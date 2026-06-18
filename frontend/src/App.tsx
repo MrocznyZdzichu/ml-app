@@ -26,7 +26,7 @@ import {
   X
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import type { FormEvent, KeyboardEvent } from "react";
+import type { ChangeEvent, FormEvent, KeyboardEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { api, getAccessToken, setAccessToken } from "./api/client";
@@ -726,10 +726,11 @@ function AnalysisPanel({
         />
       )}
       {activeAnalysisTab === "descriptive" && (
-        <AnalysisPlaceholder
-          icon={BarChart3}
-          title="Descriptive Analysis"
-          message="This workspace is reserved for calculated summaries, distributions, and column-level statistics."
+        <DescriptiveAnalysisPanel
+          datasets={availableDatasets}
+          datasetId={datasetId}
+          setDatasetId={setDatasetId}
+          setNotice={setNotice}
         />
       )}
       {activeAnalysisTab === "visualization" && (
@@ -1082,6 +1083,1038 @@ const filterOperatorLabels: Record<FilterOperator, string> = {
   empty: "Is empty",
   not_empty: "Is not empty"
 };
+
+type ColumnProfile = {
+  name: string;
+  type: DatasetPreview["columns"][number]["type"];
+  role: string;
+  count: number;
+  missing: number;
+  missingRate: number;
+  unique: number;
+  uniqueRate: number;
+  mean: number | null;
+  median: number | null;
+  minimum: DatasetCellValue;
+  maximum: DatasetCellValue;
+  stdDev: number | null;
+  mode: DatasetCellValue;
+  topValues: Array<{ value: DatasetCellValue; count: number; share: number }>;
+  histogram: Array<{ label: string; count: number; share: number }>;
+  examples: DatasetCellValue[];
+  notes: string[];
+};
+
+type TargetRelationProfile = {
+  feature: string;
+  role: string;
+  type: DatasetPreview["columns"][number]["type"];
+  kind: string;
+  score: number;
+  signal: string;
+  detail: string;
+};
+
+type SegmentProfile = {
+  columns: string[];
+  segment: string;
+  count: number;
+  targetValue: string;
+  baseline: number;
+  segmentValue: number;
+  lift: number;
+  format: "number" | "percent";
+};
+
+type TargetTypeSetting = "auto" | "categorical" | "continuous";
+type EffectiveTargetType = "categorical" | "continuous";
+
+type ProfilingRangeSettings = {
+  includeSummary: boolean;
+  includeUnivariate: boolean;
+  includeTargetRelations: boolean;
+  includeSegments: boolean;
+  rowLimit: number;
+  maxTargetFeatures: number;
+  maxSegmentFeatures: number;
+};
+
+const defaultProfilingRangeSettings: ProfilingRangeSettings = {
+  includeSummary: true,
+  includeUnivariate: true,
+  includeTargetRelations: true,
+  includeSegments: true,
+  rowLimit: 50000,
+  maxTargetFeatures: 30,
+  maxSegmentFeatures: 4
+};
+
+function DescriptiveAnalysisPanel({
+  datasets,
+  datasetId,
+  setDatasetId,
+  setNotice
+}: {
+  datasets: DataAsset[];
+  datasetId: string;
+  setDatasetId: (datasetId: string) => void;
+  setNotice: (message: string) => void;
+}) {
+  const [preview, setPreview] = useState<DatasetPreview | null>(null);
+  const [schemaPreview, setSchemaPreview] = useState<DatasetPreview | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingSchema, setIsLoadingSchema] = useState(false);
+  const [error, setError] = useState("");
+  const [schemaError, setSchemaError] = useState("");
+  const [targetColumn, setTargetColumn] = useState("");
+  const [targetTypeSetting, setTargetTypeSetting] = useState<TargetTypeSetting>("auto");
+  const [showIgnoredColumns, setShowIgnoredColumns] = useState(false);
+  const [hasProfileRun, setHasProfileRun] = useState(false);
+  const [setupCollapsed, setSetupCollapsed] = useState(false);
+  const [univariateCollapsed, setUnivariateCollapsed] = useState(false);
+  const [targetCollapsed, setTargetCollapsed] = useState(false);
+  const [segmentCollapsed, setSegmentCollapsed] = useState(true);
+  const [selectedProfileColumns, setSelectedProfileColumns] = useState<string[] | null>(null);
+  const [selectedRelationFeatures, setSelectedRelationFeatures] = useState<string[] | null>(null);
+  const [profileColumnsModalOpen, setProfileColumnsModalOpen] = useState(false);
+  const [relationColumnsModalOpen, setRelationColumnsModalOpen] = useState(false);
+  const [profilingRangeModalOpen, setProfilingRangeModalOpen] = useState(false);
+  const [profilingRange, setProfilingRange] = useState<ProfilingRangeSettings>(defaultProfilingRangeSettings);
+  const profileRequestId = useRef(0);
+  const schemaRequestId = useRef(0);
+  const selectedDataset = datasets.find((dataset) => dataset.id === datasetId) ?? null;
+  const configPreview = preview ?? schemaPreview;
+  const columns = configPreview?.columns ?? [];
+  const rows = preview?.records ?? [];
+  const targetInferenceRows = preview?.records ?? schemaPreview?.records ?? [];
+  const rolesMetadata = useMemo(
+    () => readRolesMetadata(selectedDataset, datasets, columns.map((column) => column.name)),
+    [columns, datasets, selectedDataset]
+  );
+  const inferredTargetColumn = useMemo(
+    () => inferTargetColumn(columns, rolesMetadata),
+    [columns, rolesMetadata]
+  );
+  const effectiveTargetColumn = columns.some((column) => column.name === targetColumn)
+    ? targetColumn
+    : inferredTargetColumn;
+  const targetProfile = effectiveTargetColumn
+    ? null
+    : columns.find((column) => columnRoleForColumn(column, rolesMetadata) === "target") ?? null;
+  const targetColumnDefinition = columns.find((column) => column.name === effectiveTargetColumn) ?? null;
+  const inferredTargetType = inferTargetType(targetColumnDefinition, targetInferenceRows, rolesMetadata);
+  const effectiveTargetType: EffectiveTargetType = targetTypeSetting === "auto"
+    ? inferredTargetType
+    : targetTypeSetting;
+
+  useEffect(() => {
+    const schemaRequestIdValue = schemaRequestId.current + 1;
+    schemaRequestId.current = schemaRequestIdValue;
+    profileRequestId.current += 1;
+    setPreview(null);
+    setSchemaPreview(null);
+    setError("");
+    setSchemaError("");
+    setIsLoading(false);
+    setIsLoadingSchema(Boolean(datasetId));
+    setHasProfileRun(false);
+    setTargetColumn("");
+    setTargetTypeSetting("auto");
+    setSelectedProfileColumns(null);
+    setSelectedRelationFeatures(null);
+
+    if (!datasetId) {
+      setIsLoadingSchema(false);
+      return;
+    }
+
+    api
+      .previewDataset(datasetId, 1000)
+      .then((result) => {
+        if (schemaRequestId.current !== schemaRequestIdValue) {
+          return;
+        }
+        setSchemaPreview(result);
+      })
+      .catch((loadError) => {
+        if (schemaRequestId.current !== schemaRequestIdValue) {
+          return;
+        }
+        const message = loadError instanceof Error ? loadError.message : "Dataset columns failed to load";
+        setSchemaError(message);
+      })
+      .finally(() => {
+        if (schemaRequestId.current === schemaRequestIdValue) {
+          setIsLoadingSchema(false);
+        }
+      });
+  }, [datasetId]);
+
+  useEffect(() => {
+    if (columns.length === 0) {
+      setTargetColumn("");
+      return;
+    }
+    if (!targetColumn || !columns.some((column) => column.name === targetColumn)) {
+      setTargetColumn(inferredTargetColumn);
+    }
+  }, [columns, inferredTargetColumn, targetColumn]);
+
+  const shouldBuildColumnProfiles =
+    profilingRange.includeSummary ||
+    profilingRange.includeUnivariate ||
+    profilingRange.includeTargetRelations;
+  const columnProfiles = useMemo(
+    () => shouldBuildColumnProfiles
+      ? columns.map((column) => buildColumnProfile(column, rows, rolesMetadata))
+      : [],
+    [columns, rolesMetadata, rows, shouldBuildColumnProfiles]
+  );
+  const selectableProfiles = showIgnoredColumns
+    ? columnProfiles
+    : columnProfiles.filter((profile) => !["ignored", "identifier"].includes(profile.role));
+  const activeProfileColumns = selectedProfileColumns ?? selectableProfiles.map((profile) => profile.name);
+  const visibleProfiles = selectableProfiles.filter((profile) =>
+    activeProfileColumns.includes(profile.name)
+  );
+  const profileByName = new Map(columnProfiles.map((profile) => [profile.name, profile]));
+  const targetRelations = useMemo(
+    () => profilingRange.includeTargetRelations
+      ? buildTargetRelations(rows, columns, rolesMetadata, effectiveTargetColumn, effectiveTargetType).slice(0, profilingRange.maxTargetFeatures)
+      : [],
+    [columns, effectiveTargetColumn, effectiveTargetType, profilingRange.includeTargetRelations, profilingRange.maxTargetFeatures, rolesMetadata, rows]
+  );
+  const activeRelationFeatures = selectedRelationFeatures ?? targetRelations.map((relation) => relation.feature);
+  const visibleTargetRelations = targetRelations.filter((relation) =>
+    activeRelationFeatures.includes(relation.feature)
+  );
+  const segmentProfile = useMemo(
+    () => profilingRange.includeSegments
+      ? buildSegmentProfile(rows, columns, rolesMetadata, effectiveTargetColumn, effectiveTargetType, profilingRange.maxSegmentFeatures)
+      : null,
+    [columns, effectiveTargetColumn, effectiveTargetType, profilingRange.includeSegments, profilingRange.maxSegmentFeatures, rolesMetadata, rows]
+  );
+  const dataQualityNotes = useMemo(
+    () => profilingRange.includeSummary
+      ? buildDatasetQualityNotes(columnProfiles, rows.length, rolesMetadata, effectiveTargetColumn)
+      : [],
+    [columnProfiles, effectiveTargetColumn, profilingRange.includeSummary, rolesMetadata, rows.length]
+  );
+  const numericProfiles = columnProfiles.filter((profile) => profile.mean !== null);
+  const categoricalProfiles = columnProfiles.filter((profile) =>
+    ["feature_categorical", "feature_ordinal", "boolean", "target"].includes(profile.role) ||
+    ["text", "boolean"].includes(profile.type)
+  );
+  const featureCount = columns.filter((column) =>
+    !["ignored", "identifier", "target"].includes(columnRoleForColumn(column, rolesMetadata))
+  ).length;
+  const targetSummary = effectiveTargetColumn
+    ? profileByName.get(effectiveTargetColumn)
+    : undefined;
+  const enabledRangeLabels = [
+    profilingRange.includeSummary ? "summary" : "",
+    profilingRange.includeUnivariate ? "univariate" : "",
+    profilingRange.includeTargetRelations ? "target relations" : "",
+    profilingRange.includeSegments ? "segments" : ""
+  ].filter(Boolean);
+
+  useEffect(() => {
+    setSelectedProfileColumns((current) => syncSelectedNames(current, selectableProfiles.map((profile) => profile.name)));
+  }, [selectableProfiles]);
+
+  useEffect(() => {
+    setSelectedRelationFeatures((current) => syncSelectedNames(current, targetRelations.map((relation) => relation.feature)));
+  }, [targetRelations]);
+
+  async function runProfiling() {
+    if (!datasetId) {
+      setNotice("Choose a dataset first");
+      return;
+    }
+
+    const requestId = profileRequestId.current + 1;
+    profileRequestId.current = requestId;
+    setIsLoading(true);
+    setError("");
+    setHasProfileRun(true);
+    setSetupCollapsed(false);
+    setNotice("Profiling dataset. This can take a moment.");
+
+    try {
+      const result = await api.previewDataset(datasetId, profilingRange.rowLimit);
+      if (profileRequestId.current !== requestId) {
+        return;
+      }
+      setPreview(result);
+      setNotice(`Profile loaded for ${result.returned_count} of ${result.row_count} rows`);
+    } catch (loadError) {
+      if (profileRequestId.current !== requestId) {
+        return;
+      }
+      const message = loadError instanceof Error ? loadError.message : "Dataset profile failed";
+      setPreview(null);
+      setError(message);
+      setNotice(message);
+    } finally {
+      if (profileRequestId.current === requestId) {
+        setIsLoading(false);
+      }
+    }
+  }
+
+  function updateDataset(nextDatasetId: string) {
+    setDatasetId(nextDatasetId);
+  }
+
+  function updateProfileSelection(values: string[]) {
+    setSelectedProfileColumns(values);
+  }
+
+  function updateRelationSelection(values: string[]) {
+    setSelectedRelationFeatures(values);
+  }
+
+  if (datasets.length === 0) {
+    return (
+      <div className="panel">
+        <div className="empty-state">No datasets available</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="descriptive-analysis-panel">
+      <section className="panel profile-run-panel">
+        <button
+          aria-expanded={!setupCollapsed}
+          className="section-toggle profile-section-toggle"
+          onClick={() => setSetupCollapsed((current) => !current)}
+          type="button"
+        >
+          {setupCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+          <strong>Dataset profile</strong>
+          <span>{isLoading ? "running" : isLoadingSchema ? "loading columns" : hasProfileRun && preview ? "ready" : "not started"}</span>
+        </button>
+
+        {!setupCollapsed && (
+          <>
+            <div className="descriptive-toolbar">
+              <label>
+                Dataset
+                <select value={datasetId} onChange={(event) => updateDataset(event.target.value)}>
+                  {datasets.map((dataset) => (
+                    <option key={dataset.id} value={dataset.id}>
+                      {dataset.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Target
+                <select
+                  disabled={columns.length === 0 || isLoading || isLoadingSchema}
+                  value={effectiveTargetColumn}
+                  onChange={(event) => setTargetColumn(event.target.value)}
+                >
+                  <option value="">No target selected</option>
+                  {columns.map((column) => (
+                    <option key={column.name} value={column.name}>
+                      {column.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Target type
+                <select
+                  disabled={!effectiveTargetColumn || isLoading || isLoadingSchema}
+                  value={targetTypeSetting}
+                  onChange={(event) => setTargetTypeSetting(event.target.value as TargetTypeSetting)}
+                >
+                  <option value="auto">Auto ({inferredTargetType})</option>
+                  <option value="categorical">Categorical/classification</option>
+                  <option value="continuous">Continuous/regression</option>
+                </select>
+              </label>
+              <label className="check-tile descriptive-toggle">
+                <input
+                  checked={showIgnoredColumns}
+                  disabled={isLoading}
+                  onChange={(event) => setShowIgnoredColumns(event.target.checked)}
+                  type="checkbox"
+                />
+                <span>Show ignored and ID columns</span>
+              </label>
+              <button
+                className="secondary-button toolbar-button"
+                disabled={isLoading}
+                onClick={() => setProfilingRangeModalOpen(true)}
+                type="button"
+              >
+                <Filter size={16} />
+                Profiling range
+              </button>
+              <button
+                className="primary-button toolbar-button"
+                disabled={isLoading || isLoadingSchema || !datasetId}
+                onClick={runProfiling}
+                type="button"
+              >
+                <Play size={16} />
+                {isLoading ? "Profiling" : "Run profiling"}
+              </button>
+            </div>
+
+            {isLoading && (
+              <div className="profiling-status" role="status">
+                <div className="progress-track" aria-hidden="true">
+                  <div />
+                </div>
+                <strong>Profiling dataset</strong>
+                <span>Working on metadata-aware summaries. Please wait, the app is still running.</span>
+              </div>
+            )}
+
+            {!isLoading && isLoadingSchema && (
+              <div className="profiling-status" role="status">
+                <div className="progress-track" aria-hidden="true">
+                  <div />
+                </div>
+                <strong>Loading dataset columns</strong>
+                <span>Preparing target and target-type settings before profiling starts.</span>
+              </div>
+            )}
+
+            {!isLoading && !isLoadingSchema && schemaError && (
+              <div className="empty-state error-state">{schemaError}</div>
+            )}
+
+            {!isLoading && !isLoadingSchema && !schemaError && !hasProfileRun && (
+              <div className="empty-state">
+                Choose a dataset, configure profiling range if needed, then run profiling when you are ready.
+              </div>
+            )}
+            {!isLoading && error && <div className="empty-state error-state">{error}</div>}
+            {!isLoading && !error && preview && preview.row_count === 0 && (
+              <div className="empty-state">Dataset is empty</div>
+            )}
+
+            {!isLoading && !error && preview && preview.row_count > 0 && (
+              <>
+                <section className="profile-metrics">
+                  <Metric icon={Database} label="Rows profiled" value={preview.returned_count} tone="teal" />
+                  <Metric icon={Table2} label="Columns" value={columns.length} tone="blue" />
+                  <Metric icon={BarChart3} label="Features" value={featureCount} tone="amber" />
+                  <Metric icon={Activity} label="Feature relations" value={targetRelations.length} tone="teal" />
+                </section>
+
+                <div className="profile-range-summary">
+                  <strong>Profiling range</strong>
+                  <span>{enabledRangeLabels.join(", ")} / up to {formatInteger(profilingRange.rowLimit)} rows</span>
+                </div>
+
+                {profilingRange.includeSummary && (
+                  <section className="profile-overview">
+                    <div className="panel-header">
+                      <h2>Smart dataset profile</h2>
+                      {preview.returned_count < preview.row_count && (
+                        <span className="muted-text">Preview limited to {preview.returned_count} rows</span>
+                      )}
+                    </div>
+                    <div className="profile-summary-grid">
+                      <ProfileFact label="Dataset roles" value={rolesMetadata.dataset_roles.length ? rolesMetadata.dataset_roles.join(", ") : "not set"} />
+                      <ProfileFact label="Target" value={effectiveTargetColumn || "not set"} />
+                      <ProfileFact label="Target type" value={effectiveTargetType} />
+                      <ProfileFact label="Numeric columns" value={String(numericProfiles.length)} />
+                      <ProfileFact label="Categorical columns" value={String(categoricalProfiles.length)} />
+                    </div>
+                    <div className="insight-list">
+                      {dataQualityNotes.map((note) => (
+                        <div className="insight-item" key={note}>{note}</div>
+                      ))}
+                      {dataQualityNotes.length === 0 && (
+                        <div className="insight-item">No major profiling warnings in the loaded sample.</div>
+                      )}
+                    </div>
+                  </section>
+                )}
+              </>
+            )}
+          </>
+        )}
+      </section>
+
+      {!isLoading && !error && preview && preview.row_count > 0 && (
+        <>
+          {profilingRange.includeUnivariate && <section className="panel">
+            <button
+              aria-expanded={!univariateCollapsed}
+              className="section-toggle profile-section-toggle"
+              onClick={() => setUnivariateCollapsed((current) => !current)}
+              type="button"
+            >
+              {univariateCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+              <strong>Univariate profile</strong>
+              <span>{visibleProfiles.length}/{selectableProfiles.length} columns</span>
+            </button>
+            {!univariateCollapsed && (
+              <>
+                <ColumnSelectionSummary
+                  columns={selectableProfiles.map((profile) => ({ name: profile.name, meta: `${columnRoleLabel(profile.role)} / ${profile.type}` }))}
+                  selected={activeProfileColumns}
+                  onOpen={() => setProfileColumnsModalOpen(true)}
+                />
+                <div className="profile-column-grid">
+                  {visibleProfiles.map((profile) => (
+                    <article className="column-profile-card" key={profile.name}>
+                      <div className="column-profile-head">
+                        <div>
+                          <strong>{profile.name}</strong>
+                          <span>{columnRoleLabel(profile.role)} / {profile.type}</span>
+                        </div>
+                        <em>{formatPercent(1 - profile.missingRate)} complete</em>
+                      </div>
+                      <div className="profile-stat-grid">
+                        <ProfileFact label="Count" value={formatInteger(profile.count)} />
+                        <ProfileFact label="Missing" value={formatPercent(profile.missingRate)} />
+                        <ProfileFact label="Unique" value={formatInteger(profile.unique)} />
+                        <ProfileFact label="Mode" value={displayValue(profile.mode)} />
+                      </div>
+                      {profile.mean !== null ? (
+                        <>
+                          <MiniHistogram bins={profile.histogram} />
+                          <div className="profile-stat-grid">
+                            <ProfileFact label="Mean" value={formatNumber(profile.mean)} />
+                            <ProfileFact label="Median" value={formatNullableNumber(profile.median)} />
+                            <ProfileFact label="Min" value={displayValue(profile.minimum)} />
+                            <ProfileFact label="Max" value={displayValue(profile.maximum)} />
+                          </div>
+                        </>
+                      ) : (
+                        <div className="top-values">
+                          {profile.topValues.slice(0, 4).map((item) => (
+                            <div className="top-value-row" key={displayValue(item.value)}>
+                              <span>{displayValue(item.value)}</span>
+                              <div className="mini-bar" aria-hidden="true">
+                                <div style={{ width: `${Math.max(4, item.share * 100)}%` }} />
+                              </div>
+                              <em>{formatPercent(item.share)}</em>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {profile.notes.length > 0 && (
+                        <div className="profile-notes">
+                          {profile.notes.map((note) => <span key={note}>{note}</span>)}
+                        </div>
+                      )}
+                    </article>
+                  ))}
+                  {visibleProfiles.length === 0 && (
+                    <div className="empty-state">No columns selected for univariate profile.</div>
+                  )}
+                </div>
+              </>
+            )}
+          </section>}
+
+          {profilingRange.includeTargetRelations && <section className="panel">
+            <button
+              aria-expanded={!targetCollapsed}
+              className="section-toggle profile-section-toggle"
+              onClick={() => setTargetCollapsed((current) => !current)}
+              type="button"
+            >
+              {targetCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+              <strong>Target vs features</strong>
+              <span>{visibleTargetRelations.length}/{targetRelations.length} signals</span>
+            </button>
+            {!targetCollapsed && (
+              <section className="profile-relation-layout">
+                <div className="target-relations-main">
+                  {targetRelations.length > 0 && (
+                    <ColumnSelectionSummary
+                      columns={targetRelations.map((relation) => ({ name: relation.feature, meta: `${columnRoleLabel(relation.role)} / ${relation.kind}` }))}
+                      selected={activeRelationFeatures}
+                      onOpen={() => setRelationColumnsModalOpen(true)}
+                    />
+                  )}
+                  {!effectiveTargetColumn && (
+                    <div className="empty-state">
+                      Select a target or set one in Data Roles to rank feature relationships.
+                    </div>
+                  )}
+                  {effectiveTargetColumn && targetRelations.length === 0 && (
+                    <div className="empty-state">No eligible feature relationships found for the selected target.</div>
+                  )}
+                  {effectiveTargetColumn && targetRelations.length > 0 && visibleTargetRelations.length === 0 && (
+                    <div className="empty-state">No feature relationships selected.</div>
+                  )}
+                  {effectiveTargetColumn && visibleTargetRelations.length > 0 && (
+                    <div className="relation-list">
+                      {visibleTargetRelations.slice(0, 10).map((relation) => (
+                        <article className="relation-row" key={relation.feature}>
+                          <div>
+                            <strong>{relation.feature}</strong>
+                            <span>{columnRoleLabel(relation.role)} / {relation.kind}</span>
+                          </div>
+                          <div className="relation-score">
+                            <div className="mini-bar" aria-hidden="true">
+                              <div style={{ width: `${Math.max(4, relation.score * 100)}%` }} />
+                            </div>
+                            <em>{relation.signal}</em>
+                          </div>
+                          <p>{relation.detail}</p>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <aside className="target-context">
+                  <div className="panel-header">
+                    <h2>Target context</h2>
+                  </div>
+                  {targetSummary ? (
+                    <>
+                      <div className="profile-stat-grid">
+                        <ProfileFact label="Role" value={columnRoleLabel(targetSummary.role)} />
+                        <ProfileFact label="Target type" value={effectiveTargetType} />
+                        <ProfileFact label="Type" value={targetSummary.type} />
+                        <ProfileFact label="Missing" value={formatPercent(targetSummary.missingRate)} />
+                        <ProfileFact label="Unique" value={formatInteger(targetSummary.unique)} />
+                      </div>
+                      {targetSummary.mean !== null && <MiniHistogram bins={targetSummary.histogram} />}
+                      <div className="top-values">
+                        {targetSummary.topValues.slice(0, 6).map((item) => (
+                          <div className="top-value-row" key={displayValue(item.value)}>
+                            <span>{displayValue(item.value)}</span>
+                            <div className="mini-bar" aria-hidden="true">
+                              <div style={{ width: `${Math.max(4, item.share * 100)}%` }} />
+                            </div>
+                            <em>{formatPercent(item.share)}</em>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="empty-state compact-empty">Target not selected</div>
+                  )}
+                  {targetProfile && (
+                    <div className="insight-item">Role metadata marks {targetProfile.name} as target.</div>
+                  )}
+                </aside>
+              </section>
+            )}
+          </section>}
+
+          {profilingRange.includeSegments && <section className="panel">
+            <button
+              aria-expanded={!segmentCollapsed}
+              className="section-toggle profile-section-toggle"
+              onClick={() => setSegmentCollapsed((current) => !current)}
+              type="button"
+            >
+              {segmentCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+              <strong>Multivariate segment scan</strong>
+              <span>role-aware categorical feature combinations</span>
+            </button>
+            {!segmentCollapsed && (
+              segmentProfile ? (
+                <div className="segment-scan">
+                  <div className="profile-summary-grid">
+                    <ProfileFact label="Columns" value={segmentProfile.columns.join(" + ")} />
+                    <ProfileFact label="Segment" value={segmentProfile.segment} />
+                    <ProfileFact label="Rows" value={formatInteger(segmentProfile.count)} />
+                    <ProfileFact label="Target focus" value={segmentProfile.targetValue} />
+                  </div>
+                  <p>
+                    Segment value {formatSegmentMetric(segmentProfile.segmentValue, segmentProfile.format)} vs baseline{" "}
+                    {formatSegmentMetric(segmentProfile.baseline, segmentProfile.format)} (
+                    {formatSignedSegmentMetric(segmentProfile.lift, segmentProfile.format)} difference).
+                  </p>
+                </div>
+              ) : (
+                <div className="empty-state">
+                  Need a selected target and at least two low-cardinality categorical features to scan combined segments.
+                </div>
+              )
+            )}
+          </section>}
+        </>
+      )}
+
+      {profileColumnsModalOpen && (
+        <ColumnSelectionModal
+          columns={selectableProfiles.map((profile) => ({ name: profile.name, meta: `${columnRoleLabel(profile.role)} / ${profile.type}` }))}
+          onChange={updateProfileSelection}
+          onClose={() => setProfileColumnsModalOpen(false)}
+          selected={activeProfileColumns}
+          title="Univariate columns"
+        />
+      )}
+      {relationColumnsModalOpen && (
+        <ColumnSelectionModal
+          columns={targetRelations.map((relation) => ({ name: relation.feature, meta: `${columnRoleLabel(relation.role)} / ${relation.kind}` }))}
+          onChange={updateRelationSelection}
+          onClose={() => setRelationColumnsModalOpen(false)}
+          selected={activeRelationFeatures}
+          title="Target relationship columns"
+        />
+      )}
+      {profilingRangeModalOpen && (
+        <ProfilingRangeModal
+          onApply={setProfilingRange}
+          onClose={() => setProfilingRangeModalOpen(false)}
+          settings={profilingRange}
+        />
+      )}
+    </div>
+  );
+}
+
+type SelectableColumn = {
+  name: string;
+  meta: string;
+};
+
+function ColumnSelectionSummary({
+  columns,
+  selected,
+  onOpen
+}: {
+  columns: SelectableColumn[];
+  selected: string[];
+  onOpen: () => void;
+}) {
+  const selectedPreview = selected.slice(0, 4).join(", ");
+  return (
+    <div className="column-selection-summary">
+      <div>
+        <strong>Columns</strong>
+        <span>
+          {selected.length} of {columns.length} selected
+          {selectedPreview ? ` / ${selectedPreview}${selected.length > 4 ? ", ..." : ""}` : ""}
+        </span>
+      </div>
+      <button className="secondary-button compact-button" onClick={onOpen} type="button">
+        <Table2 size={14} />
+        Columns selection
+      </button>
+    </div>
+  );
+}
+
+function ColumnSelectionModal({
+  columns,
+  onChange,
+  onClose,
+  selected,
+  title
+}: {
+  columns: SelectableColumn[];
+  onChange: (columns: string[]) => void;
+  onClose: () => void;
+  selected: string[];
+  title: string;
+}) {
+  const [searchValue, setSearchValue] = useState("");
+  const [draftSelected, setDraftSelected] = useState(selected);
+  const [lastClickedIndex, setLastClickedIndex] = useState<number | null>(null);
+  const draftSelectedSet = new Set(draftSelected);
+  const normalizedSearch = searchValue.trim().toLowerCase();
+  const filteredColumns = normalizedSearch
+    ? columns.filter((column) =>
+        column.name.toLowerCase().includes(normalizedSearch) ||
+        column.meta.toLowerCase().includes(normalizedSearch)
+      )
+    : columns;
+  const selectedVisibleCount = filteredColumns.filter((column) => draftSelectedSet.has(column.name)).length;
+
+  function applySelection() {
+    onChange(draftSelected);
+    onClose();
+  }
+
+  function toggleColumn(column: SelectableColumn, filteredIndex: number, event: ChangeEvent<HTMLInputElement>) {
+    const nextChecked = event.target.checked;
+    const visibleNames = filteredColumns.map((item) => item.name);
+    let namesToUpdate = [column.name];
+    if (event.nativeEvent instanceof MouseEvent && event.nativeEvent.shiftKey && lastClickedIndex !== null) {
+      const start = Math.min(lastClickedIndex, filteredIndex);
+      const end = Math.max(lastClickedIndex, filteredIndex);
+      namesToUpdate = visibleNames.slice(start, end + 1);
+    }
+    const updateSet = new Set(namesToUpdate);
+    setDraftSelected((current) => {
+      const currentSet = new Set(current);
+      for (const name of updateSet) {
+        if (nextChecked) {
+          currentSet.add(name);
+        } else {
+          currentSet.delete(name);
+        }
+      }
+      return columns.map((item) => item.name).filter((name) => currentSet.has(name));
+    });
+    setLastClickedIndex(filteredIndex);
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section aria-label={title} className="column-selection-modal" role="dialog">
+        <header className="modal-header">
+          <div>
+            <p className="eyebrow">Columns selection</p>
+            <h2>{title}</h2>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Close columns selection">
+            <X size={18} />
+          </button>
+        </header>
+
+        <div className="column-selection-body">
+          <div className="column-selection-tools">
+            <label>
+              Search columns
+              <div className="input-with-icon">
+                <Search size={16} />
+                <input
+                  value={searchValue}
+                  onChange={(event) => {
+                    setSearchValue(event.target.value);
+                    setLastClickedIndex(null);
+                  }}
+                  placeholder="Column name or role"
+                />
+              </div>
+            </label>
+            <div className="section-actions">
+              <button className="secondary-button compact-button" onClick={() => setDraftSelected(columns.map((column) => column.name))} type="button">
+                Show all
+              </button>
+              <button className="secondary-button compact-button" onClick={() => setDraftSelected([])} type="button">
+                Hide all
+              </button>
+            </div>
+          </div>
+
+          <div className="selector-filter-summary">
+            {draftSelected.length} of {columns.length} selected
+            {searchValue.trim() ? ` / ${selectedVisibleCount} of ${filteredColumns.length} matching selected` : ""}
+          </div>
+
+          <div className="column-selector-grid modal-selector-grid">
+            {filteredColumns.map((column, index) => (
+              <label className={draftSelectedSet.has(column.name) ? "selector-column selected" : "selector-column"} key={column.name}>
+                <input
+                  checked={draftSelectedSet.has(column.name)}
+                  onChange={(event) => toggleColumn(column, index, event)}
+                  type="checkbox"
+                />
+                <span>
+                  <strong>{column.name}</strong>
+                  <em>{column.meta}</em>
+                </span>
+              </label>
+            ))}
+            {filteredColumns.length === 0 && (
+              <div className="empty-state compact-empty">No columns match current search</div>
+            )}
+          </div>
+        </div>
+
+        <footer className="modal-actions">
+          <button className="secondary-button" onClick={onClose} type="button">
+            Cancel
+          </button>
+          <button className="primary-button" onClick={applySelection} type="button">
+            Apply selection
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function ProfilingRangeModal({
+  onApply,
+  onClose,
+  settings
+}: {
+  onApply: (settings: ProfilingRangeSettings) => void;
+  onClose: () => void;
+  settings: ProfilingRangeSettings;
+}) {
+  const [draftSettings, setDraftSettings] = useState(settings);
+
+  function updateBoolean(key: keyof Pick<
+    ProfilingRangeSettings,
+    "includeSummary" | "includeUnivariate" | "includeTargetRelations" | "includeSegments"
+  >, value: boolean) {
+    setDraftSettings((current) => ({ ...current, [key]: value }));
+  }
+
+  function updateNumber(key: keyof Pick<
+    ProfilingRangeSettings,
+    "rowLimit" | "maxTargetFeatures" | "maxSegmentFeatures"
+  >, value: string) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+      return;
+    }
+    const minimum = key === "maxSegmentFeatures" ? 2 : 1;
+    setDraftSettings((current) => ({
+      ...current,
+      [key]: Math.max(minimum, Math.trunc(parsed))
+    }));
+  }
+
+  function applySettings() {
+    onApply(draftSettings);
+    onClose();
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section aria-label="Profiling range" className="profiling-range-modal" role="dialog">
+        <header className="modal-header">
+          <div>
+            <p className="eyebrow">Profiling range</p>
+            <h2>Configure profiling scope</h2>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Close profiling range">
+            <X size={18} />
+          </button>
+        </header>
+
+        <div className="profiling-range-body">
+          <section className="range-section">
+            <div className="panel-header compact-header">
+              <h2>Sections</h2>
+            </div>
+            <div className="range-choice-grid">
+              <label className="check-tile">
+                <input
+                  checked={draftSettings.includeSummary}
+                  onChange={(event) => updateBoolean("includeSummary", event.target.checked)}
+                  type="checkbox"
+                />
+                <span>Dataset summary and quality notes</span>
+              </label>
+              <label className="check-tile">
+                <input
+                  checked={draftSettings.includeUnivariate}
+                  onChange={(event) => updateBoolean("includeUnivariate", event.target.checked)}
+                  type="checkbox"
+                />
+                <span>Univariate column profiles</span>
+              </label>
+              <label className="check-tile">
+                <input
+                  checked={draftSettings.includeTargetRelations}
+                  onChange={(event) => updateBoolean("includeTargetRelations", event.target.checked)}
+                  type="checkbox"
+                />
+                <span>Target vs feature relations</span>
+              </label>
+              <label className="check-tile">
+                <input
+                  checked={draftSettings.includeSegments}
+                  onChange={(event) => updateBoolean("includeSegments", event.target.checked)}
+                  type="checkbox"
+                />
+                <span>Multivariate segment scan</span>
+              </label>
+            </div>
+          </section>
+
+          <section className="range-section">
+            <div className="panel-header compact-header">
+              <h2>Limits</h2>
+            </div>
+            <div className="range-number-grid">
+              <label>
+                Row sample limit
+                <input
+                  min={1}
+                  onChange={(event) => updateNumber("rowLimit", event.target.value)}
+                  type="number"
+                  value={draftSettings.rowLimit}
+                />
+              </label>
+              <label>
+                Max target relation features
+                <input
+                  min={1}
+                  onChange={(event) => updateNumber("maxTargetFeatures", event.target.value)}
+                  type="number"
+                  value={draftSettings.maxTargetFeatures}
+                />
+              </label>
+              <label>
+                Max segment scan features
+                <input
+                  min={2}
+                  onChange={(event) => updateNumber("maxSegmentFeatures", event.target.value)}
+                  type="number"
+                  value={draftSettings.maxSegmentFeatures}
+                />
+              </label>
+            </div>
+          </section>
+
+          <div className="insight-item">
+            Lighter ranges finish faster. For a quick look, run only Dataset summary or Univariate profiles.
+          </div>
+        </div>
+
+        <footer className="modal-actions">
+          <button className="secondary-button" onClick={onClose} type="button">
+            Cancel
+          </button>
+          <button className="secondary-button" onClick={() => setDraftSettings(defaultProfilingRangeSettings)} type="button">
+            Reset defaults
+          </button>
+          <button className="primary-button" onClick={applySettings} type="button">
+            Apply range
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function MiniHistogram({ bins }: { bins: Array<{ label: string; count: number; share: number }> }) {
+  if (bins.length === 0) {
+    return <div className="empty-state compact-empty">No numeric distribution available</div>;
+  }
+  const maxCount = Math.max(...bins.map((bin) => bin.count), 1);
+  return (
+    <div className="mini-histogram" aria-label="Mini histogram">
+      <div className="histogram-bars">
+        {bins.map((bin) => (
+          <div className="histogram-bin" key={bin.label} title={`${bin.label}: ${formatInteger(bin.count)}`}>
+            <div style={{ height: `${Math.max(6, (bin.count / maxCount) * 100)}%` }} />
+          </div>
+        ))}
+      </div>
+      <div className="histogram-axis">
+        <span>{bins[0]?.label.split(" - ")[0]}</span>
+        <span>{bins.at(-1)?.label.split(" - ").at(-1)}</span>
+      </div>
+    </div>
+  );
+}
+
+function ProfileFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="profile-fact">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
 
 function DataBrowsingPanel({
   datasets,
@@ -3416,6 +4449,592 @@ function mostCommonValue(values: DatasetCellValue[]) {
 
 function roundNumber(value: number) {
   return Number(value.toFixed(6));
+}
+
+function inferTargetColumn(columns: DatasetPreview["columns"], rolesMetadata: DataRolesMetadata) {
+  const names = new Set(columns.map((column) => column.name));
+  if (rolesMetadata.target_column && names.has(rolesMetadata.target_column)) {
+    return rolesMetadata.target_column;
+  }
+  const roleTarget = columns.find((column) => rolesMetadata.column_roles[column.name] === "target");
+  if (roleTarget) {
+    return roleTarget.name;
+  }
+  const commonTargetNames = new Set(["target", "label", "class", "outcome", "churn", "y"]);
+  return columns.find((column) => commonTargetNames.has(column.name.toLowerCase()))?.name ?? "";
+}
+
+function inferTargetType(
+  column: DatasetPreview["columns"][number] | null,
+  rows: Array<Record<string, DatasetCellValue>>,
+  rolesMetadata: DataRolesMetadata
+): EffectiveTargetType {
+  if (!column) {
+    return "categorical";
+  }
+  const role = columnRoleForColumn(column, rolesMetadata);
+  if (["feature_categorical", "feature_ordinal", "boolean", "text"].includes(role)) {
+    return "categorical";
+  }
+  if (role === "feature_continuous") {
+    return "continuous";
+  }
+  if (column.type === "boolean" || column.type === "text") {
+    return "categorical";
+  }
+  if (column.type !== "number") {
+    return "categorical";
+  }
+
+  const present = rows.map((row) => normalizeCellValue(row[column.name])).filter(isPresentCell);
+  const uniqueValues = [...new Set(present.map(displayValue))];
+  if (uniqueValues.length <= 2) {
+    return "categorical";
+  }
+  const lowCardinalityLimit = Math.min(20, Math.max(5, Math.floor(present.length * 0.05)));
+  if (uniqueValues.length <= lowCardinalityLimit) {
+    return "categorical";
+  }
+  return "continuous";
+}
+
+function buildColumnProfile(
+  column: DatasetPreview["columns"][number],
+  rows: Array<Record<string, DatasetCellValue>>,
+  rolesMetadata: DataRolesMetadata
+): ColumnProfile {
+  const values = rows.map((row) => normalizeCellValue(row[column.name]));
+  const present = values.filter(isPresentCell);
+  const numericValues = present
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
+    .sort((left, right) => left - right);
+  const topValues = countTopValues(present, rows.length);
+  const role = columnRoleForColumn(column, rolesMetadata);
+  const mean = numericValues.length === present.length && numericValues.length > 0
+    ? numericValues.reduce((total, value) => total + value, 0) / numericValues.length
+    : null;
+  const notes: string[] = [];
+  const unique = new Set(present.map(displayValue)).size;
+  const missingRate = rows.length === 0 ? 0 : (rows.length - present.length) / rows.length;
+  const uniqueRate = present.length === 0 ? 0 : unique / present.length;
+
+  if (missingRate >= 0.3) {
+    notes.push("High missingness");
+  }
+  if (uniqueRate >= 0.95 && !["identifier", "timestamp", "period_id"].includes(role)) {
+    notes.push("Near-unique values");
+  }
+  if (unique <= 1 && present.length > 0) {
+    notes.push("Constant column");
+  }
+  if (role === "ignored") {
+    notes.push("Excluded by role");
+  }
+  if (["feature_categorical", "text"].includes(role) && unique > 50) {
+    notes.push("High-cardinality category");
+  }
+
+  return {
+    name: column.name,
+    type: column.type,
+    role,
+    count: present.length,
+    missing: rows.length - present.length,
+    missingRate,
+    unique,
+    uniqueRate,
+    mean: mean === null ? null : roundNumber(mean),
+    median: mean === null ? null : roundNumber(medianNumber(numericValues)),
+    minimum: mean === null ? minComparableValue(present) : numericValues[0] ?? null,
+    maximum: mean === null ? maxComparableValue(present) : numericValues.at(-1) ?? null,
+    stdDev: mean === null ? null : roundNumber(standardDeviation(numericValues)),
+    mode: topValues[0]?.value ?? null,
+    topValues,
+    histogram: mean === null ? [] : buildHistogramBins(numericValues),
+    examples: present.slice(0, 3),
+    notes
+  };
+}
+
+function buildTargetRelations(
+  rows: Array<Record<string, DatasetCellValue>>,
+  columns: DatasetPreview["columns"],
+  rolesMetadata: DataRolesMetadata,
+  targetColumn: string,
+  targetType: EffectiveTargetType
+): TargetRelationProfile[] {
+  const target = columns.find((column) => column.name === targetColumn);
+  if (!target) {
+    return [];
+  }
+
+  const targetIsNumeric = targetType === "continuous";
+  const relations = columns
+    .filter((column) => column.name !== target.name)
+    .filter((column) => !["ignored", "identifier"].includes(columnRoleForColumn(column, rolesMetadata)))
+    .map((feature) => {
+      const role = columnRoleForColumn(feature, rolesMetadata);
+      const featureIsNumeric = isNumericMeasureColumn(feature, rolesMetadata, rows, false);
+      const relationRows = rows.filter((row) =>
+        isPresentCell(normalizeCellValue(row[target.name])) &&
+        isPresentCell(normalizeCellValue(row[feature.name]))
+      );
+      if (relationRows.length < 3) {
+        return null;
+      }
+
+      if (targetIsNumeric && featureIsNumeric) {
+        const pairs = relationRows
+          .map((row) => [Number(row[feature.name]), Number(row[target.name])] as const)
+          .filter(([featureValue, targetValue]) => Number.isFinite(featureValue) && Number.isFinite(targetValue));
+        const correlation = pearsonCorrelation(pairs);
+        if (correlation === null) {
+          return null;
+        }
+        return {
+          feature: feature.name,
+          role,
+          type: feature.type,
+          kind: "numeric correlation",
+          score: Math.min(1, Math.abs(correlation)),
+          signal: `r ${formatSignedNumber(correlation)}`,
+          detail: `${feature.name} moves ${correlation >= 0 ? "with" : "against"} ${target.name} in the loaded sample.`
+        };
+      }
+
+      if (targetIsNumeric && !featureIsNumeric) {
+        return groupedMeanRelation({
+          rows: relationRows,
+          groupColumn: feature.name,
+          numericColumn: target.name,
+          feature,
+          role,
+          kind: "target mean by feature"
+        });
+      }
+
+      if (!targetIsNumeric && featureIsNumeric) {
+        return groupedMeanRelation({
+          rows: relationRows,
+          groupColumn: target.name,
+          numericColumn: feature.name,
+          feature,
+          role,
+          kind: "feature mean by target"
+        });
+      }
+
+      return categoricalRelation(relationRows, target.name, feature, role);
+    })
+    .filter((relation): relation is TargetRelationProfile => relation !== null);
+
+  return relations.sort((left, right) => right.score - left.score);
+}
+
+function groupedMeanRelation({
+  rows,
+  groupColumn,
+  numericColumn,
+  feature,
+  role,
+  kind
+}: {
+  rows: Array<Record<string, DatasetCellValue>>;
+  groupColumn: string;
+  numericColumn: string;
+  feature: DatasetPreview["columns"][number];
+  role: string;
+  kind: string;
+}): TargetRelationProfile | null {
+  const groups = new Map<string, number[]>();
+  for (const row of rows) {
+    const numericValue = Number(row[numericColumn]);
+    if (!Number.isFinite(numericValue)) {
+      continue;
+    }
+    const group = displayValue(row[groupColumn]);
+    groups.set(group, [...(groups.get(group) ?? []), numericValue]);
+  }
+
+  const minimumGroupSize = Math.max(3, Math.floor(rows.length * 0.03));
+  const summaries = [...groups.entries()]
+    .map(([group, values]) => ({
+      group,
+      count: values.length,
+      mean: values.reduce((total, value) => total + value, 0) / values.length
+    }))
+    .filter((summary) => summary.count >= minimumGroupSize);
+  if (summaries.length < 2) {
+    return null;
+  }
+
+  const allValues = [...groups.values()].flat();
+  const spread = standardDeviation(allValues);
+  const ordered = summaries.sort((left, right) => right.mean - left.mean);
+  const range = ordered[0].mean - ordered.at(-1)!.mean;
+  const score = spread === 0 ? 0 : Math.min(1, Math.abs(range) / (spread * 4));
+  return {
+    feature: feature.name,
+    role,
+    type: feature.type,
+    kind,
+    score,
+    signal: `effect ${formatNumber(score)}`,
+    detail: `${ordered[0].group} has the highest mean (${formatNumber(ordered[0].mean)}), ${ordered.at(-1)!.group} the lowest (${formatNumber(ordered.at(-1)!.mean)}).`
+  };
+}
+
+function categoricalRelation(
+  rows: Array<Record<string, DatasetCellValue>>,
+  targetColumn: string,
+  feature: DatasetPreview["columns"][number],
+  role: string
+): TargetRelationProfile | null {
+  const targetValues = uniqueDisplayValues(rows, targetColumn);
+  const featureValues = uniqueDisplayValues(rows, feature.name);
+  if (targetValues.length < 2 || featureValues.length < 2 || featureValues.length > 50) {
+    return null;
+  }
+
+  const rowTotals = new Map<string, number>();
+  const columnTotals = new Map<string, number>();
+  const cells = new Map<string, number>();
+  for (const row of rows) {
+    const targetValue = displayValue(row[targetColumn]);
+    const featureValue = displayValue(row[feature.name]);
+    rowTotals.set(targetValue, (rowTotals.get(targetValue) ?? 0) + 1);
+    columnTotals.set(featureValue, (columnTotals.get(featureValue) ?? 0) + 1);
+    cells.set(`${targetValue}\u0000${featureValue}`, (cells.get(`${targetValue}\u0000${featureValue}`) ?? 0) + 1);
+  }
+
+  let chiSquare = 0;
+  let strongest = { targetValue: "", featureValue: "", lift: 0 };
+  for (const targetValue of targetValues) {
+    for (const featureValue of featureValues) {
+      const observed = cells.get(`${targetValue}\u0000${featureValue}`) ?? 0;
+      const expected = ((rowTotals.get(targetValue) ?? 0) * (columnTotals.get(featureValue) ?? 0)) / rows.length;
+      if (expected > 0) {
+        chiSquare += ((observed - expected) ** 2) / expected;
+        const lift = observed / expected;
+        if (Math.abs(lift - 1) > Math.abs(strongest.lift - 1)) {
+          strongest = { targetValue, featureValue, lift };
+        }
+      }
+    }
+  }
+
+  const denominator = rows.length * Math.max(1, Math.min(targetValues.length - 1, featureValues.length - 1));
+  const cramersV = denominator === 0 ? 0 : Math.sqrt(chiSquare / denominator);
+  return {
+    feature: feature.name,
+    role,
+    type: feature.type,
+    kind: "categorical association",
+    score: Math.min(1, cramersV),
+    signal: `V ${formatNumber(cramersV)}`,
+    detail: `${feature.name}=${strongest.featureValue} is ${formatNumber(strongest.lift)}x expected with target ${strongest.targetValue}.`
+  };
+}
+
+function buildSegmentProfile(
+  rows: Array<Record<string, DatasetCellValue>>,
+  columns: DatasetPreview["columns"],
+  rolesMetadata: DataRolesMetadata,
+  targetColumn: string,
+  targetType: EffectiveTargetType,
+  maxSegmentFeatures: number
+): SegmentProfile | null {
+  const target = columns.find((column) => column.name === targetColumn);
+  if (!target) {
+    return null;
+  }
+
+  const targetIsNumeric = targetType === "continuous";
+  const candidates = columns
+    .filter((column) => column.name !== targetColumn)
+    .filter((column) => {
+      const role = columnRoleForColumn(column, rolesMetadata);
+      const uniqueCount = uniqueDisplayValues(rows, column.name).length;
+      return !["ignored", "identifier"].includes(role) && uniqueCount >= 2 && uniqueCount <= 12;
+    })
+    .slice(0, maxSegmentFeatures);
+  if (candidates.length < 2) {
+    return null;
+  }
+
+  const selected = candidates.slice(0, 2);
+  const groups = new Map<string, Array<Record<string, DatasetCellValue>>>();
+  for (const row of rows) {
+    if (!isPresentCell(normalizeCellValue(row[targetColumn]))) {
+      continue;
+    }
+    const keyValues = selected.map((column) => displayValue(row[column.name]));
+    if (keyValues.some((value) => value === "null")) {
+      continue;
+    }
+    const key = keyValues.join(" / ");
+    groups.set(key, [...(groups.get(key) ?? []), row]);
+  }
+
+  const minimumGroupSize = Math.max(5, Math.floor(rows.length * 0.03));
+  if (targetIsNumeric) {
+    const targetValues = rows.map((row) => Number(row[targetColumn])).filter(Number.isFinite);
+    const baseline = targetValues.reduce((total, value) => total + value, 0) / targetValues.length;
+    let best: SegmentProfile | null = null;
+    for (const [segment, groupRows] of groups.entries()) {
+      if (groupRows.length < minimumGroupSize) {
+        continue;
+      }
+      const values = groupRows.map((row) => Number(row[targetColumn])).filter(Number.isFinite);
+      const segmentValue = values.reduce((total, value) => total + value, 0) / values.length;
+      const lift = segmentValue - baseline;
+      if (!best || Math.abs(lift) > Math.abs(best.lift)) {
+        best = {
+          columns: selected.map((column) => column.name),
+          segment,
+          count: groupRows.length,
+          targetValue: `mean ${targetColumn}`,
+          baseline,
+          segmentValue,
+          lift,
+          format: "number"
+        };
+      }
+    }
+    return best;
+  }
+
+  const targetCounts = countTopValues(rows.map((row) => normalizeCellValue(row[targetColumn])).filter(isPresentCell), rows.length);
+  let best: SegmentProfile | null = null;
+  for (const [segment, groupRows] of groups.entries()) {
+    if (groupRows.length < minimumGroupSize) {
+      continue;
+    }
+    for (const targetValue of targetCounts.map((item) => item.value)) {
+      const targetLabel = displayValue(targetValue);
+      const baseline = targetCounts.find((item) => displayValue(item.value) === targetLabel)?.share ?? 0;
+      const segmentValue = groupRows.filter((row) => displayValue(row[targetColumn]) === targetLabel).length / groupRows.length;
+      const lift = segmentValue - baseline;
+      if (!best || Math.abs(lift) > Math.abs(best.lift)) {
+        best = {
+          columns: selected.map((column) => column.name),
+          segment,
+          count: groupRows.length,
+          targetValue: targetLabel,
+          baseline,
+          segmentValue,
+          lift,
+          format: "percent"
+        };
+      }
+    }
+  }
+  return best;
+}
+
+function buildDatasetQualityNotes(
+  profiles: ColumnProfile[],
+  rowCount: number,
+  rolesMetadata: DataRolesMetadata,
+  targetColumn: string
+) {
+  const notes: string[] = [];
+  if (!targetColumn) {
+    notes.push("No target role is set; target-feature profiling is waiting for metadata.");
+  }
+  if (rolesMetadata.dataset_roles.length === 0) {
+    notes.push("Dataset role is not set; mark training, validation, scoring, or monitoring intent in Data Roles.");
+  }
+  const highMissing = profiles.filter((profile) => profile.missingRate >= 0.3 && profile.role !== "ignored");
+  if (highMissing.length > 0) {
+    notes.push(`${highMissing.length} columns have at least 30% missing values.`);
+  }
+  const nearUnique = profiles.filter((profile) =>
+    profile.uniqueRate >= 0.95 && !["identifier", "timestamp", "period_id", "ignored"].includes(profile.role)
+  );
+  if (nearUnique.length > 0) {
+    notes.push(`${nearUnique.length} non-ID columns look near-unique; review roles before modeling.`);
+  }
+  const constants = profiles.filter((profile) => profile.unique <= 1 && profile.count > 0);
+  if (constants.length > 0) {
+    notes.push(`${constants.length} columns are constant in ${formatInteger(rowCount)} profiled rows.`);
+  }
+  return notes;
+}
+
+function isNumericMeasureColumn(
+  column: DatasetPreview["columns"][number],
+  rolesMetadata: DataRolesMetadata,
+  rows: Array<Record<string, DatasetCellValue>>,
+  isTarget: boolean
+) {
+  const role = columnRoleForColumn(column, rolesMetadata);
+  if (role === "feature_continuous" || role === "sample_weight") {
+    return true;
+  }
+  if (role === "feature_categorical" || role === "feature_ordinal" || role === "boolean") {
+    return false;
+  }
+  if (column.type !== "number") {
+    return false;
+  }
+  if (!isTarget) {
+    return true;
+  }
+  const present = rows.map((row) => normalizeCellValue(row[column.name])).filter(isPresentCell);
+  const unique = new Set(present.map(displayValue)).size;
+  return unique > Math.min(20, Math.max(2, Math.floor(present.length * 0.1)));
+}
+
+function pearsonCorrelation(pairs: Array<readonly [number, number]>) {
+  if (pairs.length < 3) {
+    return null;
+  }
+  const meanX = pairs.reduce((total, pair) => total + pair[0], 0) / pairs.length;
+  const meanY = pairs.reduce((total, pair) => total + pair[1], 0) / pairs.length;
+  let numerator = 0;
+  let sumX = 0;
+  let sumY = 0;
+  for (const [x, y] of pairs) {
+    const dx = x - meanX;
+    const dy = y - meanY;
+    numerator += dx * dy;
+    sumX += dx ** 2;
+    sumY += dy ** 2;
+  }
+  const denominator = Math.sqrt(sumX * sumY);
+  return denominator === 0 ? null : numerator / denominator;
+}
+
+function countTopValues(values: DatasetCellValue[], denominator: number) {
+  const counts = new Map<string, { value: DatasetCellValue; count: number }>();
+  for (const value of values) {
+    const key = displayValue(value);
+    const current = counts.get(key);
+    counts.set(key, { value, count: (current?.count ?? 0) + 1 });
+  }
+  return [...counts.values()]
+    .sort((left, right) => right.count - left.count || displayValue(left.value).localeCompare(displayValue(right.value)))
+    .slice(0, 10)
+    .map((item) => ({
+      ...item,
+      share: denominator === 0 ? 0 : item.count / denominator
+    }));
+}
+
+function buildHistogramBins(values: number[], binCount = 12) {
+  if (values.length === 0) {
+    return [];
+  }
+  const minimum = values[0];
+  const maximum = values.at(-1) ?? minimum;
+  if (minimum === maximum) {
+    return [{
+      label: formatNumber(minimum),
+      count: values.length,
+      share: 1
+    }];
+  }
+
+  const width = (maximum - minimum) / binCount;
+  const bins = Array.from({ length: binCount }, (_, index) => {
+    const start = minimum + index * width;
+    const end = index === binCount - 1 ? maximum : start + width;
+    return {
+      label: `${formatNumber(start)} - ${formatNumber(end)}`,
+      count: 0,
+      share: 0
+    };
+  });
+
+  for (const value of values) {
+    const index = Math.min(binCount - 1, Math.floor((value - minimum) / width));
+    bins[index].count += 1;
+  }
+
+  return bins.map((bin) => ({
+    ...bin,
+    share: bin.count / values.length
+  }));
+}
+
+function syncSelectedNames(current: string[] | null, available: string[]) {
+  if (current === null) {
+    return null;
+  }
+  const availableSet = new Set(available);
+  return current.filter((name) => availableSet.has(name));
+}
+
+function uniqueDisplayValues(rows: Array<Record<string, DatasetCellValue>>, column: string) {
+  return [...new Set(
+    rows
+      .map((row) => normalizeCellValue(row[column]))
+      .filter(isPresentCell)
+      .map(displayValue)
+  )];
+}
+
+function normalizeCellValue(value: unknown): DatasetCellValue {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null) {
+    return value;
+  }
+  return null;
+}
+
+function isPresentCell(value: DatasetCellValue): value is Exclude<DatasetCellValue, null> {
+  return value !== null && value !== "";
+}
+
+function medianNumber(values: number[]) {
+  if (values.length === 0) {
+    return 0;
+  }
+  const middle = Math.floor(values.length / 2);
+  return values.length % 2 === 0
+    ? (values[middle - 1] + values[middle]) / 2
+    : values[middle];
+}
+
+function standardDeviation(values: number[]) {
+  if (values.length < 2) {
+    return 0;
+  }
+  const mean = values.reduce((total, value) => total + value, 0) / values.length;
+  const variance = values.reduce((total, value) => total + (value - mean) ** 2, 0) / (values.length - 1);
+  return Math.sqrt(variance);
+}
+
+function formatInteger(value: number) {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value);
+}
+
+function formatNumber(value: number) {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 3 }).format(roundNumber(value));
+}
+
+function formatNullableNumber(value: number | null) {
+  return value === null ? "null" : formatNumber(value);
+}
+
+function formatSignedNumber(value: number) {
+  return `${value >= 0 ? "+" : ""}${formatNumber(value)}`;
+}
+
+function formatPercent(value: number) {
+  return new Intl.NumberFormat(undefined, {
+    maximumFractionDigits: 1,
+    style: "percent"
+  }).format(value);
+}
+
+function formatSegmentMetric(value: number, format: SegmentProfile["format"]) {
+  return format === "percent" ? formatPercent(value) : formatNumber(value);
+}
+
+function formatSignedSegmentMetric(value: number, format: SegmentProfile["format"]) {
+  const formatted = formatSegmentMetric(Math.abs(value), format);
+  return `${value >= 0 ? "+" : "-"}${formatted}`;
 }
 
 function AnalysisPlaceholder({
