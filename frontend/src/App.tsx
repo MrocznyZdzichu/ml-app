@@ -375,8 +375,9 @@ function Overview({
   models: ModelArtifact[];
   deployments: Deployment[];
 }) {
-  const dataViews = datasets.filter(isDataView);
-  const sourceDatasets = datasets.filter((dataset) => !isDataView(dataset));
+  const activeDataAssets = datasets.filter((dataset) => dataset.status !== "deleted");
+  const dataViews = activeDataAssets.filter(isDataView);
+  const sourceDatasets = activeDataAssets.filter((dataset) => !isDataView(dataset));
   const recentAssets = [
     ...sourceDatasets.map((item) => ({
       id: item.id,
@@ -654,10 +655,20 @@ function AnalysisPanel({
   setNotice: (message: string) => void;
 }) {
   const [activeAnalysisTab, setActiveAnalysisTab] = useState<"roles" | "browse" | "descriptive" | "visualization">("roles");
+  const [datasetId, setDatasetId] = useState("");
   const availableDatasets = useMemo(
     () => datasets.filter((dataset) => dataset.status !== "deleted"),
     [datasets]
   );
+
+  useEffect(() => {
+    const nextDatasetId = availableDatasets.some((dataset) => dataset.id === datasetId)
+      ? datasetId
+      : availableDatasets[0]?.id ?? "";
+    if (nextDatasetId !== datasetId) {
+      setDatasetId(nextDatasetId);
+    }
+  }, [availableDatasets, datasetId]);
 
   return (
     <section className="analysis-workspace">
@@ -699,12 +710,20 @@ function AnalysisPanel({
       {activeAnalysisTab === "roles" && (
         <DataRolesPanel
           datasets={availableDatasets}
+          datasetId={datasetId}
+          setDatasetId={setDatasetId}
           onRefresh={onRefresh}
           setNotice={setNotice}
         />
       )}
       {activeAnalysisTab === "browse" && (
-        <DataBrowsingPanel datasets={availableDatasets} onRefresh={onRefresh} setNotice={setNotice} />
+        <DataBrowsingPanel
+          datasets={availableDatasets}
+          datasetId={datasetId}
+          setDatasetId={setDatasetId}
+          onRefresh={onRefresh}
+          setNotice={setNotice}
+        />
       )}
       {activeAnalysisTab === "descriptive" && (
         <AnalysisPlaceholder
@@ -726,29 +745,23 @@ function AnalysisPanel({
 
 function DataRolesPanel({
   datasets,
+  datasetId,
+  setDatasetId,
   onRefresh,
   setNotice
 }: {
   datasets: DataAsset[];
+  datasetId: string;
+  setDatasetId: (datasetId: string) => void;
   onRefresh: () => Promise<void>;
   setNotice: (message: string) => void;
 }) {
-  const [datasetId, setDatasetId] = useState("");
   const [preview, setPreview] = useState<DatasetPreview | null>(null);
   const [metadata, setMetadata] = useState<DataRolesMetadata>(emptyRolesMetadata);
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const selectedDataset = datasets.find((dataset) => dataset.id === datasetId) ?? null;
   const columns = preview?.columns ?? [];
-
-  useEffect(() => {
-    const nextDatasetId = datasets.some((dataset) => dataset.id === datasetId)
-      ? datasetId
-      : datasets[0]?.id ?? "";
-    if (nextDatasetId !== datasetId) {
-      setDatasetId(nextDatasetId);
-    }
-  }, [datasets, datasetId]);
 
   useEffect(() => {
     setMetadata(readRolesMetadata(selectedDataset, datasets, columns.map((column) => column.name)));
@@ -1072,14 +1085,17 @@ const filterOperatorLabels: Record<FilterOperator, string> = {
 
 function DataBrowsingPanel({
   datasets,
+  datasetId,
+  setDatasetId,
   onRefresh,
   setNotice
 }: {
   datasets: DataAsset[];
+  datasetId: string;
+  setDatasetId: (datasetId: string) => void;
   onRefresh: () => Promise<void>;
   setNotice: (message: string) => void;
 }) {
-  const [datasetId, setDatasetId] = useState("");
   const [preview, setPreview] = useState<DatasetPreview | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
@@ -1118,15 +1134,6 @@ function DataBrowsingPanel({
     () => readRolesMetadata(selectedDataset, datasets, preview?.columns.map((column) => column.name) ?? []),
     [datasets, preview, selectedDataset]
   );
-
-  useEffect(() => {
-    const nextDatasetId = datasets.some((dataset) => dataset.id === datasetId)
-      ? datasetId
-      : datasets[0]?.id ?? "";
-    if (nextDatasetId !== datasetId) {
-      setDatasetId(nextDatasetId);
-    }
-  }, [datasets, datasetId]);
 
   useEffect(() => {
     resetViewState();

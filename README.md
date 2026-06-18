@@ -16,6 +16,7 @@ The current product slice focuses on a practical analyst workflow:
 - run read-only Custom SQL,
 - save reusable Data Views,
 - use the same Data Roles and Data Browsing tools on saved views.
+- keep one shared Analysis dataset selection across Data Roles and Data Browsing.
 
 ## Repository Layout
 
@@ -96,6 +97,7 @@ by later tools.
 
 Data Browsing supports:
 
+- shared dataset selection with the Data Roles tab,
 - full-dataset filtering/searching before preview limits are applied,
 - column selection with presets,
 - multi-column sorting,
@@ -119,16 +121,23 @@ and Data Browsing.
 When possible, data roles are inherited from the source dataset for columns that
 survive in the view.
 
+Deleted datasets and views remain visible in the Data workspace deletion history
+but are excluded from Overview metrics, Recent assets, and Analysis selectors.
+
 ## Example Data
 
 Use these files for manual testing:
 
 - `examples/data/iris.csv`
 - `examples/data/general-example.csv`
+- `examples/data/regression-example.csv`
 
 `general-example.csv` contains 10,000 synthetic customer-churn-like rows with
 mixed numeric and categorical columns, useful for testing filtering, grouping,
 aggregation, sorting, Custom SQL, and Data Views.
+
+`regression-example.csv` contains 10,000 synthetic real-estate transaction rows
+for a regression task where the target is `sale_price_pln`.
 
 ## Verification
 

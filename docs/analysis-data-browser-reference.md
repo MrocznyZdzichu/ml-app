@@ -13,6 +13,10 @@ The Analysis workspace currently contains:
 - `Descriptive Analysis` - placeholder for calculated summaries.
 - `Visualization and Trends` - placeholder for visual analysis.
 
+Dataset selection is shared across Analysis tabs. Selecting a dataset in
+`Data Browsing` keeps the same dataset selected when switching to `Data Roles`,
+and vice versa.
+
 ## Data Roles
 
 Data Roles are stored in dataset metadata under:
