@@ -75,10 +75,19 @@ column context for configuration, but the profile calculations are run only
 after `Run profiling`. The profiling range controls which sections are
 calculated and whether graphic summaries are produced.
 
+Successful profile previews, computed summaries, and UI snapshots are cached in
+an App-owned, session-scoped in-memory map keyed by dataset ID. The cache
+survives Analysis tab and workspace navigation, is invalidated when dataset
+metadata has a newer `updated_at`, and is cleared during logout. No profiling
+records are persisted to browser storage.
+
 The UI supports univariate profiles, target/comparison relations, optional
-histograms, KDE-like density plots, scatterplots, and a small multivariate
-segment scan. Future backend/worker profiling can reuse the same metadata
-contract and persist generated artifacts in object storage.
+histograms, KDE-like density plots, scatterplots, and a multivariate subgroup
+scan over eligible low-cardinality feature pairs. Segment results are ranked by
+coverage-adjusted impact (WRAcc for categorical targets and support-weighted
+Cohen's d for continuous targets) and cached with the rest of the computed
+profile. Future backend/worker profiling can reuse the same metadata contract
+and persist generated artifacts in object storage.
 
 ## Data Views
 

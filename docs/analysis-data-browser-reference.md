@@ -24,6 +24,16 @@ Descriptive Analysis profiles a selected dataset only after the analyst clicks
 `Run profiling`. Selecting a dataset loads lightweight configuration context for
 target and target-type choices, but the heavier profiling work remains explicit.
 
+Successful profiles and their computed summaries are cached in frontend memory
+for the authenticated session.
+Switching to another dataset and then returning restores the latest profile and
+its view settings without another profiling request. Cache entries are ignored
+when the dataset `updated_at` value changes, and the entire cache is cleared on
+logout or page refresh/close. Profiles are not written to localStorage or other
+persistent browser storage. Restoring a matching entry reuses calculated column
+profiles, relations, density/scatter data, segment results, and quality notes
+instead of recalculating them from cached rows.
+
 ### Dataset Profile
 
 The top Dataset Profile panel lets the analyst configure:
@@ -87,14 +97,45 @@ For two continuous variables, the card shows Pearson correlation, Spearman
 correlation, R-squared, regression slope, intercept, and covariance. With
 graphic summaries enabled, it also shows a scatterplot with a trend line.
 
-Categorical-vs-categorical relations are summarized with a Cramer's V-style
-association signal and the strongest observed-vs-expected lift.
+Categorical-vs-categorical relations include a contingency table with counts,
+row-normalized target percentages, lift, and Pearson residuals per cell.
+The card also reports chi-square, degrees of freedom, Cramer's V, and the share
+of sparse expected cells. Sparse tables display an exploratory-use warning.
+
+For ordinal features with a binary target, the card additionally reports a
+Spearman trend against the selected target value. Numeric ordinal labels are
+ordered numerically; otherwise the current implementation uses first-observed
+category order and labels that basis explicitly, so analysts can verify that it
+matches the domain order.
 
 ### Multivariate Segment Scan
 
-The segment scan looks for notable combinations of low-cardinality categorical
-features against the selected target. It is intended as a quick role-aware hint,
-not a substitute for full statistical modeling.
+The segment scan evaluates every pair among the configured number of eligible
+low-cardinality features. Ignored, identifier, and target columns are excluded.
+Combinations below 3% of the profiled sample (with an absolute minimum of five
+rows) are excluded to reduce unstable small-group extremes. The UI shows the 12
+highest-ranked results rather than only the single largest raw deviation.
+
+For a categorical target, a binary target is focused on its less frequent class;
+all classes are evaluated for a multiclass target. Each result reports:
+
+- support (the segment's share of eligible target rows),
+- segment target rate and the population baseline,
+- absolute percentage-point difference and relative lift,
+- a 95% Wilson interval for the segment rate,
+- WRAcc (`support * (segment rate - baseline)`) as a coverage-adjusted ranking
+  measure.
+
+For a continuous target, each result reports the segment mean, population mean,
+their difference, an approximate 95% interval around the segment mean, and
+Cohen's d against the rest of the population. Ranking uses support multiplied by
+Cohen's d, balancing standardized separation with segment coverage.
+
+The scan is exploratory subgroup discovery. Reusing the same data to generate
+and inspect many candidate segments creates selection and multiple-comparison
+risk, so displayed intervals are descriptive and results do not establish
+causality. Confirm important segments on validation data or with a model that
+controls for confounding variables.
 
 ## Data Roles
 

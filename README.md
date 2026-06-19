@@ -132,7 +132,10 @@ The tab supports:
 - continuous-vs-continuous relation cards with Pearson, Spearman, R-squared,
   slope, intercept, covariance, and optional scatterplots,
 - collapsible relation cards with Show all / Collapse all controls,
-- multivariate segment scan for low-cardinality categorical combinations.
+- session-scoped in-memory profile caching when switching between datasets,
+- ranked multivariate segment scan across low-cardinality feature pairs, with
+  support-aware impact, uncertainty, lift/WRAcc for categorical targets, and
+  standardized effect size for continuous targets.
 
 ### Data Views
 
