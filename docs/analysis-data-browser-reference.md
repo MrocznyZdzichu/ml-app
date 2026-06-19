@@ -10,12 +10,91 @@ The Analysis workspace currently contains:
 - `Data Roles` - durable semantic metadata for datasets and columns.
 - `Data Browsing` - interactive preview, filtering, sorting, grouping,
   aggregation, Custom SQL, drill down, and Data View creation.
-- `Descriptive Analysis` - placeholder for calculated summaries.
+- `Descriptive Analysis` - explicit, role-aware descriptive profiling with
+  univariate, comparison, target-aware, and segment summaries.
 - `Visualization and Trends` - placeholder for visual analysis.
 
 Dataset selection is shared across Analysis tabs. Selecting a dataset in
 `Data Browsing` keeps the same dataset selected when switching to `Data Roles`,
 and vice versa.
+
+## Descriptive Analysis
+
+Descriptive Analysis profiles a selected dataset only after the analyst clicks
+`Run profiling`. Selecting a dataset loads lightweight configuration context for
+target and target-type choices, but the heavier profiling work remains explicit.
+
+### Dataset Profile
+
+The top Dataset Profile panel lets the analyst configure:
+
+- dataset,
+- target column,
+- target type: automatic, categorical/classification, or continuous/regression,
+- whether ignored and identifier columns are included,
+- profiling range.
+
+Automatic target-type inference treats boolean, text, categorical, ordinal, and
+low-cardinality numeric targets as categorical. This keeps binary numeric
+targets such as churn `0/1` in the classification-style path unless the analyst
+overrides the setting.
+
+### Profiling Range
+
+Profiling Range controls the amount of work performed:
+
+- Dataset summary and quality notes,
+- Univariate column profiles,
+- Target vs feature relations,
+- Multivariate segment scan,
+- Graphic summaries,
+- row sample limit,
+- maximum target/comparison relation features,
+- maximum segment scan features.
+
+`Graphic summaries` is enabled by default. When disabled, profiling still
+calculates tables and metrics but skips histogram, density, and scatterplot data
+and rendering.
+
+### Univariate Profile
+
+Univariate Profile is collapsible and has its own column selection modal. It
+shows count, missing rate, unique count, mode, and numeric descriptive measures.
+
+Numeric columns with low cardinality are displayed as discrete distributions
+when graphic summaries are enabled. Continuous numeric columns use histograms.
+When graphic summaries are disabled, only tabular facts and metrics are shown.
+
+### Target vs Features
+
+Target vs Features is also collapsible. By default it compares features against
+the selected target, but `Compare by` can be changed to another column for more
+general bivariate exploration.
+
+The section supports:
+
+- column selection with a modal selector,
+- collapsible relation cards per feature,
+- `Show all` and `Collapse all` for relation cards,
+- ranking by relationship strength.
+
+For a continuous feature compared with a categorical target/comparison column,
+the card shows group-level rows, min, max, median, average, and standard
+deviation. With graphic summaries enabled, it also shows KDE-like density curves
+for each comparison group on a shared axis.
+
+For two continuous variables, the card shows Pearson correlation, Spearman
+correlation, R-squared, regression slope, intercept, and covariance. With
+graphic summaries enabled, it also shows a scatterplot with a trend line.
+
+Categorical-vs-categorical relations are summarized with a Cramer's V-style
+association signal and the strongest observed-vs-expected lift.
+
+### Multivariate Segment Scan
+
+The segment scan looks for notable combinations of low-cardinality categorical
+features against the selected target. It is intended as a quick role-aware hint,
+not a substitute for full statistical modeling.
 
 ## Data Roles
 

@@ -13,10 +13,11 @@ The current product slice focuses on a practical analyst workflow:
 - upload CSV datasets,
 - assign durable data roles and column roles,
 - browse, filter, sort, group, aggregate, and drill into data,
+- profile datasets with descriptive, target-aware, and comparison summaries,
 - run read-only Custom SQL,
 - save reusable Data Views,
 - use the same Data Roles and Data Browsing tools on saved views.
-- keep one shared Analysis dataset selection across Data Roles and Data Browsing.
+- keep one shared Analysis dataset selection across Analysis tools.
 
 ## Repository Layout
 
@@ -110,6 +111,28 @@ Data Browsing supports:
 - paging with direct page number input,
 - Custom SQL with a helper sidebar and read-only execution,
 - Save View for persisting the current analysis as a reusable Data View.
+
+### Analysis: Descriptive Analysis
+
+Descriptive Analysis provides explicit, role-aware dataset profiling. Profiling
+does not start automatically after dataset selection; analysts choose the
+dataset, target, target type, and profiling range, then run profiling when ready.
+
+The tab supports:
+
+- smart dataset summary cards and quality notes based on Data Roles metadata,
+- optional profiling scope controls for summary, univariate profiles,
+  target/comparison relations, segment scans, row limits, and graphic summaries,
+- univariate profiles with collapsible UI, column selection, numeric summaries,
+  categorical distributions, and optional histograms,
+- comparison analysis that defaults to target vs features but can compare
+  features against another selected column,
+- continuous-feature vs categorical-comparison tables with rows, min, max,
+  median, average, standard deviation, and optional KDE-like density plots,
+- continuous-vs-continuous relation cards with Pearson, Spearman, R-squared,
+  slope, intercept, covariance, and optional scatterplots,
+- collapsible relation cards with Show all / Collapse all controls,
+- multivariate segment scan for low-cardinality categorical combinations.
 
 ### Data Views
 

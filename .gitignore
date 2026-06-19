@@ -30,6 +30,7 @@ pnpm-debug.log*
 /data/
 /artifacts/
 /models/
+sandbox.ipynb
 *.sqlite
 *.sqlite3
 *.db

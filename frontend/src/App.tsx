@@ -1113,6 +1113,63 @@ type TargetRelationProfile = {
   score: number;
   signal: string;
   detail: string;
+  comparisonColumn: string;
+  groupStats: NumericGroupStats[];
+  densityPlot: DensityPlot | null;
+  numericStats: NumericRelationStats | null;
+  scatterPlot: ScatterPlot | null;
+};
+
+type NumericGroupStats = {
+  group: string;
+  count: number;
+  minimum: number;
+  maximum: number;
+  median: number;
+  mean: number;
+  stdDev: number;
+  color: string;
+};
+
+type DensityPlot = {
+  xMin: number;
+  xMax: number;
+  yMax: number;
+  series: DensitySeries[];
+};
+
+type DensitySeries = {
+  group: string;
+  color: string;
+  points: Array<{
+    x: number;
+    y: number;
+  }>;
+};
+
+type NumericRelationStats = {
+  pearson: number;
+  spearman: number;
+  rSquared: number;
+  covariance: number;
+  slope: number;
+  intercept: number;
+};
+
+type ScatterPlot = {
+  xColumn: string;
+  yColumn: string;
+  xMin: number;
+  xMax: number;
+  yMin: number;
+  yMax: number;
+  points: Array<{ x: number; y: number }>;
+  trendLine: {
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+  } | null;
 };
 
 type SegmentProfile = {
@@ -1134,6 +1191,7 @@ type ProfilingRangeSettings = {
   includeUnivariate: boolean;
   includeTargetRelations: boolean;
   includeSegments: boolean;
+  includeGraphicSummaries: boolean;
   rowLimit: number;
   maxTargetFeatures: number;
   maxSegmentFeatures: number;
@@ -1144,6 +1202,7 @@ const defaultProfilingRangeSettings: ProfilingRangeSettings = {
   includeUnivariate: true,
   includeTargetRelations: true,
   includeSegments: true,
+  includeGraphicSummaries: true,
   rowLimit: 50000,
   maxTargetFeatures: 30,
   maxSegmentFeatures: 4
@@ -1168,6 +1227,7 @@ function DescriptiveAnalysisPanel({
   const [schemaError, setSchemaError] = useState("");
   const [targetColumn, setTargetColumn] = useState("");
   const [targetTypeSetting, setTargetTypeSetting] = useState<TargetTypeSetting>("auto");
+  const [comparisonColumn, setComparisonColumn] = useState("");
   const [showIgnoredColumns, setShowIgnoredColumns] = useState(false);
   const [hasProfileRun, setHasProfileRun] = useState(false);
   const [setupCollapsed, setSetupCollapsed] = useState(false);
@@ -1176,6 +1236,7 @@ function DescriptiveAnalysisPanel({
   const [segmentCollapsed, setSegmentCollapsed] = useState(true);
   const [selectedProfileColumns, setSelectedProfileColumns] = useState<string[] | null>(null);
   const [selectedRelationFeatures, setSelectedRelationFeatures] = useState<string[] | null>(null);
+  const [collapsedRelationCards, setCollapsedRelationCards] = useState<Record<string, boolean>>({});
   const [profileColumnsModalOpen, setProfileColumnsModalOpen] = useState(false);
   const [relationColumnsModalOpen, setRelationColumnsModalOpen] = useState(false);
   const [profilingRangeModalOpen, setProfilingRangeModalOpen] = useState(false);
@@ -1183,10 +1244,12 @@ function DescriptiveAnalysisPanel({
   const profileRequestId = useRef(0);
   const schemaRequestId = useRef(0);
   const selectedDataset = datasets.find((dataset) => dataset.id === datasetId) ?? null;
-  const configPreview = preview ?? schemaPreview;
+  const activeProfilePreview = preview?.dataset_id === datasetId && hasProfileRun ? preview : null;
+  const activeSchemaPreview = schemaPreview?.dataset_id === datasetId ? schemaPreview : null;
+  const configPreview = activeProfilePreview ?? activeSchemaPreview;
   const columns = configPreview?.columns ?? [];
-  const rows = preview?.records ?? [];
-  const targetInferenceRows = preview?.records ?? schemaPreview?.records ?? [];
+  const rows = activeProfilePreview?.records ?? [];
+  const targetInferenceRows = activeProfilePreview?.records ?? activeSchemaPreview?.records ?? [];
   const rolesMetadata = useMemo(
     () => readRolesMetadata(selectedDataset, datasets, columns.map((column) => column.name)),
     [columns, datasets, selectedDataset]
@@ -1206,6 +1269,13 @@ function DescriptiveAnalysisPanel({
   const effectiveTargetType: EffectiveTargetType = targetTypeSetting === "auto"
     ? inferredTargetType
     : targetTypeSetting;
+  const effectiveComparisonColumn = columns.some((column) => column.name === comparisonColumn)
+    ? comparisonColumn
+    : effectiveTargetColumn;
+  const comparisonColumnDefinition = columns.find((column) => column.name === effectiveComparisonColumn) ?? null;
+  const effectiveComparisonType = effectiveComparisonColumn === effectiveTargetColumn
+    ? effectiveTargetType
+    : inferTargetType(comparisonColumnDefinition, targetInferenceRows, rolesMetadata);
 
   useEffect(() => {
     const schemaRequestIdValue = schemaRequestId.current + 1;
@@ -1220,8 +1290,10 @@ function DescriptiveAnalysisPanel({
     setHasProfileRun(false);
     setTargetColumn("");
     setTargetTypeSetting("auto");
+    setComparisonColumn("");
     setSelectedProfileColumns(null);
     setSelectedRelationFeatures(null);
+    setCollapsedRelationCards({});
 
     if (!datasetId) {
       setIsLoadingSchema(false);
@@ -1253,6 +1325,7 @@ function DescriptiveAnalysisPanel({
   useEffect(() => {
     if (columns.length === 0) {
       setTargetColumn("");
+      setComparisonColumn("");
       return;
     }
     if (!targetColumn || !columns.some((column) => column.name === targetColumn)) {
@@ -1260,50 +1333,89 @@ function DescriptiveAnalysisPanel({
     }
   }, [columns, inferredTargetColumn, targetColumn]);
 
-  const shouldBuildColumnProfiles =
+  useEffect(() => {
+    if (columns.length === 0) {
+      setComparisonColumn("");
+      return;
+    }
+    if (!comparisonColumn || !columns.some((column) => column.name === comparisonColumn)) {
+      setComparisonColumn(effectiveTargetColumn);
+    }
+  }, [columns, comparisonColumn, effectiveTargetColumn]);
+
+  const shouldBuildColumnProfiles = Boolean(activeProfilePreview) && (
     profilingRange.includeSummary ||
     profilingRange.includeUnivariate ||
-    profilingRange.includeTargetRelations;
+    profilingRange.includeTargetRelations
+  );
   const columnProfiles = useMemo(
     () => shouldBuildColumnProfiles
-      ? columns.map((column) => buildColumnProfile(column, rows, rolesMetadata))
+      ? columns.map((column) => buildColumnProfile(column, rows, rolesMetadata, profilingRange.includeGraphicSummaries))
       : [],
-    [columns, rolesMetadata, rows, shouldBuildColumnProfiles]
+    [columns, profilingRange.includeGraphicSummaries, rolesMetadata, rows, shouldBuildColumnProfiles]
   );
-  const selectableProfiles = showIgnoredColumns
-    ? columnProfiles
-    : columnProfiles.filter((profile) => !["ignored", "identifier"].includes(profile.role));
-  const activeProfileColumns = selectedProfileColumns ?? selectableProfiles.map((profile) => profile.name);
-  const visibleProfiles = selectableProfiles.filter((profile) =>
-    activeProfileColumns.includes(profile.name)
+  const selectableProfiles = useMemo(
+    () => showIgnoredColumns
+      ? columnProfiles
+      : columnProfiles.filter((profile) => !["ignored", "identifier"].includes(profile.role)),
+    [columnProfiles, showIgnoredColumns]
   );
-  const profileByName = new Map(columnProfiles.map((profile) => [profile.name, profile]));
+  const selectableProfileNames = useMemo(
+    () => selectableProfiles.map((profile) => profile.name),
+    [selectableProfiles]
+  );
+  const activeProfileColumns = selectedProfileColumns ?? selectableProfileNames;
+  const activeProfileColumnSet = useMemo(() => new Set(activeProfileColumns), [activeProfileColumns]);
+  const visibleProfiles = useMemo(
+    () => selectableProfiles.filter((profile) => activeProfileColumnSet.has(profile.name)),
+    [activeProfileColumnSet, selectableProfiles]
+  );
+  const profileByName = useMemo(
+    () => new Map(columnProfiles.map((profile) => [profile.name, profile])),
+    [columnProfiles]
+  );
   const targetRelations = useMemo(
-    () => profilingRange.includeTargetRelations
-      ? buildTargetRelations(rows, columns, rolesMetadata, effectiveTargetColumn, effectiveTargetType).slice(0, profilingRange.maxTargetFeatures)
+    () => activeProfilePreview && profilingRange.includeTargetRelations
+      ? buildTargetRelations(rows, columns, rolesMetadata, effectiveComparisonColumn, effectiveComparisonType, profilingRange.includeGraphicSummaries).slice(0, profilingRange.maxTargetFeatures)
       : [],
-    [columns, effectiveTargetColumn, effectiveTargetType, profilingRange.includeTargetRelations, profilingRange.maxTargetFeatures, rolesMetadata, rows]
+    [activeProfilePreview, columns, effectiveComparisonColumn, effectiveComparisonType, profilingRange.includeGraphicSummaries, profilingRange.includeTargetRelations, profilingRange.maxTargetFeatures, rolesMetadata, rows]
   );
-  const activeRelationFeatures = selectedRelationFeatures ?? targetRelations.map((relation) => relation.feature);
-  const visibleTargetRelations = targetRelations.filter((relation) =>
-    activeRelationFeatures.includes(relation.feature)
+  const relationFeatureNames = useMemo(
+    () => targetRelations.map((relation) => relation.feature),
+    [targetRelations]
+  );
+  const activeRelationFeatures = selectedRelationFeatures ?? relationFeatureNames;
+  const activeRelationFeatureSet = useMemo(() => new Set(activeRelationFeatures), [activeRelationFeatures]);
+  const visibleTargetRelations = useMemo(
+    () => targetRelations.filter((relation) => activeRelationFeatureSet.has(relation.feature)),
+    [activeRelationFeatureSet, targetRelations]
+  );
+  const visibleTargetRelationKeys = useMemo(
+    () => visibleTargetRelations.map(relationCardKey),
+    [visibleTargetRelations]
   );
   const segmentProfile = useMemo(
-    () => profilingRange.includeSegments
+    () => activeProfilePreview && profilingRange.includeSegments
       ? buildSegmentProfile(rows, columns, rolesMetadata, effectiveTargetColumn, effectiveTargetType, profilingRange.maxSegmentFeatures)
       : null,
-    [columns, effectiveTargetColumn, effectiveTargetType, profilingRange.includeSegments, profilingRange.maxSegmentFeatures, rolesMetadata, rows]
+    [activeProfilePreview, columns, effectiveTargetColumn, effectiveTargetType, profilingRange.includeSegments, profilingRange.maxSegmentFeatures, rolesMetadata, rows]
   );
   const dataQualityNotes = useMemo(
-    () => profilingRange.includeSummary
+    () => activeProfilePreview && profilingRange.includeSummary
       ? buildDatasetQualityNotes(columnProfiles, rows.length, rolesMetadata, effectiveTargetColumn)
       : [],
-    [columnProfiles, effectiveTargetColumn, profilingRange.includeSummary, rolesMetadata, rows.length]
+    [activeProfilePreview, columnProfiles, effectiveTargetColumn, profilingRange.includeSummary, rolesMetadata, rows.length]
   );
-  const numericProfiles = columnProfiles.filter((profile) => profile.mean !== null);
-  const categoricalProfiles = columnProfiles.filter((profile) =>
-    ["feature_categorical", "feature_ordinal", "boolean", "target"].includes(profile.role) ||
-    ["text", "boolean"].includes(profile.type)
+  const numericProfiles = useMemo(
+    () => columnProfiles.filter((profile) => profile.mean !== null),
+    [columnProfiles]
+  );
+  const categoricalProfiles = useMemo(
+    () => columnProfiles.filter((profile) =>
+      ["feature_categorical", "feature_ordinal", "boolean", "target"].includes(profile.role) ||
+      ["text", "boolean"].includes(profile.type)
+    ),
+    [columnProfiles]
   );
   const featureCount = columns.filter((column) =>
     !["ignored", "identifier", "target"].includes(columnRoleForColumn(column, rolesMetadata))
@@ -1311,20 +1423,37 @@ function DescriptiveAnalysisPanel({
   const targetSummary = effectiveTargetColumn
     ? profileByName.get(effectiveTargetColumn)
     : undefined;
+  const comparisonSummary = effectiveComparisonColumn
+    ? profileByName.get(effectiveComparisonColumn)
+    : undefined;
   const enabledRangeLabels = [
     profilingRange.includeSummary ? "summary" : "",
     profilingRange.includeUnivariate ? "univariate" : "",
     profilingRange.includeTargetRelations ? "target relations" : "",
-    profilingRange.includeSegments ? "segments" : ""
+    profilingRange.includeSegments ? "segments" : "",
+    profilingRange.includeGraphicSummaries ? "graphics" : "no graphics"
   ].filter(Boolean);
 
   useEffect(() => {
-    setSelectedProfileColumns((current) => syncSelectedNames(current, selectableProfiles.map((profile) => profile.name)));
-  }, [selectableProfiles]);
+    setSelectedProfileColumns((current) => syncSelectedNames(current, selectableProfileNames));
+  }, [selectableProfileNames]);
 
   useEffect(() => {
-    setSelectedRelationFeatures((current) => syncSelectedNames(current, targetRelations.map((relation) => relation.feature)));
-  }, [targetRelations]);
+    setSelectedRelationFeatures((current) => syncSelectedNames(current, relationFeatureNames));
+  }, [relationFeatureNames]);
+
+  useEffect(() => {
+    setCollapsedRelationCards((current) => {
+      const visibleKeySet = new Set(visibleTargetRelationKeys);
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([key]) => visibleKeySet.has(key))
+      );
+      if (Object.keys(next).length === Object.keys(current).length) {
+        return current;
+      }
+      return next;
+    });
+  }, [visibleTargetRelationKeys]);
 
   async function runProfiling() {
     if (!datasetId) {
@@ -1374,6 +1503,31 @@ function DescriptiveAnalysisPanel({
     setSelectedRelationFeatures(values);
   }
 
+  function toggleRelationCard(relation: TargetRelationProfile) {
+    const key = relationCardKey(relation);
+    setCollapsedRelationCards((current) => ({
+      ...current,
+      [key]: !current[key]
+    }));
+  }
+
+  function showAllRelationCards() {
+    setCollapsedRelationCards((current) => {
+      const visibleKeySet = new Set(visibleTargetRelationKeys);
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([key]) => !visibleKeySet.has(key))
+      );
+      return next;
+    });
+  }
+
+  function collapseAllRelationCards() {
+    setCollapsedRelationCards((current) => ({
+      ...current,
+      ...Object.fromEntries(visibleTargetRelationKeys.map((key) => [key, true]))
+    }));
+  }
+
   if (datasets.length === 0) {
     return (
       <div className="panel">
@@ -1393,7 +1547,7 @@ function DescriptiveAnalysisPanel({
         >
           {setupCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
           <strong>Dataset profile</strong>
-          <span>{isLoading ? "running" : isLoadingSchema ? "loading columns" : hasProfileRun && preview ? "ready" : "not started"}</span>
+          <span>{isLoading ? "running" : isLoadingSchema ? "loading columns" : activeProfilePreview ? "ready" : "not started"}</span>
         </button>
 
         {!setupCollapsed && (
@@ -1495,14 +1649,14 @@ function DescriptiveAnalysisPanel({
               </div>
             )}
             {!isLoading && error && <div className="empty-state error-state">{error}</div>}
-            {!isLoading && !error && preview && preview.row_count === 0 && (
+            {!isLoading && !error && activeProfilePreview && activeProfilePreview.row_count === 0 && (
               <div className="empty-state">Dataset is empty</div>
             )}
 
-            {!isLoading && !error && preview && preview.row_count > 0 && (
+            {!isLoading && !error && activeProfilePreview && activeProfilePreview.row_count > 0 && (
               <>
                 <section className="profile-metrics">
-                  <Metric icon={Database} label="Rows profiled" value={preview.returned_count} tone="teal" />
+                  <Metric icon={Database} label="Rows profiled" value={activeProfilePreview.returned_count} tone="teal" />
                   <Metric icon={Table2} label="Columns" value={columns.length} tone="blue" />
                   <Metric icon={BarChart3} label="Features" value={featureCount} tone="amber" />
                   <Metric icon={Activity} label="Feature relations" value={targetRelations.length} tone="teal" />
@@ -1517,8 +1671,8 @@ function DescriptiveAnalysisPanel({
                   <section className="profile-overview">
                     <div className="panel-header">
                       <h2>Smart dataset profile</h2>
-                      {preview.returned_count < preview.row_count && (
-                        <span className="muted-text">Preview limited to {preview.returned_count} rows</span>
+                      {activeProfilePreview.returned_count < activeProfilePreview.row_count && (
+                        <span className="muted-text">Preview limited to {activeProfilePreview.returned_count} rows</span>
                       )}
                     </div>
                     <div className="profile-summary-grid">
@@ -1544,7 +1698,7 @@ function DescriptiveAnalysisPanel({
         )}
       </section>
 
-      {!isLoading && !error && preview && preview.row_count > 0 && (
+      {!isLoading && !error && activeProfilePreview && activeProfilePreview.row_count > 0 && (
         <>
           {profilingRange.includeUnivariate && <section className="panel">
             <button
@@ -1580,9 +1734,9 @@ function DescriptiveAnalysisPanel({
                         <ProfileFact label="Unique" value={formatInteger(profile.unique)} />
                         <ProfileFact label="Mode" value={displayValue(profile.mode)} />
                       </div>
-                      {profile.mean !== null ? (
+                      {profile.mean !== null && !usesDiscreteDistribution(profile) ? (
                         <>
-                          <MiniHistogram bins={profile.histogram} />
+                          {profilingRange.includeGraphicSummaries && <MiniHistogram bins={profile.histogram} />}
                           <div className="profile-stat-grid">
                             <ProfileFact label="Mean" value={formatNumber(profile.mean)} />
                             <ProfileFact label="Median" value={formatNullableNumber(profile.median)} />
@@ -1591,17 +1745,7 @@ function DescriptiveAnalysisPanel({
                           </div>
                         </>
                       ) : (
-                        <div className="top-values">
-                          {profile.topValues.slice(0, 4).map((item) => (
-                            <div className="top-value-row" key={displayValue(item.value)}>
-                              <span>{displayValue(item.value)}</span>
-                              <div className="mini-bar" aria-hidden="true">
-                                <div style={{ width: `${Math.max(4, item.share * 100)}%` }} />
-                              </div>
-                              <em>{formatPercent(item.share)}</em>
-                            </div>
-                          ))}
-                        </div>
+                        profilingRange.includeGraphicSummaries && <MiniDiscreteDistribution values={profile.topValues} limit={usesDiscreteDistribution(profile) ? 12 : 4} />
                       )}
                       {profile.notes.length > 0 && (
                         <div className="profile-notes">
@@ -1632,40 +1776,62 @@ function DescriptiveAnalysisPanel({
             {!targetCollapsed && (
               <section className="profile-relation-layout">
                 <div className="target-relations-main">
+                  <div className="relation-compare-toolbar">
+                    <label>
+                      Compare by
+                      <select
+                        value={effectiveComparisonColumn}
+                        onChange={(event) => setComparisonColumn(event.target.value)}
+                      >
+                        <option value="">No comparison column</option>
+                        {columns
+                          .filter((column) => !["ignored", "identifier"].includes(columnRoleForColumn(column, rolesMetadata)))
+                          .map((column) => (
+                            <option key={column.name} value={column.name}>
+                              {column.name}{column.name === effectiveTargetColumn ? " (target)" : ""}
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+                    <ProfileFact label="Comparison type" value={effectiveComparisonColumn ? effectiveComparisonType : "not set"} />
+                  </div>
                   {targetRelations.length > 0 && (
-                    <ColumnSelectionSummary
-                      columns={targetRelations.map((relation) => ({ name: relation.feature, meta: `${columnRoleLabel(relation.role)} / ${relation.kind}` }))}
-                      selected={activeRelationFeatures}
-                      onOpen={() => setRelationColumnsModalOpen(true)}
-                    />
-                  )}
-                  {!effectiveTargetColumn && (
-                    <div className="empty-state">
-                      Select a target or set one in Data Roles to rank feature relationships.
+                    <div className="relation-list-toolbar">
+                      <ColumnSelectionSummary
+                        columns={targetRelations.map((relation) => ({ name: relation.feature, meta: `${columnRoleLabel(relation.role)} / ${relation.kind}` }))}
+                        selected={activeRelationFeatures}
+                        onOpen={() => setRelationColumnsModalOpen(true)}
+                      />
+                      <div className="section-actions relation-card-actions">
+                        <button className="secondary-button compact-button" onClick={showAllRelationCards} type="button">
+                          Show all
+                        </button>
+                        <button className="secondary-button compact-button" onClick={collapseAllRelationCards} type="button">
+                          Collapse all
+                        </button>
+                      </div>
                     </div>
                   )}
-                  {effectiveTargetColumn && targetRelations.length === 0 && (
-                    <div className="empty-state">No eligible feature relationships found for the selected target.</div>
+                  {!effectiveComparisonColumn && (
+                    <div className="empty-state">
+                      Select a target or comparison column to rank feature relationships.
+                    </div>
                   )}
-                  {effectiveTargetColumn && targetRelations.length > 0 && visibleTargetRelations.length === 0 && (
+                  {effectiveComparisonColumn && targetRelations.length === 0 && (
+                    <div className="empty-state">No eligible feature relationships found for the selected comparison column.</div>
+                  )}
+                  {effectiveComparisonColumn && targetRelations.length > 0 && visibleTargetRelations.length === 0 && (
                     <div className="empty-state">No feature relationships selected.</div>
                   )}
-                  {effectiveTargetColumn && visibleTargetRelations.length > 0 && (
+                  {effectiveComparisonColumn && visibleTargetRelations.length > 0 && (
                     <div className="relation-list">
-                      {visibleTargetRelations.slice(0, 10).map((relation) => (
-                        <article className="relation-row" key={relation.feature}>
-                          <div>
-                            <strong>{relation.feature}</strong>
-                            <span>{columnRoleLabel(relation.role)} / {relation.kind}</span>
-                          </div>
-                          <div className="relation-score">
-                            <div className="mini-bar" aria-hidden="true">
-                              <div style={{ width: `${Math.max(4, relation.score * 100)}%` }} />
-                            </div>
-                            <em>{relation.signal}</em>
-                          </div>
-                          <p>{relation.detail}</p>
-                        </article>
+                      {visibleTargetRelations.map((relation) => (
+                        <TargetRelationCard
+                          collapsed={Boolean(collapsedRelationCards[relationCardKey(relation)])}
+                          onToggle={() => toggleRelationCard(relation)}
+                          relation={relation}
+                          key={relationCardKey(relation)}
+                        />
                       ))}
                     </div>
                   )}
@@ -1673,32 +1839,22 @@ function DescriptiveAnalysisPanel({
 
                 <aside className="target-context">
                   <div className="panel-header">
-                    <h2>Target context</h2>
+                    <h2>Comparison context</h2>
                   </div>
-                  {targetSummary ? (
+                  {comparisonSummary ? (
                     <>
                       <div className="profile-stat-grid">
-                        <ProfileFact label="Role" value={columnRoleLabel(targetSummary.role)} />
-                        <ProfileFact label="Target type" value={effectiveTargetType} />
-                        <ProfileFact label="Type" value={targetSummary.type} />
-                        <ProfileFact label="Missing" value={formatPercent(targetSummary.missingRate)} />
-                        <ProfileFact label="Unique" value={formatInteger(targetSummary.unique)} />
+                        <ProfileFact label="Column" value={comparisonSummary.name} />
+                        <ProfileFact label="Role" value={columnRoleLabel(comparisonSummary.role)} />
+                        <ProfileFact label="Type" value={comparisonSummary.type} />
+                        <ProfileFact label="Missing" value={formatPercent(comparisonSummary.missingRate)} />
+                        <ProfileFact label="Unique" value={formatInteger(comparisonSummary.unique)} />
                       </div>
-                      {targetSummary.mean !== null && <MiniHistogram bins={targetSummary.histogram} />}
-                      <div className="top-values">
-                        {targetSummary.topValues.slice(0, 6).map((item) => (
-                          <div className="top-value-row" key={displayValue(item.value)}>
-                            <span>{displayValue(item.value)}</span>
-                            <div className="mini-bar" aria-hidden="true">
-                              <div style={{ width: `${Math.max(4, item.share * 100)}%` }} />
-                            </div>
-                            <em>{formatPercent(item.share)}</em>
-                          </div>
-                        ))}
-                      </div>
+                      {profilingRange.includeGraphicSummaries && comparisonSummary.mean !== null && !usesDiscreteDistribution(comparisonSummary) && <MiniHistogram bins={comparisonSummary.histogram} />}
+                      {profilingRange.includeGraphicSummaries && <MiniDiscreteDistribution values={comparisonSummary.topValues} limit={6} />}
                     </>
                   ) : (
-                    <div className="empty-state compact-empty">Target not selected</div>
+                    <div className="empty-state compact-empty">Comparison column not selected</div>
                   )}
                   {targetProfile && (
                     <div className="insight-item">Role metadata marks {targetProfile.name} as target.</div>
@@ -1759,7 +1915,7 @@ function DescriptiveAnalysisPanel({
           onChange={updateRelationSelection}
           onClose={() => setRelationColumnsModalOpen(false)}
           selected={activeRelationFeatures}
-          title="Target relationship columns"
+          title="Relationship columns"
         />
       )}
       {profilingRangeModalOpen && (
@@ -1950,7 +2106,7 @@ function ProfilingRangeModal({
 
   function updateBoolean(key: keyof Pick<
     ProfilingRangeSettings,
-    "includeSummary" | "includeUnivariate" | "includeTargetRelations" | "includeSegments"
+    "includeSummary" | "includeUnivariate" | "includeTargetRelations" | "includeSegments" | "includeGraphicSummaries"
   >, value: boolean) {
     setDraftSettings((current) => ({ ...current, [key]: value }));
   }
@@ -2031,6 +2187,22 @@ function ProfilingRangeModal({
 
           <section className="range-section">
             <div className="panel-header compact-header">
+              <h2>Options</h2>
+            </div>
+            <div className="range-choice-grid">
+              <label className="check-tile">
+                <input
+                  checked={draftSettings.includeGraphicSummaries}
+                  onChange={(event) => updateBoolean("includeGraphicSummaries", event.target.checked)}
+                  type="checkbox"
+                />
+                <span>Graphic summaries</span>
+              </label>
+            </div>
+          </section>
+
+          <section className="range-section">
+            <div className="panel-header compact-header">
               <h2>Limits</h2>
             </div>
             <div className="range-number-grid">
@@ -2103,6 +2275,292 @@ function MiniHistogram({ bins }: { bins: Array<{ label: string; count: number; s
         <span>{bins[0]?.label.split(" - ")[0]}</span>
         <span>{bins.at(-1)?.label.split(" - ").at(-1)}</span>
       </div>
+    </div>
+  );
+}
+
+function TargetRelationCard({
+  collapsed,
+  onToggle,
+  relation
+}: {
+  collapsed: boolean;
+  onToggle: () => void;
+  relation: TargetRelationProfile;
+}) {
+  return (
+    <article className={relation.groupStats.length > 0 || relation.numericStats ? "relation-row relation-row-detailed" : "relation-row"}>
+      <button
+        aria-expanded={!collapsed}
+        className="relation-card-toggle"
+        onClick={onToggle}
+        type="button"
+      >
+        <span className="relation-card-title">
+          {collapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+          <span>
+            <strong>{relation.feature}</strong>
+            <em>{columnRoleLabel(relation.role)} / {relation.kind}</em>
+          </span>
+        </span>
+        <span className="relation-score">
+          <span className="mini-bar" aria-hidden="true">
+            <span style={{ width: `${Math.max(4, relation.score * 100)}%` }} />
+          </span>
+          <em>{relation.signal}</em>
+        </span>
+      </button>
+      {!collapsed && (
+        <div className="relation-card-body">
+          <p>{relation.detail}</p>
+          {relation.numericStats && (
+            <>
+              {relation.scatterPlot && <MiniScatterPlot plot={relation.scatterPlot} />}
+              <div className="numeric-relation-table" role="table" aria-label={`${relation.feature} numeric relationship with ${relation.comparisonColumn}`}>
+                <div className="numeric-relation-row numeric-relation-head" role="row">
+                  <span role="columnheader">Pearson</span>
+                  <span role="columnheader">Spearman</span>
+                  <span role="columnheader">R²</span>
+                  <span role="columnheader">Slope</span>
+                  <span role="columnheader">Intercept</span>
+                  <span role="columnheader">Covariance</span>
+                </div>
+                <div className="numeric-relation-row" role="row">
+                  <span role="cell">{formatSignedNumber(relation.numericStats.pearson)}</span>
+                  <span role="cell">{formatSignedNumber(relation.numericStats.spearman)}</span>
+                  <span role="cell">{formatNumber(relation.numericStats.rSquared)}</span>
+                  <span role="cell">{formatSignedNumber(relation.numericStats.slope)}</span>
+                  <span role="cell">{formatSignedNumber(relation.numericStats.intercept)}</span>
+                  <span role="cell">{formatSignedNumber(relation.numericStats.covariance)}</span>
+                </div>
+              </div>
+            </>
+          )}
+          {relation.groupStats.length > 0 && (
+            <>
+              {relation.densityPlot && <MiniDensityPlot plot={relation.densityPlot} />}
+              <div className="relation-stats-table" role="table" aria-label={`${relation.feature} by ${relation.comparisonColumn}`}>
+                <div className="relation-stats-row relation-stats-head" role="row">
+                  <span role="columnheader">{relation.comparisonColumn}</span>
+                  <span role="columnheader">Rows</span>
+                  <span role="columnheader">Min</span>
+                  <span role="columnheader">Max</span>
+                  <span role="columnheader">Median</span>
+                  <span role="columnheader">Average</span>
+                  <span role="columnheader">Std</span>
+                </div>
+                {relation.groupStats.map((group) => (
+                  <div className="relation-stats-row" key={group.group} role="row">
+                    <span role="cell">
+                      <i style={{ background: group.color }} />
+                      {group.group}
+                    </span>
+                    <span role="cell">{formatInteger(group.count)}</span>
+                    <span role="cell">{formatNumber(group.minimum)}</span>
+                    <span role="cell">{formatNumber(group.maximum)}</span>
+                    <span role="cell">{formatNumber(group.median)}</span>
+                    <span role="cell">{formatNumber(group.mean)}</span>
+                    <span role="cell">{formatNumber(group.stdDev)}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </article>
+  );
+}
+
+function MiniScatterPlot({ plot }: { plot: ScatterPlot }) {
+  const width = 640;
+  const height = 220;
+  const padding = { top: 14, right: 18, bottom: 38, left: 48 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const xRange = plot.xMax - plot.xMin || 1;
+  const yRange = plot.yMax - plot.yMin || 1;
+  const xToPx = (value: number) => padding.left + ((value - plot.xMin) / xRange) * plotWidth;
+  const yToPx = (value: number) => padding.top + plotHeight - ((value - plot.yMin) / yRange) * plotHeight;
+  const xTicks = [plot.xMin, plot.xMin + xRange / 2, plot.xMax];
+  const yTicks = [plot.yMin, plot.yMin + yRange / 2, plot.yMax];
+  const sampledPoints = plot.points.length > 700
+    ? plot.points.filter((_, index) => index % Math.ceil(plot.points.length / 700) === 0)
+    : plot.points;
+
+  return (
+    <div className="scatter-plot" aria-label={`${plot.yColumn} by ${plot.xColumn} scatter plot`}>
+      <svg viewBox={`0 0 ${width} ${height}`} role="img">
+        <g className="density-grid">
+          {yTicks.map((tick) => (
+            <line key={`y-${tick}`} x1={padding.left} x2={width - padding.right} y1={yToPx(tick)} y2={yToPx(tick)} />
+          ))}
+          {xTicks.map((tick) => (
+            <line key={`x-${tick}`} x1={xToPx(tick)} x2={xToPx(tick)} y1={padding.top} y2={height - padding.bottom} />
+          ))}
+        </g>
+        <line className="density-axis" x1={padding.left} x2={width - padding.right} y1={height - padding.bottom} y2={height - padding.bottom} />
+        <line className="density-axis" x1={padding.left} x2={padding.left} y1={padding.top} y2={height - padding.bottom} />
+        {sampledPoints.map((point, index) => (
+          <circle
+            className="scatter-point"
+            cx={xToPx(point.x)}
+            cy={yToPx(point.y)}
+            key={`${point.x}-${point.y}-${index}`}
+            r="2.6"
+          />
+        ))}
+        {plot.trendLine && (
+          <line
+            className="scatter-trend"
+            x1={xToPx(plot.trendLine.x1)}
+            x2={xToPx(plot.trendLine.x2)}
+            y1={yToPx(plot.trendLine.y1)}
+            y2={yToPx(plot.trendLine.y2)}
+          />
+        )}
+        <g className="density-labels">
+          {xTicks.map((tick) => (
+            <text key={tick} x={xToPx(tick)} y={height - 20} textAnchor="middle">
+              {formatNumber(tick)}
+            </text>
+          ))}
+          {yTicks.map((tick) => (
+            <text key={tick} x={padding.left - 8} y={yToPx(tick) + 4} textAnchor="end">
+              {formatNumber(tick)}
+            </text>
+          ))}
+          <text x={padding.left + plotWidth / 2} y={height - 4} textAnchor="middle">{plot.xColumn}</text>
+          <text transform={`translate(12 ${padding.top + plotHeight / 2}) rotate(-90)`} textAnchor="middle">{plot.yColumn}</text>
+        </g>
+      </svg>
+    </div>
+  );
+}
+
+function MiniDensityPlot({ plot }: { plot: DensityPlot | null }) {
+  if (!plot || plot.series.length === 0 || plot.yMax <= 0) {
+    return <div className="empty-state compact-empty">No density distribution available</div>;
+  }
+  const width = 640;
+  const height = 190;
+  const padding = { top: 14, right: 18, bottom: 28, left: 42 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const xRange = plot.xMax - plot.xMin || 1;
+  const xToPx = (value: number) => padding.left + ((value - plot.xMin) / xRange) * plotWidth;
+  const yToPx = (value: number) => padding.top + plotHeight - (value / plot.yMax) * plotHeight;
+  const baseline = padding.top + plotHeight;
+  const xTicks = [plot.xMin, plot.xMin + xRange / 2, plot.xMax];
+  const yTicks = [0, plot.yMax / 2, plot.yMax];
+
+  return (
+    <div className="density-plot" aria-label="Grouped density plot">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img">
+        <g className="density-grid">
+          {yTicks.map((tick) => (
+            <line
+              key={tick}
+              x1={padding.left}
+              x2={width - padding.right}
+              y1={yToPx(tick)}
+              y2={yToPx(tick)}
+            />
+          ))}
+        </g>
+        <line className="density-axis" x1={padding.left} x2={width - padding.right} y1={baseline} y2={baseline} />
+        <line className="density-axis" x1={padding.left} x2={padding.left} y1={padding.top} y2={baseline} />
+        {plot.series.map((series) => {
+          const linePath = densityLinePath(series.points, xToPx, yToPx);
+          const areaPath = densityAreaPath(series.points, xToPx, yToPx, baseline);
+          return (
+            <g key={series.group}>
+              <path d={areaPath} fill={series.color} opacity="0.22" />
+              <path d={linePath} fill="none" stroke={series.color} strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
+            </g>
+          );
+        })}
+        <g className="density-labels">
+          {xTicks.map((tick) => (
+            <text key={tick} x={xToPx(tick)} y={height - 8} textAnchor="middle">
+              {formatNumber(tick)}
+            </text>
+          ))}
+          {yTicks.map((tick) => (
+            <text key={tick} x={padding.left - 8} y={yToPx(tick) + 4} textAnchor="end">
+              {formatNumber(tick)}
+            </text>
+          ))}
+        </g>
+      </svg>
+      <div className="density-legend">
+        {plot.series.map((series) => (
+          <span key={series.group}>
+            <i style={{ background: series.color }} />
+            {series.group}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function densityLinePath(
+  points: DensitySeries["points"],
+  xToPx: (value: number) => number,
+  yToPx: (value: number) => number
+) {
+  return points
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${xToPx(point.x).toFixed(2)} ${yToPx(point.y).toFixed(2)}`)
+    .join(" ");
+}
+
+function densityAreaPath(
+  points: DensitySeries["points"],
+  xToPx: (value: number) => number,
+  yToPx: (value: number) => number,
+  baseline: number
+) {
+  if (points.length === 0) {
+    return "";
+  }
+  const start = points[0];
+  const end = points.at(-1) ?? start;
+  return [
+    `M ${xToPx(start.x).toFixed(2)} ${baseline.toFixed(2)}`,
+    densityLinePath(points, xToPx, yToPx).replace(/^M/, "L"),
+    `L ${xToPx(end.x).toFixed(2)} ${baseline.toFixed(2)}`,
+    "Z"
+  ].join(" ");
+}
+
+function relationCardKey(relation: TargetRelationProfile) {
+  return `${relation.comparisonColumn}\u0000${relation.feature}`;
+}
+
+function MiniDiscreteDistribution({
+  values,
+  limit
+}: {
+  values: Array<{ value: DatasetCellValue; count: number; share: number }>;
+  limit: number;
+}) {
+  const visibleValues = values.slice(0, limit);
+  if (visibleValues.length === 0) {
+    return <div className="empty-state compact-empty">No distribution available</div>;
+  }
+
+  return (
+    <div className="mini-discrete-distribution" aria-label="Value distribution">
+      {visibleValues.map((item) => (
+        <div className="discrete-bar-row" key={displayValue(item.value)} title={`${displayValue(item.value)}: ${formatInteger(item.count)}`}>
+          <span>{displayValue(item.value)}</span>
+          <div className="discrete-bar-track" aria-hidden="true">
+            <div style={{ width: `${Math.max(4, item.share * 100)}%` }} />
+          </div>
+          <strong>{formatPercent(item.share)}</strong>
+        </div>
+      ))}
     </div>
   );
 }
@@ -4501,7 +4959,8 @@ function inferTargetType(
 function buildColumnProfile(
   column: DatasetPreview["columns"][number],
   rows: Array<Record<string, DatasetCellValue>>,
-  rolesMetadata: DataRolesMetadata
+  rolesMetadata: DataRolesMetadata,
+  includeGraphics: boolean
 ): ColumnProfile {
   const values = rows.map((row) => normalizeCellValue(row[column.name]));
   const present = values.filter(isPresentCell);
@@ -4550,47 +5009,54 @@ function buildColumnProfile(
     stdDev: mean === null ? null : roundNumber(standardDeviation(numericValues)),
     mode: topValues[0]?.value ?? null,
     topValues,
-    histogram: mean === null ? [] : buildHistogramBins(numericValues),
+    histogram: mean === null || !includeGraphics ? [] : buildHistogramBins(numericValues),
     examples: present.slice(0, 3),
     notes
   };
+}
+
+function usesDiscreteDistribution(profile: ColumnProfile) {
+  return profile.mean !== null && profile.unique > 0 && profile.unique <= 12;
 }
 
 function buildTargetRelations(
   rows: Array<Record<string, DatasetCellValue>>,
   columns: DatasetPreview["columns"],
   rolesMetadata: DataRolesMetadata,
-  targetColumn: string,
-  targetType: EffectiveTargetType
+  comparisonColumn: string,
+  comparisonType: EffectiveTargetType,
+  includeGraphics: boolean
 ): TargetRelationProfile[] {
-  const target = columns.find((column) => column.name === targetColumn);
-  if (!target) {
+  const comparison = columns.find((column) => column.name === comparisonColumn);
+  if (!comparison) {
     return [];
   }
 
-  const targetIsNumeric = targetType === "continuous";
+  const comparisonIsNumeric = comparisonType === "continuous";
   const relations = columns
-    .filter((column) => column.name !== target.name)
+    .filter((column) => column.name !== comparison.name)
     .filter((column) => !["ignored", "identifier"].includes(columnRoleForColumn(column, rolesMetadata)))
     .map((feature) => {
       const role = columnRoleForColumn(feature, rolesMetadata);
       const featureIsNumeric = isNumericMeasureColumn(feature, rolesMetadata, rows, false);
       const relationRows = rows.filter((row) =>
-        isPresentCell(normalizeCellValue(row[target.name])) &&
+        isPresentCell(normalizeCellValue(row[comparison.name])) &&
         isPresentCell(normalizeCellValue(row[feature.name]))
       );
       if (relationRows.length < 3) {
         return null;
       }
 
-      if (targetIsNumeric && featureIsNumeric) {
+      if (comparisonIsNumeric && featureIsNumeric) {
         const pairs = relationRows
-          .map((row) => [Number(row[feature.name]), Number(row[target.name])] as const)
+          .map((row) => [Number(row[feature.name]), Number(row[comparison.name])] as const)
           .filter(([featureValue, targetValue]) => Number.isFinite(featureValue) && Number.isFinite(targetValue));
         const correlation = pearsonCorrelation(pairs);
         if (correlation === null) {
           return null;
         }
+        const numericStats = numericRelationStats(pairs);
+        const scatterPlot = includeGraphics ? buildScatterPlot(pairs, feature.name, comparison.name, numericStats) : null;
         return {
           feature: feature.name,
           role,
@@ -4598,33 +5064,42 @@ function buildTargetRelations(
           kind: "numeric correlation",
           score: Math.min(1, Math.abs(correlation)),
           signal: `r ${formatSignedNumber(correlation)}`,
-          detail: `${feature.name} moves ${correlation >= 0 ? "with" : "against"} ${target.name} in the loaded sample.`
+          detail: `${feature.name} moves ${correlation >= 0 ? "with" : "against"} ${comparison.name} in the loaded sample.`,
+          comparisonColumn: comparison.name,
+          groupStats: [],
+          densityPlot: null,
+          numericStats,
+          scatterPlot
         };
       }
 
-      if (targetIsNumeric && !featureIsNumeric) {
+      if (comparisonIsNumeric && !featureIsNumeric) {
         return groupedMeanRelation({
           rows: relationRows,
           groupColumn: feature.name,
-          numericColumn: target.name,
+          numericColumn: comparison.name,
           feature,
           role,
-          kind: "target mean by feature"
+          kind: "comparison mean by feature",
+          comparisonColumn: comparison.name,
+          includeGraphics
         });
       }
 
-      if (!targetIsNumeric && featureIsNumeric) {
+      if (!comparisonIsNumeric && featureIsNumeric) {
         return groupedMeanRelation({
           rows: relationRows,
-          groupColumn: target.name,
+          groupColumn: comparison.name,
           numericColumn: feature.name,
           feature,
           role,
-          kind: "feature mean by target"
+          kind: "feature stats by comparison",
+          comparisonColumn: comparison.name,
+          includeGraphics
         });
       }
 
-      return categoricalRelation(relationRows, target.name, feature, role);
+      return categoricalRelation(relationRows, comparison.name, feature, role);
     })
     .filter((relation): relation is TargetRelationProfile => relation !== null);
 
@@ -4637,7 +5112,9 @@ function groupedMeanRelation({
   numericColumn,
   feature,
   role,
-  kind
+  kind,
+  comparisonColumn,
+  includeGraphics
 }: {
   rows: Array<Record<string, DatasetCellValue>>;
   groupColumn: string;
@@ -4645,6 +5122,8 @@ function groupedMeanRelation({
   feature: DatasetPreview["columns"][number];
   role: string;
   kind: string;
+  comparisonColumn: string;
+  includeGraphics: boolean;
 }): TargetRelationProfile | null {
   const groups = new Map<string, number[]>();
   for (const row of rows) {
@@ -4658,11 +5137,19 @@ function groupedMeanRelation({
 
   const minimumGroupSize = Math.max(3, Math.floor(rows.length * 0.03));
   const summaries = [...groups.entries()]
-    .map(([group, values]) => ({
-      group,
-      count: values.length,
-      mean: values.reduce((total, value) => total + value, 0) / values.length
-    }))
+    .map(([group, values], index) => {
+      const sortedValues = [...values].sort((left, right) => left - right);
+      return {
+        group,
+        count: values.length,
+        minimum: sortedValues[0] ?? 0,
+        maximum: sortedValues.at(-1) ?? 0,
+        median: medianNumber(sortedValues),
+        mean: values.reduce((total, value) => total + value, 0) / values.length,
+        stdDev: standardDeviation(sortedValues),
+        color: comparisonColor(index)
+      };
+    })
     .filter((summary) => summary.count >= minimumGroupSize);
   if (summaries.length < 2) {
     return null;
@@ -4673,6 +5160,14 @@ function groupedMeanRelation({
   const ordered = summaries.sort((left, right) => right.mean - left.mean);
   const range = ordered[0].mean - ordered.at(-1)!.mean;
   const score = spread === 0 ? 0 : Math.min(1, Math.abs(range) / (spread * 4));
+  const groupStats = ordered.map((summary) => ({
+    ...summary,
+    minimum: roundNumber(summary.minimum),
+    maximum: roundNumber(summary.maximum),
+    median: roundNumber(summary.median),
+    mean: roundNumber(summary.mean),
+    stdDev: roundNumber(summary.stdDev)
+  }));
   return {
     feature: feature.name,
     role,
@@ -4680,7 +5175,12 @@ function groupedMeanRelation({
     kind,
     score,
     signal: `effect ${formatNumber(score)}`,
-    detail: `${ordered[0].group} has the highest mean (${formatNumber(ordered[0].mean)}), ${ordered.at(-1)!.group} the lowest (${formatNumber(ordered.at(-1)!.mean)}).`
+    detail: `${ordered[0].group} has the highest mean (${formatNumber(ordered[0].mean)}), ${ordered.at(-1)!.group} the lowest (${formatNumber(ordered.at(-1)!.mean)}).`,
+    comparisonColumn,
+    groupStats,
+    densityPlot: includeGraphics ? buildDensityPlot(groupStats, groups) : null,
+    numericStats: null,
+    scatterPlot: null
   };
 }
 
@@ -4732,7 +5232,12 @@ function categoricalRelation(
     kind: "categorical association",
     score: Math.min(1, cramersV),
     signal: `V ${formatNumber(cramersV)}`,
-    detail: `${feature.name}=${strongest.featureValue} is ${formatNumber(strongest.lift)}x expected with target ${strongest.targetValue}.`
+    detail: `${feature.name}=${strongest.featureValue} is ${formatNumber(strongest.lift)}x expected with ${targetColumn} ${strongest.targetValue}.`,
+    comparisonColumn: targetColumn,
+    groupStats: [],
+    densityPlot: null,
+    numericStats: null,
+    scatterPlot: null
   };
 }
 
@@ -4906,6 +5411,100 @@ function pearsonCorrelation(pairs: Array<readonly [number, number]>) {
   return denominator === 0 ? null : numerator / denominator;
 }
 
+function numericRelationStats(pairs: Array<readonly [number, number]>): NumericRelationStats {
+  const pearson = pearsonCorrelation(pairs) ?? 0;
+  const spearman = spearmanCorrelation(pairs) ?? 0;
+  const meanX = pairs.reduce((total, pair) => total + pair[0], 0) / pairs.length;
+  const meanY = pairs.reduce((total, pair) => total + pair[1], 0) / pairs.length;
+  let covarianceNumerator = 0;
+  let varianceXNumerator = 0;
+  for (const [x, y] of pairs) {
+    covarianceNumerator += (x - meanX) * (y - meanY);
+    varianceXNumerator += (x - meanX) ** 2;
+  }
+  const covariance = pairs.length > 1 ? covarianceNumerator / (pairs.length - 1) : 0;
+  const slope = varianceXNumerator === 0 ? 0 : covarianceNumerator / varianceXNumerator;
+  const intercept = meanY - slope * meanX;
+  return {
+    pearson: roundNumber(pearson),
+    spearman: roundNumber(spearman),
+    rSquared: roundNumber(pearson ** 2),
+    covariance: roundNumber(covariance),
+    slope: roundNumber(slope),
+    intercept: roundNumber(intercept)
+  };
+}
+
+function spearmanCorrelation(pairs: Array<readonly [number, number]>) {
+  if (pairs.length < 3) {
+    return null;
+  }
+  const xRanks = rankValues(pairs.map((pair) => pair[0]));
+  const yRanks = rankValues(pairs.map((pair) => pair[1]));
+  return pearsonCorrelation(xRanks.map((rank, index) => [rank, yRanks[index]] as const));
+}
+
+function rankValues(values: number[]) {
+  const sorted = values
+    .map((value, index) => ({ value, index }))
+    .sort((left, right) => left.value - right.value);
+  const ranks = Array(values.length).fill(0);
+  let index = 0;
+  while (index < sorted.length) {
+    let end = index + 1;
+    while (end < sorted.length && sorted[end].value === sorted[index].value) {
+      end += 1;
+    }
+    const averageRank = (index + 1 + end) / 2;
+    for (let cursor = index; cursor < end; cursor += 1) {
+      ranks[sorted[cursor].index] = averageRank;
+    }
+    index = end;
+  }
+  return ranks;
+}
+
+function buildScatterPlot(
+  pairs: Array<readonly [number, number]>,
+  xColumn: string,
+  yColumn: string,
+  stats: NumericRelationStats
+): ScatterPlot | null {
+  if (pairs.length === 0) {
+    return null;
+  }
+  const xValues = pairs.map((pair) => pair[0]);
+  const yValues = pairs.map((pair) => pair[1]);
+  const xMinRaw = Math.min(...xValues);
+  const xMaxRaw = Math.max(...xValues);
+  const yMinRaw = Math.min(...yValues);
+  const yMaxRaw = Math.max(...yValues);
+  const xPadding = (xMaxRaw - xMinRaw || Math.max(1, Math.abs(xMinRaw) * 0.1)) * 0.06;
+  const yPadding = (yMaxRaw - yMinRaw || Math.max(1, Math.abs(yMinRaw) * 0.1)) * 0.06;
+  const xMin = xMinRaw - xPadding;
+  const xMax = xMaxRaw + xPadding;
+  const yMin = yMinRaw - yPadding;
+  const yMax = yMaxRaw + yPadding;
+  const trendLine = Number.isFinite(stats.slope) && Number.isFinite(stats.intercept)
+    ? {
+      x1: xMinRaw,
+      y1: stats.slope * xMinRaw + stats.intercept,
+      x2: xMaxRaw,
+      y2: stats.slope * xMaxRaw + stats.intercept
+    }
+    : null;
+  return {
+    xColumn,
+    yColumn,
+    xMin,
+    xMax,
+    yMin,
+    yMax,
+    points: pairs.map(([x, y]) => ({ x, y })),
+    trendLine
+  };
+}
+
 function countTopValues(values: DatasetCellValue[], denominator: number) {
   const counts = new Map<string, { value: DatasetCellValue; count: number }>();
   for (const value of values) {
@@ -4958,12 +5557,69 @@ function buildHistogramBins(values: number[], binCount = 12) {
   }));
 }
 
+function buildDensityPlot(groupStats: NumericGroupStats[], groups: Map<string, number[]>, pointCount = 80): DensityPlot | null {
+  const groupEntries = groupStats
+    .map((summary) => ({
+      summary,
+      values: [...(groups.get(summary.group) ?? [])].sort((left, right) => left - right)
+    }))
+    .filter((entry) => entry.values.length > 0);
+  const allValues = groupEntries.flatMap((entry) => entry.values);
+  if (allValues.length === 0) {
+    return null;
+  }
+
+  const sortedValues = [...allValues].sort((left, right) => left - right);
+  const minimum = sortedValues[0];
+  const maximum = sortedValues.at(-1) ?? minimum;
+  const rawRange = maximum - minimum;
+  const range = rawRange || Math.max(1, Math.abs(minimum) * 0.1);
+  const xMin = minimum - range * 0.08;
+  const xMax = maximum + range * 0.08;
+  const step = (xMax - xMin) / Math.max(1, pointCount - 1);
+  const xValues = Array.from({ length: pointCount }, (_, index) => xMin + index * step);
+  let yMax = 0;
+
+  const series = groupEntries.map((entry) => {
+    const stdDev = standardDeviation(entry.values);
+    const fallbackBandwidth = Math.max(range / 18, 0.001);
+    const silverman = 1.06 * (stdDev || fallbackBandwidth) * entry.values.length ** -0.2;
+    const bandwidth = Math.max(silverman, fallbackBandwidth);
+    const coefficient = 1 / (entry.values.length * bandwidth * Math.sqrt(2 * Math.PI));
+    const points = xValues.map((x) => {
+      const kernelSum = entry.values.reduce((total, value) => {
+        const z = (x - value) / bandwidth;
+        return total + Math.exp(-0.5 * z * z);
+      }, 0);
+      const y = coefficient * kernelSum;
+      yMax = Math.max(yMax, y);
+      return { x, y };
+    });
+    return {
+      group: entry.summary.group,
+      color: entry.summary.color,
+      points
+    };
+  });
+
+  return { xMin, xMax, yMax, series };
+}
+
+function comparisonColor(index: number) {
+  const colors = ["#2ea39a", "#4477c2", "#c08522", "#8b6bd6", "#cf5f5f", "#5a9f45"];
+  return colors[index % colors.length];
+}
+
 function syncSelectedNames(current: string[] | null, available: string[]) {
   if (current === null) {
     return null;
   }
   const availableSet = new Set(available);
-  return current.filter((name) => availableSet.has(name));
+  const next = current.filter((name) => availableSet.has(name));
+  if (next.length === current.length && next.every((name, index) => name === current[index])) {
+    return current;
+  }
+  return next;
 }
 
 function uniqueDisplayValues(rows: Array<Record<string, DatasetCellValue>>, column: string) {

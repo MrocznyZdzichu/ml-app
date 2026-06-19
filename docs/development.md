@@ -64,6 +64,9 @@ under `examples/data` instead.
 Python bytecode, test caches, Vite output, node modules, local env files, model
 artifacts, and runtime data should not be committed.
 
+The root-level `sandbox.ipynb` notebook is also ignored. It is intended for quick
+local experiments and scratch calculations, not shared documentation.
+
 ## First Git Publish
 
 The project includes `.gitignore` and `.gitattributes` for a Windows + Docker

@@ -63,6 +63,23 @@ Saved Data Views inherit source roles for columns that still exist in the view.
 For example, if `plan_type` is ordinal in the source dataset and the view keeps
 `plan_type`, the view receives the same role.
 
+## Descriptive Analysis
+
+The current Descriptive Analysis implementation runs in the frontend over
+dataset preview records returned by the dataset API. It uses Data Roles metadata
+to infer targets, feature eligibility, target type, ignored columns, and
+role-aware comparison behavior.
+
+Profiling is explicitly started by the analyst. Dataset selection can load
+column context for configuration, but the profile calculations are run only
+after `Run profiling`. The profiling range controls which sections are
+calculated and whether graphic summaries are produced.
+
+The UI supports univariate profiles, target/comparison relations, optional
+histograms, KDE-like density plots, scatterplots, and a small multivariate
+segment scan. Future backend/worker profiling can reuse the same metadata
+contract and persist generated artifacts in object storage.
+
 ## Data Views
 
 Data Views are stored as normal data assets with `source_type = "view"` and
