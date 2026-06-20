@@ -128,3 +128,41 @@ class DataAssetPreviewRead(BaseModel):
 class DataAssetSqlQueryRequest(BaseModel):
     sql: str = Field(min_length=1)
     limit: int = Field(default=50_000, ge=1, le=50_000)
+
+
+VisualizationKind = Literal["line", "bar", "scatter", "histogram", "kpi"]
+VisualizationAggregation = Literal["average", "median", "std", "sum", "count", "min", "max"]
+
+
+class DataAssetVisualizationRequest(BaseModel):
+    kind: VisualizationKind
+    x: str = ""
+    y: str = ""
+    group: str = ""
+    aggregations: list[VisualizationAggregation] = Field(default_factory=lambda: ["average"], max_length=7)
+    selected_groups: list[str] | None = None
+    max_points: int = Field(default=2_000, ge=50, le=10_000)
+    bins: int = Field(default=16, ge=5, le=100)
+
+
+class DataAssetVisualizationRead(BaseModel):
+    dataset_id: str
+    row_count: int
+    scanned_row_count: int
+    points: list[dict[str, Any]] = Field(default_factory=list)
+    series: list[str] = Field(default_factory=list)
+    kpi: float | None = None
+    valid_count: int = 0
+    execution_mode: Literal["full_dataset"] = "full_dataset"
+    truncated: bool = False
+
+
+class DataAssetVisualizationGroupsRequest(BaseModel):
+    column: str
+    limit: int = Field(default=100, ge=1, le=1_000)
+
+
+class DataAssetVisualizationGroupsRead(BaseModel):
+    dataset_id: str
+    values: list[str]
+    truncated: bool = False

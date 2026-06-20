@@ -102,6 +102,34 @@ export type DatasetPreview = {
   limit: number;
 };
 
+export type VisualizationPoint = {
+  x: number;
+  y: number;
+  xLabel: string;
+  series: string;
+  group?: string;
+  aggregation?: "average" | "median" | "std" | "sum" | "count" | "min" | "max";
+  count?: number;
+};
+
+export type DatasetVisualization = {
+  dataset_id: string;
+  row_count: number;
+  scanned_row_count: number;
+  points: VisualizationPoint[];
+  series: string[];
+  kpi: number | null;
+  valid_count: number;
+  execution_mode: "full_dataset";
+  truncated: boolean;
+};
+
+export type DatasetVisualizationGroups = {
+  dataset_id: string;
+  values: string[];
+  truncated: boolean;
+};
+
 export type FullDescriptiveProfileResponse = {
   dataset_id: string;
   columns: DatasetColumn[];
@@ -220,6 +248,16 @@ export const api = {
     request<DatasetPreview>(`/datasets/${datasetId}/query`, {
       method: "POST",
       body: JSON.stringify({ sql, limit })
+    }),
+  visualizeDataset: (datasetId: string, payload: Record<string, unknown>) =>
+    request<DatasetVisualization>(`/datasets/${datasetId}/visualization`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  visualizationGroups: (datasetId: string, column: string, limit = 100) =>
+    request<DatasetVisualizationGroups>(`/datasets/${datasetId}/visualization/groups`, {
+      method: "POST",
+      body: JSON.stringify({ column, limit })
     }),
   createDataView: (payload: DataViewCreatePayload) =>
     request<DataAsset>("/datasets/views", {

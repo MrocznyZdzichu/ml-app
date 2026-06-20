@@ -19,10 +19,13 @@ from app.modules.datasets.schemas import (
     DataAssetProfileRead,
     DataAssetProfileRequest,
     DataAssetSqlQueryRequest,
+    DataAssetVisualizationGroupsRequest,
+    DataAssetVisualizationRequest,
     DataViewCreate,
     FullDescriptiveProfileRequest,
 )
 from app.modules.datasets.sources import DatasetSourceRegistry
+from app.modules.datasets.visualizations import FullDatasetVisualization
 
 
 class DatasetService:
@@ -34,6 +37,7 @@ class DatasetService:
         self.sources = DatasetSourceRegistry(self.repository_root)
         self.query_engine = DatasetQueryEngine(self.sources)
         self.full_profiler = FullDatasetProfiler()
+        self.full_visualization = FullDatasetVisualization()
         self.profile_jobs = DescriptiveProfileJobs()
 
     def register(self, payload: DataAssetCreate, principal: Principal) -> DataAsset:
@@ -56,16 +60,9 @@ class DatasetService:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Deleted dataset cannot be used as a Data View source",
-            )
+        )
 
         now = datetime.now(timezone.utc)
-        preview = self.query_engine.preview_definition(
-            source,
-            payload.definition,
-            lambda asset_id: self.get_asset(asset_id, principal),
-            limit=50_000,
-        )
-        inherited_roles = self._inherit_data_roles(source, [column.name for column in preview.columns])
         view = DataAsset(
             id=str(uuid4()),
             owner_id=principal.user_id,
@@ -74,7 +71,7 @@ class DatasetService:
             format="view",
             description=payload.description,
             location_uri=f"view://{source.id}",
-            row_count=preview.row_count,
+            row_count=None,
             has_header=True,
             uploaded_by=principal.user_id,
             uploaded_at=now,
@@ -87,12 +84,27 @@ class DatasetService:
                     "definition": dict(payload.definition),
                     "created_by": principal.user_id,
                     "created_at": now.isoformat(),
-                    "row_count": preview.row_count,
-                    "column_count": len(preview.columns),
-                },
-                **({"data_roles": inherited_roles} if inherited_roles else {}),
+                }
             },
         )
+        preview = self.full_visualization.preview(
+            view,
+            limit=1,
+            load_asset=lambda asset_id: self.get_asset(asset_id, principal),
+        )
+        columns = [str(column["name"]) for column in preview["columns"]]
+        inherited_roles = self._inherit_data_roles(source, columns)
+        view.row_count = int(preview["row_count"])
+        view.metadata = {
+            **view.metadata,
+            "source_schema": preview["columns"],
+            "data_view": {
+                **dict(view.metadata["data_view"]),
+                "row_count": view.row_count,
+                "column_count": len(columns),
+            },
+            **({"data_roles": inherited_roles} if inherited_roles else {}),
+        }
         return self.repository.add(view)
 
     def upload_csv(
@@ -218,6 +230,10 @@ class DatasetService:
             )
         if asset.source_type == SourceType.FILE and asset.format.lower() == "csv":
             return DataAssetPreviewRead.model_validate(self.full_profiler.schema(asset, limit))
+        if asset.source_type == SourceType.VIEW:
+            return DataAssetPreviewRead.model_validate(
+                self.full_visualization.preview(asset, limit, lambda asset_id: self.get_asset(asset_id, principal))
+            )
         return self.query_engine.preview(
             asset,
             lambda asset_id: self.get_asset(asset_id, principal),
@@ -266,6 +282,33 @@ class DatasetService:
             payload.sql,
             payload.limit,
             dataset_id=dataset_id,
+        )
+
+    def visualize(
+        self,
+        dataset_id: str,
+        payload: DataAssetVisualizationRequest,
+        principal: Principal,
+    ) -> dict[str, Any]:
+        asset = self.get_asset(dataset_id, principal)
+        if asset.status == DataAssetStatus.DELETED:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Deleted dataset cannot be visualized")
+        return self.full_visualization.render(asset, payload, lambda asset_id: self.get_asset(asset_id, principal))
+
+    def visualization_groups(
+        self,
+        dataset_id: str,
+        payload: DataAssetVisualizationGroupsRequest,
+        principal: Principal,
+    ) -> dict[str, Any]:
+        asset = self.get_asset(dataset_id, principal)
+        if asset.status == DataAssetStatus.DELETED:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Deleted dataset cannot be visualized")
+        return self.full_visualization.group_values(
+            asset,
+            payload.column,
+            payload.limit,
+            lambda asset_id: self.get_asset(asset_id, principal),
         )
 
     def delete_asset(self, dataset_id: str, principal: Principal) -> DataAsset:

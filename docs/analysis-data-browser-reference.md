@@ -12,11 +12,11 @@ The Analysis workspace currently contains:
   aggregation, Custom SQL, drill down, and Data View creation.
 - `Descriptive Analysis` - explicit, role-aware descriptive profiling with
   univariate, comparison, target-aware, and segment summaries.
-- `Visualization and Trends` - placeholder for visual analysis.
+- `Visualization and Trends` - interactive, full-dataset dashboard composition and visual analysis.
 
-Dataset selection is shared across Analysis tabs. Selecting a dataset in
-`Data Browsing` keeps the same dataset selected when switching to `Data Roles`,
-and vice versa.
+Dataset selection is shared by Data Roles, Data Browsing, and Descriptive
+Analysis. Visualization and Trends keeps an independent, session-scoped dataset
+and dashboard state so entering the tab does not automatically execute work.
 
 ## Descriptive Analysis
 
@@ -24,8 +24,9 @@ Descriptive Analysis profiles a selected dataset only after the analyst clicks
 `Run profiling`. Selecting a dataset loads lightweight configuration context for
 target and target-type choices, but the heavier profiling work remains explicit.
 
-For uploaded CSV datasets, profiling is submitted to a background worker. The
-worker materializes a reusable Parquet representation and computes statistics,
+For uploaded CSV datasets and materialized Data Views, profiling is submitted
+to a background worker. The worker materializes a reusable Parquet
+representation and computes statistics,
 relationships, and segment aggregates over every row with DuckDB. Raw profile
 rows are not transferred to the browser. The existing progress state remains
 visible while the frontend polls the background job.
@@ -117,8 +118,7 @@ For ordinal features with a binary target, the card additionally reports a
 Spearman trend against the selected target value. Numeric ordinal labels are
 ordered numerically. Backend full-file profiles use lexicographic order for
 non-numeric labels and identify that basis explicitly, so analysts can verify
-whether it matches the domain order. Legacy Data View profiles retain their
-first-observed order.
+whether it matches the domain order.
 
 ### Multivariate Segment Scan
 
@@ -163,10 +163,39 @@ a dataset-local temporary directory rather than requiring the full relation in
 RAM. Celery result data contains only compact aggregates and expires from Redis
 after one hour; the existing frontend cache remains session-scoped.
 
-Saved Data Views currently retain the legacy preview-backed profiling path. They
-preserve existing behavior but do not yet have the same large-data guarantees as
-physical CSV assets. Moving browser filters, grouping, and Custom SQL to a
-validated DuckDB relation is the remaining pushdown step.
+Saved SQL and Browser Data Views are resolved recursively to their physical
+source, compiled into validated DuckDB queries, and materialized as reusable,
+definition-versioned Parquet artifacts. Filters, search, projection, grouping,
+aggregation filters, and sorting are pushed into DuckDB. The cached view is
+invalidated when its source Parquet or definition changes. Visualization and
+descriptive profiling therefore use the complete Data View result without
+materializing raw rows in the browser or Python process.
+
+## Visualization and Trends
+
+Selecting a dataset prepares schema context but does not create a dashboard.
+The analyst starts with an empty canvas, adds charts manually, or explicitly
+requests Smart start. Canvas state is saved in session storage per dataset;
+returning to a dataset during the same browser session restores its layout.
+
+Supported views include line, bar, scatter/density-bin, histogram, and KPI.
+Charts can be moved and resized on a fine 48-column grid. Alignment guides snap
+edges and centers, collision detection rejects overlapping placements, Tidy
+layout creates a balanced grid, and Clear canvas removes all cards.
+
+Chart configuration supports axes, primary and additional aggregations,
+categorical grouping, and All/None/explicit group selection. A group keeps one
+high-contrast color while its metrics use ordered line patterns (solid, dashed,
+dash-dot, dotted, and further variants). Legends are scrollable and preserve
+the rendered line pattern. Axes use adaptive ticks; charts support exact-value
+tooltips, cursor-centered wheel zoom, buttons, range scrolling, and pan.
+
+The visualization endpoint scans the complete Parquet relation with DuckDB.
+Line/bar aggregates, histograms, KPI values, group choices, and scatter density
+bins therefore use the full selected dataset or Data View. Only bounded chart
+results cross the API boundary. The UI reports `rows analyzed` and
+`Full dataset · server-side`; it does not present a schema preview sample as an
+analytical result.
 
 ## Data Roles
 
@@ -219,10 +248,16 @@ Data Roles are stored in dataset metadata under:
 
 ## Data Browsing
 
-The browser works on the full dataset before applying the display limit. This
-means filtering, searching, grouping, aggregation, sorting, and Custom SQL are
-computed against all currently loaded records, and only the final result is
-limited/paged for display.
+The interactive browser table is a bounded exploratory preview and reports both
+returned and total row counts. Local filtering, searching, grouping,
+aggregation, and sorting affect the currently returned preview rows. Custom SQL
+uses the current interactive query path and also returns a bounded result.
+
+Saving the state as a Data View changes the execution path: the persisted
+filters, search, grouping, aggregation filters, projection, sorting, or SQL are
+compiled into DuckDB and applied to the complete source relation. Downstream
+visualization and descriptive analysis therefore operate on the full transformed
+view rather than the browser preview.
 
 ### Column Selection
 
@@ -308,9 +343,10 @@ Drill down opens a detail view for the selected group. The detail view:
 
 ### Custom SQL
 
-Custom SQL opens a modal editor. The SQL runs against an in-memory table named
-after the selected dataset. If the dataset name contains spaces or other special
-characters, quote it with double quotes:
+Custom SQL opens a modal editor. During interactive Data Browser execution, SQL
+runs against a bounded in-memory SQLite table named after the selected dataset.
+If the dataset name contains spaces or other special characters, quote it with
+double quotes:
 
 ```sql
 SELECT
@@ -332,6 +368,8 @@ Only read-only `SELECT` and `WITH` queries are supported. The editor supports:
 
 When Custom SQL is active, the Custom SQL button is highlighted. Reset View
 returns to the original dataset preview and clears the active SQL state.
+After Save View, the same SQL definition is executed and cached by DuckDB over
+the source Parquet for scalable downstream analysis.
 
 ## Data Views
 
@@ -346,7 +384,10 @@ Save View persists the current browser state as a Data View. A view stores:
 - inherited data roles where applicable.
 
 Data Views appear in Overview, Data, and Analysis. In Analysis they can be
-selected like regular datasets and used with Data Roles and Data Browsing.
+selected like regular datasets and used with Data Roles, Data Browsing,
+Visualization and Trends, and Descriptive Analysis. SQL and Browser views are
+materialized as definition-versioned Parquet relations and can themselves be
+used as sources of nested views.
 
 ## Backend API
 
@@ -356,6 +397,10 @@ Important dataset endpoints:
 - `GET /api/v1/datasets` - list current user's datasets and views.
 - `GET /api/v1/datasets/{dataset_id}/preview` - preview dataset or view.
 - `POST /api/v1/datasets/{dataset_id}/query` - run read-only SQL.
+- `POST /api/v1/datasets/{dataset_id}/visualization` - execute a bounded,
+  full-dataset chart query.
+- `POST /api/v1/datasets/{dataset_id}/visualization/groups` - return complete
+  grouping context with a bounded categorical result.
 - `PATCH /api/v1/datasets/{dataset_id}/metadata` - update metadata, including
   `data_roles`.
 - `POST /api/v1/datasets/views` - save a Data View.
@@ -366,5 +411,10 @@ Important dataset endpoints:
 
 - UI role helpers live in `frontend/src/analysis/dataRoles.ts`.
 - Dataset use cases live in `backend/app/modules/datasets/service.py`.
-- Query/view execution lives in `backend/app/modules/datasets/query_engine.py`.
+- Interactive query execution lives in
+  `backend/app/modules/datasets/query_engine.py`; columnar relations, saved view
+  pushdown, and cache materialization live in
+  `backend/app/modules/datasets/columnar.py`.
+- Full-dataset chart queries live in
+  `backend/app/modules/datasets/visualizations.py`.
 - Source adapters live in `backend/app/modules/datasets/sources.py`.

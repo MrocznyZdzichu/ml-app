@@ -44,7 +44,14 @@ The dataset module is split into these responsibilities:
 - `DatasetService` handles use cases: upload, registration, metadata updates,
   deletion, preview, Custom SQL, and Data View creation.
 - `DatasetQueryEngine` executes tabular previews, read-only SQL, browser view
-  definitions, grouping, aggregation, sorting, and filtering.
+  definitions, grouping, aggregation, sorting, and filtering for the bounded
+  interactive browser path. Moving this live preview path to pushdown is a
+  remaining scalability task.
+- `ColumnarDatasetStore` owns reusable physical Parquet relations, recursive
+  Data View resolution, browser-definition pushdown, SQL-view materialization,
+  cache invalidation, and concurrency-safe first-run conversion.
+- `FullDatasetVisualization` executes bounded visualization queries over full
+  relations and returns compact chart contracts rather than raw tables.
 - `DatasetSourceRegistry` selects a source adapter. CSV files are supported
   today; the adapter boundary is prepared for parquet, xlsx, databases, and APIs.
 - `DatasetRepository` persists dataset metadata in PostgreSQL.
@@ -92,9 +99,21 @@ scan over eligible low-cardinality feature pairs. Segment results are ranked by
 coverage-adjusted impact (WRAcc for categorical targets and support-weighted
 Cohen's d for continuous targets) and cached with the rest of the computed
 profile. Only scatterplot observations are reservoir-sampled; metrics and
-aggregate graphics use all rows. Saved Data Views still use the legacy
-preview-backed profiler until their transformation definitions can be pushed
-down to a validated DuckDB relation.
+aggregate graphics use all rows. Saved Data Views use the same columnar execution
+path after their transformations have been pushed down and cached as Parquet.
+
+## Visualization and Trends
+
+The dashboard layout is a 48-column session-scoped grid stored in browser
+session storage per dataset. React owns layout and presentation state, while
+analytical computation remains server-side.
+
+Each chart sends a declarative specification to the dataset visualization API.
+DuckDB scans the complete physical dataset or materialized Data View and returns
+only bounded points, series metadata, counts, or KPI values. Grouped line/bar
+charts use exact full-data aggregates; histograms use full-data bins; scatter
+plots use full-data two-dimensional bins so browser cost does not scale with row
+count. Group-value selectors also query the complete relation.
 
 ## Data Views
 
@@ -108,8 +127,13 @@ Two definition shapes are supported:
   filters, sort rules, grouping, aggregation, and aggregation filters.
 - `kind = "sql"` for read-only Custom SQL.
 
-Views are expanded at preview time. That keeps them lightweight and makes them
-behave like dynamic sources for Analysis tools.
+Views are recursively resolved to their physical source. Browser definitions
+are compiled into parameterized DuckDB SQL; saved SQL definitions execute
+against a temporary relation named after the source dataset. Results are
+materialized to definition-hashed Parquet files and reused while both definition
+and source remain unchanged. This makes views first-class sources for preview,
+visualization, and descriptive profiling without loading full tables into Python
+or React.
 
 ## Model Operationalization
 

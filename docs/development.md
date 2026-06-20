@@ -45,7 +45,7 @@ docker exec ml-app-api-1 pytest tests
 Run the focused full-dataset profiling tests:
 
 ```powershell
-docker exec ml-app-api-1 pytest tests/test_full_profile.py tests/test_profile_jobs.py
+docker exec ml-app-api-1 pytest tests/test_full_profile.py tests/test_profile_jobs.py tests/test_visualizations.py
 ```
 
 Frontend production build:
@@ -91,8 +91,23 @@ Run the synthetic full-profile benchmark inside the API container:
 docker exec ml-app-api-1 python tests/benchmark_full_profile.py --rows 1000000
 ```
 
-See `descriptive-profiling-performance.md` for measured results, scaling
-characteristics, and the current saved Data View limitation.
+See `descriptive-profiling-performance.md` for measured results and scaling
+characteristics.
+
+## Data View And Visualization Runtime
+
+Saved SQL and Browser Data Views are materialized by DuckDB as reusable Parquet
+relations. The cache filename includes a hash of the definition and is reused
+only while it is newer than the source relation. Browser filters, search,
+grouping, aggregation filters, projection, and sorting are pushed down instead
+of being evaluated over Python records.
+
+Visualization requests scan complete physical or view relations and return
+bounded aggregate contracts. When changing this path, run:
+
+```powershell
+docker exec ml-app-api-1 pytest tests/test_visualizations.py tests/test_datasets_upload.py tests/test_full_profile.py
+```
 
 ## Local Runtime Data
 
@@ -121,6 +136,9 @@ git add --dry-run .
 - Add Alembic migrations and SQLAlchemy repositories.
 - Add database connection testing and external source adapters.
 - Add parquet and xlsx source adapters.
-- Push saved Data View profiling into the full-row DuckDB execution path.
+- Move the live Data Browser preview and Custom SQL execution to paged DuckDB
+  query pushdown instead of bounded frontend/Python records.
+- Add query cancellation, quotas, and persisted observability for long-running analytics.
+- Add remote query-engine adapters for datasets that exceed a single-node DuckDB deployment.
 - Implement model training workers and artifact registration.
 - Add deployment adapter for Docker Compose or Kubernetes.

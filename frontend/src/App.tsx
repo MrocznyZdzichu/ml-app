@@ -47,6 +47,7 @@ import {
   readRolesMetadata
 } from "./analysis/dataRoles";
 import type { DataRolesMetadata } from "./analysis/dataRoles";
+import { VisualizationDashboard } from "./analysis/VisualizationDashboard";
 
 type TabId = "overview" | "data" | "analysis" | "models" | "serving" | "share";
 
@@ -745,10 +746,9 @@ function AnalysisPanel({
         />
       )}
       {activeAnalysisTab === "visualization" && (
-        <AnalysisPlaceholder
-          icon={Activity}
-          title="Visualization and Trends"
-          message="This workspace is reserved for charts, trend exploration, and visual comparison tools."
+        <VisualizationDashboard
+          datasets={availableDatasets}
+          setNotice={setNotice}
         />
       )}
     </section>
@@ -6244,24 +6244,6 @@ function formatSegmentMetric(value: number, format: SegmentResult["format"]) {
 function formatSignedSegmentMetric(value: number, format: SegmentResult["format"]) {
   const formatted = formatSegmentMetric(Math.abs(value), format);
   return `${value >= 0 ? "+" : "-"}${formatted}`;
-}
-
-function AnalysisPlaceholder({
-  icon: Icon,
-  title,
-  message
-}: {
-  icon: LucideIcon;
-  title: string;
-  message: string;
-}) {
-  return (
-    <div className="panel analysis-placeholder">
-      <Icon size={22} />
-      <h2>{title}</h2>
-      <p>{message}</p>
-    </div>
-  );
 }
 
 function valueToSearchText(value: unknown) {

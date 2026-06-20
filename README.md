@@ -16,8 +16,8 @@ The current product slice focuses on a practical analyst workflow:
 - profile datasets with descriptive, target-aware, and comparison summaries,
 - run read-only Custom SQL,
 - save reusable Data Views,
-- use the same Data Roles and Data Browsing tools on saved views,
-- keep one shared Analysis dataset selection across Analysis tools.
+- continue from saved views into browsing, visualization, and descriptive analysis,
+- compose reusable interactive dashboards over full datasets and Data Views.
 
 ## Repository Layout
 
@@ -99,7 +99,8 @@ by later tools.
 Data Browsing supports:
 
 - shared dataset selection with the Data Roles tab,
-- full-dataset filtering/searching before preview limits are applied,
+- bounded interactive preview filtering and searching with explicit returned-row
+  and total-row counts,
 - column selection with presets,
 - multi-column sorting,
 - flexible filters: equals, not equals, contains, regex, in, numeric
@@ -111,6 +112,10 @@ Data Browsing supports:
 - paging with direct page number input,
 - Custom SQL with a helper sidebar and read-only execution,
 - Save View for persisting the current analysis as a reusable Data View.
+
+The interactive table remains a bounded exploratory preview. Saving its state as
+a Data View recompiles the filters, search, grouping, aggregation, projection,
+and sorting into DuckDB and applies them to the complete source relation.
 
 ### Analysis: Descriptive Analysis
 
@@ -144,14 +149,40 @@ Full-dataset profiling runs in the Celery analytics worker and scans every row
 for tabular statistics, relationships, and segments. Only bounded scatterplot
 source points are sampled. See
 [`docs/descriptive-profiling-performance.md`](docs/descriptive-profiling-performance.md)
-for the architecture, benchmark results, and current Data View limitation.
+for the architecture and benchmark results.
+
+### Analysis: Visualization and Trends
+
+Visualization and Trends is an interactive dashboard canvas. Analysts explicitly
+choose a dataset, start with an empty canvas, and either add charts manually or
+use Smart start. The workspace supports:
+
+- line, bar, scatter/density-bin, histogram, and KPI views,
+- drag-and-drop positioning, fine-grained resizing, snapping guides, collision
+  detection, Tidy layout, and Clear canvas,
+- configurable axes, grouping, full-dataset aggregations, multiple metrics per
+  group, and explicit group selection,
+- adaptive axes, tooltips, zoom, pan, scrollable legends, stable high-contrast
+  group colors, and metric-specific line styles,
+- session-scoped layouts restored independently for each dataset.
+
+Chart queries run in DuckDB over the complete Parquet-backed relation. React
+receives only bounded aggregates. Scatter views use full-dataset spatial binning
+rather than silently substituting a row sample. The UI reports the number of
+rows scanned and labels the execution mode as full-dataset server analytics.
 
 ### Data Views
 
 Data Views are saved, reusable transformations over source datasets. They can be
-created from a clicked Data Browser state or Custom SQL. Views are shown in
-Overview, Data, and Analysis, and they behave like normal datasets in Data Roles
-and Data Browsing.
+created from a clicked Data Browser state or Custom SQL. SQL and Browser
+definitions are compiled into DuckDB queries and materialized as reusable,
+definition-versioned Parquet artifacts. Nested views are supported with bounded
+recursion, and caches are invalidated when the definition or source changes.
+
+Views are shown in Overview, Data, and Analysis, and they behave like normal
+datasets in Data Roles, Data Browsing, Visualization and Trends, and Descriptive
+Analysis. Full-dataset downstream computations operate on the transformed view,
+not on its browser preview.
 
 When possible, data roles are inherited from the source dataset for columns that
 survive in the view.
