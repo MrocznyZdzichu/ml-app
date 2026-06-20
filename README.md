@@ -16,7 +16,7 @@ The current product slice focuses on a practical analyst workflow:
 - profile datasets with descriptive, target-aware, and comparison summaries,
 - run read-only Custom SQL,
 - save reusable Data Views,
-- use the same Data Roles and Data Browsing tools on saved views.
+- use the same Data Roles and Data Browsing tools on saved views,
 - keep one shared Analysis dataset selection across Analysis tools.
 
 ## Repository Layout
@@ -218,6 +218,7 @@ docker compose --profile serving up --build model-runtime
 - [Architecture](docs/architecture.md)
 - [Development notes](docs/development.md)
 - [Analysis and Data Browser reference](docs/analysis-data-browser-reference.md)
+- [Descriptive profiling performance](docs/descriptive-profiling-performance.md)
 
 ## Git Notes
 
@@ -225,19 +226,10 @@ The repository is prepared to keep source code, docs, infrastructure, tests, and
 example datasets in Git while excluding local runtime data, caches, build
 outputs, virtual environments, secrets, and model artifacts.
 
-This working tree has been initialized with `git init`. Before the first commit,
-review:
+Before committing, review the working tree and staged file list:
 
 ```powershell
 git status --short
-```
-
-Suggested first commit flow:
-
-```powershell
-git add .
-git commit -m "Initial ML App workbench"
-git branch -M main
-git remote add origin <your-repository-url>
-git push -u origin main
+git diff --check
+git add --dry-run .
 ```
