@@ -13,10 +13,11 @@ The current product slice focuses on a practical analyst workflow:
 - upload CSV datasets,
 - assign durable data roles and column roles,
 - browse, filter, sort, group, aggregate, and drill into data,
+- profile datasets with descriptive, target-aware, and comparison summaries,
 - run read-only Custom SQL,
 - save reusable Data Views,
-- use the same Data Roles and Data Browsing tools on saved views.
-- keep one shared Analysis dataset selection across Data Roles and Data Browsing.
+- use the same Data Roles and Data Browsing tools on saved views,
+- keep one shared Analysis dataset selection across Analysis tools.
 
 ## Repository Layout
 
@@ -111,6 +112,40 @@ Data Browsing supports:
 - Custom SQL with a helper sidebar and read-only execution,
 - Save View for persisting the current analysis as a reusable Data View.
 
+### Analysis: Descriptive Analysis
+
+Descriptive Analysis provides explicit, role-aware dataset profiling. Profiling
+does not start automatically after dataset selection; analysts choose the
+dataset, target, target type, and profiling range, then run profiling when ready.
+
+The tab supports:
+
+- smart dataset summary cards and quality notes based on Data Roles metadata,
+- optional profiling scope controls for summary, univariate profiles,
+  target/comparison relations, segment scans, graphic source-point limits, and
+  graphic summaries,
+- asynchronous full-row profiling of uploaded CSV datasets with DuckDB and
+  reusable Parquet materialization instead of browser-side row processing,
+- univariate profiles with collapsible UI, column selection, numeric summaries,
+  categorical distributions, and optional histograms,
+- comparison analysis that defaults to target vs features but can compare
+  features against another selected column,
+- continuous-feature vs categorical-comparison tables with rows, min, max,
+  median, average, standard deviation, and optional KDE-like density plots,
+- continuous-vs-continuous relation cards with Pearson, Spearman, R-squared,
+  slope, intercept, covariance, and optional scatterplots,
+- collapsible relation cards with Show all / Collapse all controls,
+- session-scoped in-memory profile caching when switching between datasets,
+- ranked multivariate segment scan across low-cardinality feature pairs, with
+  support-aware impact, uncertainty, lift/WRAcc for categorical targets, and
+  standardized effect size for continuous targets.
+
+Full-dataset profiling runs in the Celery analytics worker and scans every row
+for tabular statistics, relationships, and segments. Only bounded scatterplot
+source points are sampled. See
+[`docs/descriptive-profiling-performance.md`](docs/descriptive-profiling-performance.md)
+for the architecture, benchmark results, and current Data View limitation.
+
 ### Data Views
 
 Data Views are saved, reusable transformations over source datasets. They can be
@@ -183,6 +218,7 @@ docker compose --profile serving up --build model-runtime
 - [Architecture](docs/architecture.md)
 - [Development notes](docs/development.md)
 - [Analysis and Data Browser reference](docs/analysis-data-browser-reference.md)
+- [Descriptive profiling performance](docs/descriptive-profiling-performance.md)
 
 ## Git Notes
 
@@ -190,19 +226,10 @@ The repository is prepared to keep source code, docs, infrastructure, tests, and
 example datasets in Git while excluding local runtime data, caches, build
 outputs, virtual environments, secrets, and model artifacts.
 
-This working tree has been initialized with `git init`. Before the first commit,
-review:
+Before committing, review the working tree and staged file list:
 
 ```powershell
 git status --short
-```
-
-Suggested first commit flow:
-
-```powershell
-git add .
-git commit -m "Initial ML App workbench"
-git branch -M main
-git remote add origin <your-repository-url>
-git push -u origin main
+git diff --check
+git add --dry-run .
 ```

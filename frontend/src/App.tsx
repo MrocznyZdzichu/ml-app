@@ -26,7 +26,7 @@ import {
   X
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import type { FormEvent, KeyboardEvent } from "react";
+import type { ChangeEvent, FormEvent, KeyboardEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { api, getAccessToken, setAccessToken } from "./api/client";
@@ -74,6 +74,7 @@ export default function App() {
   const [models, setModels] = useState<ModelArtifact[]>([]);
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [notice, setNotice] = useState("Workspace ready");
+  const descriptiveProfileCache = useRef<Map<string, DescriptiveProfileCacheEntry>>(new Map());
 
   const activeConfig = useMemo(
     () => navItems.find((item) => item.id === activeTab) ?? navItems[0],
@@ -128,6 +129,7 @@ export default function App() {
   }, [authStatus]);
 
   async function authenticate(token: string) {
+    descriptiveProfileCache.current.clear();
     setAccessToken(token);
     const profile = await api.me();
     setCurrentUser(profile);
@@ -136,6 +138,7 @@ export default function App() {
   }
 
   function logout() {
+    descriptiveProfileCache.current.clear();
     setAccessToken(null);
     setCurrentUser(null);
     setDatasets([]);
@@ -219,7 +222,12 @@ export default function App() {
           <DataPanel datasets={datasets} onRefresh={refreshWorkspace} setNotice={setNotice} />
         )}
         {activeTab === "analysis" && (
-          <AnalysisPanel datasets={datasets} onRefresh={refreshWorkspace} setNotice={setNotice} />
+          <AnalysisPanel
+            datasets={datasets}
+            descriptiveProfileCache={descriptiveProfileCache.current}
+            onRefresh={refreshWorkspace}
+            setNotice={setNotice}
+          />
         )}
         {activeTab === "models" && (
           <ModelsPanel
@@ -647,10 +655,12 @@ function shortId(value: string) {
 
 function AnalysisPanel({
   datasets,
+  descriptiveProfileCache,
   onRefresh,
   setNotice
 }: {
   datasets: DataAsset[];
+  descriptiveProfileCache: Map<string, DescriptiveProfileCacheEntry>;
   onRefresh: () => Promise<void>;
   setNotice: (message: string) => void;
 }) {
@@ -726,10 +736,12 @@ function AnalysisPanel({
         />
       )}
       {activeAnalysisTab === "descriptive" && (
-        <AnalysisPlaceholder
-          icon={BarChart3}
-          title="Descriptive Analysis"
-          message="This workspace is reserved for calculated summaries, distributions, and column-level statistics."
+        <DescriptiveAnalysisPanel
+          datasets={availableDatasets}
+          datasetId={datasetId}
+          profileCache={descriptiveProfileCache}
+          setDatasetId={setDatasetId}
+          setNotice={setNotice}
         />
       )}
       {activeAnalysisTab === "visualization" && (
@@ -1082,6 +1094,1877 @@ const filterOperatorLabels: Record<FilterOperator, string> = {
   empty: "Is empty",
   not_empty: "Is not empty"
 };
+
+type ColumnProfile = {
+  name: string;
+  type: DatasetPreview["columns"][number]["type"];
+  role: string;
+  count: number;
+  missing: number;
+  missingRate: number;
+  unique: number;
+  uniqueRate: number;
+  mean: number | null;
+  median: number | null;
+  minimum: DatasetCellValue;
+  maximum: DatasetCellValue;
+  stdDev: number | null;
+  mode: DatasetCellValue;
+  topValues: Array<{ value: DatasetCellValue; count: number; share: number }>;
+  histogram: Array<{ label: string; count: number; share: number }>;
+  examples: DatasetCellValue[];
+  notes: string[];
+};
+
+type TargetRelationProfile = {
+  feature: string;
+  role: string;
+  type: DatasetPreview["columns"][number]["type"];
+  kind: string;
+  score: number;
+  signal: string;
+  detail: string;
+  comparisonColumn: string;
+  groupStats: NumericGroupStats[];
+  densityPlot: DensityPlot | null;
+  numericStats: NumericRelationStats | null;
+  scatterPlot: ScatterPlot | null;
+  categoricalStats: CategoricalRelationStats | null;
+};
+
+type CategoricalRelationStats = {
+  comparisonValues: string[];
+  rows: Array<{
+    featureValue: string;
+    count: number;
+    cells: Array<{
+      comparisonValue: string;
+      count: number;
+      rowShare: number;
+      lift: number;
+      residual: number;
+    }>;
+  }>;
+  chiSquare: number;
+  degreesFreedom: number;
+  cramersV: number;
+  sparseCellShare: number;
+  ordinalTrend: {
+    focusValue: string;
+    spearman: number;
+    orderBasis: string;
+  } | null;
+  graphicSummaries: boolean;
+};
+
+type NumericGroupStats = {
+  group: string;
+  count: number;
+  minimum: number;
+  maximum: number;
+  median: number;
+  mean: number;
+  stdDev: number;
+  color: string;
+};
+
+type DensityPlot = {
+  xMin: number;
+  xMax: number;
+  yMax: number;
+  series: DensitySeries[];
+};
+
+type DensitySeries = {
+  group: string;
+  color: string;
+  points: Array<{
+    x: number;
+    y: number;
+  }>;
+};
+
+type NumericRelationStats = {
+  pearson: number;
+  spearman: number;
+  rSquared: number;
+  covariance: number;
+  slope: number;
+  intercept: number;
+};
+
+type ScatterPlot = {
+  xColumn: string;
+  yColumn: string;
+  xMin: number;
+  xMax: number;
+  yMin: number;
+  yMax: number;
+  points: Array<{ x: number; y: number }>;
+  trendLine: {
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+  } | null;
+};
+
+type SegmentResult = {
+  columns: string[];
+  segment: string;
+  count: number;
+  support: number;
+  targetValue: string;
+  baseline: number;
+  segmentValue: number;
+  difference: number;
+  relativeLift: number | null;
+  confidenceInterval: [number, number] | null;
+  effectSize: number | null;
+  score: number;
+  format: "number" | "percent";
+};
+
+type SegmentProfile = {
+  targetColumn: string;
+  targetType: EffectiveTargetType;
+  candidateFeatures: string[];
+  pairsScanned: number;
+  segmentsEvaluated: number;
+  minimumSegmentSize: number;
+  graphicSummaries: boolean;
+  results: SegmentResult[];
+};
+
+type TargetTypeSetting = "auto" | "categorical" | "continuous";
+type EffectiveTargetType = "categorical" | "continuous";
+
+type ProfilingRangeSettings = {
+  includeSummary: boolean;
+  includeUnivariate: boolean;
+  includeTargetRelations: boolean;
+  includeSegments: boolean;
+  includeGraphicSummaries: boolean;
+  rowLimit: number;
+  maxTargetFeatures: number;
+  maxSegmentFeatures: number;
+};
+
+type DescriptiveProfileCacheEntry = {
+  datasetUpdatedAt: string;
+  preview: DatasetPreview;
+  targetColumn: string;
+  targetTypeSetting: TargetTypeSetting;
+  comparisonColumn: string;
+  showIgnoredColumns: boolean;
+  profilingRange: ProfilingRangeSettings;
+  selectedProfileColumns: string[] | null;
+  selectedRelationFeatures: string[] | null;
+  collapsedRelationCards: Record<string, boolean>;
+  setupCollapsed: boolean;
+  univariateCollapsed: boolean;
+  targetCollapsed: boolean;
+  segmentCollapsed: boolean;
+  computedProfile: DescriptiveComputedProfile | null;
+};
+
+type DescriptiveComputedProfile = {
+  key: string;
+  columnProfiles: ColumnProfile[];
+  targetRelations: TargetRelationProfile[];
+  segmentProfile: SegmentProfile | null;
+  dataQualityNotes: string[];
+};
+
+const defaultProfilingRangeSettings: ProfilingRangeSettings = {
+  includeSummary: true,
+  includeUnivariate: true,
+  includeTargetRelations: true,
+  includeSegments: true,
+  includeGraphicSummaries: true,
+  rowLimit: 50000,
+  maxTargetFeatures: 30,
+  maxSegmentFeatures: 4
+};
+
+function DescriptiveAnalysisPanel({
+  datasets,
+  datasetId,
+  profileCache,
+  setDatasetId,
+  setNotice
+}: {
+  datasets: DataAsset[];
+  datasetId: string;
+  profileCache: Map<string, DescriptiveProfileCacheEntry>;
+  setDatasetId: (datasetId: string) => void;
+  setNotice: (message: string) => void;
+}) {
+  const [preview, setPreview] = useState<DatasetPreview | null>(null);
+  const [schemaPreview, setSchemaPreview] = useState<DatasetPreview | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingSchema, setIsLoadingSchema] = useState(false);
+  const [error, setError] = useState("");
+  const [schemaError, setSchemaError] = useState("");
+  const [targetColumn, setTargetColumn] = useState("");
+  const [targetTypeSetting, setTargetTypeSetting] = useState<TargetTypeSetting>("auto");
+  const [comparisonColumn, setComparisonColumn] = useState("");
+  const [showIgnoredColumns, setShowIgnoredColumns] = useState(false);
+  const [hasProfileRun, setHasProfileRun] = useState(false);
+  const [setupCollapsed, setSetupCollapsed] = useState(false);
+  const [univariateCollapsed, setUnivariateCollapsed] = useState(false);
+  const [targetCollapsed, setTargetCollapsed] = useState(false);
+  const [segmentCollapsed, setSegmentCollapsed] = useState(true);
+  const [selectedProfileColumns, setSelectedProfileColumns] = useState<string[] | null>(null);
+  const [selectedRelationFeatures, setSelectedRelationFeatures] = useState<string[] | null>(null);
+  const [collapsedRelationCards, setCollapsedRelationCards] = useState<Record<string, boolean>>({});
+  const [cachedComputedProfile, setCachedComputedProfile] = useState<DescriptiveComputedProfile | null>(null);
+  const [profileColumnsModalOpen, setProfileColumnsModalOpen] = useState(false);
+  const [relationColumnsModalOpen, setRelationColumnsModalOpen] = useState(false);
+  const [profilingRangeModalOpen, setProfilingRangeModalOpen] = useState(false);
+  const [profilingRange, setProfilingRange] = useState<ProfilingRangeSettings>(defaultProfilingRangeSettings);
+  const profileRequestId = useRef(0);
+  const profileAbortController = useRef<AbortController | null>(null);
+  const schemaRequestId = useRef(0);
+  const selectedDataset = datasets.find((dataset) => dataset.id === datasetId) ?? null;
+  const activeProfilePreview = preview?.dataset_id === datasetId && hasProfileRun ? preview : null;
+  const activeSchemaPreview = schemaPreview?.dataset_id === datasetId ? schemaPreview : null;
+  const configPreview = activeProfilePreview ?? activeSchemaPreview;
+  const columns = configPreview?.columns ?? [];
+  const rows = activeProfilePreview?.records ?? [];
+  const targetInferenceRows = activeProfilePreview?.records.length
+    ? activeProfilePreview.records
+    : activeSchemaPreview?.records ?? [];
+  const rolesMetadata = useMemo(
+    () => readRolesMetadata(selectedDataset, datasets, columns.map((column) => column.name)),
+    [columns, datasets, selectedDataset]
+  );
+  const inferredTargetColumn = useMemo(
+    () => inferTargetColumn(columns, rolesMetadata),
+    [columns, rolesMetadata]
+  );
+  const effectiveTargetColumn = columns.some((column) => column.name === targetColumn)
+    ? targetColumn
+    : inferredTargetColumn;
+  const targetProfile = effectiveTargetColumn
+    ? null
+    : columns.find((column) => columnRoleForColumn(column, rolesMetadata) === "target") ?? null;
+  const targetColumnDefinition = columns.find((column) => column.name === effectiveTargetColumn) ?? null;
+  const inferredTargetType = inferTargetType(targetColumnDefinition, targetInferenceRows, rolesMetadata);
+  const effectiveTargetType: EffectiveTargetType = targetTypeSetting === "auto"
+    ? inferredTargetType
+    : targetTypeSetting;
+  const effectiveComparisonColumn = columns.some((column) => column.name === comparisonColumn)
+    ? comparisonColumn
+    : effectiveTargetColumn;
+  const comparisonColumnDefinition = columns.find((column) => column.name === effectiveComparisonColumn) ?? null;
+  const effectiveComparisonType = effectiveComparisonColumn === effectiveTargetColumn
+    ? effectiveTargetType
+    : inferTargetType(comparisonColumnDefinition, targetInferenceRows, rolesMetadata);
+
+  useEffect(() => () => profileAbortController.current?.abort(), []);
+
+  useEffect(() => {
+    const schemaRequestIdValue = schemaRequestId.current + 1;
+    schemaRequestId.current = schemaRequestIdValue;
+    profileRequestId.current += 1;
+    profileAbortController.current?.abort();
+    profileAbortController.current = null;
+    const cachedProfile = profileCache.get(datasetId);
+    const cacheIsCurrent = Boolean(
+      cachedProfile && selectedDataset && cachedProfile.datasetUpdatedAt === selectedDataset.updated_at
+    );
+
+    if (cachedProfile && !cacheIsCurrent) {
+      profileCache.delete(datasetId);
+    }
+
+    if (cachedProfile && cacheIsCurrent) {
+      setPreview(cachedProfile.preview);
+      setSchemaPreview(null);
+      setError("");
+      setSchemaError("");
+      setIsLoading(false);
+      setIsLoadingSchema(false);
+      setHasProfileRun(true);
+      setTargetColumn(cachedProfile.targetColumn);
+      setTargetTypeSetting(cachedProfile.targetTypeSetting);
+      setComparisonColumn(cachedProfile.comparisonColumn);
+      setShowIgnoredColumns(cachedProfile.showIgnoredColumns);
+      setProfilingRange({ ...cachedProfile.profilingRange });
+      setSelectedProfileColumns(cachedProfile.selectedProfileColumns ? [...cachedProfile.selectedProfileColumns] : null);
+      setSelectedRelationFeatures(cachedProfile.selectedRelationFeatures ? [...cachedProfile.selectedRelationFeatures] : null);
+      setCollapsedRelationCards({ ...cachedProfile.collapsedRelationCards });
+      setCachedComputedProfile(cachedProfile.computedProfile);
+      setSetupCollapsed(cachedProfile.setupCollapsed);
+      setUnivariateCollapsed(cachedProfile.univariateCollapsed);
+      setTargetCollapsed(cachedProfile.targetCollapsed);
+      setSegmentCollapsed(cachedProfile.segmentCollapsed);
+      setNotice(`Cached profile restored for ${selectedDataset?.name ?? "dataset"}`);
+      return;
+    }
+
+    setPreview(null);
+    setSchemaPreview(null);
+    setError("");
+    setSchemaError("");
+    setIsLoading(false);
+    setIsLoadingSchema(Boolean(datasetId));
+    setHasProfileRun(false);
+    setTargetColumn("");
+    setTargetTypeSetting("auto");
+    setComparisonColumn("");
+    setSelectedProfileColumns(null);
+    setSelectedRelationFeatures(null);
+    setCollapsedRelationCards({});
+    setCachedComputedProfile(null);
+
+    if (!datasetId) {
+      setIsLoadingSchema(false);
+      return;
+    }
+
+    api
+      .previewDataset(datasetId, 1000)
+      .then((result) => {
+        if (schemaRequestId.current !== schemaRequestIdValue) {
+          return;
+        }
+        setSchemaPreview(result);
+      })
+      .catch((loadError) => {
+        if (schemaRequestId.current !== schemaRequestIdValue) {
+          return;
+        }
+        const message = loadError instanceof Error ? loadError.message : "Dataset columns failed to load";
+        setSchemaError(message);
+      })
+      .finally(() => {
+        if (schemaRequestId.current === schemaRequestIdValue) {
+          setIsLoadingSchema(false);
+        }
+      });
+  }, [datasetId, profileCache, selectedDataset, setNotice]);
+
+  useEffect(() => {
+    if (columns.length === 0) {
+      setTargetColumn("");
+      setComparisonColumn("");
+      return;
+    }
+    if (!targetColumn || !columns.some((column) => column.name === targetColumn)) {
+      setTargetColumn(inferredTargetColumn);
+    }
+  }, [columns, inferredTargetColumn, targetColumn]);
+
+  useEffect(() => {
+    if (columns.length === 0) {
+      setComparisonColumn("");
+      return;
+    }
+    if (!comparisonColumn || !columns.some((column) => column.name === comparisonColumn)) {
+      setComparisonColumn(effectiveTargetColumn);
+    }
+  }, [columns, comparisonColumn, effectiveTargetColumn]);
+
+  function createProfileComputationKey(returnedCount: number) {
+    return JSON.stringify({
+    datasetId,
+    datasetUpdatedAt: selectedDataset?.updated_at ?? "",
+    returnedCount,
+    targetColumn: effectiveTargetColumn,
+    targetType: effectiveTargetType,
+    comparisonColumn: effectiveComparisonColumn,
+    comparisonType: effectiveComparisonType,
+    includeSummary: profilingRange.includeSummary,
+    includeUnivariate: profilingRange.includeUnivariate,
+    includeTargetRelations: profilingRange.includeTargetRelations,
+    includeSegments: profilingRange.includeSegments,
+    includeGraphicSummaries: profilingRange.includeGraphicSummaries,
+    maxTargetFeatures: profilingRange.maxTargetFeatures,
+    maxSegmentFeatures: profilingRange.maxSegmentFeatures
+    });
+  }
+
+  const profileComputationKey = useMemo(() => createProfileComputationKey(activeProfilePreview?.returned_count ?? 0), [
+    activeProfilePreview?.returned_count,
+    datasetId,
+    effectiveComparisonColumn,
+    effectiveComparisonType,
+    effectiveTargetColumn,
+    effectiveTargetType,
+    profilingRange.includeGraphicSummaries,
+    profilingRange.includeSegments,
+    profilingRange.includeSummary,
+    profilingRange.includeTargetRelations,
+    profilingRange.includeUnivariate,
+    profilingRange.maxSegmentFeatures,
+    profilingRange.maxTargetFeatures,
+    selectedDataset?.updated_at
+  ]);
+  const restoredComputedProfile = cachedComputedProfile?.key === profileComputationKey
+    ? cachedComputedProfile
+    : null;
+
+  const shouldBuildColumnProfiles = Boolean(activeProfilePreview) && (
+    profilingRange.includeSummary ||
+    profilingRange.includeUnivariate ||
+    profilingRange.includeTargetRelations
+  );
+  const columnProfiles = useMemo(
+    () => restoredComputedProfile?.columnProfiles ?? (shouldBuildColumnProfiles
+      ? columns.map((column) => buildColumnProfile(column, rows, rolesMetadata, profilingRange.includeGraphicSummaries))
+      : []),
+    [columns, profilingRange.includeGraphicSummaries, restoredComputedProfile, rolesMetadata, rows, shouldBuildColumnProfiles]
+  );
+  const selectableProfiles = useMemo(
+    () => showIgnoredColumns
+      ? columnProfiles
+      : columnProfiles.filter((profile) => !["ignored", "identifier"].includes(profile.role)),
+    [columnProfiles, showIgnoredColumns]
+  );
+  const selectableProfileNames = useMemo(
+    () => selectableProfiles.map((profile) => profile.name),
+    [selectableProfiles]
+  );
+  const activeProfileColumns = selectedProfileColumns ?? selectableProfileNames;
+  const activeProfileColumnSet = useMemo(() => new Set(activeProfileColumns), [activeProfileColumns]);
+  const visibleProfiles = useMemo(
+    () => selectableProfiles.filter((profile) => activeProfileColumnSet.has(profile.name)),
+    [activeProfileColumnSet, selectableProfiles]
+  );
+  const profileByName = useMemo(
+    () => new Map(columnProfiles.map((profile) => [profile.name, profile])),
+    [columnProfiles]
+  );
+  const targetRelations = useMemo(
+    () => restoredComputedProfile?.targetRelations ?? (activeProfilePreview && profilingRange.includeTargetRelations
+      ? buildTargetRelations(rows, columns, rolesMetadata, effectiveComparisonColumn, effectiveComparisonType, profilingRange.includeGraphicSummaries).slice(0, profilingRange.maxTargetFeatures)
+      : []),
+    [activeProfilePreview, columns, effectiveComparisonColumn, effectiveComparisonType, profilingRange.includeGraphicSummaries, profilingRange.includeTargetRelations, profilingRange.maxTargetFeatures, restoredComputedProfile, rolesMetadata, rows]
+  );
+  const relationFeatureNames = useMemo(
+    () => targetRelations.map((relation) => relation.feature),
+    [targetRelations]
+  );
+  const activeRelationFeatures = selectedRelationFeatures ?? relationFeatureNames;
+  const activeRelationFeatureSet = useMemo(() => new Set(activeRelationFeatures), [activeRelationFeatures]);
+  const visibleTargetRelations = useMemo(
+    () => targetRelations.filter((relation) => activeRelationFeatureSet.has(relation.feature)),
+    [activeRelationFeatureSet, targetRelations]
+  );
+  const visibleTargetRelationKeys = useMemo(
+    () => visibleTargetRelations.map(relationCardKey),
+    [visibleTargetRelations]
+  );
+  const segmentProfile = useMemo(
+    () => restoredComputedProfile ? restoredComputedProfile.segmentProfile : (activeProfilePreview && profilingRange.includeSegments
+      ? buildSegmentProfile(rows, columns, rolesMetadata, effectiveTargetColumn, effectiveTargetType, profilingRange.maxSegmentFeatures, profilingRange.includeGraphicSummaries)
+      : null),
+    [activeProfilePreview, columns, effectiveTargetColumn, effectiveTargetType, profilingRange.includeGraphicSummaries, profilingRange.includeSegments, profilingRange.maxSegmentFeatures, restoredComputedProfile, rolesMetadata, rows]
+  );
+  const dataQualityNotes = useMemo(
+    () => restoredComputedProfile?.dataQualityNotes ?? (activeProfilePreview && profilingRange.includeSummary
+      ? buildDatasetQualityNotes(columnProfiles, rows.length, rolesMetadata, effectiveTargetColumn)
+      : []),
+    [activeProfilePreview, columnProfiles, effectiveTargetColumn, profilingRange.includeSummary, restoredComputedProfile, rolesMetadata, rows.length]
+  );
+  const computedProfileSnapshot = useMemo<DescriptiveComputedProfile>(() => ({
+    key: profileComputationKey,
+    columnProfiles,
+    targetRelations,
+    segmentProfile,
+    dataQualityNotes
+  }), [columnProfiles, dataQualityNotes, profileComputationKey, segmentProfile, targetRelations]);
+  const numericProfiles = useMemo(
+    () => columnProfiles.filter((profile) => profile.mean !== null),
+    [columnProfiles]
+  );
+  const categoricalProfiles = useMemo(
+    () => columnProfiles.filter((profile) =>
+      ["feature_categorical", "feature_ordinal", "boolean", "target"].includes(profile.role) ||
+      ["text", "boolean"].includes(profile.type)
+    ),
+    [columnProfiles]
+  );
+  const featureCount = columns.filter((column) =>
+    !["ignored", "identifier", "target"].includes(columnRoleForColumn(column, rolesMetadata))
+  ).length;
+  const targetSummary = effectiveTargetColumn
+    ? profileByName.get(effectiveTargetColumn)
+    : undefined;
+  const comparisonSummary = effectiveComparisonColumn
+    ? profileByName.get(effectiveComparisonColumn)
+    : undefined;
+  const enabledRangeLabels = [
+    profilingRange.includeSummary ? "summary" : "",
+    profilingRange.includeUnivariate ? "univariate" : "",
+    profilingRange.includeTargetRelations ? "target relations" : "",
+    profilingRange.includeSegments ? "segments" : "",
+    profilingRange.includeGraphicSummaries ? "graphics" : "no graphics"
+  ].filter(Boolean);
+
+  useEffect(() => {
+    setSelectedProfileColumns((current) => syncSelectedNames(current, selectableProfileNames));
+  }, [selectableProfileNames]);
+
+  useEffect(() => {
+    setSelectedRelationFeatures((current) => syncSelectedNames(current, relationFeatureNames));
+  }, [relationFeatureNames]);
+
+  useEffect(() => {
+    setCollapsedRelationCards((current) => {
+      const visibleKeySet = new Set(visibleTargetRelationKeys);
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([key]) => visibleKeySet.has(key))
+      );
+      if (Object.keys(next).length === Object.keys(current).length) {
+        return current;
+      }
+      return next;
+    });
+  }, [visibleTargetRelationKeys]);
+
+  useEffect(() => {
+    if (!activeProfilePreview || !selectedDataset) {
+      return;
+    }
+    const cachedProfile = profileCache.get(datasetId);
+    if (!cachedProfile || cachedProfile.datasetUpdatedAt !== selectedDataset.updated_at) {
+      return;
+    }
+    profileCache.set(datasetId, createProfileCacheEntry(activeProfilePreview, computedProfileSnapshot));
+  }, [
+    activeProfilePreview,
+    collapsedRelationCards,
+    computedProfileSnapshot,
+    datasetId,
+    effectiveComparisonColumn,
+    effectiveTargetColumn,
+    profileCache,
+    profilingRange,
+    segmentCollapsed,
+    selectedDataset,
+    selectedProfileColumns,
+    selectedRelationFeatures,
+    setupCollapsed,
+    showIgnoredColumns,
+    targetCollapsed,
+    targetTypeSetting,
+    univariateCollapsed
+  ]);
+
+  function createProfileCacheEntry(
+    profilePreview: DatasetPreview,
+    computedProfile: DescriptiveComputedProfile | null
+  ): DescriptiveProfileCacheEntry {
+    return {
+      datasetUpdatedAt: selectedDataset?.updated_at ?? "",
+      preview: profilePreview,
+      targetColumn: effectiveTargetColumn,
+      targetTypeSetting,
+      comparisonColumn: effectiveComparisonColumn,
+      showIgnoredColumns,
+      profilingRange: { ...profilingRange },
+      selectedProfileColumns: selectedProfileColumns ? [...selectedProfileColumns] : null,
+      selectedRelationFeatures: selectedRelationFeatures ? [...selectedRelationFeatures] : null,
+      collapsedRelationCards: { ...collapsedRelationCards },
+      setupCollapsed,
+      univariateCollapsed,
+      targetCollapsed,
+      segmentCollapsed,
+      computedProfile
+    };
+  }
+
+  async function runProfiling() {
+    if (!datasetId) {
+      setNotice("Choose a dataset first");
+      return;
+    }
+
+    const requestId = profileRequestId.current + 1;
+    profileRequestId.current = requestId;
+    profileAbortController.current?.abort();
+    const abortController = new AbortController();
+    profileAbortController.current = abortController;
+    setCachedComputedProfile(null);
+    setIsLoading(true);
+    setError("");
+    setHasProfileRun(true);
+    setSetupCollapsed(false);
+    setNotice("Profiling dataset. This can take a moment.");
+
+    try {
+      if (selectedDataset?.source_type === "view") {
+        const result = await api.previewDataset(datasetId, profilingRange.rowLimit);
+        if (profileRequestId.current !== requestId) {
+          return;
+        }
+        if (selectedDataset) {
+          profileCache.set(datasetId, createProfileCacheEntry(result, null));
+        }
+        setPreview(result);
+        setNotice(`Profile loaded for ${result.returned_count} of ${result.row_count} rows`);
+        return;
+      }
+      const result = await api.profileDataset(datasetId, {
+        target_column: effectiveTargetColumn,
+        target_type: effectiveTargetType,
+        comparison_column: effectiveComparisonColumn,
+        comparison_type: effectiveComparisonType,
+        include_summary: profilingRange.includeSummary,
+        include_univariate: profilingRange.includeUnivariate,
+        include_target_relations: profilingRange.includeTargetRelations,
+        include_segments: profilingRange.includeSegments,
+        include_graphic_summaries: profilingRange.includeGraphicSummaries,
+        row_limit: profilingRange.rowLimit,
+        max_target_features: profilingRange.maxTargetFeatures,
+        max_segment_features: profilingRange.maxSegmentFeatures
+      }, abortController.signal);
+      if (profileRequestId.current !== requestId) {
+        return;
+      }
+      const profilePreview: DatasetPreview = {
+        dataset_id: result.dataset_id,
+        columns: result.columns,
+        records: [],
+        row_count: result.row_count,
+        returned_count: result.row_count,
+        limit: result.row_count
+      };
+      const backendProfile = result.profile as Omit<DescriptiveComputedProfile, "key">;
+      const computedProfile: DescriptiveComputedProfile = {
+        key: createProfileComputationKey(result.row_count),
+        columnProfiles: backendProfile.columnProfiles ?? [],
+        targetRelations: backendProfile.targetRelations ?? [],
+        segmentProfile: backendProfile.segmentProfile ?? null,
+        dataQualityNotes: backendProfile.dataQualityNotes ?? []
+      };
+      if (selectedDataset) {
+        profileCache.set(datasetId, createProfileCacheEntry(profilePreview, computedProfile));
+      }
+      setCachedComputedProfile(computedProfile);
+      setPreview(profilePreview);
+      setNotice(`Profile loaded for all ${result.row_count} rows`);
+    } catch (loadError) {
+      if (profileRequestId.current !== requestId) {
+        return;
+      }
+      const message = loadError instanceof Error ? loadError.message : "Dataset profile failed";
+      setPreview(null);
+      setError(message);
+      setNotice(message);
+    } finally {
+      if (profileRequestId.current === requestId) {
+        setIsLoading(false);
+        profileAbortController.current = null;
+      }
+    }
+  }
+
+  function updateDataset(nextDatasetId: string) {
+    setDatasetId(nextDatasetId);
+  }
+
+  function updateProfileSelection(values: string[]) {
+    setSelectedProfileColumns(values);
+  }
+
+  function updateRelationSelection(values: string[]) {
+    setSelectedRelationFeatures(values);
+  }
+
+  function toggleRelationCard(relation: TargetRelationProfile) {
+    const key = relationCardKey(relation);
+    setCollapsedRelationCards((current) => ({
+      ...current,
+      [key]: !current[key]
+    }));
+  }
+
+  function showAllRelationCards() {
+    setCollapsedRelationCards((current) => {
+      const visibleKeySet = new Set(visibleTargetRelationKeys);
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([key]) => !visibleKeySet.has(key))
+      );
+      return next;
+    });
+  }
+
+  function collapseAllRelationCards() {
+    setCollapsedRelationCards((current) => ({
+      ...current,
+      ...Object.fromEntries(visibleTargetRelationKeys.map((key) => [key, true]))
+    }));
+  }
+
+  if (datasets.length === 0) {
+    return (
+      <div className="panel">
+        <div className="empty-state">No datasets available</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="descriptive-analysis-panel">
+      <section className="panel profile-run-panel">
+        <button
+          aria-expanded={!setupCollapsed}
+          className="section-toggle profile-section-toggle"
+          onClick={() => setSetupCollapsed((current) => !current)}
+          type="button"
+        >
+          {setupCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+          <strong>Dataset profile</strong>
+          <span>{isLoading ? "running" : isLoadingSchema ? "loading columns" : activeProfilePreview ? "ready" : "not started"}</span>
+        </button>
+
+        {!setupCollapsed && (
+          <>
+            <div className="descriptive-toolbar">
+              <label>
+                Dataset
+                <select value={datasetId} onChange={(event) => updateDataset(event.target.value)}>
+                  {datasets.map((dataset) => (
+                    <option key={dataset.id} value={dataset.id}>
+                      {dataset.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Target
+                <select
+                  disabled={columns.length === 0 || isLoading || isLoadingSchema}
+                  value={effectiveTargetColumn}
+                  onChange={(event) => setTargetColumn(event.target.value)}
+                >
+                  <option value="">No target selected</option>
+                  {columns.map((column) => (
+                    <option key={column.name} value={column.name}>
+                      {column.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                Target type
+                <select
+                  disabled={!effectiveTargetColumn || isLoading || isLoadingSchema}
+                  value={targetTypeSetting}
+                  onChange={(event) => setTargetTypeSetting(event.target.value as TargetTypeSetting)}
+                >
+                  <option value="auto">Auto ({inferredTargetType})</option>
+                  <option value="categorical">Categorical/classification</option>
+                  <option value="continuous">Continuous/regression</option>
+                </select>
+              </label>
+              <label className="check-tile descriptive-toggle">
+                <input
+                  checked={showIgnoredColumns}
+                  disabled={isLoading}
+                  onChange={(event) => setShowIgnoredColumns(event.target.checked)}
+                  type="checkbox"
+                />
+                <span>Show ignored and ID columns</span>
+              </label>
+              <button
+                className="secondary-button toolbar-button"
+                disabled={isLoading}
+                onClick={() => setProfilingRangeModalOpen(true)}
+                type="button"
+              >
+                <Filter size={16} />
+                Profiling range
+              </button>
+              <button
+                className="primary-button toolbar-button"
+                disabled={isLoading || isLoadingSchema || !datasetId}
+                onClick={runProfiling}
+                type="button"
+              >
+                <Play size={16} />
+                {isLoading ? "Profiling" : "Run profiling"}
+              </button>
+            </div>
+
+            {isLoading && (
+              <div className="profiling-status" role="status">
+                <div className="progress-track" aria-hidden="true">
+                  <div />
+                </div>
+                <strong>Profiling dataset</strong>
+                <span>Working on metadata-aware summaries. Please wait, the app is still running.</span>
+              </div>
+            )}
+
+            {!isLoading && isLoadingSchema && (
+              <div className="profiling-status" role="status">
+                <div className="progress-track" aria-hidden="true">
+                  <div />
+                </div>
+                <strong>Loading dataset columns</strong>
+                <span>Preparing target and target-type settings before profiling starts.</span>
+              </div>
+            )}
+
+            {!isLoading && !isLoadingSchema && schemaError && (
+              <div className="empty-state error-state">{schemaError}</div>
+            )}
+
+            {!isLoading && !isLoadingSchema && !schemaError && !hasProfileRun && (
+              <div className="empty-state">
+                Choose a dataset, configure profiling range if needed, then run profiling when you are ready.
+              </div>
+            )}
+            {!isLoading && error && <div className="empty-state error-state">{error}</div>}
+            {!isLoading && !error && activeProfilePreview && activeProfilePreview.row_count === 0 && (
+              <div className="empty-state">Dataset is empty</div>
+            )}
+
+            {!isLoading && !error && activeProfilePreview && activeProfilePreview.row_count > 0 && (
+              <>
+                <section className="profile-metrics">
+                  <Metric icon={Database} label="Rows profiled" value={activeProfilePreview.returned_count} tone="teal" />
+                  <Metric icon={Table2} label="Columns" value={columns.length} tone="blue" />
+                  <Metric icon={BarChart3} label="Features" value={featureCount} tone="amber" />
+                  <Metric icon={Activity} label="Feature relations" value={targetRelations.length} tone="teal" />
+                </section>
+
+                <div className="profile-range-summary">
+                  <strong>Profiling range</strong>
+                  <span>{enabledRangeLabels.join(", ")} / all rows / graphics capped at {formatInteger(profilingRange.rowLimit)} source points</span>
+                </div>
+
+                {profilingRange.includeSummary && (
+                  <section className="profile-overview">
+                    <div className="panel-header">
+                      <h2>Smart dataset profile</h2>
+                      {activeProfilePreview.returned_count < activeProfilePreview.row_count && (
+                        <span className="muted-text">Preview limited to {activeProfilePreview.returned_count} rows</span>
+                      )}
+                    </div>
+                    <div className="profile-summary-grid">
+                      <ProfileFact label="Dataset roles" value={rolesMetadata.dataset_roles.length ? rolesMetadata.dataset_roles.join(", ") : "not set"} />
+                      <ProfileFact label="Target" value={effectiveTargetColumn || "not set"} />
+                      <ProfileFact label="Target type" value={effectiveTargetType} />
+                      <ProfileFact label="Numeric columns" value={String(numericProfiles.length)} />
+                      <ProfileFact label="Categorical columns" value={String(categoricalProfiles.length)} />
+                    </div>
+                    <div className="insight-list">
+                      {dataQualityNotes.map((note) => (
+                        <div className="insight-item" key={note}>{note}</div>
+                      ))}
+                      {dataQualityNotes.length === 0 && (
+                        <div className="insight-item">No major profiling warnings in the loaded sample.</div>
+                      )}
+                    </div>
+                  </section>
+                )}
+              </>
+            )}
+          </>
+        )}
+      </section>
+
+      {!isLoading && !error && activeProfilePreview && activeProfilePreview.row_count > 0 && (
+        <>
+          {profilingRange.includeUnivariate && <section className="panel">
+            <button
+              aria-expanded={!univariateCollapsed}
+              className="section-toggle profile-section-toggle"
+              onClick={() => setUnivariateCollapsed((current) => !current)}
+              type="button"
+            >
+              {univariateCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+              <strong>Univariate profile</strong>
+              <span>{visibleProfiles.length}/{selectableProfiles.length} columns</span>
+            </button>
+            {!univariateCollapsed && (
+              <>
+                <ColumnSelectionSummary
+                  columns={selectableProfiles.map((profile) => ({ name: profile.name, meta: `${columnRoleLabel(profile.role)} / ${profile.type}` }))}
+                  selected={activeProfileColumns}
+                  onOpen={() => setProfileColumnsModalOpen(true)}
+                />
+                <div className="profile-column-grid">
+                  {visibleProfiles.map((profile) => (
+                    <article className="column-profile-card" key={profile.name}>
+                      <div className="column-profile-head">
+                        <div>
+                          <strong>{profile.name}</strong>
+                          <span>{columnRoleLabel(profile.role)} / {profile.type}</span>
+                        </div>
+                        <em>{formatPercent(1 - profile.missingRate)} complete</em>
+                      </div>
+                      <div className="profile-stat-grid">
+                        <ProfileFact label="Count" value={formatInteger(profile.count)} />
+                        <ProfileFact label="Missing" value={formatPercent(profile.missingRate)} />
+                        <ProfileFact label="Unique" value={formatInteger(profile.unique)} />
+                        <ProfileFact label="Mode" value={displayValue(profile.mode)} />
+                      </div>
+                      {profile.mean !== null && !usesDiscreteDistribution(profile) ? (
+                        <>
+                          {profilingRange.includeGraphicSummaries && <MiniHistogram bins={profile.histogram} />}
+                          <div className="profile-stat-grid">
+                            <ProfileFact label="Mean" value={formatNumber(profile.mean)} />
+                            <ProfileFact label="Median" value={formatNullableNumber(profile.median)} />
+                            <ProfileFact label="Min" value={displayValue(profile.minimum)} />
+                            <ProfileFact label="Max" value={displayValue(profile.maximum)} />
+                          </div>
+                        </>
+                      ) : (
+                        profilingRange.includeGraphicSummaries && <MiniDiscreteDistribution values={profile.topValues} limit={usesDiscreteDistribution(profile) ? 12 : 4} />
+                      )}
+                      {profile.notes.length > 0 && (
+                        <div className="profile-notes">
+                          {profile.notes.map((note) => <span key={note}>{note}</span>)}
+                        </div>
+                      )}
+                    </article>
+                  ))}
+                  {visibleProfiles.length === 0 && (
+                    <div className="empty-state">No columns selected for univariate profile.</div>
+                  )}
+                </div>
+              </>
+            )}
+          </section>}
+
+          {profilingRange.includeTargetRelations && <section className="panel">
+            <button
+              aria-expanded={!targetCollapsed}
+              className="section-toggle profile-section-toggle"
+              onClick={() => setTargetCollapsed((current) => !current)}
+              type="button"
+            >
+              {targetCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+              <strong>Target vs features</strong>
+              <span>{visibleTargetRelations.length}/{targetRelations.length} signals</span>
+            </button>
+            {!targetCollapsed && (
+              <section className="profile-relation-layout">
+                <div className="target-relations-main">
+                  <div className="relation-compare-toolbar">
+                    <label>
+                      Compare by
+                      <select
+                        value={effectiveComparisonColumn}
+                        onChange={(event) => setComparisonColumn(event.target.value)}
+                      >
+                        <option value="">No comparison column</option>
+                        {columns
+                          .filter((column) => !["ignored", "identifier"].includes(columnRoleForColumn(column, rolesMetadata)))
+                          .map((column) => (
+                            <option key={column.name} value={column.name}>
+                              {column.name}{column.name === effectiveTargetColumn ? " (target)" : ""}
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+                    <ProfileFact label="Comparison type" value={effectiveComparisonColumn ? effectiveComparisonType : "not set"} />
+                  </div>
+                  {targetRelations.length > 0 && (
+                    <div className="relation-list-toolbar">
+                      <ColumnSelectionSummary
+                        columns={targetRelations.map((relation) => ({ name: relation.feature, meta: `${columnRoleLabel(relation.role)} / ${relation.kind}` }))}
+                        selected={activeRelationFeatures}
+                        onOpen={() => setRelationColumnsModalOpen(true)}
+                      />
+                      <div className="section-actions relation-card-actions">
+                        <button className="secondary-button compact-button" onClick={showAllRelationCards} type="button">
+                          Show all
+                        </button>
+                        <button className="secondary-button compact-button" onClick={collapseAllRelationCards} type="button">
+                          Collapse all
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {!effectiveComparisonColumn && (
+                    <div className="empty-state">
+                      Select a target or comparison column to rank feature relationships.
+                    </div>
+                  )}
+                  {effectiveComparisonColumn && targetRelations.length === 0 && (
+                    <div className="empty-state">No eligible feature relationships found for the selected comparison column.</div>
+                  )}
+                  {effectiveComparisonColumn && targetRelations.length > 0 && visibleTargetRelations.length === 0 && (
+                    <div className="empty-state">No feature relationships selected.</div>
+                  )}
+                  {effectiveComparisonColumn && visibleTargetRelations.length > 0 && (
+                    <div className="relation-list">
+                      {visibleTargetRelations.map((relation) => (
+                        <TargetRelationCard
+                          collapsed={Boolean(collapsedRelationCards[relationCardKey(relation)])}
+                          onToggle={() => toggleRelationCard(relation)}
+                          relation={relation}
+                          key={relationCardKey(relation)}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <aside className="target-context">
+                  <div className="panel-header">
+                    <h2>Comparison context</h2>
+                  </div>
+                  {comparisonSummary ? (
+                    <>
+                      <div className="profile-stat-grid">
+                        <ProfileFact label="Column" value={comparisonSummary.name} />
+                        <ProfileFact label="Role" value={columnRoleLabel(comparisonSummary.role)} />
+                        <ProfileFact label="Type" value={comparisonSummary.type} />
+                        <ProfileFact label="Missing" value={formatPercent(comparisonSummary.missingRate)} />
+                        <ProfileFact label="Unique" value={formatInteger(comparisonSummary.unique)} />
+                      </div>
+                      {profilingRange.includeGraphicSummaries && comparisonSummary.mean !== null && !usesDiscreteDistribution(comparisonSummary) && <MiniHistogram bins={comparisonSummary.histogram} />}
+                      {profilingRange.includeGraphicSummaries && <MiniDiscreteDistribution values={comparisonSummary.topValues} limit={6} />}
+                    </>
+                  ) : (
+                    <div className="empty-state compact-empty">Comparison column not selected</div>
+                  )}
+                  {targetProfile && (
+                    <div className="insight-item">Role metadata marks {targetProfile.name} as target.</div>
+                  )}
+                </aside>
+              </section>
+            )}
+          </section>}
+
+          {profilingRange.includeSegments && <section className="panel">
+            <button
+              aria-expanded={!segmentCollapsed}
+              className="section-toggle profile-section-toggle"
+              onClick={() => setSegmentCollapsed((current) => !current)}
+              type="button"
+            >
+              {segmentCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+              <strong>Multivariate segment scan</strong>
+              <span>role-aware categorical feature combinations</span>
+            </button>
+            {!segmentCollapsed && (
+              segmentProfile && segmentProfile.results.length > 0 ? (
+                <div className="segment-scan">
+                  <div className="profile-summary-grid">
+                    <ProfileFact label="Target" value={segmentProfile.targetColumn} />
+                    <ProfileFact label="Candidate features" value={formatInteger(segmentProfile.candidateFeatures.length)} />
+                    <ProfileFact label="Feature pairs scanned" value={formatInteger(segmentProfile.pairsScanned)} />
+                    <ProfileFact label="Eligible segments" value={formatInteger(segmentProfile.segmentsEvaluated)} />
+                  </div>
+                  <SegmentScanResults profile={segmentProfile} />
+                </div>
+              ) : (
+                <div className="empty-state">
+                  Need a selected target and at least two low-cardinality categorical features to scan combined segments.
+                </div>
+              )
+            )}
+          </section>}
+        </>
+      )}
+
+      {profileColumnsModalOpen && (
+        <ColumnSelectionModal
+          columns={selectableProfiles.map((profile) => ({ name: profile.name, meta: `${columnRoleLabel(profile.role)} / ${profile.type}` }))}
+          onChange={updateProfileSelection}
+          onClose={() => setProfileColumnsModalOpen(false)}
+          selected={activeProfileColumns}
+          title="Univariate columns"
+        />
+      )}
+      {relationColumnsModalOpen && (
+        <ColumnSelectionModal
+          columns={targetRelations.map((relation) => ({ name: relation.feature, meta: `${columnRoleLabel(relation.role)} / ${relation.kind}` }))}
+          onChange={updateRelationSelection}
+          onClose={() => setRelationColumnsModalOpen(false)}
+          selected={activeRelationFeatures}
+          title="Relationship columns"
+        />
+      )}
+      {profilingRangeModalOpen && (
+        <ProfilingRangeModal
+          onApply={setProfilingRange}
+          onClose={() => setProfilingRangeModalOpen(false)}
+          settings={profilingRange}
+        />
+      )}
+    </div>
+  );
+}
+
+type SelectableColumn = {
+  name: string;
+  meta: string;
+};
+
+function ColumnSelectionSummary({
+  columns,
+  selected,
+  onOpen
+}: {
+  columns: SelectableColumn[];
+  selected: string[];
+  onOpen: () => void;
+}) {
+  const selectedPreview = selected.slice(0, 4).join(", ");
+  return (
+    <div className="column-selection-summary">
+      <div>
+        <strong>Columns</strong>
+        <span>
+          {selected.length} of {columns.length} selected
+          {selectedPreview ? ` / ${selectedPreview}${selected.length > 4 ? ", ..." : ""}` : ""}
+        </span>
+      </div>
+      <button className="secondary-button compact-button" onClick={onOpen} type="button">
+        <Table2 size={14} />
+        Columns selection
+      </button>
+    </div>
+  );
+}
+
+function ColumnSelectionModal({
+  columns,
+  onChange,
+  onClose,
+  selected,
+  title
+}: {
+  columns: SelectableColumn[];
+  onChange: (columns: string[]) => void;
+  onClose: () => void;
+  selected: string[];
+  title: string;
+}) {
+  const [searchValue, setSearchValue] = useState("");
+  const [draftSelected, setDraftSelected] = useState(selected);
+  const [lastClickedIndex, setLastClickedIndex] = useState<number | null>(null);
+  const draftSelectedSet = new Set(draftSelected);
+  const normalizedSearch = searchValue.trim().toLowerCase();
+  const filteredColumns = normalizedSearch
+    ? columns.filter((column) =>
+        column.name.toLowerCase().includes(normalizedSearch) ||
+        column.meta.toLowerCase().includes(normalizedSearch)
+      )
+    : columns;
+  const selectedVisibleCount = filteredColumns.filter((column) => draftSelectedSet.has(column.name)).length;
+
+  function applySelection() {
+    onChange(draftSelected);
+    onClose();
+  }
+
+  function toggleColumn(column: SelectableColumn, filteredIndex: number, event: ChangeEvent<HTMLInputElement>) {
+    const nextChecked = event.target.checked;
+    const visibleNames = filteredColumns.map((item) => item.name);
+    let namesToUpdate = [column.name];
+    if (event.nativeEvent instanceof MouseEvent && event.nativeEvent.shiftKey && lastClickedIndex !== null) {
+      const start = Math.min(lastClickedIndex, filteredIndex);
+      const end = Math.max(lastClickedIndex, filteredIndex);
+      namesToUpdate = visibleNames.slice(start, end + 1);
+    }
+    const updateSet = new Set(namesToUpdate);
+    setDraftSelected((current) => {
+      const currentSet = new Set(current);
+      for (const name of updateSet) {
+        if (nextChecked) {
+          currentSet.add(name);
+        } else {
+          currentSet.delete(name);
+        }
+      }
+      return columns.map((item) => item.name).filter((name) => currentSet.has(name));
+    });
+    setLastClickedIndex(filteredIndex);
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section aria-label={title} className="column-selection-modal" role="dialog">
+        <header className="modal-header">
+          <div>
+            <p className="eyebrow">Columns selection</p>
+            <h2>{title}</h2>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Close columns selection">
+            <X size={18} />
+          </button>
+        </header>
+
+        <div className="column-selection-body">
+          <div className="column-selection-tools">
+            <label>
+              Search columns
+              <div className="input-with-icon">
+                <Search size={16} />
+                <input
+                  value={searchValue}
+                  onChange={(event) => {
+                    setSearchValue(event.target.value);
+                    setLastClickedIndex(null);
+                  }}
+                  placeholder="Column name or role"
+                />
+              </div>
+            </label>
+            <div className="section-actions">
+              <button className="secondary-button compact-button" onClick={() => setDraftSelected(columns.map((column) => column.name))} type="button">
+                Show all
+              </button>
+              <button className="secondary-button compact-button" onClick={() => setDraftSelected([])} type="button">
+                Hide all
+              </button>
+            </div>
+          </div>
+
+          <div className="selector-filter-summary">
+            {draftSelected.length} of {columns.length} selected
+            {searchValue.trim() ? ` / ${selectedVisibleCount} of ${filteredColumns.length} matching selected` : ""}
+          </div>
+
+          <div className="column-selector-grid modal-selector-grid">
+            {filteredColumns.map((column, index) => (
+              <label className={draftSelectedSet.has(column.name) ? "selector-column selected" : "selector-column"} key={column.name}>
+                <input
+                  checked={draftSelectedSet.has(column.name)}
+                  onChange={(event) => toggleColumn(column, index, event)}
+                  type="checkbox"
+                />
+                <span>
+                  <strong>{column.name}</strong>
+                  <em>{column.meta}</em>
+                </span>
+              </label>
+            ))}
+            {filteredColumns.length === 0 && (
+              <div className="empty-state compact-empty">No columns match current search</div>
+            )}
+          </div>
+        </div>
+
+        <footer className="modal-actions">
+          <button className="secondary-button" onClick={onClose} type="button">
+            Cancel
+          </button>
+          <button className="primary-button" onClick={applySelection} type="button">
+            Apply selection
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function ProfilingRangeModal({
+  onApply,
+  onClose,
+  settings
+}: {
+  onApply: (settings: ProfilingRangeSettings) => void;
+  onClose: () => void;
+  settings: ProfilingRangeSettings;
+}) {
+  const [draftSettings, setDraftSettings] = useState(settings);
+
+  function updateBoolean(key: keyof Pick<
+    ProfilingRangeSettings,
+    "includeSummary" | "includeUnivariate" | "includeTargetRelations" | "includeSegments" | "includeGraphicSummaries"
+  >, value: boolean) {
+    setDraftSettings((current) => ({ ...current, [key]: value }));
+  }
+
+  function updateNumber(key: keyof Pick<
+    ProfilingRangeSettings,
+    "rowLimit" | "maxTargetFeatures" | "maxSegmentFeatures"
+  >, value: string) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) {
+      return;
+    }
+    const minimum = key === "maxSegmentFeatures" ? 2 : 1;
+    setDraftSettings((current) => ({
+      ...current,
+      [key]: Math.max(minimum, Math.trunc(parsed))
+    }));
+  }
+
+  function applySettings() {
+    onApply(draftSettings);
+    onClose();
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section aria-label="Profiling range" className="profiling-range-modal" role="dialog">
+        <header className="modal-header">
+          <div>
+            <p className="eyebrow">Profiling range</p>
+            <h2>Configure profiling scope</h2>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Close profiling range">
+            <X size={18} />
+          </button>
+        </header>
+
+        <div className="profiling-range-body">
+          <section className="range-section">
+            <div className="panel-header compact-header">
+              <h2>Sections</h2>
+            </div>
+            <div className="range-choice-grid">
+              <label className="check-tile">
+                <input
+                  checked={draftSettings.includeSummary}
+                  onChange={(event) => updateBoolean("includeSummary", event.target.checked)}
+                  type="checkbox"
+                />
+                <span>Dataset summary and quality notes</span>
+              </label>
+              <label className="check-tile">
+                <input
+                  checked={draftSettings.includeUnivariate}
+                  onChange={(event) => updateBoolean("includeUnivariate", event.target.checked)}
+                  type="checkbox"
+                />
+                <span>Univariate column profiles</span>
+              </label>
+              <label className="check-tile">
+                <input
+                  checked={draftSettings.includeTargetRelations}
+                  onChange={(event) => updateBoolean("includeTargetRelations", event.target.checked)}
+                  type="checkbox"
+                />
+                <span>Target vs feature relations</span>
+              </label>
+              <label className="check-tile">
+                <input
+                  checked={draftSettings.includeSegments}
+                  onChange={(event) => updateBoolean("includeSegments", event.target.checked)}
+                  type="checkbox"
+                />
+                <span>Multivariate segment scan</span>
+              </label>
+            </div>
+          </section>
+
+          <section className="range-section">
+            <div className="panel-header compact-header">
+              <h2>Options</h2>
+            </div>
+            <div className="range-choice-grid">
+              <label className="check-tile">
+                <input
+                  checked={draftSettings.includeGraphicSummaries}
+                  onChange={(event) => updateBoolean("includeGraphicSummaries", event.target.checked)}
+                  type="checkbox"
+                />
+                <span>Graphic summaries</span>
+              </label>
+            </div>
+          </section>
+
+          <section className="range-section">
+            <div className="panel-header compact-header">
+              <h2>Limits</h2>
+            </div>
+            <div className="range-number-grid">
+              <label>
+                Graphic source-point limit
+                <input
+                  min={1}
+                  onChange={(event) => updateNumber("rowLimit", event.target.value)}
+                  type="number"
+                  value={draftSettings.rowLimit}
+                />
+              </label>
+              <label>
+                Max target relation features
+                <input
+                  min={1}
+                  onChange={(event) => updateNumber("maxTargetFeatures", event.target.value)}
+                  type="number"
+                  value={draftSettings.maxTargetFeatures}
+                />
+              </label>
+              <label>
+                Max segment scan features
+                <input
+                  min={2}
+                  onChange={(event) => updateNumber("maxSegmentFeatures", event.target.value)}
+                  type="number"
+                  value={draftSettings.maxSegmentFeatures}
+                />
+              </label>
+            </div>
+          </section>
+
+          <div className="insight-item">
+            Lighter ranges finish faster. For a quick look, run only Dataset summary or Univariate profiles.
+          </div>
+        </div>
+
+        <footer className="modal-actions">
+          <button className="secondary-button" onClick={onClose} type="button">
+            Cancel
+          </button>
+          <button className="secondary-button" onClick={() => setDraftSettings(defaultProfilingRangeSettings)} type="button">
+            Reset defaults
+          </button>
+          <button className="primary-button" onClick={applySettings} type="button">
+            Apply range
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function MiniHistogram({ bins }: { bins: Array<{ label: string; count: number; share: number }> }) {
+  if (bins.length === 0) {
+    return <div className="empty-state compact-empty">No numeric distribution available</div>;
+  }
+  const maxCount = Math.max(...bins.map((bin) => bin.count), 1);
+  return (
+    <div className="mini-histogram" aria-label="Mini histogram">
+      <div className="histogram-bars">
+        {bins.map((bin) => (
+          <div className="histogram-bin" key={bin.label} title={`${bin.label}: ${formatInteger(bin.count)}`}>
+            <div style={{ height: `${Math.max(6, (bin.count / maxCount) * 100)}%` }} />
+          </div>
+        ))}
+      </div>
+      <div className="histogram-axis">
+        <span>{bins[0]?.label.split(" - ")[0]}</span>
+        <span>{bins.at(-1)?.label.split(" - ").at(-1)}</span>
+      </div>
+    </div>
+  );
+}
+
+function TargetRelationCard({
+  collapsed,
+  onToggle,
+  relation
+}: {
+  collapsed: boolean;
+  onToggle: () => void;
+  relation: TargetRelationProfile;
+}) {
+  return (
+    <article className={relation.groupStats.length > 0 || relation.numericStats ? "relation-row relation-row-detailed" : "relation-row"}>
+      <button
+        aria-expanded={!collapsed}
+        className="relation-card-toggle"
+        onClick={onToggle}
+        type="button"
+      >
+        <span className="relation-card-title">
+          {collapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
+          <span>
+            <strong>{relation.feature}</strong>
+            <em>{columnRoleLabel(relation.role)} / {relation.kind}</em>
+          </span>
+        </span>
+        <span className="relation-score">
+          <span className="mini-bar" aria-hidden="true">
+            <span style={{ width: `${Math.max(4, relation.score * 100)}%` }} />
+          </span>
+          <em>{relation.signal}</em>
+        </span>
+      </button>
+      {!collapsed && (
+        <div className="relation-card-body">
+          <p>{relation.detail}</p>
+          {relation.numericStats && (
+            <>
+              {relation.scatterPlot && <MiniScatterPlot plot={relation.scatterPlot} />}
+              <div className="numeric-relation-table" role="table" aria-label={`${relation.feature} numeric relationship with ${relation.comparisonColumn}`}>
+                <div className="numeric-relation-row numeric-relation-head" role="row">
+                  <span role="columnheader">Pearson</span>
+                  <span role="columnheader">Spearman</span>
+                  <span role="columnheader">R²</span>
+                  <span role="columnheader">Slope</span>
+                  <span role="columnheader">Intercept</span>
+                  <span role="columnheader">Covariance</span>
+                </div>
+                <div className="numeric-relation-row" role="row">
+                  <span role="cell">{formatSignedNumber(relation.numericStats.pearson)}</span>
+                  <span role="cell">{formatSignedNumber(relation.numericStats.spearman)}</span>
+                  <span role="cell">{formatNumber(relation.numericStats.rSquared)}</span>
+                  <span role="cell">{formatSignedNumber(relation.numericStats.slope)}</span>
+                  <span role="cell">{formatSignedNumber(relation.numericStats.intercept)}</span>
+                  <span role="cell">{formatSignedNumber(relation.numericStats.covariance)}</span>
+                </div>
+              </div>
+            </>
+          )}
+          {relation.groupStats.length > 0 && (
+            <>
+              {relation.densityPlot && <MiniDensityPlot plot={relation.densityPlot} />}
+              <div className="relation-stats-table" role="table" aria-label={`${relation.feature} by ${relation.comparisonColumn}`}>
+                <div className="relation-stats-row relation-stats-head" role="row">
+                  <span role="columnheader">{relation.comparisonColumn}</span>
+                  <span role="columnheader">Rows</span>
+                  <span role="columnheader">Min</span>
+                  <span role="columnheader">Max</span>
+                  <span role="columnheader">Median</span>
+                  <span role="columnheader">Average</span>
+                  <span role="columnheader">Std</span>
+                </div>
+                {relation.groupStats.map((group) => (
+                  <div className="relation-stats-row" key={group.group} role="row">
+                    <span role="cell">
+                      <i style={{ background: group.color }} />
+                      {group.group}
+                    </span>
+                    <span role="cell">{formatInteger(group.count)}</span>
+                    <span role="cell">{formatNumber(group.minimum)}</span>
+                    <span role="cell">{formatNumber(group.maximum)}</span>
+                    <span role="cell">{formatNumber(group.median)}</span>
+                    <span role="cell">{formatNumber(group.mean)}</span>
+                    <span role="cell">{formatNumber(group.stdDev)}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+          {relation.categoricalStats && (
+            <CategoricalRelationDetails
+              comparisonColumn={relation.comparisonColumn}
+              feature={relation.feature}
+              stats={relation.categoricalStats}
+            />
+          )}
+        </div>
+      )}
+    </article>
+  );
+}
+
+function CategoricalRelationDetails({
+  comparisonColumn,
+  feature,
+  stats
+}: {
+  comparisonColumn: string;
+  feature: string;
+  stats: CategoricalRelationStats;
+}) {
+  return (
+    <>
+      <div className="categorical-metric-grid">
+        <ProfileFact label="Cramer's V" value={formatNumber(stats.cramersV)} />
+        <ProfileFact label="Chi-square" value={formatNumber(stats.chiSquare)} />
+        <ProfileFact label="Degrees of freedom" value={formatInteger(stats.degreesFreedom)} />
+        <ProfileFact label="Sparse expected cells" value={formatPercent(stats.sparseCellShare)} />
+      </div>
+      {stats.ordinalTrend && (
+        <div className="ordinal-trend-summary">
+          <strong>Ordinal trend</strong>
+          <span>
+            Spearman {formatSignedNumber(stats.ordinalTrend.spearman)} for target value {stats.ordinalTrend.focusValue}
+          </span>
+          <em>Order: {stats.ordinalTrend.orderBasis}</em>
+        </div>
+      )}
+      <div className="categorical-relation-table" role="table" aria-label={`${feature} distribution by ${comparisonColumn}`}>
+        <div
+          className="categorical-relation-row categorical-relation-head"
+          role="row"
+          style={{ gridTemplateColumns: `minmax(140px, 1.3fr) 72px repeat(${stats.comparisonValues.length}, minmax(130px, 1fr))` }}
+        >
+          <span role="columnheader">{feature}</span>
+          <span role="columnheader">Rows</span>
+          {stats.comparisonValues.map((value) => (
+            <span key={value} role="columnheader">{comparisonColumn}={value}</span>
+          ))}
+        </div>
+        {stats.rows.map((row) => (
+          <div
+            className="categorical-relation-row"
+            key={row.featureValue}
+            role="row"
+            style={{ gridTemplateColumns: `minmax(140px, 1.3fr) 72px repeat(${stats.comparisonValues.length}, minmax(130px, 1fr))` }}
+          >
+            <strong role="cell">{row.featureValue}</strong>
+            <span role="cell">{formatInteger(row.count)}</span>
+            {row.cells.map((cell) => (
+              <span
+                className="categorical-relation-cell"
+                key={cell.comparisonValue}
+                role="cell"
+                style={stats.graphicSummaries ? { backgroundColor: `rgba(46, 163, 154, ${Math.min(0.42, 0.04 + cell.rowShare * 0.42)})` } : undefined}
+                title={`Lift ${formatNumber(cell.lift)} / Pearson residual ${formatSignedNumber(cell.residual)}`}
+              >
+                <b>{formatInteger(cell.count)} ({formatPercent(cell.rowShare)})</b>
+                <em>lift {formatNumber(cell.lift)} / resid {formatSignedNumber(cell.residual)}</em>
+              </span>
+            ))}
+          </div>
+        ))}
+      </div>
+      {stats.sparseCellShare > 0.2 && (
+        <div className="insight-item">
+          Many expected cell counts are below 5; treat chi-square and Cramer's V as exploratory signals.
+        </div>
+      )}
+    </>
+  );
+}
+
+function SegmentScanResults({ profile }: { profile: SegmentProfile }) {
+  const categorical = profile.targetType === "categorical";
+  const maximumDifference = Math.max(...profile.results.map((item) => Math.abs(item.difference)), Number.EPSILON);
+  return (
+    <>
+      <div className="segment-results-table">
+        <div className={`segment-result-row segment-result-head ${categorical ? "categorical" : "continuous"}`}>
+          <span>Segment</span>
+          <span>Rows</span>
+          <span>Support</span>
+          <span>{categorical ? "Target rate" : "Mean"}</span>
+          <span>Baseline</span>
+          <span>Difference</span>
+          {categorical ? <span title="Segment rate divided by the population rate">Lift</span> : <span title="Difference from the rest of the population in pooled standard deviations">Cohen's d</span>}
+          <span title={categorical ? "Weighted Relative Accuracy: support multiplied by the target-rate difference" : "Support multiplied by Cohen's d"}>
+            {categorical ? "WRAcc" : "Impact"}
+          </span>
+          <span>{categorical ? "Rate 95% CI" : "Mean 95% CI"}</span>
+        </div>
+        {profile.results.map((result) => {
+          const barWidth = `${Math.max(2, (Math.abs(result.difference) / maximumDifference) * 50)}%`;
+          return (
+            <div className={`segment-result-row ${categorical ? "categorical" : "continuous"}`} key={`${result.columns.join("|")}:${result.segment}:${result.targetValue}`}>
+              <strong title={result.columns.join(" + ")}>{result.segment}</strong>
+              <span>{formatInteger(result.count)}</span>
+              <span>{formatPercent(result.support)}</span>
+              <span>{formatSegmentMetric(result.segmentValue, result.format)}</span>
+              <span>{formatSegmentMetric(result.baseline, result.format)}</span>
+              <span className={result.difference >= 0 ? "positive-difference" : "negative-difference"}>
+                {profile.graphicSummaries && <i className="segment-difference-bar" style={{ width: barWidth }} />}
+                {formatSignedSegmentMetric(result.difference, result.format)}
+              </span>
+              <span>{categorical ? `${formatNumber(result.relativeLift ?? 0)}x` : formatSignedNumber(result.effectSize ?? 0)}</span>
+              <span>{formatSignedNumber(result.score)}</span>
+              <span>{result.confidenceInterval ? `${formatSegmentMetric(result.confidenceInterval[0], result.format)} - ${formatSegmentMetric(result.confidenceInterval[1], result.format)}` : "n/a"}</span>
+            </div>
+          );
+        })}
+      </div>
+      <p className="segment-method-note">
+        Minimum segment size: {formatInteger(profile.minimumSegmentSize)} rows. Ranked by coverage-adjusted impact; results are exploratory associations, not causal effects.
+      </p>
+    </>
+  );
+}
+
+function MiniScatterPlot({ plot }: { plot: ScatterPlot }) {
+  const width = 640;
+  const height = 220;
+  const padding = { top: 14, right: 18, bottom: 38, left: 48 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const xRange = plot.xMax - plot.xMin || 1;
+  const yRange = plot.yMax - plot.yMin || 1;
+  const xToPx = (value: number) => padding.left + ((value - plot.xMin) / xRange) * plotWidth;
+  const yToPx = (value: number) => padding.top + plotHeight - ((value - plot.yMin) / yRange) * plotHeight;
+  const xTicks = [plot.xMin, plot.xMin + xRange / 2, plot.xMax];
+  const yTicks = [plot.yMin, plot.yMin + yRange / 2, plot.yMax];
+  const sampledPoints = plot.points.length > 700
+    ? plot.points.filter((_, index) => index % Math.ceil(plot.points.length / 700) === 0)
+    : plot.points;
+
+  return (
+    <div className="scatter-plot" aria-label={`${plot.yColumn} by ${plot.xColumn} scatter plot`}>
+      <svg viewBox={`0 0 ${width} ${height}`} role="img">
+        <g className="density-grid">
+          {yTicks.map((tick) => (
+            <line key={`y-${tick}`} x1={padding.left} x2={width - padding.right} y1={yToPx(tick)} y2={yToPx(tick)} />
+          ))}
+          {xTicks.map((tick) => (
+            <line key={`x-${tick}`} x1={xToPx(tick)} x2={xToPx(tick)} y1={padding.top} y2={height - padding.bottom} />
+          ))}
+        </g>
+        <line className="density-axis" x1={padding.left} x2={width - padding.right} y1={height - padding.bottom} y2={height - padding.bottom} />
+        <line className="density-axis" x1={padding.left} x2={padding.left} y1={padding.top} y2={height - padding.bottom} />
+        {sampledPoints.map((point, index) => (
+          <circle
+            className="scatter-point"
+            cx={xToPx(point.x)}
+            cy={yToPx(point.y)}
+            key={`${point.x}-${point.y}-${index}`}
+            r="2.6"
+          />
+        ))}
+        {plot.trendLine && (
+          <line
+            className="scatter-trend"
+            x1={xToPx(plot.trendLine.x1)}
+            x2={xToPx(plot.trendLine.x2)}
+            y1={yToPx(plot.trendLine.y1)}
+            y2={yToPx(plot.trendLine.y2)}
+          />
+        )}
+        <g className="density-labels">
+          {xTicks.map((tick) => (
+            <text key={tick} x={xToPx(tick)} y={height - 20} textAnchor="middle">
+              {formatNumber(tick)}
+            </text>
+          ))}
+          {yTicks.map((tick) => (
+            <text key={tick} x={padding.left - 8} y={yToPx(tick) + 4} textAnchor="end">
+              {formatNumber(tick)}
+            </text>
+          ))}
+          <text x={padding.left + plotWidth / 2} y={height - 4} textAnchor="middle">{plot.xColumn}</text>
+          <text transform={`translate(12 ${padding.top + plotHeight / 2}) rotate(-90)`} textAnchor="middle">{plot.yColumn}</text>
+        </g>
+      </svg>
+    </div>
+  );
+}
+
+function MiniDensityPlot({ plot }: { plot: DensityPlot | null }) {
+  if (!plot || plot.series.length === 0 || plot.yMax <= 0) {
+    return <div className="empty-state compact-empty">No density distribution available</div>;
+  }
+  const width = 640;
+  const height = 190;
+  const padding = { top: 14, right: 18, bottom: 28, left: 42 };
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const xRange = plot.xMax - plot.xMin || 1;
+  const xToPx = (value: number) => padding.left + ((value - plot.xMin) / xRange) * plotWidth;
+  const yToPx = (value: number) => padding.top + plotHeight - (value / plot.yMax) * plotHeight;
+  const baseline = padding.top + plotHeight;
+  const xTicks = [plot.xMin, plot.xMin + xRange / 2, plot.xMax];
+  const yTicks = [0, plot.yMax / 2, plot.yMax];
+
+  return (
+    <div className="density-plot" aria-label="Grouped density plot">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img">
+        <g className="density-grid">
+          {yTicks.map((tick) => (
+            <line
+              key={tick}
+              x1={padding.left}
+              x2={width - padding.right}
+              y1={yToPx(tick)}
+              y2={yToPx(tick)}
+            />
+          ))}
+        </g>
+        <line className="density-axis" x1={padding.left} x2={width - padding.right} y1={baseline} y2={baseline} />
+        <line className="density-axis" x1={padding.left} x2={padding.left} y1={padding.top} y2={baseline} />
+        {plot.series.map((series) => {
+          const linePath = densityLinePath(series.points, xToPx, yToPx);
+          const areaPath = densityAreaPath(series.points, xToPx, yToPx, baseline);
+          return (
+            <g key={series.group}>
+              <path d={areaPath} fill={series.color} opacity="0.22" />
+              <path d={linePath} fill="none" stroke={series.color} strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" />
+            </g>
+          );
+        })}
+        <g className="density-labels">
+          {xTicks.map((tick) => (
+            <text key={tick} x={xToPx(tick)} y={height - 8} textAnchor="middle">
+              {formatNumber(tick)}
+            </text>
+          ))}
+          {yTicks.map((tick) => (
+            <text key={tick} x={padding.left - 8} y={yToPx(tick) + 4} textAnchor="end">
+              {formatNumber(tick)}
+            </text>
+          ))}
+        </g>
+      </svg>
+      <div className="density-legend">
+        {plot.series.map((series) => (
+          <span key={series.group}>
+            <i style={{ background: series.color }} />
+            {series.group}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function densityLinePath(
+  points: DensitySeries["points"],
+  xToPx: (value: number) => number,
+  yToPx: (value: number) => number
+) {
+  return points
+    .map((point, index) => `${index === 0 ? "M" : "L"} ${xToPx(point.x).toFixed(2)} ${yToPx(point.y).toFixed(2)}`)
+    .join(" ");
+}
+
+function densityAreaPath(
+  points: DensitySeries["points"],
+  xToPx: (value: number) => number,
+  yToPx: (value: number) => number,
+  baseline: number
+) {
+  if (points.length === 0) {
+    return "";
+  }
+  const start = points[0];
+  const end = points.at(-1) ?? start;
+  return [
+    `M ${xToPx(start.x).toFixed(2)} ${baseline.toFixed(2)}`,
+    densityLinePath(points, xToPx, yToPx).replace(/^M/, "L"),
+    `L ${xToPx(end.x).toFixed(2)} ${baseline.toFixed(2)}`,
+    "Z"
+  ].join(" ");
+}
+
+function relationCardKey(relation: TargetRelationProfile) {
+  return `${relation.comparisonColumn}\u0000${relation.feature}`;
+}
+
+function MiniDiscreteDistribution({
+  values,
+  limit
+}: {
+  values: Array<{ value: DatasetCellValue; count: number; share: number }>;
+  limit: number;
+}) {
+  const visibleValues = values.slice(0, limit);
+  if (visibleValues.length === 0) {
+    return <div className="empty-state compact-empty">No distribution available</div>;
+  }
+
+  return (
+    <div className="mini-discrete-distribution" aria-label="Value distribution">
+      {visibleValues.map((item) => (
+        <div className="discrete-bar-row" key={displayValue(item.value)} title={`${displayValue(item.value)}: ${formatInteger(item.count)}`}>
+          <span>{displayValue(item.value)}</span>
+          <div className="discrete-bar-track" aria-hidden="true">
+            <div style={{ width: `${Math.max(4, item.share * 100)}%` }} />
+          </div>
+          <strong>{formatPercent(item.share)}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ProfileFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="profile-fact">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
 
 function DataBrowsingPanel({
   datasets,
@@ -3416,6 +5299,951 @@ function mostCommonValue(values: DatasetCellValue[]) {
 
 function roundNumber(value: number) {
   return Number(value.toFixed(6));
+}
+
+function inferTargetColumn(columns: DatasetPreview["columns"], rolesMetadata: DataRolesMetadata) {
+  const names = new Set(columns.map((column) => column.name));
+  if (rolesMetadata.target_column && names.has(rolesMetadata.target_column)) {
+    return rolesMetadata.target_column;
+  }
+  const roleTarget = columns.find((column) => rolesMetadata.column_roles[column.name] === "target");
+  if (roleTarget) {
+    return roleTarget.name;
+  }
+  const commonTargetNames = new Set(["target", "label", "class", "outcome", "churn", "y"]);
+  return columns.find((column) => commonTargetNames.has(column.name.toLowerCase()))?.name ?? "";
+}
+
+function inferTargetType(
+  column: DatasetPreview["columns"][number] | null,
+  rows: Array<Record<string, DatasetCellValue>>,
+  rolesMetadata: DataRolesMetadata
+): EffectiveTargetType {
+  if (!column) {
+    return "categorical";
+  }
+  const role = columnRoleForColumn(column, rolesMetadata);
+  if (["feature_categorical", "feature_ordinal", "boolean", "text"].includes(role)) {
+    return "categorical";
+  }
+  if (role === "feature_continuous") {
+    return "continuous";
+  }
+  if (column.type === "boolean" || column.type === "text") {
+    return "categorical";
+  }
+  if (column.type !== "number") {
+    return "categorical";
+  }
+
+  const present = rows.map((row) => normalizeCellValue(row[column.name])).filter(isPresentCell);
+  const uniqueValues = [...new Set(present.map(displayValue))];
+  if (uniqueValues.length <= 2) {
+    return "categorical";
+  }
+  const lowCardinalityLimit = Math.min(20, Math.max(5, Math.floor(present.length * 0.05)));
+  if (uniqueValues.length <= lowCardinalityLimit) {
+    return "categorical";
+  }
+  return "continuous";
+}
+
+function buildColumnProfile(
+  column: DatasetPreview["columns"][number],
+  rows: Array<Record<string, DatasetCellValue>>,
+  rolesMetadata: DataRolesMetadata,
+  includeGraphics: boolean
+): ColumnProfile {
+  const values = rows.map((row) => normalizeCellValue(row[column.name]));
+  const present = values.filter(isPresentCell);
+  const numericValues = present
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
+    .sort((left, right) => left - right);
+  const topValues = countTopValues(present, rows.length);
+  const role = columnRoleForColumn(column, rolesMetadata);
+  const mean = numericValues.length === present.length && numericValues.length > 0
+    ? numericValues.reduce((total, value) => total + value, 0) / numericValues.length
+    : null;
+  const notes: string[] = [];
+  const unique = new Set(present.map(displayValue)).size;
+  const missingRate = rows.length === 0 ? 0 : (rows.length - present.length) / rows.length;
+  const uniqueRate = present.length === 0 ? 0 : unique / present.length;
+
+  if (missingRate >= 0.3) {
+    notes.push("High missingness");
+  }
+  if (uniqueRate >= 0.95 && !["identifier", "timestamp", "period_id"].includes(role)) {
+    notes.push("Near-unique values");
+  }
+  if (unique <= 1 && present.length > 0) {
+    notes.push("Constant column");
+  }
+  if (role === "ignored") {
+    notes.push("Excluded by role");
+  }
+  if (["feature_categorical", "text"].includes(role) && unique > 50) {
+    notes.push("High-cardinality category");
+  }
+
+  return {
+    name: column.name,
+    type: column.type,
+    role,
+    count: present.length,
+    missing: rows.length - present.length,
+    missingRate,
+    unique,
+    uniqueRate,
+    mean: mean === null ? null : roundNumber(mean),
+    median: mean === null ? null : roundNumber(medianNumber(numericValues)),
+    minimum: mean === null ? minComparableValue(present) : numericValues[0] ?? null,
+    maximum: mean === null ? maxComparableValue(present) : numericValues.at(-1) ?? null,
+    stdDev: mean === null ? null : roundNumber(standardDeviation(numericValues)),
+    mode: topValues[0]?.value ?? null,
+    topValues,
+    histogram: mean === null || !includeGraphics ? [] : buildHistogramBins(numericValues),
+    examples: present.slice(0, 3),
+    notes
+  };
+}
+
+function usesDiscreteDistribution(profile: ColumnProfile) {
+  return profile.mean !== null && profile.unique > 0 && profile.unique <= 12;
+}
+
+function buildTargetRelations(
+  rows: Array<Record<string, DatasetCellValue>>,
+  columns: DatasetPreview["columns"],
+  rolesMetadata: DataRolesMetadata,
+  comparisonColumn: string,
+  comparisonType: EffectiveTargetType,
+  includeGraphics: boolean
+): TargetRelationProfile[] {
+  const comparison = columns.find((column) => column.name === comparisonColumn);
+  if (!comparison) {
+    return [];
+  }
+
+  const comparisonIsNumeric = comparisonType === "continuous";
+  const relations = columns
+    .filter((column) => column.name !== comparison.name)
+    .filter((column) => !["ignored", "identifier"].includes(columnRoleForColumn(column, rolesMetadata)))
+    .map((feature) => {
+      const role = columnRoleForColumn(feature, rolesMetadata);
+      const featureIsNumeric = isNumericMeasureColumn(feature, rolesMetadata, rows, false);
+      const relationRows = rows.filter((row) =>
+        isPresentCell(normalizeCellValue(row[comparison.name])) &&
+        isPresentCell(normalizeCellValue(row[feature.name]))
+      );
+      if (relationRows.length < 3) {
+        return null;
+      }
+
+      if (comparisonIsNumeric && featureIsNumeric) {
+        const pairs = relationRows
+          .map((row) => [Number(row[feature.name]), Number(row[comparison.name])] as const)
+          .filter(([featureValue, targetValue]) => Number.isFinite(featureValue) && Number.isFinite(targetValue));
+        const correlation = pearsonCorrelation(pairs);
+        if (correlation === null) {
+          return null;
+        }
+        const numericStats = numericRelationStats(pairs);
+        const scatterPlot = includeGraphics ? buildScatterPlot(pairs, feature.name, comparison.name, numericStats) : null;
+        return {
+          feature: feature.name,
+          role,
+          type: feature.type,
+          kind: "numeric correlation",
+          score: Math.min(1, Math.abs(correlation)),
+          signal: `r ${formatSignedNumber(correlation)}`,
+          detail: `${feature.name} moves ${correlation >= 0 ? "with" : "against"} ${comparison.name} in the loaded sample.`,
+          comparisonColumn: comparison.name,
+          groupStats: [],
+          densityPlot: null,
+          numericStats,
+          scatterPlot,
+          categoricalStats: null
+        };
+      }
+
+      if (comparisonIsNumeric && !featureIsNumeric) {
+        return groupedMeanRelation({
+          rows: relationRows,
+          groupColumn: feature.name,
+          numericColumn: comparison.name,
+          feature,
+          role,
+          kind: "comparison mean by feature",
+          comparisonColumn: comparison.name,
+          includeGraphics
+        });
+      }
+
+      if (!comparisonIsNumeric && featureIsNumeric) {
+        return groupedMeanRelation({
+          rows: relationRows,
+          groupColumn: comparison.name,
+          numericColumn: feature.name,
+          feature,
+          role,
+          kind: "feature stats by comparison",
+          comparisonColumn: comparison.name,
+          includeGraphics
+        });
+      }
+
+      return categoricalRelation(relationRows, comparison.name, feature, role, includeGraphics);
+    })
+    .filter((relation): relation is TargetRelationProfile => relation !== null);
+
+  return relations;
+}
+
+function groupedMeanRelation({
+  rows,
+  groupColumn,
+  numericColumn,
+  feature,
+  role,
+  kind,
+  comparisonColumn,
+  includeGraphics
+}: {
+  rows: Array<Record<string, DatasetCellValue>>;
+  groupColumn: string;
+  numericColumn: string;
+  feature: DatasetPreview["columns"][number];
+  role: string;
+  kind: string;
+  comparisonColumn: string;
+  includeGraphics: boolean;
+}): TargetRelationProfile | null {
+  const groups = new Map<string, number[]>();
+  for (const row of rows) {
+    const numericValue = Number(row[numericColumn]);
+    if (!Number.isFinite(numericValue)) {
+      continue;
+    }
+    const group = displayValue(row[groupColumn]);
+    groups.set(group, [...(groups.get(group) ?? []), numericValue]);
+  }
+
+  const minimumGroupSize = Math.max(3, Math.floor(rows.length * 0.03));
+  const summaries = [...groups.entries()]
+    .map(([group, values], index) => {
+      const sortedValues = [...values].sort((left, right) => left - right);
+      return {
+        group,
+        count: values.length,
+        minimum: sortedValues[0] ?? 0,
+        maximum: sortedValues.at(-1) ?? 0,
+        median: medianNumber(sortedValues),
+        mean: values.reduce((total, value) => total + value, 0) / values.length,
+        stdDev: standardDeviation(sortedValues),
+        color: comparisonColor(index)
+      };
+    })
+    .filter((summary) => summary.count >= minimumGroupSize);
+  if (summaries.length < 2) {
+    return null;
+  }
+
+  const allValues = [...groups.values()].flat();
+  const spread = standardDeviation(allValues);
+  const ordered = summaries.sort((left, right) => right.mean - left.mean);
+  const range = ordered[0].mean - ordered.at(-1)!.mean;
+  const score = spread === 0 ? 0 : Math.min(1, Math.abs(range) / (spread * 4));
+  const groupStats = ordered.map((summary) => ({
+    ...summary,
+    minimum: roundNumber(summary.minimum),
+    maximum: roundNumber(summary.maximum),
+    median: roundNumber(summary.median),
+    mean: roundNumber(summary.mean),
+    stdDev: roundNumber(summary.stdDev)
+  }));
+  return {
+    feature: feature.name,
+    role,
+    type: feature.type,
+    kind,
+    score,
+    signal: `effect ${formatNumber(score)}`,
+    detail: `${ordered[0].group} has the highest mean (${formatNumber(ordered[0].mean)}), ${ordered.at(-1)!.group} the lowest (${formatNumber(ordered.at(-1)!.mean)}).`,
+    comparisonColumn,
+    groupStats,
+    densityPlot: includeGraphics ? buildDensityPlot(groupStats, groups) : null,
+    numericStats: null,
+    scatterPlot: null,
+    categoricalStats: null
+  };
+}
+
+function categoricalRelation(
+  rows: Array<Record<string, DatasetCellValue>>,
+  targetColumn: string,
+  feature: DatasetPreview["columns"][number],
+  role: string,
+  includeGraphics: boolean
+): TargetRelationProfile | null {
+  const targetValues = sortCategoryValues(uniqueDisplayValues(rows, targetColumn));
+  const rawFeatureValues = uniqueDisplayValues(rows, feature.name);
+  const featureValues = role === "feature_ordinal"
+    ? orderOrdinalValues(rawFeatureValues)
+    : rawFeatureValues;
+  if (targetValues.length < 2 || featureValues.length < 2 || featureValues.length > 50) {
+    return null;
+  }
+
+  const rowTotals = new Map<string, number>();
+  const columnTotals = new Map<string, number>();
+  const cells = new Map<string, number>();
+  for (const row of rows) {
+    const targetValue = displayValue(row[targetColumn]);
+    const featureValue = displayValue(row[feature.name]);
+    rowTotals.set(targetValue, (rowTotals.get(targetValue) ?? 0) + 1);
+    columnTotals.set(featureValue, (columnTotals.get(featureValue) ?? 0) + 1);
+    cells.set(`${targetValue}\u0000${featureValue}`, (cells.get(`${targetValue}\u0000${featureValue}`) ?? 0) + 1);
+  }
+
+  let chiSquare = 0;
+  let sparseCells = 0;
+  let strongest = { targetValue: "", featureValue: "", lift: 0, residual: 0 };
+  const tableRows = featureValues.map((featureValue) => {
+    const rowCount = columnTotals.get(featureValue) ?? 0;
+    const tableCells = targetValues.map((targetValue) => {
+      const observed = cells.get(`${targetValue}\u0000${featureValue}`) ?? 0;
+      const expected = ((rowTotals.get(targetValue) ?? 0) * rowCount) / rows.length;
+      if (expected < 5) {
+        sparseCells += 1;
+      }
+      const residual = expected > 0 ? (observed - expected) / Math.sqrt(expected) : 0;
+      const lift = expected > 0 ? observed / expected : 0;
+      if (!strongest.featureValue || Math.abs(residual) > Math.abs(strongest.residual)) {
+        strongest = { targetValue, featureValue, lift, residual };
+      }
+      if (expected > 0) {
+        chiSquare += ((observed - expected) ** 2) / expected;
+      }
+      return {
+        comparisonValue: targetValue,
+        count: observed,
+        rowShare: rowCount === 0 ? 0 : observed / rowCount,
+        lift,
+        residual
+      };
+    });
+    return { featureValue, count: rowCount, cells: tableCells };
+  });
+
+  const ordinalTrend = role === "feature_ordinal" && targetValues.length === 2
+    ? buildOrdinalTrend(rows, feature.name, targetColumn, featureValues, targetValues.at(-1)!)
+    : null;
+
+  const degreesFreedom = (targetValues.length - 1) * (featureValues.length - 1);
+  const cellCount = targetValues.length * featureValues.length;
+
+  const denominator = rows.length * Math.max(1, Math.min(targetValues.length - 1, featureValues.length - 1));
+  const cramersV = denominator === 0 ? 0 : Math.sqrt(chiSquare / denominator);
+  return {
+    feature: feature.name,
+    role,
+    type: feature.type,
+    kind: "categorical association",
+    score: Math.min(1, cramersV),
+    signal: `V ${formatNumber(cramersV)}`,
+    detail: `${feature.name}=${strongest.featureValue} has the strongest cell deviation for ${targetColumn}=${strongest.targetValue} (lift ${formatNumber(strongest.lift)}, residual ${formatSignedNumber(strongest.residual)}).`,
+    comparisonColumn: targetColumn,
+    groupStats: [],
+    densityPlot: null,
+    numericStats: null,
+    scatterPlot: null,
+    categoricalStats: {
+      comparisonValues: targetValues,
+      rows: tableRows,
+      chiSquare: roundNumber(chiSquare),
+      degreesFreedom,
+      cramersV: roundNumber(cramersV),
+      sparseCellShare: cellCount === 0 ? 0 : sparseCells / cellCount,
+      ordinalTrend,
+      graphicSummaries: includeGraphics
+    }
+  };
+}
+
+function buildSegmentProfile(
+  rows: Array<Record<string, DatasetCellValue>>,
+  columns: DatasetPreview["columns"],
+  rolesMetadata: DataRolesMetadata,
+  targetColumn: string,
+  targetType: EffectiveTargetType,
+  maxSegmentFeatures: number,
+  includeGraphics: boolean
+): SegmentProfile | null {
+  const target = columns.find((column) => column.name === targetColumn);
+  if (!target) {
+    return null;
+  }
+
+  const candidates = columns
+    .filter((column) => column.name !== targetColumn)
+    .filter((column) => {
+      const role = columnRoleForColumn(column, rolesMetadata);
+      const uniqueCount = uniqueDisplayValues(rows, column.name).length;
+      return !["ignored", "identifier"].includes(role) && uniqueCount >= 2 && uniqueCount <= 12;
+    })
+    .slice(0, maxSegmentFeatures);
+  if (candidates.length < 2) {
+    return null;
+  }
+
+  const validRows = rows.filter((row) => {
+    const targetValue = normalizeCellValue(row[targetColumn]);
+    return isPresentCell(targetValue) && (targetType !== "continuous" || Number.isFinite(Number(targetValue)));
+  });
+  if (validRows.length === 0) {
+    return null;
+  }
+  const minimumGroupSize = Math.max(5, Math.floor(validRows.length * 0.03));
+
+  const featurePairs: Array<typeof candidates> = [];
+  for (let left = 0; left < candidates.length - 1; left += 1) {
+    for (let right = left + 1; right < candidates.length; right += 1) {
+      featurePairs.push([candidates[left], candidates[right]]);
+    }
+  }
+
+  const results: SegmentResult[] = [];
+  let segmentsEvaluated = 0;
+  const numericTargetValues = targetType === "continuous"
+    ? validRows.map((row) => Number(row[targetColumn])).filter(Number.isFinite)
+    : [];
+  const numericBaseline = numericTargetValues.length > 0
+    ? numericTargetValues.reduce((total, value) => total + value, 0) / numericTargetValues.length
+    : 0;
+  const numericTargetSum = numericTargetValues.reduce((total, value) => total + value, 0);
+  const numericTargetSumSquares = numericTargetValues.reduce((total, value) => total + value ** 2, 0);
+  const categoryCounts = new Map<string, number>();
+  if (targetType === "categorical") {
+    for (const row of validRows) {
+      const label = displayValue(row[targetColumn]);
+      categoryCounts.set(label, (categoryCounts.get(label) ?? 0) + 1);
+    }
+  }
+  const orderedTargetValues = [...categoryCounts.entries()]
+    .sort((left, right) => left[1] - right[1] || left[0].localeCompare(right[0]))
+    .map(([value]) => value);
+  const targetValuesToScan = orderedTargetValues.length === 2 ? orderedTargetValues.slice(0, 1) : orderedTargetValues;
+
+  for (const pair of featurePairs) {
+    const groups = new Map<string, { label: string; rows: Array<Record<string, DatasetCellValue>> }>();
+    for (const row of validRows) {
+      const values = pair.map((column) => displayValue(row[column.name]));
+      if (values.some((value) => value === "null")) {
+        continue;
+      }
+      const key = values.join("\u001f");
+      const group = groups.get(key) ?? {
+        label: pair.map((column, index) => `${column.name}=${values[index]}`).join(" / "),
+        rows: []
+      };
+      group.rows.push(row);
+      groups.set(key, group);
+    }
+
+    for (const group of groups.values()) {
+      if (group.rows.length < minimumGroupSize || group.rows.length >= validRows.length) {
+        continue;
+      }
+      segmentsEvaluated += 1;
+      const support = group.rows.length / validRows.length;
+      if (targetType === "continuous") {
+        const values = group.rows.map((row) => Number(row[targetColumn])).filter(Number.isFinite);
+        const restCount = numericTargetValues.length - values.length;
+        if (values.length < 2 || restCount < 2) {
+          continue;
+        }
+        const segmentSum = values.reduce((total, value) => total + value, 0);
+        const segmentSumSquares = values.reduce((total, value) => total + value ** 2, 0);
+        const restSum = numericTargetSum - segmentSum;
+        const restSumSquares = numericTargetSumSquares - segmentSumSquares;
+        const segmentMean = segmentSum / values.length;
+        const restMean = restSum / restCount;
+        const segmentDeviation = sampleDeviationFromMoments(values.length, segmentSum, segmentSumSquares);
+        const restDeviation = sampleDeviationFromMoments(restCount, restSum, restSumSquares);
+        const pooledVariance = (((values.length - 1) * segmentDeviation ** 2) + ((restCount - 1) * restDeviation ** 2))
+          / (values.length + restCount - 2);
+        const pooledDeviation = Math.sqrt(Math.max(0, pooledVariance));
+        const effectSize = pooledDeviation === 0 ? 0 : (segmentMean - restMean) / pooledDeviation;
+        const standardError = segmentDeviation / Math.sqrt(values.length);
+        results.push({
+          columns: pair.map((column) => column.name),
+          segment: group.label,
+          count: values.length,
+          support,
+          targetValue: `mean ${targetColumn}`,
+          baseline: numericBaseline,
+          segmentValue: segmentMean,
+          difference: segmentMean - numericBaseline,
+          relativeLift: null,
+          confidenceInterval: [segmentMean - 1.96 * standardError, segmentMean + 1.96 * standardError],
+          effectSize,
+          score: support * effectSize,
+          format: "number"
+        });
+        continue;
+      }
+
+      for (const targetValue of targetValuesToScan) {
+        const targetCount = group.rows.filter((row) => displayValue(row[targetColumn]) === targetValue).length;
+        const segmentRate = targetCount / group.rows.length;
+        const baseline = (categoryCounts.get(targetValue) ?? 0) / validRows.length;
+        const difference = segmentRate - baseline;
+        results.push({
+          columns: pair.map((column) => column.name),
+          segment: group.label,
+          count: group.rows.length,
+          support,
+          targetValue: `${targetColumn}=${targetValue}`,
+          baseline,
+          segmentValue: segmentRate,
+          difference,
+          relativeLift: baseline === 0 ? null : segmentRate / baseline,
+          confidenceInterval: wilsonInterval(targetCount, group.rows.length),
+          effectSize: null,
+          score: support * difference,
+          format: "percent"
+        });
+      }
+    }
+  }
+
+  return {
+    targetColumn,
+    targetType,
+    candidateFeatures: candidates.map((column) => column.name),
+    pairsScanned: featurePairs.length,
+    segmentsEvaluated,
+    minimumSegmentSize: minimumGroupSize,
+    graphicSummaries: includeGraphics,
+    results: results.sort((left, right) => Math.abs(right.score) - Math.abs(left.score)).slice(0, 12)
+  };
+}
+
+function wilsonInterval(successes: number, trials: number): [number, number] {
+  if (trials === 0) {
+    return [0, 0];
+  }
+  const z = 1.96;
+  const proportion = successes / trials;
+  const denominator = 1 + (z ** 2) / trials;
+  const center = (proportion + (z ** 2) / (2 * trials)) / denominator;
+  const margin = (z / denominator) * Math.sqrt((proportion * (1 - proportion) / trials) + (z ** 2) / (4 * trials ** 2));
+  return [Math.max(0, center - margin), Math.min(1, center + margin)];
+}
+
+function sampleDeviationFromMoments(count: number, sum: number, sumSquares: number) {
+  if (count < 2) {
+    return 0;
+  }
+  const variance = Math.max(0, (sumSquares - (sum ** 2) / count) / (count - 1));
+  return Math.sqrt(variance);
+}
+
+function buildDatasetQualityNotes(
+  profiles: ColumnProfile[],
+  rowCount: number,
+  rolesMetadata: DataRolesMetadata,
+  targetColumn: string
+) {
+  const notes: string[] = [];
+  if (!targetColumn) {
+    notes.push("No target role is set; target-feature profiling is waiting for metadata.");
+  }
+  if (rolesMetadata.dataset_roles.length === 0) {
+    notes.push("Dataset role is not set; mark training, validation, scoring, or monitoring intent in Data Roles.");
+  }
+  const highMissing = profiles.filter((profile) => profile.missingRate >= 0.3 && profile.role !== "ignored");
+  if (highMissing.length > 0) {
+    notes.push(`${highMissing.length} columns have at least 30% missing values.`);
+  }
+  const nearUnique = profiles.filter((profile) =>
+    profile.uniqueRate >= 0.95 && !["identifier", "timestamp", "period_id", "ignored"].includes(profile.role)
+  );
+  if (nearUnique.length > 0) {
+    notes.push(`${nearUnique.length} non-ID columns look near-unique; review roles before modeling.`);
+  }
+  const constants = profiles.filter((profile) => profile.unique <= 1 && profile.count > 0);
+  if (constants.length > 0) {
+    notes.push(`${constants.length} columns are constant in ${formatInteger(rowCount)} profiled rows.`);
+  }
+  return notes;
+}
+
+function isNumericMeasureColumn(
+  column: DatasetPreview["columns"][number],
+  rolesMetadata: DataRolesMetadata,
+  rows: Array<Record<string, DatasetCellValue>>,
+  isTarget: boolean
+) {
+  const role = columnRoleForColumn(column, rolesMetadata);
+  if (role === "feature_continuous" || role === "sample_weight") {
+    return true;
+  }
+  if (role === "feature_categorical" || role === "feature_ordinal" || role === "boolean") {
+    return false;
+  }
+  if (column.type !== "number") {
+    return false;
+  }
+  if (!isTarget) {
+    return true;
+  }
+  const present = rows.map((row) => normalizeCellValue(row[column.name])).filter(isPresentCell);
+  const unique = new Set(present.map(displayValue)).size;
+  return unique > Math.min(20, Math.max(2, Math.floor(present.length * 0.1)));
+}
+
+function pearsonCorrelation(pairs: Array<readonly [number, number]>) {
+  if (pairs.length < 3) {
+    return null;
+  }
+  const meanX = pairs.reduce((total, pair) => total + pair[0], 0) / pairs.length;
+  const meanY = pairs.reduce((total, pair) => total + pair[1], 0) / pairs.length;
+  let numerator = 0;
+  let sumX = 0;
+  let sumY = 0;
+  for (const [x, y] of pairs) {
+    const dx = x - meanX;
+    const dy = y - meanY;
+    numerator += dx * dy;
+    sumX += dx ** 2;
+    sumY += dy ** 2;
+  }
+  const denominator = Math.sqrt(sumX * sumY);
+  return denominator === 0 ? null : numerator / denominator;
+}
+
+function numericRelationStats(pairs: Array<readonly [number, number]>): NumericRelationStats {
+  const pearson = pearsonCorrelation(pairs) ?? 0;
+  const spearman = spearmanCorrelation(pairs) ?? 0;
+  const meanX = pairs.reduce((total, pair) => total + pair[0], 0) / pairs.length;
+  const meanY = pairs.reduce((total, pair) => total + pair[1], 0) / pairs.length;
+  let covarianceNumerator = 0;
+  let varianceXNumerator = 0;
+  for (const [x, y] of pairs) {
+    covarianceNumerator += (x - meanX) * (y - meanY);
+    varianceXNumerator += (x - meanX) ** 2;
+  }
+  const covariance = pairs.length > 1 ? covarianceNumerator / (pairs.length - 1) : 0;
+  const slope = varianceXNumerator === 0 ? 0 : covarianceNumerator / varianceXNumerator;
+  const intercept = meanY - slope * meanX;
+  return {
+    pearson: roundNumber(pearson),
+    spearman: roundNumber(spearman),
+    rSquared: roundNumber(pearson ** 2),
+    covariance: roundNumber(covariance),
+    slope: roundNumber(slope),
+    intercept: roundNumber(intercept)
+  };
+}
+
+function spearmanCorrelation(pairs: Array<readonly [number, number]>) {
+  if (pairs.length < 3) {
+    return null;
+  }
+  const xRanks = rankValues(pairs.map((pair) => pair[0]));
+  const yRanks = rankValues(pairs.map((pair) => pair[1]));
+  return pearsonCorrelation(xRanks.map((rank, index) => [rank, yRanks[index]] as const));
+}
+
+function buildOrdinalTrend(
+  rows: Array<Record<string, DatasetCellValue>>,
+  featureColumn: string,
+  targetColumn: string,
+  orderedFeatureValues: string[],
+  focusValue: string
+) {
+  const rankByValue = new Map(orderedFeatureValues.map((value, index) => [value, index + 1]));
+  const pairs = rows
+    .map((row) => {
+      const featureValue = displayValue(row[featureColumn]);
+      const targetValue = displayValue(row[targetColumn]);
+      const rank = rankByValue.get(featureValue);
+      return rank === undefined ? null : [rank, targetValue === focusValue ? 1 : 0] as const;
+    })
+    .filter((pair): pair is readonly [number, 0 | 1] => pair !== null);
+  const spearman = spearmanCorrelation(pairs);
+  if (spearman === null) {
+    return null;
+  }
+  const numericOrder = orderedFeatureValues.every((value) => Number.isFinite(Number(value)));
+  return {
+    focusValue,
+    spearman: roundNumber(spearman),
+    orderBasis: numericOrder ? "numeric ascending" : "observed category order"
+  };
+}
+
+function sortCategoryValues(values: string[]) {
+  const numeric = values.every((value) => Number.isFinite(Number(value)));
+  return [...values].sort((left, right) => numeric
+    ? Number(left) - Number(right)
+    : left.localeCompare(right)
+  );
+}
+
+function orderOrdinalValues(values: string[]) {
+  const numeric = values.every((value) => Number.isFinite(Number(value)));
+  return numeric ? sortCategoryValues(values) : values;
+}
+
+function rankValues(values: number[]) {
+  const sorted = values
+    .map((value, index) => ({ value, index }))
+    .sort((left, right) => left.value - right.value);
+  const ranks = Array(values.length).fill(0);
+  let index = 0;
+  while (index < sorted.length) {
+    let end = index + 1;
+    while (end < sorted.length && sorted[end].value === sorted[index].value) {
+      end += 1;
+    }
+    const averageRank = (index + 1 + end) / 2;
+    for (let cursor = index; cursor < end; cursor += 1) {
+      ranks[sorted[cursor].index] = averageRank;
+    }
+    index = end;
+  }
+  return ranks;
+}
+
+function buildScatterPlot(
+  pairs: Array<readonly [number, number]>,
+  xColumn: string,
+  yColumn: string,
+  stats: NumericRelationStats
+): ScatterPlot | null {
+  if (pairs.length === 0) {
+    return null;
+  }
+  const xValues = pairs.map((pair) => pair[0]);
+  const yValues = pairs.map((pair) => pair[1]);
+  const xMinRaw = Math.min(...xValues);
+  const xMaxRaw = Math.max(...xValues);
+  const yMinRaw = Math.min(...yValues);
+  const yMaxRaw = Math.max(...yValues);
+  const xPadding = (xMaxRaw - xMinRaw || Math.max(1, Math.abs(xMinRaw) * 0.1)) * 0.06;
+  const yPadding = (yMaxRaw - yMinRaw || Math.max(1, Math.abs(yMinRaw) * 0.1)) * 0.06;
+  const xMin = xMinRaw - xPadding;
+  const xMax = xMaxRaw + xPadding;
+  const yMin = yMinRaw - yPadding;
+  const yMax = yMaxRaw + yPadding;
+  const trendLine = Number.isFinite(stats.slope) && Number.isFinite(stats.intercept)
+    ? {
+      x1: xMinRaw,
+      y1: stats.slope * xMinRaw + stats.intercept,
+      x2: xMaxRaw,
+      y2: stats.slope * xMaxRaw + stats.intercept
+    }
+    : null;
+  return {
+    xColumn,
+    yColumn,
+    xMin,
+    xMax,
+    yMin,
+    yMax,
+    points: pairs.map(([x, y]) => ({ x, y })),
+    trendLine
+  };
+}
+
+function countTopValues(values: DatasetCellValue[], denominator: number) {
+  const counts = new Map<string, { value: DatasetCellValue; count: number }>();
+  for (const value of values) {
+    const key = displayValue(value);
+    const current = counts.get(key);
+    counts.set(key, { value, count: (current?.count ?? 0) + 1 });
+  }
+  return [...counts.values()]
+    .sort((left, right) => right.count - left.count || displayValue(left.value).localeCompare(displayValue(right.value)))
+    .slice(0, 10)
+    .map((item) => ({
+      ...item,
+      share: denominator === 0 ? 0 : item.count / denominator
+    }));
+}
+
+function buildHistogramBins(values: number[], binCount = 12) {
+  if (values.length === 0) {
+    return [];
+  }
+  const minimum = values[0];
+  const maximum = values.at(-1) ?? minimum;
+  if (minimum === maximum) {
+    return [{
+      label: formatNumber(minimum),
+      count: values.length,
+      share: 1
+    }];
+  }
+
+  const width = (maximum - minimum) / binCount;
+  const bins = Array.from({ length: binCount }, (_, index) => {
+    const start = minimum + index * width;
+    const end = index === binCount - 1 ? maximum : start + width;
+    return {
+      label: `${formatNumber(start)} - ${formatNumber(end)}`,
+      count: 0,
+      share: 0
+    };
+  });
+
+  for (const value of values) {
+    const index = Math.min(binCount - 1, Math.floor((value - minimum) / width));
+    bins[index].count += 1;
+  }
+
+  return bins.map((bin) => ({
+    ...bin,
+    share: bin.count / values.length
+  }));
+}
+
+function buildDensityPlot(groupStats: NumericGroupStats[], groups: Map<string, number[]>, pointCount = 80): DensityPlot | null {
+  const groupEntries = groupStats
+    .map((summary) => ({
+      summary,
+      values: [...(groups.get(summary.group) ?? [])].sort((left, right) => left - right)
+    }))
+    .filter((entry) => entry.values.length > 0);
+  const allValues = groupEntries.flatMap((entry) => entry.values);
+  if (allValues.length === 0) {
+    return null;
+  }
+
+  const sortedValues = [...allValues].sort((left, right) => left - right);
+  const minimum = sortedValues[0];
+  const maximum = sortedValues.at(-1) ?? minimum;
+  const rawRange = maximum - minimum;
+  const range = rawRange || Math.max(1, Math.abs(minimum) * 0.1);
+  const xMin = minimum - range * 0.08;
+  const xMax = maximum + range * 0.08;
+  const step = (xMax - xMin) / Math.max(1, pointCount - 1);
+  const xValues = Array.from({ length: pointCount }, (_, index) => xMin + index * step);
+  let yMax = 0;
+
+  const series = groupEntries.map((entry) => {
+    const stdDev = standardDeviation(entry.values);
+    const fallbackBandwidth = Math.max(range / 18, 0.001);
+    const silverman = 1.06 * (stdDev || fallbackBandwidth) * entry.values.length ** -0.2;
+    const bandwidth = Math.max(silverman, fallbackBandwidth);
+    const coefficient = 1 / (entry.values.length * bandwidth * Math.sqrt(2 * Math.PI));
+    const points = xValues.map((x) => {
+      const kernelSum = entry.values.reduce((total, value) => {
+        const z = (x - value) / bandwidth;
+        return total + Math.exp(-0.5 * z * z);
+      }, 0);
+      const y = coefficient * kernelSum;
+      yMax = Math.max(yMax, y);
+      return { x, y };
+    });
+    return {
+      group: entry.summary.group,
+      color: entry.summary.color,
+      points
+    };
+  });
+
+  return { xMin, xMax, yMax, series };
+}
+
+function comparisonColor(index: number) {
+  const colors = ["#2ea39a", "#4477c2", "#c08522", "#8b6bd6", "#cf5f5f", "#5a9f45"];
+  return colors[index % colors.length];
+}
+
+function syncSelectedNames(current: string[] | null, available: string[]) {
+  if (current === null) {
+    return null;
+  }
+  const availableSet = new Set(available);
+  const next = current.filter((name) => availableSet.has(name));
+  if (next.length === current.length && next.every((name, index) => name === current[index])) {
+    return current;
+  }
+  return next;
+}
+
+function uniqueDisplayValues(rows: Array<Record<string, DatasetCellValue>>, column: string) {
+  return [...new Set(
+    rows
+      .map((row) => normalizeCellValue(row[column]))
+      .filter(isPresentCell)
+      .map(displayValue)
+  )];
+}
+
+function normalizeCellValue(value: unknown): DatasetCellValue {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null) {
+    return value;
+  }
+  return null;
+}
+
+function isPresentCell(value: DatasetCellValue): value is Exclude<DatasetCellValue, null> {
+  return value !== null && value !== "";
+}
+
+function medianNumber(values: number[]) {
+  if (values.length === 0) {
+    return 0;
+  }
+  const middle = Math.floor(values.length / 2);
+  return values.length % 2 === 0
+    ? (values[middle - 1] + values[middle]) / 2
+    : values[middle];
+}
+
+function standardDeviation(values: number[]) {
+  if (values.length < 2) {
+    return 0;
+  }
+  const mean = values.reduce((total, value) => total + value, 0) / values.length;
+  const variance = values.reduce((total, value) => total + (value - mean) ** 2, 0) / (values.length - 1);
+  return Math.sqrt(variance);
+}
+
+function formatInteger(value: number) {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value);
+}
+
+function formatNumber(value: number) {
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 3 }).format(roundNumber(value));
+}
+
+function formatNullableNumber(value: number | null) {
+  return value === null ? "null" : formatNumber(value);
+}
+
+function formatSignedNumber(value: number) {
+  return `${value >= 0 ? "+" : ""}${formatNumber(value)}`;
+}
+
+function formatPercent(value: number) {
+  return new Intl.NumberFormat(undefined, {
+    maximumFractionDigits: 1,
+    style: "percent"
+  }).format(value);
+}
+
+function formatSegmentMetric(value: number, format: SegmentResult["format"]) {
+  return format === "percent" ? formatPercent(value) : formatNumber(value);
+}
+
+function formatSignedSegmentMetric(value: number, format: SegmentResult["format"]) {
+  const formatted = formatSegmentMetric(Math.abs(value), format);
+  return `${value >= 0 ? "+" : "-"}${formatted}`;
 }
 
 function AnalysisPlaceholder({

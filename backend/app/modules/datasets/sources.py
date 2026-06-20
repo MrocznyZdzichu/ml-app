@@ -1,5 +1,6 @@
 import csv
 from dataclasses import dataclass
+from datetime import datetime
 from io import StringIO
 from pathlib import Path
 from typing import Protocol
@@ -62,6 +63,55 @@ class CsvFileDatasetSource:
         row_count = len(rows) - 1 if has_header else len(rows)
         return has_header, max(row_count, 0)
 
+    def inspect_path(self, path: Path) -> tuple[bool, int]:
+        has_header, row_count, _columns = self.inspect_path_with_schema(path)
+        return has_header, row_count
+
+    def inspect_path_with_schema(self, path: Path) -> tuple[bool, int, list[dict[str, str]]]:
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as source:
+                sample = source.read(4096)
+            dialect = self._dialect(sample)
+            sample_rows = [row for row in csv.reader(StringIO(sample), dialect) if any(cell.strip() for cell in row)]
+            if not sample_rows:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="CSV file does not contain any rows",
+                )
+            has_header = self._has_header(sample, sample_rows)
+            headers = [self._column_name(value, index) for index, value in enumerate(sample_rows[0])] if has_header else [
+                f"column_{index + 1}" for index in range(len(sample_rows[0]))
+            ]
+            headers = self._unique_column_names(headers)
+            observed_types: list[set[str]] = [set() for _ in headers]
+            with path.open("r", encoding="utf-8-sig", newline="") as source:
+                row_count = 0
+                non_empty_row_index = 0
+                for row in csv.reader(source, dialect):
+                    if not any(cell.strip() for cell in row):
+                        continue
+                    if has_header and non_empty_row_index == 0:
+                        non_empty_row_index += 1
+                        continue
+                    non_empty_row_index += 1
+                    if not has_header and len(row) > len(headers):
+                        start = len(headers)
+                        headers.extend(f"column_{index + 1}" for index in range(start, len(row)))
+                        observed_types.extend(set() for _ in range(start, len(row)))
+                    row_count += 1
+                    for index, _header in enumerate(headers):
+                        observed_types[index].add(self._cell_type(row[index] if index < len(row) else ""))
+        except UnicodeDecodeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="CSV file must be UTF-8 encoded",
+            ) from exc
+        columns = [
+            {"name": header, "type": self._resolve_types(observed_types[index])}
+            for index, header in enumerate(headers)
+        ]
+        return has_header, row_count, columns
+
     def read(self, asset: DataAsset, action: str = "read") -> TabularDataset:
         if asset.source_type != SourceType.FILE or asset.format.lower() != "csv":
             raise HTTPException(
@@ -104,11 +154,14 @@ class CsvFileDatasetSource:
         return path
 
     def _read_rows(self, text: str) -> list[list[str]]:
-        try:
-            dialect = csv.Sniffer().sniff(text[:4096])
-        except csv.Error:
-            dialect = csv.excel
+        dialect = self._dialect(text[:4096])
         return [row for row in csv.reader(StringIO(text), dialect) if any(cell.strip() for cell in row)]
+
+    def _dialect(self, sample: str):
+        try:
+            return csv.Sniffer().sniff(sample)
+        except csv.Error:
+            return csv.excel
 
     def _has_header(self, text: str, rows: list[list[str]]) -> bool:
         try:
@@ -135,6 +188,26 @@ class CsvFileDatasetSource:
         except ValueError:
             return False
         return True
+
+    def _cell_type(self, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            return "empty"
+        if stripped.lower() in {"true", "false"}:
+            return "boolean"
+        if self._is_number(stripped):
+            return "number"
+        try:
+            datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+        except ValueError:
+            return "text"
+        return "date"
+
+    def _resolve_types(self, value_types: set[str]) -> str:
+        concrete = value_types - {"empty"}
+        if not concrete:
+            return "empty"
+        return next(iter(concrete)) if len(concrete) == 1 else "mixed"
 
     def _column_name(self, value: str, index: int) -> str:
         return value.strip() or f"column_{index + 1}"

@@ -10,12 +10,163 @@ The Analysis workspace currently contains:
 - `Data Roles` - durable semantic metadata for datasets and columns.
 - `Data Browsing` - interactive preview, filtering, sorting, grouping,
   aggregation, Custom SQL, drill down, and Data View creation.
-- `Descriptive Analysis` - placeholder for calculated summaries.
+- `Descriptive Analysis` - explicit, role-aware descriptive profiling with
+  univariate, comparison, target-aware, and segment summaries.
 - `Visualization and Trends` - placeholder for visual analysis.
 
 Dataset selection is shared across Analysis tabs. Selecting a dataset in
 `Data Browsing` keeps the same dataset selected when switching to `Data Roles`,
 and vice versa.
+
+## Descriptive Analysis
+
+Descriptive Analysis profiles a selected dataset only after the analyst clicks
+`Run profiling`. Selecting a dataset loads lightweight configuration context for
+target and target-type choices, but the heavier profiling work remains explicit.
+
+For uploaded CSV datasets, profiling is submitted to a background worker. The
+worker materializes a reusable Parquet representation and computes statistics,
+relationships, and segment aggregates over every row with DuckDB. Raw profile
+rows are not transferred to the browser. The existing progress state remains
+visible while the frontend polls the background job.
+
+Successful profiles and their computed summaries are cached in frontend memory
+for the authenticated session.
+Switching to another dataset and then returning restores the latest profile and
+its view settings without another profiling request. Cache entries are ignored
+when the dataset `updated_at` value changes, and the entire cache is cleared on
+logout or page refresh/close. Profiles are not written to localStorage or other
+persistent browser storage. Restoring a matching entry reuses calculated column
+profiles, relations, density/scatter data, segment results, and quality notes
+instead of recalculating them from cached rows.
+
+### Dataset Profile
+
+The top Dataset Profile panel lets the analyst configure:
+
+- dataset,
+- target column,
+- target type: automatic, categorical/classification, or continuous/regression,
+- whether ignored and identifier columns are included,
+- profiling range.
+
+Automatic target-type inference treats boolean, text, categorical, ordinal, and
+low-cardinality numeric targets as categorical. This keeps binary numeric
+targets such as churn `0/1` in the classification-style path unless the analyst
+overrides the setting.
+
+### Profiling Range
+
+Profiling Range controls the amount of work performed:
+
+- Dataset summary and quality notes,
+- Univariate column profiles,
+- Target vs feature relations,
+- Multivariate segment scan,
+- Graphic summaries,
+- graphic source-point limit,
+- maximum target/comparison relation features,
+- maximum segment scan features.
+
+`Graphic summaries` is enabled by default. When disabled, profiling still
+calculates tables and metrics but skips histogram, density, and scatterplot data
+and rendering.
+
+The graphic source-point limit does not limit the rows used by profile
+statistics. Histograms, group distributions, correlations, contingency tables,
+and segment scans aggregate the complete uploaded file. The limit only bounds
+raw observations retained for graphics such as scatterplots.
+
+### Univariate Profile
+
+Univariate Profile is collapsible and has its own column selection modal. It
+shows count, missing rate, unique count, mode, and numeric descriptive measures.
+
+Numeric columns with low cardinality are displayed as discrete distributions
+when graphic summaries are enabled. Continuous numeric columns use histograms.
+When graphic summaries are disabled, only tabular facts and metrics are shown.
+
+### Target vs Features
+
+Target vs Features is also collapsible. By default it compares features against
+the selected target, but `Compare by` can be changed to another column for more
+general bivariate exploration.
+
+The section supports:
+
+- column selection with a modal selector,
+- collapsible relation cards per feature,
+- `Show all` and `Collapse all` for relation cards,
+- ranking by relationship strength.
+
+For a continuous feature compared with a categorical target/comparison column,
+the card shows group-level rows, min, max, median, average, and standard
+deviation. With graphic summaries enabled, it also shows KDE-like density curves
+for each comparison group on a shared axis.
+
+For two continuous variables, the card shows Pearson correlation, Spearman
+correlation, R-squared, regression slope, intercept, and covariance. With
+graphic summaries enabled, it also shows a scatterplot with a trend line.
+
+Categorical-vs-categorical relations include a contingency table with counts,
+row-normalized target percentages, lift, and Pearson residuals per cell.
+The card also reports chi-square, degrees of freedom, Cramer's V, and the share
+of sparse expected cells. Sparse tables display an exploratory-use warning.
+
+For ordinal features with a binary target, the card additionally reports a
+Spearman trend against the selected target value. Numeric ordinal labels are
+ordered numerically. Backend full-file profiles use lexicographic order for
+non-numeric labels and identify that basis explicitly, so analysts can verify
+whether it matches the domain order. Legacy Data View profiles retain their
+first-observed order.
+
+### Multivariate Segment Scan
+
+The segment scan evaluates every pair among the configured number of eligible
+low-cardinality features. Ignored, identifier, and target columns are excluded.
+Combinations below 3% of the profiled dataset (with an absolute minimum of five
+rows) are excluded to reduce unstable small-group extremes. The UI shows the 12
+highest-ranked results rather than only the single largest raw deviation.
+
+For a categorical target, a binary target is focused on its less frequent class;
+all classes are evaluated for a multiclass target. Each result reports:
+
+- support (the segment's share of eligible target rows),
+- segment target rate and the population baseline,
+- absolute percentage-point difference and relative lift,
+- a 95% Wilson interval for the segment rate,
+- WRAcc (`support * (segment rate - baseline)`) as a coverage-adjusted ranking
+  measure.
+
+For a continuous target, each result reports the segment mean, population mean,
+their difference, an approximate 95% interval around the segment mean, and
+Cohen's d against the rest of the population. Ranking uses support multiplied by
+Cohen's d, balancing standardized separation with segment coverage.
+
+The scan is exploratory subgroup discovery. Reusing the same data to generate
+and inspect many candidate segments creates selection and multiple-comparison
+risk, so displayed intervals are descriptive and results do not establish
+causality. Confirm important segments on validation data or with a model that
+controls for confounding variables.
+
+### Large Dataset Execution
+
+Uploaded CSV files are copied to repository storage in chunks, so upload no
+longer creates a second complete in-memory byte buffer. A streaming pass records
+the row count and source schema. Dataset selection reads only lightweight schema
+context and does not trigger Parquet materialization.
+
+The first explicit profile creates `dataset.mlapp.parquet` beside the source CSV
+and then performs the full scan. Later profiles reuse that artifact while the
+source file modification time is unchanged. DuckDB can spill analytical work to
+a dataset-local temporary directory rather than requiring the full relation in
+RAM. Celery result data contains only compact aggregates and expires from Redis
+after one hour; the existing frontend cache remains session-scoped.
+
+Saved Data Views currently retain the legacy preview-backed profiling path. They
+preserve existing behavior but do not yet have the same large-data guarantees as
+physical CSV assets. Moving browser filters, grouping, and Custom SQL to a
+validated DuckDB relation is the remaining pushdown step.
 
 ## Data Roles
 
