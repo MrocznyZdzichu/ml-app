@@ -1,12 +1,14 @@
 import shutil
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 from uuid import uuid4
 
 from fastapi import HTTPException, status
-
 from app.core.security import Principal
+from app.modules.analysis.full_profile import FullDatasetProfiler
+from app.modules.analysis.profile_jobs import DescriptiveProfileJobs
 from app.modules.datasets.domain import DataAsset, DataAssetStatus, SourceType
 from app.modules.datasets.query_engine import DatasetQueryEngine
 from app.modules.datasets.repository import DatasetRepository, PostgresDatasetRepository
@@ -18,6 +20,7 @@ from app.modules.datasets.schemas import (
     DataAssetProfileRequest,
     DataAssetSqlQueryRequest,
     DataViewCreate,
+    FullDescriptiveProfileRequest,
 )
 from app.modules.datasets.sources import DatasetSourceRegistry
 
@@ -30,6 +33,8 @@ class DatasetService:
         self.repository_root = Path("data/repository")
         self.sources = DatasetSourceRegistry(self.repository_root)
         self.query_engine = DatasetQueryEngine(self.sources)
+        self.full_profiler = FullDatasetProfiler()
+        self.profile_jobs = DescriptiveProfileJobs()
 
     def register(self, payload: DataAssetCreate, principal: Principal) -> DataAsset:
         asset = DataAsset(
@@ -99,24 +104,48 @@ class DatasetService:
         description: str = "",
         tags: list[str] | None = None,
     ) -> DataAsset:
+        return self.upload_csv_stream(
+            stream=BytesIO(content),
+            filename=filename,
+            principal=principal,
+            name=name,
+            description=description,
+            tags=tags,
+        )
+
+    def upload_csv_stream(
+        self,
+        stream: BinaryIO,
+        filename: str,
+        principal: Principal,
+        name: str | None = None,
+        description: str = "",
+        tags: list[str] | None = None,
+    ) -> DataAsset:
         if not filename.lower().endswith(".csv"):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Only .csv files are supported",
             )
-        if not content:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Uploaded CSV file is empty",
-            )
-
-        text = self.sources.csv.decode(content)
-        has_header, row_count = self.sources.csv.inspect(text)
         dataset_id = str(uuid4())
         safe_filename = self._safe_filename(filename)
         storage_path = self.repository_root / "users" / principal.user_id / dataset_id / safe_filename
         storage_path.parent.mkdir(parents=True, exist_ok=True)
-        storage_path.write_bytes(content)
+        stream.seek(0)
+        with storage_path.open("wb") as destination:
+            shutil.copyfileobj(stream, destination, length=1024 * 1024)
+        file_size = storage_path.stat().st_size
+        if file_size == 0:
+            storage_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Uploaded CSV file is empty",
+            )
+        try:
+            has_header, row_count, source_schema = self.sources.csv.inspect_path_with_schema(storage_path)
+        except Exception:
+            shutil.rmtree(storage_path.parent, ignore_errors=True)
+            raise
         now = datetime.now(timezone.utc)
 
         asset = DataAsset(
@@ -128,13 +157,14 @@ class DatasetService:
             description=description,
             original_filename=filename,
             location_uri=f"file://{storage_path.as_posix()}",
-            file_size_bytes=len(content),
+            file_size_bytes=file_size,
             row_count=row_count,
             has_header=has_header,
             uploaded_by=principal.user_id,
             uploaded_at=now,
             status=DataAssetStatus.READY,
             tags=list(tags or []),
+            metadata={"source_schema": source_schema},
         )
         return self.repository.add(asset)
 
@@ -186,12 +216,37 @@ class DatasetService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Deleted dataset cannot be browsed",
             )
+        if asset.source_type == SourceType.FILE and asset.format.lower() == "csv":
+            return DataAssetPreviewRead.model_validate(self.full_profiler.schema(asset, limit))
         return self.query_engine.preview(
             asset,
             lambda asset_id: self.get_asset(asset_id, principal),
             limit,
             dataset_id=dataset_id,
         )
+
+    def start_descriptive_profile(
+        self,
+        dataset_id: str,
+        payload: FullDescriptiveProfileRequest,
+        principal: Principal,
+    ) -> dict[str, Any]:
+        asset = self.get_asset(dataset_id, principal)
+        if asset.status == DataAssetStatus.DELETED:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Deleted dataset cannot be profiled",
+            )
+        return self.profile_jobs.start(dataset_id, principal.user_id, payload.model_dump())
+
+    def descriptive_profile_status(
+        self,
+        dataset_id: str,
+        job_id: str,
+        principal: Principal,
+    ) -> dict[str, Any]:
+        self.get_asset(dataset_id, principal)
+        return self.profile_jobs.status(dataset_id, principal.user_id, job_id)
 
     def query(
         self,

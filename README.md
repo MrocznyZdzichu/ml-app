@@ -122,7 +122,10 @@ The tab supports:
 
 - smart dataset summary cards and quality notes based on Data Roles metadata,
 - optional profiling scope controls for summary, univariate profiles,
-  target/comparison relations, segment scans, row limits, and graphic summaries,
+  target/comparison relations, segment scans, graphic source-point limits, and
+  graphic summaries,
+- asynchronous full-row profiling of uploaded CSV datasets with DuckDB and
+  reusable Parquet materialization instead of browser-side row processing,
 - univariate profiles with collapsible UI, column selection, numeric summaries,
   categorical distributions, and optional histograms,
 - comparison analysis that defaults to target vs features but can compare
@@ -136,6 +139,12 @@ The tab supports:
 - ranked multivariate segment scan across low-cardinality feature pairs, with
   support-aware impact, uncertainty, lift/WRAcc for categorical targets, and
   standardized effect size for continuous targets.
+
+Full-dataset profiling runs in the Celery analytics worker and scans every row
+for tabular statistics, relationships, and segments. Only bounded scatterplot
+source points are sampled. See
+[`docs/descriptive-profiling-performance.md`](docs/descriptive-profiling-performance.md)
+for the architecture, benchmark results, and current Data View limitation.
 
 ### Data Views
 

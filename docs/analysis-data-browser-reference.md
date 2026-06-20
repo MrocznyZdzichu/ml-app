@@ -24,6 +24,12 @@ Descriptive Analysis profiles a selected dataset only after the analyst clicks
 `Run profiling`. Selecting a dataset loads lightweight configuration context for
 target and target-type choices, but the heavier profiling work remains explicit.
 
+For uploaded CSV datasets, profiling is submitted to a background worker. The
+worker materializes a reusable Parquet representation and computes statistics,
+relationships, and segment aggregates over every row with DuckDB. Raw profile
+rows are not transferred to the browser. The existing progress state remains
+visible while the frontend polls the background job.
+
 Successful profiles and their computed summaries are cached in frontend memory
 for the authenticated session.
 Switching to another dataset and then returning restores the latest profile and
@@ -58,13 +64,18 @@ Profiling Range controls the amount of work performed:
 - Target vs feature relations,
 - Multivariate segment scan,
 - Graphic summaries,
-- row sample limit,
+- graphic source-point limit,
 - maximum target/comparison relation features,
 - maximum segment scan features.
 
 `Graphic summaries` is enabled by default. When disabled, profiling still
 calculates tables and metrics but skips histogram, density, and scatterplot data
 and rendering.
+
+The graphic source-point limit does not limit the rows used by profile
+statistics. Histograms, group distributions, correlations, contingency tables,
+and segment scans aggregate the complete uploaded file. The limit only bounds
+raw observations retained for graphics such as scatterplots.
 
 ### Univariate Profile
 
@@ -104,15 +115,16 @@ of sparse expected cells. Sparse tables display an exploratory-use warning.
 
 For ordinal features with a binary target, the card additionally reports a
 Spearman trend against the selected target value. Numeric ordinal labels are
-ordered numerically; otherwise the current implementation uses first-observed
-category order and labels that basis explicitly, so analysts can verify that it
-matches the domain order.
+ordered numerically. Backend full-file profiles use lexicographic order for
+non-numeric labels and identify that basis explicitly, so analysts can verify
+whether it matches the domain order. Legacy Data View profiles retain their
+first-observed order.
 
 ### Multivariate Segment Scan
 
 The segment scan evaluates every pair among the configured number of eligible
 low-cardinality features. Ignored, identifier, and target columns are excluded.
-Combinations below 3% of the profiled sample (with an absolute minimum of five
+Combinations below 3% of the profiled dataset (with an absolute minimum of five
 rows) are excluded to reduce unstable small-group extremes. The UI shows the 12
 highest-ranked results rather than only the single largest raw deviation.
 
@@ -136,6 +148,25 @@ and inspect many candidate segments creates selection and multiple-comparison
 risk, so displayed intervals are descriptive and results do not establish
 causality. Confirm important segments on validation data or with a model that
 controls for confounding variables.
+
+### Large Dataset Execution
+
+Uploaded CSV files are copied to repository storage in chunks, so upload no
+longer creates a second complete in-memory byte buffer. A streaming pass records
+the row count and source schema. Dataset selection reads only lightweight schema
+context and does not trigger Parquet materialization.
+
+The first explicit profile creates `dataset.mlapp.parquet` beside the source CSV
+and then performs the full scan. Later profiles reuse that artifact while the
+source file modification time is unchanged. DuckDB can spill analytical work to
+a dataset-local temporary directory rather than requiring the full relation in
+RAM. Celery result data contains only compact aggregates and expires from Redis
+after one hour; the existing frontend cache remains session-scoped.
+
+Saved Data Views currently retain the legacy preview-backed profiling path. They
+preserve existing behavior but do not yet have the same large-data guarantees as
+physical CSV assets. Moving browser filters, grouping, and Custom SQL to a
+validated DuckDB relation is the remaining pushdown step.
 
 ## Data Roles
 

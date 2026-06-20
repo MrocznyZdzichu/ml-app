@@ -65,18 +65,23 @@ For example, if `plan_type` is ordinal in the source dataset and the view keeps
 
 ## Descriptive Analysis
 
-The current Descriptive Analysis implementation runs in the frontend over
-dataset preview records returned by the dataset API. It uses Data Roles metadata
-to infer targets, feature eligibility, target type, ignored columns, and
-role-aware comparison behavior.
+Descriptive Analysis for uploaded CSV assets runs as a Celery task over a DuckDB
+relation. The first explicit run converts the source CSV to a reusable,
+Zstandard-compressed Parquet sidecar. DuckDB performs full-column aggregates,
+relationships, contingency tables, graphic bins, and segment grouping over all
+rows and can spill to a dataset-local temporary directory. The API and Redis
+carry only compact profile results; raw profile rows are not sent to React.
 
-Profiling is explicitly started by the analyst. Dataset selection can load
-column context for configuration, but the profile calculations are run only
-after `Run profiling`. The profiling range controls which sections are
-calculated and whether graphic summaries are produced.
+Profiling is explicitly started by the analyst. Dataset selection reads a small
+CSV schema sample plus stored upload metadata and does not create Parquet. After
+`Run profiling`, the API queues work and the unchanged frontend progress state
+polls for completion. Worker concurrency is deliberately limited and prefetch is
+one so multiple large scans do not multiply memory pressure unpredictably.
+Queue ownership and result lifecycle are isolated in `DescriptiveProfileJobs`;
+`DatasetService` only validates dataset access and delegates job orchestration.
 
-Successful profile previews, computed summaries, and UI snapshots are cached in
-an App-owned, session-scoped in-memory map keyed by dataset ID. The cache
+Successful computed summaries and UI snapshots are cached in an App-owned,
+session-scoped in-memory map keyed by dataset ID. The cache
 survives Analysis tab and workspace navigation, is invalidated when dataset
 metadata has a newer `updated_at`, and is cleared during logout. No profiling
 records are persisted to browser storage.
@@ -86,8 +91,10 @@ histograms, KDE-like density plots, scatterplots, and a multivariate subgroup
 scan over eligible low-cardinality feature pairs. Segment results are ranked by
 coverage-adjusted impact (WRAcc for categorical targets and support-weighted
 Cohen's d for continuous targets) and cached with the rest of the computed
-profile. Future backend/worker profiling can reuse the same metadata contract
-and persist generated artifacts in object storage.
+profile. Only scatterplot observations are reservoir-sampled; metrics and
+aggregate graphics use all rows. Saved Data Views still use the legacy
+preview-backed profiler until their transformation definitions can be pushed
+down to a validated DuckDB relation.
 
 ## Data Views
 

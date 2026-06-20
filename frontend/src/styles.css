@@ -1181,21 +1181,6 @@ textarea {
   margin: 0;
 }
 
-.segment-highlight {
-  background: #eef3f7;
-  border: 1px solid #dce4eb;
-  border-radius: 8px;
-  display: grid;
-  gap: 4px;
-  padding: 10px 12px;
-}
-
-.segment-highlight strong,
-.segment-highlight span {
-  display: block;
-}
-
-.segment-highlight span,
 .segment-method-note {
   color: #647383;
   font-size: 12px;

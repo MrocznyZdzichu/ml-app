@@ -82,9 +82,38 @@ class DataAssetProfileRead(BaseModel):
     artifact_uri: str | None = None
 
 
+class FullDescriptiveProfileRequest(BaseModel):
+    target_column: str = ""
+    target_type: Literal["categorical", "continuous"] = "categorical"
+    comparison_column: str = ""
+    comparison_type: Literal["categorical", "continuous"] = "categorical"
+    include_summary: bool = True
+    include_univariate: bool = True
+    include_target_relations: bool = True
+    include_segments: bool = True
+    include_graphic_summaries: bool = True
+    row_limit: int = Field(default=50_000, ge=100, le=1_000_000)
+    max_target_features: int = Field(default=30, ge=1, le=500)
+    max_segment_features: int = Field(default=4, ge=2, le=20)
+
+
 class DataAssetColumnRead(BaseModel):
     name: str
     type: Literal["text", "number", "date", "boolean", "empty", "mixed", "unsupported"]
+
+
+class FullDescriptiveProfileRead(BaseModel):
+    dataset_id: str
+    columns: list[DataAssetColumnRead]
+    row_count: int
+    profile: dict[str, Any]
+
+
+class FullDescriptiveProfileJobRead(BaseModel):
+    job_id: str
+    status: Literal["queued", "running", "completed", "failed"]
+    result: FullDescriptiveProfileRead | None = None
+    error: str | None = None
 
 
 class DataAssetPreviewRead(BaseModel):

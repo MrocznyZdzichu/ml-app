@@ -1324,6 +1324,7 @@ function DescriptiveAnalysisPanel({
   const [profilingRangeModalOpen, setProfilingRangeModalOpen] = useState(false);
   const [profilingRange, setProfilingRange] = useState<ProfilingRangeSettings>(defaultProfilingRangeSettings);
   const profileRequestId = useRef(0);
+  const profileAbortController = useRef<AbortController | null>(null);
   const schemaRequestId = useRef(0);
   const selectedDataset = datasets.find((dataset) => dataset.id === datasetId) ?? null;
   const activeProfilePreview = preview?.dataset_id === datasetId && hasProfileRun ? preview : null;
@@ -1331,7 +1332,9 @@ function DescriptiveAnalysisPanel({
   const configPreview = activeProfilePreview ?? activeSchemaPreview;
   const columns = configPreview?.columns ?? [];
   const rows = activeProfilePreview?.records ?? [];
-  const targetInferenceRows = activeProfilePreview?.records ?? activeSchemaPreview?.records ?? [];
+  const targetInferenceRows = activeProfilePreview?.records.length
+    ? activeProfilePreview.records
+    : activeSchemaPreview?.records ?? [];
   const rolesMetadata = useMemo(
     () => readRolesMetadata(selectedDataset, datasets, columns.map((column) => column.name)),
     [columns, datasets, selectedDataset]
@@ -1359,10 +1362,14 @@ function DescriptiveAnalysisPanel({
     ? effectiveTargetType
     : inferTargetType(comparisonColumnDefinition, targetInferenceRows, rolesMetadata);
 
+  useEffect(() => () => profileAbortController.current?.abort(), []);
+
   useEffect(() => {
     const schemaRequestIdValue = schemaRequestId.current + 1;
     schemaRequestId.current = schemaRequestIdValue;
     profileRequestId.current += 1;
+    profileAbortController.current?.abort();
+    profileAbortController.current = null;
     const cachedProfile = profileCache.get(datasetId);
     const cacheIsCurrent = Boolean(
       cachedProfile && selectedDataset && cachedProfile.datasetUpdatedAt === selectedDataset.updated_at
@@ -1460,10 +1467,11 @@ function DescriptiveAnalysisPanel({
     }
   }, [columns, comparisonColumn, effectiveTargetColumn]);
 
-  const profileComputationKey = useMemo(() => JSON.stringify({
+  function createProfileComputationKey(returnedCount: number) {
+    return JSON.stringify({
     datasetId,
     datasetUpdatedAt: selectedDataset?.updated_at ?? "",
-    returnedCount: activeProfilePreview?.returned_count ?? 0,
+    returnedCount,
     targetColumn: effectiveTargetColumn,
     targetType: effectiveTargetType,
     comparisonColumn: effectiveComparisonColumn,
@@ -1475,7 +1483,10 @@ function DescriptiveAnalysisPanel({
     includeGraphicSummaries: profilingRange.includeGraphicSummaries,
     maxTargetFeatures: profilingRange.maxTargetFeatures,
     maxSegmentFeatures: profilingRange.maxSegmentFeatures
-  }), [
+    });
+  }
+
+  const profileComputationKey = useMemo(() => createProfileComputationKey(activeProfilePreview?.returned_count ?? 0), [
     activeProfilePreview?.returned_count,
     datasetId,
     effectiveComparisonColumn,
@@ -1674,6 +1685,9 @@ function DescriptiveAnalysisPanel({
 
     const requestId = profileRequestId.current + 1;
     profileRequestId.current = requestId;
+    profileAbortController.current?.abort();
+    const abortController = new AbortController();
+    profileAbortController.current = abortController;
     setCachedComputedProfile(null);
     setIsLoading(true);
     setError("");
@@ -1682,15 +1696,57 @@ function DescriptiveAnalysisPanel({
     setNotice("Profiling dataset. This can take a moment.");
 
     try {
-      const result = await api.previewDataset(datasetId, profilingRange.rowLimit);
+      if (selectedDataset?.source_type === "view") {
+        const result = await api.previewDataset(datasetId, profilingRange.rowLimit);
+        if (profileRequestId.current !== requestId) {
+          return;
+        }
+        if (selectedDataset) {
+          profileCache.set(datasetId, createProfileCacheEntry(result, null));
+        }
+        setPreview(result);
+        setNotice(`Profile loaded for ${result.returned_count} of ${result.row_count} rows`);
+        return;
+      }
+      const result = await api.profileDataset(datasetId, {
+        target_column: effectiveTargetColumn,
+        target_type: effectiveTargetType,
+        comparison_column: effectiveComparisonColumn,
+        comparison_type: effectiveComparisonType,
+        include_summary: profilingRange.includeSummary,
+        include_univariate: profilingRange.includeUnivariate,
+        include_target_relations: profilingRange.includeTargetRelations,
+        include_segments: profilingRange.includeSegments,
+        include_graphic_summaries: profilingRange.includeGraphicSummaries,
+        row_limit: profilingRange.rowLimit,
+        max_target_features: profilingRange.maxTargetFeatures,
+        max_segment_features: profilingRange.maxSegmentFeatures
+      }, abortController.signal);
       if (profileRequestId.current !== requestId) {
         return;
       }
+      const profilePreview: DatasetPreview = {
+        dataset_id: result.dataset_id,
+        columns: result.columns,
+        records: [],
+        row_count: result.row_count,
+        returned_count: result.row_count,
+        limit: result.row_count
+      };
+      const backendProfile = result.profile as Omit<DescriptiveComputedProfile, "key">;
+      const computedProfile: DescriptiveComputedProfile = {
+        key: createProfileComputationKey(result.row_count),
+        columnProfiles: backendProfile.columnProfiles ?? [],
+        targetRelations: backendProfile.targetRelations ?? [],
+        segmentProfile: backendProfile.segmentProfile ?? null,
+        dataQualityNotes: backendProfile.dataQualityNotes ?? []
+      };
       if (selectedDataset) {
-        profileCache.set(datasetId, createProfileCacheEntry(result, null));
+        profileCache.set(datasetId, createProfileCacheEntry(profilePreview, computedProfile));
       }
-      setPreview(result);
-      setNotice(`Profile loaded for ${result.returned_count} of ${result.row_count} rows`);
+      setCachedComputedProfile(computedProfile);
+      setPreview(profilePreview);
+      setNotice(`Profile loaded for all ${result.row_count} rows`);
     } catch (loadError) {
       if (profileRequestId.current !== requestId) {
         return;
@@ -1702,6 +1758,7 @@ function DescriptiveAnalysisPanel({
     } finally {
       if (profileRequestId.current === requestId) {
         setIsLoading(false);
+        profileAbortController.current = null;
       }
     }
   }
@@ -1879,7 +1936,7 @@ function DescriptiveAnalysisPanel({
 
                 <div className="profile-range-summary">
                   <strong>Profiling range</strong>
-                  <span>{enabledRangeLabels.join(", ")} / up to {formatInteger(profilingRange.rowLimit)} rows</span>
+                  <span>{enabledRangeLabels.join(", ")} / all rows / graphics capped at {formatInteger(profilingRange.rowLimit)} source points</span>
                 </div>
 
                 {profilingRange.includeSummary && (
@@ -2418,7 +2475,7 @@ function ProfilingRangeModal({
             </div>
             <div className="range-number-grid">
               <label>
-                Row sample limit
+                Graphic source-point limit
                 <input
                   min={1}
                   onChange={(event) => updateNumber("rowLimit", event.target.value)}
@@ -2662,19 +2719,10 @@ function CategoricalRelationDetails({
 }
 
 function SegmentScanResults({ profile }: { profile: SegmentProfile }) {
-  const strongest = profile.results[0];
   const categorical = profile.targetType === "categorical";
   const maximumDifference = Math.max(...profile.results.map((item) => Math.abs(item.difference)), Number.EPSILON);
   return (
     <>
-      <div className="segment-highlight">
-        <strong>{strongest.segment}</strong>
-        <span>
-          {formatInteger(strongest.count)} rows ({formatPercent(strongest.support)}); {strongest.targetValue}{" "}
-          {formatSegmentMetric(strongest.segmentValue, strongest.format)} vs {formatSegmentMetric(strongest.baseline, strongest.format)} baseline
-          ({formatSignedSegmentMetric(strongest.difference, strongest.format)}).
-        </span>
-      </div>
       <div className="segment-results-table">
         <div className={`segment-result-row segment-result-head ${categorical ? "categorical" : "continuous"}`}>
           <span>Segment</span>
@@ -5448,7 +5496,7 @@ function buildTargetRelations(
     })
     .filter((relation): relation is TargetRelationProfile => relation !== null);
 
-  return relations.sort((left, right) => right.score - left.score);
+  return relations;
 }
 
 function groupedMeanRelation({

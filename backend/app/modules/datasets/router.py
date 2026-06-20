@@ -10,6 +10,8 @@ from app.modules.datasets.schemas import (
     DataAssetRead,
     DataAssetSqlQueryRequest,
     DataViewCreate,
+    FullDescriptiveProfileJobRead,
+    FullDescriptiveProfileRequest,
 )
 from app.modules.datasets.service import DatasetService
 
@@ -26,7 +28,7 @@ def register_dataset(
 
 
 @router.post("/upload", response_model=DataAssetRead, status_code=201)
-async def upload_dataset(
+def upload_dataset(
     file: UploadFile = File(...),
     name: str | None = Form(default=None),
     description: str = Form(default=""),
@@ -34,10 +36,9 @@ async def upload_dataset(
     principal: Principal = Depends(require_user),
 ) -> DataAssetRead:
     tag_values = [tag.strip() for tag in tags.split(",") if tag.strip()]
-    content = await file.read()
     return DataAssetRead.model_validate(
-        service.upload_csv(
-            content=content,
+        service.upload_csv_stream(
+            stream=file.file,
             filename=file.filename or "dataset.csv",
             principal=principal,
             name=name,
@@ -104,3 +105,25 @@ def profile_dataset(
     principal: Principal = Depends(require_user),
 ) -> DataAssetProfileRead:
     return service.profile(dataset_id, payload, principal)
+
+
+@router.post("/{dataset_id}/descriptive-profile", response_model=FullDescriptiveProfileJobRead, status_code=202)
+def descriptive_profile_dataset(
+    dataset_id: str,
+    payload: FullDescriptiveProfileRequest,
+    principal: Principal = Depends(require_user),
+) -> FullDescriptiveProfileJobRead:
+    return FullDescriptiveProfileJobRead.model_validate(
+        service.start_descriptive_profile(dataset_id, payload, principal)
+    )
+
+
+@router.get("/{dataset_id}/descriptive-profile/{job_id}", response_model=FullDescriptiveProfileJobRead)
+def descriptive_profile_status(
+    dataset_id: str,
+    job_id: str,
+    principal: Principal = Depends(require_user),
+) -> FullDescriptiveProfileJobRead:
+    return FullDescriptiveProfileJobRead.model_validate(
+        service.descriptive_profile_status(dataset_id, job_id, principal)
+    )

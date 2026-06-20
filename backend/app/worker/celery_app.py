@@ -18,4 +18,9 @@ celery_app.conf.update(
     task_serializer="json",
     result_serializer="json",
     accept_content=["json"],
+    result_expires=settings.descriptive_profile_result_expires_seconds,
+    task_acks_late=True,
+    worker_prefetch_multiplier=1,
 )
+
+celery_app.autodiscover_tasks(["app.worker"])

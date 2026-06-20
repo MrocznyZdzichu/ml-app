@@ -102,6 +102,54 @@ export type DatasetPreview = {
   limit: number;
 };
 
+export type FullDescriptiveProfileResponse = {
+  dataset_id: string;
+  columns: DatasetColumn[];
+  row_count: number;
+  profile: Record<string, unknown>;
+};
+
+type FullDescriptiveProfileJob = {
+  job_id: string;
+  status: "queued" | "running" | "completed" | "failed";
+  result: FullDescriptiveProfileResponse | null;
+  error: string | null;
+};
+
+async function profileDataset(datasetId: string, payload: Record<string, unknown>, signal?: AbortSignal) {
+  let job = await request<FullDescriptiveProfileJob>(`/datasets/${datasetId}/descriptive-profile`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+    signal
+  });
+  while (job.status === "queued" || job.status === "running") {
+    await abortableDelay(750, signal);
+    job = await request<FullDescriptiveProfileJob>(`/datasets/${datasetId}/descriptive-profile/${job.job_id}`, { signal });
+  }
+  if (job.status === "failed" || !job.result) {
+    throw new Error(job.error || "Dataset profiling failed");
+  }
+  return job.result;
+}
+
+function abortableDelay(milliseconds: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Aborted", "AbortError"));
+      return;
+    }
+    const onAbort = () => {
+      window.clearTimeout(timeout);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    const timeout = window.setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export type DataViewCreatePayload = {
   name: string;
   source_dataset_id: string;
@@ -167,6 +215,7 @@ export const api = {
     }),
   previewDataset: (datasetId: string, limit = 50000) =>
     request<DatasetPreview>(`/datasets/${datasetId}/preview?limit=${limit}`),
+  profileDataset,
   queryDataset: (datasetId: string, sql: string, limit = 50000) =>
     request<DatasetPreview>(`/datasets/${datasetId}/query`, {
       method: "POST",

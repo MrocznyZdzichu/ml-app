@@ -21,6 +21,16 @@ class Settings(BaseSettings):
         alias="DATABASE_URL",
     )
     redis_url: str = Field(default="redis://redis:6379/0", alias="REDIS_URL")
+    descriptive_profile_result_expires_seconds: int = Field(
+        default=3600,
+        ge=60,
+        alias="DESCRIPTIVE_PROFILE_RESULT_EXPIRES_SECONDS",
+    )
+    descriptive_profile_duckdb_threads: int = Field(
+        default=4,
+        ge=1,
+        alias="DESCRIPTIVE_PROFILE_DUCKDB_THREADS",
+    )
 
     object_storage_endpoint: str = Field(default="minio:9000", alias="OBJECT_STORAGE_ENDPOINT")
     object_storage_access_key: str = Field(default="mlapp", alias="OBJECT_STORAGE_ACCESS_KEY")
