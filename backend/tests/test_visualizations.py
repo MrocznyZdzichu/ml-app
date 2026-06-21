@@ -55,6 +55,60 @@ def test_grouped_visualization_scans_every_row_and_supports_multiple_metrics(tmp
     assert all(point["y"] == 20 for point in result["points"] if point["aggregation"] in {"average", "median"})
 
 
+def test_x_epsilon_groups_continuous_axis_into_centered_full_dataset_buckets(tmp_path: Path) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+    result = visualization.render(asset, DataAssetVisualizationRequest(
+        kind="line",
+        x="x",
+        y="y",
+        group="species",
+        aggregations=["average"],
+        x_epsilon=5,
+    ))
+
+    centers = sorted({point["x"] for point in result["points"]})
+    first_bucket = [point for point in result["points"] if point["x"] == 5]
+    assert result["scanned_row_count"] == 10_000
+    assert result["valid_count"] == 10_000
+    assert centers == [5, 15, 25, 35, 45, 55, 65, 75, 85, 95]
+    assert {point["group"]: point["y"] for point in first_bucket} == {"setosa": 8, "virginica": 10}
+    assert all(point["xRange"] == [0, 10] for point in first_bucket)
+    assert all(point["count"] == 500 for point in first_bucket)
+
+
+def test_x_epsilon_uses_half_open_boundaries_for_decimal_values(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    dataset_dir = repository / "users" / "owner" / "epsilon-boundary"
+    dataset_dir.mkdir(parents=True)
+    csv_path = dataset_dir / "epsilon.csv"
+    csv_path.write_text("x,y\n0.8,1\n1.0,3\n1.19,5\n1.2,100\n", encoding="utf-8")
+    source = CsvFileDatasetSource(repository)
+    has_header, row_count, schema = source.inspect_path_with_schema(csv_path)
+    asset = DataAsset(
+        id="epsilon-boundary",
+        owner_id="owner",
+        name="epsilon",
+        source_type=SourceType.FILE,
+        format="csv",
+        location_uri=f"file://{csv_path.as_posix()}",
+        row_count=row_count,
+        has_header=has_header,
+        status=DataAssetStatus.READY,
+        metadata={"source_schema": schema},
+    )
+    result = FullDatasetVisualization(ColumnarDatasetStore(repository)).render(
+        asset,
+        DataAssetVisualizationRequest(kind="line", x="x", y="y", aggregations=["average"], x_epsilon=0.2),
+    )
+
+    by_center = {point["x"]: point for point in result["points"]}
+    assert by_center[1]["y"] == 3
+    assert by_center[1]["count"] == 3
+    assert by_center[1]["xRange"] == [0.8, 1.2]
+    assert by_center[1.4]["y"] == 100
+    assert by_center[1.4]["count"] == 1
+
+
 def test_visualization_group_selection_and_values_use_full_dataset(tmp_path: Path) -> None:
     visualization, asset = visualization_fixture(tmp_path)
     groups = visualization.group_values(asset, "species", 100)

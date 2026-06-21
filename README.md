@@ -160,8 +160,9 @@ use Smart start. The workspace supports:
 - line, bar, scatter/density-bin, histogram, and KPI views,
 - drag-and-drop positioning, fine-grained resizing, snapping guides, collision
   detection, Tidy layout, and Clear canvas,
-- configurable axes, grouping, full-dataset aggregations, multiple metrics per
-  group, and explicit group selection,
+- configurable axes, per-chart X-epsilon bucketing for continuous variables,
+  grouping, full-dataset aggregations, multiple metrics per group, and explicit
+  group selection,
 - adaptive axes, tooltips, zoom, pan, scrollable legends, stable high-contrast
   group colors, and metric-specific line styles,
 - session-scoped layouts restored independently for each dataset.

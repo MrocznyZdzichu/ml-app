@@ -103,7 +103,9 @@ grouping, aggregation filters, projection, and sorting are pushed down instead
 of being evaluated over Python records.
 
 Visualization requests scan complete physical or view relations and return
-bounded aggregate contracts. When changing this path, run:
+bounded aggregate contracts. Continuous X bucketing is performed by DuckDB from
+the per-chart `x_epsilon` request field; do not reproduce this aggregation in
+React. When changing this path, run:
 
 ```powershell
 docker exec ml-app-api-1 pytest tests/test_visualizations.py tests/test_datasets_upload.py tests/test_full_profile.py

@@ -34,6 +34,7 @@ type ChartConfig = {
   title: string;
   x: string;
   y: string;
+  xEpsilon: number;
   group: string;
   aggregation: Aggregation;
   comparisonAggregations: Aggregation[];
@@ -376,6 +377,7 @@ export function VisualizationDashboard({ datasets, setNotice }: VisualizationDas
 
 function ChartInspector({ chart, columns, datasetId, rows, onChange }: { chart: ChartConfig; columns: DatasetColumn[]; datasetId: string; rows: RecordRow[]; onChange: (patch: Partial<ChartConfig>) => void }) {
   const numericColumns = columns.filter((column) => column.type === "number");
+  const xColumn = columns.find((column) => column.name === chart.x);
   const groupingColumns = columns.filter((column) => column.name !== chart.x && column.name !== chart.y && cardinality(rows, column.name) <= 20);
   const [availableGroups, setAvailableGroups] = useState<string[]>([]);
   const [groupsLoading, setGroupsLoading] = useState(false);
@@ -411,9 +413,21 @@ function ChartInspector({ chart, columns, datasetId, rows, onChange }: { chart: 
       <label>Title<input value={chart.title} onChange={(event) => onChange({ title: event.target.value })} /></label>
       {chart.kind !== "kpi" && (
         <label>{chart.kind === "histogram" ? "Measure" : "Horizontal axis"}
-          <select value={chart.x} onChange={(event) => onChange({ x: event.target.value })}>
+          <select value={chart.x} onChange={(event) => onChange({ x: event.target.value, xEpsilon: 0 })}>
             {(chart.kind === "histogram" ? numericColumns : columns).map((column) => <option key={column.name} value={column.name}>{column.name} · {column.type}</option>)}
           </select>
+        </label>
+      )}
+      {(chart.kind === "line" || chart.kind === "bar") && xColumn?.type === "number" && (
+        <label>X epsilon
+          <input
+            min="0"
+            onChange={(event) => onChange({ xEpsilon: Math.max(0, Number(event.target.value) || 0) })}
+            step="any"
+            type="number"
+            value={chart.xEpsilon ?? 0}
+          />
+          <span className="epsilon-hint">0 keeps exact X values. A positive value groups [center − ε, center + ε).</span>
         </label>
       )}
       {chart.kind !== "histogram" && (
@@ -508,9 +522,10 @@ function ChartView({ chart, datasetId }: { chart: ChartConfig; datasetId: string
     group: chart.group,
     aggregations: unique([chart.aggregation, ...(chart.comparisonAggregations ?? [])]),
     selected_groups: chart.selectedGroups ?? null,
+    x_epsilon: chart.xEpsilon ?? 0,
     max_points: 2000,
     bins: 16
-  }), [chart.aggregation, chart.comparisonAggregations, chart.group, chart.kind, chart.selectedGroups, chart.x, chart.y]);
+  }), [chart.aggregation, chart.comparisonAggregations, chart.group, chart.kind, chart.selectedGroups, chart.x, chart.xEpsilon, chart.y]);
   const metricOrder = useMemo(
     () => unique([chart.aggregation, ...(chart.comparisonAggregations ?? [])]),
     [chart.aggregation, chart.comparisonAggregations]
@@ -651,7 +666,7 @@ function ChartView({ chart, datasetId }: { chart: ChartConfig; datasetId: string
   );
 }
 
-type PlotPoint = { x: number; y: number; xLabel: string; series: string; group?: string; aggregation?: Aggregation; count?: number };
+type PlotPoint = { x: number; y: number; xLabel: string; xRange?: [number, number]; series: string; group?: string; aggregation?: Aggregation; count?: number };
 type ChartData = { isValid: boolean; points: PlotPoint[]; series: string[]; kpi: number | null; validCount: number };
 type SeriesVisual = { name: string; color: string; dash: string | undefined };
 
@@ -674,7 +689,8 @@ function SvgChart({ chart, points, series, seriesVisuals, setTooltip }: { chart:
   const setPointTooltip = (event: ReactPointerEvent<SVGElement>, point: PlotPoint) => {
     const rect = event.currentTarget.ownerSVGElement?.getBoundingClientRect();
     if (!rect) return;
-    setTooltip({ x: Math.min(rect.width - 150, event.clientX - rect.left + 10), y: Math.max(8, event.clientY - rect.top - 48), title: point.xLabel, value: `${point.series} · ${chart.y || "Count"}: ${formatNumber(point.y)}${point.count ? ` · n=${point.count}` : ""}` });
+    const range = point.xRange ? ` · [${formatNumber(point.xRange[0])}, ${formatNumber(point.xRange[1])})` : "";
+    setTooltip({ x: Math.min(rect.width - 150, event.clientX - rect.left + 10), y: Math.max(8, event.clientY - rect.top - 48), title: `${point.xLabel}${range}`, value: `${point.series} · ${chart.y || "Count"}: ${formatNumber(point.y)}${point.count ? ` · n=${point.count}` : ""}` });
   };
   const yTicks = [0, 0.25, 0.5, 0.75, 1];
   const xGroups = [...points.reduce((groups, point, index) => {
@@ -748,7 +764,7 @@ function createChart(kind: ChartKind, columns: DatasetColumn[], rows: RecordRow[
 }
 
 function makeConfig(kind: ChartKind, x: string, y: string, group: string, title: string, layout: ChartLayout): ChartConfig {
-  return { id: `${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, kind, title, x, y, group, aggregation: "average", comparisonAggregations: [], selectedGroups: null, layout };
+  return { id: `${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, kind, title, x, y, xEpsilon: 0, group, aggregation: "average", comparisonAggregations: [], selectedGroups: null, layout };
 }
 
 function readSessionDashboard(datasetId: string, columns: DatasetColumn[]): ChartConfig[] | null {
@@ -770,6 +786,7 @@ function readSessionDashboard(datasetId: string, columns: DatasetColumn[]): Char
       .filter((chart) => chart && kindLabels[chart.kind] && (!chart.x || names.has(chart.x)) && (!chart.y || names.has(chart.y)))
       .map((chart, index) => ({
         ...chart,
+        xEpsilon: chart.xEpsilon ?? 0,
         comparisonAggregations: chart.comparisonAggregations ?? [],
         selectedGroups: chart.selectedGroups ?? null,
         layout: normalizeLayout(chart.layout
@@ -785,7 +802,7 @@ function readSessionDashboard(datasetId: string, columns: DatasetColumn[]): Char
 function describeEncoding(chart: ChartConfig) {
   if (chart.kind === "histogram") return `${chart.x} · binned count`;
   if (chart.kind === "kpi") return `${chart.aggregation} of ${chart.y}`;
-  return `${chart.x || "row"} → ${chart.y || "count"}${chart.group ? ` · by ${chart.group}` : ""}`;
+  return `${chart.x || "row"} → ${chart.y || "count"}${chart.xEpsilon > 0 ? ` · ε=${formatNumber(chart.xEpsilon)}` : ""}${chart.group ? ` · by ${chart.group}` : ""}`;
 }
 
 function defaultLayout(kind: ChartKind, index: number): ChartLayout {

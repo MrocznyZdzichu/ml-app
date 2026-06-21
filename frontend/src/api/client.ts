@@ -110,6 +110,7 @@ export type VisualizationPoint = {
   group?: string;
   aggregation?: "average" | "median" | "std" | "sum" | "count" | "min" | "max";
   count?: number;
+  xRange?: [number, number];
 };
 
 export type DatasetVisualization = {

@@ -190,6 +190,14 @@ dash-dot, dotted, and further variants). Legends are scrollable and preserve
 the rendered line pattern. Axes use adaptive ticks; charts support exact-value
 tooltips, cursor-centered wheel zoom, buttons, range scrolling, and pan.
 
+For numeric X axes in line and bar charts, `X epsilon` optionally reduces dense
+continuous coordinates before aggregation. `epsilon = 0` preserves exact X
+values. A positive epsilon creates non-overlapping buckets of width `2 × ε`,
+anchored at zero and represented by their center. For example, `ε = 0.2`
+aggregates values in `[0.8, 1.2)` into the point centered at `x = 1`. Epsilon is
+stored independently for each chart, and tooltips report the bucket range and
+row count.
+
 The visualization endpoint scans the complete Parquet relation with DuckDB.
 Line/bar aggregates, histograms, KPI values, group choices, and scatter density
 bins therefore use the full selected dataset or Data View. Only bounded chart

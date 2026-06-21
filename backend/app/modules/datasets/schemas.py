@@ -141,6 +141,7 @@ class DataAssetVisualizationRequest(BaseModel):
     group: str = ""
     aggregations: list[VisualizationAggregation] = Field(default_factory=lambda: ["average"], max_length=7)
     selected_groups: list[str] | None = None
+    x_epsilon: float = Field(default=0, ge=0, le=1e100)
     max_points: int = Field(default=2_000, ge=50, le=10_000)
     bins: int = Field(default=16, ge=5, le=100)
 

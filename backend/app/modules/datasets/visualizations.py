@@ -113,6 +113,17 @@ class FullDatasetVisualization:
         x = self.store.identifier(request.x)
         y = self.store.identifier(request.y)
         group = self.store.identifier(request.group) if request.group else ""
+        numeric_x = self._frontend_type(columns[request.x]) == "number"
+        if request.x_epsilon > 0 and not numeric_x:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="X epsilon requires a numeric horizontal axis",
+            )
+        x_expression = x
+        if request.x_epsilon > 0:
+            bucket_width = request.x_epsilon * 2
+            width_sql = format(bucket_width, ".17g")
+            x_expression = f"round((floor(CAST({x} AS DOUBLE) / {width_sql} + 1e-12) + 0.5) * {width_sql}, 12)"
         aggregations = list(dict.fromkeys(request.aggregations or ["average"]))
         select_aggregates = ", ".join(
             f"{self._aggregate_sql(aggregation, y)} AS {self.store.identifier('metric_' + aggregation)}"
@@ -120,28 +131,27 @@ class FullDatasetVisualization:
         )
         group_select = f", CAST({group} AS VARCHAR) AS group_value" if group else ", 'Values' AS group_value"
         where, parameters = self._where(request, x, y, group)
-        group_by = f"{x}, {group}" if group else x
+        group_by = f"{x_expression}, {group}" if group else x_expression
         output_limit = max(1, request.max_points // max(1, len(aggregations)))
         rows = connection.execute(
-            f"SELECT {x} AS x_value{group_select}, {select_aggregates}, count({y}) AS valid_count "
-            f"FROM {relation} {where} GROUP BY {group_by} ORDER BY {x}, group_value LIMIT ?",
+            f"SELECT {x_expression} AS x_value{group_select}, {select_aggregates}, count({y}) AS valid_count "
+            f"FROM {relation} {where} GROUP BY {group_by} ORDER BY x_value, group_value LIMIT ?",
             [*parameters, output_limit + 1],
         ).fetchall()
         truncated = len(rows) > output_limit
         rows = rows[:output_limit]
-        numeric_x = self._frontend_type(columns[request.x]) == "number"
-        labels = list(dict.fromkeys(self._label(row[0]) for row in rows))
+        labels = list(dict.fromkeys(self._format(float(row[0])) if numeric_x else self._label(row[0]) for row in rows))
         label_positions = {label: index for index, label in enumerate(labels)}
         points: list[dict[str, Any]] = []
         for row in rows:
-            label = self._label(row[0])
+            label = self._format(float(row[0])) if numeric_x else self._label(row[0])
             group_value = str(row[1])
             for index, aggregation in enumerate(aggregations):
                 value = self._number(row[2 + index])
                 if value is None:
                     continue
                 series = group_value if len(aggregations) == 1 else f"{group_value} · {self._aggregation_label(aggregation)}"
-                points.append({
+                point = {
                     "x": self._number(row[0]) if numeric_x else label_positions[label],
                     "y": value,
                     "xLabel": label,
@@ -149,7 +159,11 @@ class FullDatasetVisualization:
                     "group": group_value,
                     "aggregation": aggregation,
                     "count": int(row[-1]),
-                })
+                }
+                if request.x_epsilon > 0:
+                    center = float(row[0])
+                    point["xRange"] = [center - request.x_epsilon, center + request.x_epsilon]
+                points.append(point)
         return {
             "points": points,
             "series": list(dict.fromkeys(point["series"] for point in points)),

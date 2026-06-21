@@ -114,6 +114,10 @@ only bounded points, series metadata, counts, or KPI values. Grouped line/bar
 charts use exact full-data aggregates; histograms use full-data bins; scatter
 plots use full-data two-dimensional bins so browser cost does not scale with row
 count. Group-value selectors also query the complete relation.
+Numeric line/bar specifications may include an X epsilon. DuckDB converts the
+continuous X expression into deterministic, non-overlapping `2 × epsilon`
+buckets and aggregates Y over every row in each bucket. Only the bucket centers,
+ranges, counts, and requested metrics are returned to React.
 
 ## Data Views
 

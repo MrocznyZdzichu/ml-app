@@ -2219,6 +2219,13 @@ textarea {
   min-height: 36px;
 }
 
+.chart-inspector .epsilon-hint {
+  color: #70808d;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.35;
+}
+
 .metric-series-fieldset {
   border: 1px solid #d8e1e7;
   border-radius: 7px;
