@@ -15,6 +15,7 @@ from app.modules.datasets.repository import DatasetRepository, PostgresDatasetRe
 from app.modules.datasets.schemas import (
     DataAssetCreate,
     DataAssetMetadataUpdate,
+    DataAssetDrillRequest,
     DataAssetPreviewRead,
     DataAssetProfileRead,
     DataAssetProfileRequest,
@@ -294,6 +295,21 @@ class DatasetService:
         if asset.status == DataAssetStatus.DELETED:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Deleted dataset cannot be visualized")
         return self.full_visualization.render(asset, payload, lambda asset_id: self.get_asset(asset_id, principal))
+
+    def drill(
+        self,
+        dataset_id: str,
+        payload: DataAssetDrillRequest,
+        principal: Principal,
+    ) -> dict[str, Any]:
+        asset = self.get_asset(dataset_id, principal)
+        if asset.status == DataAssetStatus.DELETED:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Deleted dataset cannot be drilled")
+        return self.full_visualization.drill(
+            asset,
+            payload,
+            lambda asset_id: self.get_asset(asset_id, principal),
+        )
 
     def visualization_groups(
         self,

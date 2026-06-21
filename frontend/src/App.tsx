@@ -47,6 +47,11 @@ import {
   readRolesMetadata
 } from "./analysis/dataRoles";
 import type { DataRolesMetadata } from "./analysis/dataRoles";
+import {
+  browserFiltersFromVisualizationDrill,
+  type BrowserFilterConfig,
+  type VisualizationDrillRequest,
+} from "./analysis/drillContext";
 import { VisualizationDashboard } from "./analysis/VisualizationDashboard";
 
 type TabId = "overview" | "data" | "analysis" | "models" | "serving" | "share";
@@ -667,6 +672,7 @@ function AnalysisPanel({
 }) {
   const [activeAnalysisTab, setActiveAnalysisTab] = useState<"roles" | "browse" | "descriptive" | "visualization">("roles");
   const [datasetId, setDatasetId] = useState("");
+  const [visualizationDrill, setVisualizationDrill] = useState<VisualizationDrillRequest | null>(null);
   const availableDatasets = useMemo(
     () => datasets.filter((dataset) => dataset.status !== "deleted"),
     [datasets]
@@ -734,6 +740,10 @@ function AnalysisPanel({
           setDatasetId={setDatasetId}
           onRefresh={onRefresh}
           setNotice={setNotice}
+          visualizationDrill={visualizationDrill}
+          onVisualizationDrillConsumed={(requestId) => {
+            setVisualizationDrill((current) => current?.id === requestId ? null : current);
+          }}
         />
       )}
       {activeAnalysisTab === "descriptive" && (
@@ -748,7 +758,14 @@ function AnalysisPanel({
       {activeAnalysisTab === "visualization" && (
         <VisualizationDashboard
           datasets={availableDatasets}
+          datasetId={datasetId}
+          setDatasetId={setDatasetId}
           setNotice={setNotice}
+          onDrill={(request) => {
+            setDatasetId(request.datasetId);
+            setVisualizationDrill(request);
+            setActiveAnalysisTab("browse");
+          }}
         />
       )}
     </section>
@@ -1014,25 +1031,9 @@ type SortRule = {
   column: string;
   direction: SortDirection;
 };
-type FilterOperator =
-  | "contains"
-  | "equals"
-  | "not_equals"
-  | "in"
-  | "regex"
-  | "starts_with"
-  | "ends_with"
-  | "gt"
-  | "gte"
-  | "lt"
-  | "lte"
-  | "empty"
-  | "not_empty";
-type ColumnFilterConfig = {
-  operator: FilterOperator;
-  value: string;
-  values?: string[];
-};
+type FilterOperator = BrowserFilterConfig["operator"];
+type ColumnFilterConfig = BrowserFilterConfig;
+const DATA_BROWSER_DRILL_PREVIEW_LIMIT = 5_000;
 type DatasetCellValue = string | number | boolean | null;
 type GroupingRole = "none" | "group" | "aggregate";
 type AggregationFunction =
@@ -1091,6 +1092,7 @@ const filterOperatorLabels: Record<FilterOperator, string> = {
   gte: ">=",
   lt: "<",
   lte: "<=",
+  between: "Between",
   empty: "Is empty",
   not_empty: "Is not empty"
 };
@@ -2971,13 +2973,17 @@ function DataBrowsingPanel({
   datasetId,
   setDatasetId,
   onRefresh,
-  setNotice
+  setNotice,
+  visualizationDrill,
+  onVisualizationDrillConsumed
 }: {
   datasets: DataAsset[];
   datasetId: string;
   setDatasetId: (datasetId: string) => void;
   onRefresh: () => Promise<void>;
   setNotice: (message: string) => void;
+  visualizationDrill: VisualizationDrillRequest | null;
+  onVisualizationDrillConsumed: (requestId: string) => void;
 }) {
   const [preview, setPreview] = useState<DatasetPreview | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -3029,14 +3035,24 @@ function DataBrowsingPanel({
     let isCurrent = true;
     setIsLoading(true);
     setError("");
-    api
-      .previewDataset(datasetId)
+    const drillRequest = visualizationDrill?.datasetId === datasetId ? visualizationDrill : null;
+    const loadRequest = drillRequest
+      ? api.drillDataset(datasetId, { filters: drillRequest.filters, limit: DATA_BROWSER_DRILL_PREVIEW_LIMIT })
+      : api.previewDataset(datasetId);
+    loadRequest
       .then((result) => {
         if (!isCurrent) {
           return;
         }
         setPreview(result);
-        setNotice(`Loaded ${result.returned_count} of ${result.row_count} rows`);
+        if (drillRequest) {
+          setFilters(browserFiltersFromVisualizationDrill(drillRequest));
+          setFiltersCollapsed(false);
+          setNotice(`Drill loaded ${result.returned_count} of ${result.row_count} matching rows from the full dataset`);
+          onVisualizationDrillConsumed(drillRequest.id);
+        } else {
+          setNotice(`Loaded ${result.returned_count} of ${result.row_count} rows`);
+        }
       })
       .catch((loadError) => {
         if (!isCurrent) {
@@ -4854,7 +4870,10 @@ function defaultFilterOperator(type: DatasetPreview["columns"][number]["type"] =
 }
 
 function filterOperatorsForColumn(type: DatasetPreview["columns"][number]["type"], role = ""): FilterOperator[] {
-  if (type === "number" || type === "date") {
+  if (type === "number") {
+    return ["equals", "not_equals", "gt", "gte", "lt", "lte", "between", "empty", "not_empty"];
+  }
+  if (type === "date") {
     return ["equals", "not_equals", "gt", "gte", "lt", "lte", "empty", "not_empty"];
   }
   if (type === "boolean") {
@@ -4885,6 +4904,17 @@ function matchesFilter(value: unknown, config: ColumnFilterConfig | undefined) {
   }
   if (config.operator === "not_empty") {
     return !isEmpty;
+  }
+  if (config.operator === "between") {
+    const bounds = config.values?.length === 2
+      ? config.values
+      : filterValue.split(",").map((item) => item.trim()).filter(Boolean);
+    if (bounds.length !== 2) return true;
+    const leftNumber = comparableNumber(value);
+    const lower = Number(bounds[0]);
+    const upper = Number(bounds[1]);
+    if (!Number.isFinite(leftNumber) || !Number.isFinite(lower) || !Number.isFinite(upper)) return false;
+    return leftNumber >= lower && (config.upperInclusive ? leftNumber <= upper : leftNumber < upper);
   }
   if (!filterValue) {
     return true;

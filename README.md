@@ -163,14 +163,20 @@ use Smart start. The workspace supports:
 - configurable axes, per-chart X-epsilon bucketing for continuous variables,
   grouping, full-dataset aggregations, multiple metrics per group, and explicit
   group selection,
-- adaptive axes, tooltips, zoom, pan, scrollable legends, stable high-contrast
-  group colors, and metric-specific line styles,
+- grouped Category bars with side-by-side or per-metric stacked presentation,
+- adaptive axes, tooltips, zoom, pan, and scrollable mark-aware legends,
+- double-click Drill on chart marks that opens Data Browsing with the exact
+  source range and series filters applied over the full dataset or Data View,
+- stable high-contrast series colors for bar/scatter views, plus group colors
+  and metric-specific line styles for trend lines,
 - session-scoped layouts restored independently for each dataset.
 
 Chart queries run in DuckDB over the complete Parquet-backed relation. React
 receives only bounded aggregates. Scatter views use full-dataset spatial binning
 rather than silently substituting a row sample. The UI reports the number of
 rows scanned and labels the execution mode as full-dataset server analytics.
+Drill queries also execute in DuckDB before a bounded set of matching records is
+returned to the browser; the total match count remains visible.
 
 ### Data Views
 

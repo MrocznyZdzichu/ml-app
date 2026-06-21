@@ -118,10 +118,39 @@ grouped result records the complete valid-row and group counts before the output
 cap is applied, so bounded transport never makes partial results look complete.
 Chart navigation slices the X domain rather than the flat point array, preserving
 all returned series for each visible coordinate.
+Category bars consume the same grouped aggregate contract as trend lines. Their
+side-by-side and stacked layouts are presentation concerns in React; stacked
+mode creates one stack per aggregation and maintains separate positive and
+negative baselines without rerunning or approximating the analytical query.
+Axis domains and ticks are derived in React from the bounded result contract.
+Numeric scales use nice-number steps with step-aware precision; categorical
+scales first run label-width collision detection and use all labels that fit,
+falling back to the smallest collision-free regular integer stride. Zero is
+mandatory for magnitude-encoding bars and histograms but optional for positional
+line and scatter encodings.
+Visualization measures remain numeric, including when `count` is selected;
+DuckDB then counts their non-null values in each analytical partition.
+Categorical dimensions are represented through the grouped series contract
+rather than overloaded as measures. These type rules are validated server-side.
 Numeric line/bar specifications may include an X epsilon. DuckDB converts the
 continuous X expression into deterministic, non-overlapping `2 × epsilon`
 buckets and aggregates Y over every row in each bucket. Only the bucket centers,
 ranges, counts, and requested metrics are returned to React.
+
+Chart-mark double-click Drill uses mark metadata to build parameterized source
+predicates. The API compiles them through the columnar Browser query builder and
+uses one windowed DuckDB query to count all matches while returning only a
+bounded record window. Histogram and scatter bin
+contracts carry explicit upper-bound inclusion flags, so navigation reproduces
+the precise analytical partition for physical datasets and recursively resolved
+Data Views without moving the full relation into the API process or React.
+Frontend translation from chart marks to API filters and then to visible Browser
+filter controls is centralized in `frontend/src/analysis/drillContext.ts`; chart
+components and the general application shell do not duplicate that contract.
+
+Scatter bounds and group cardinality are calculated in one pass. The binned
+query computes full valid-row and bin counts with window functions, applies its
+point limit in SQL, and never materializes overflow bins as Python dictionaries.
 
 ## Data Views
 

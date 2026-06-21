@@ -1,9 +1,12 @@
 from pathlib import Path
 
+import pytest
+from fastapi import HTTPException
+
 from app.modules.analysis.full_profile import FullDatasetProfiler
 from app.modules.datasets.columnar import ColumnarDatasetStore
 from app.modules.datasets.domain import DataAsset, DataAssetStatus, SourceType
-from app.modules.datasets.schemas import DataAssetVisualizationRequest
+from app.modules.datasets.schemas import DataAssetDrillRequest, DataAssetVisualizationRequest
 from app.modules.datasets.sources import CsvFileDatasetSource
 from app.modules.datasets.visualizations import FullDatasetVisualization
 
@@ -14,11 +17,11 @@ def visualization_fixture(tmp_path: Path) -> tuple[FullDatasetVisualization, Dat
     dataset_dir.mkdir(parents=True)
     csv_path = dataset_dir / "data.csv"
     with csv_path.open("w", encoding="utf-8", newline="") as output:
-        output.write("bucket,species,value,x,y\n")
+        output.write("bucket,species,value,x,y,segment\n")
         for index in range(10_000):
             species = "setosa" if index % 2 == 0 else "virginica"
             value = 10 if index < 5_000 else 30
-            output.write(f"{index % 5},{species},{value},{index % 100},{(index % 100) * 2}\n")
+            output.write(f"{index % 5},{species},{value},{index % 100},{(index % 100) * 2},segment-{index}\n")
     source = CsvFileDatasetSource(repository)
     has_header, row_count, schema = source.inspect_path_with_schema(csv_path)
     asset = DataAsset(
@@ -53,6 +56,100 @@ def test_grouped_visualization_scans_every_row_and_supports_multiple_metrics(tmp
     assert len(result["series"]) == 6
     assert {point["aggregation"] for point in result["points"]} == {"average", "median", "std"}
     assert all(point["y"] == 20 for point in result["points"] if point["aggregation"] in {"average", "median"})
+
+
+def test_category_bars_support_full_dataset_group_series(tmp_path: Path) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+    result = visualization.render(asset, DataAssetVisualizationRequest(
+        kind="bar",
+        x="bucket",
+        y="value",
+        group="species",
+        aggregations=["average"],
+    ))
+
+    assert result["scanned_row_count"] == 10_000
+    assert result["valid_count"] == 10_000
+    assert result["series"] == ["setosa", "virginica"]
+    assert {point["group"] for point in result["points"]} == {"setosa", "virginica"}
+
+
+def test_visualization_rejects_categorical_measure_even_for_count(tmp_path: Path) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+
+    with pytest.raises(HTTPException, match="Visualization measure must be numeric"):
+        visualization.render(asset, DataAssetVisualizationRequest(
+            kind="bar",
+            x="bucket",
+            y="species",
+            aggregations=["count"],
+        ))
+
+
+def test_drill_filters_full_dataset_with_half_open_range_and_group(tmp_path: Path) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+    request = DataAssetDrillRequest.model_validate({
+        "filters": {
+            "x": {"operator": "between", "values": ["0", "10"]},
+            "species": {"operator": "equals", "value": "setosa"},
+        },
+        "limit": 25,
+    })
+    result = visualization.drill(asset, request)
+
+    assert result["row_count"] == 500
+    assert result["returned_count"] == 25
+    assert all(0 <= row["x"] < 10 for row in result["records"])
+    assert {row["species"] for row in result["records"]} == {"setosa"}
+
+
+def test_drill_rejects_unknown_filter_columns(tmp_path: Path) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+
+    with pytest.raises(HTTPException, match="Unknown drill filter column"):
+        visualization.drill(asset, DataAssetDrillRequest.model_validate({
+            "filters": {"does_not_exist": {"operator": "equals", "value": "x"}},
+        }))
+
+
+def test_drill_between_requires_exactly_two_bounds() -> None:
+    with pytest.raises(ValueError, match="exactly two values"):
+        DataAssetDrillRequest.model_validate({
+            "filters": {"x": {"operator": "between", "values": ["1"]}},
+        })
+
+
+def test_drill_requires_at_least_one_source_filter() -> None:
+    with pytest.raises(ValueError, match="at least 1 item"):
+        DataAssetDrillRequest.model_validate({"filters": {}})
+
+
+def test_visualization_rejects_series_column_that_duplicates_an_axis(tmp_path: Path) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+
+    with pytest.raises(HTTPException, match="Series column must be different from chart axes"):
+        visualization.render(asset, DataAssetVisualizationRequest(
+            kind="bar",
+            x="species",
+            y="value",
+            group="species",
+        ))
+
+
+def test_scatter_bounds_high_cardinality_groups_before_python_materialization(tmp_path: Path) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+
+    result = visualization.render(asset, DataAssetVisualizationRequest(
+        kind="scatter",
+        x="x",
+        y="y",
+        group="segment",
+        max_points=50,
+    ))
+
+    assert result["valid_count"] == 10_000
+    assert result["truncated"] is True
+    assert len(result["points"]) == 50
 
 
 def test_x_epsilon_groups_continuous_axis_into_centered_full_dataset_buckets(tmp_path: Path) -> None:
@@ -218,11 +315,17 @@ def test_browser_data_view_pushes_filters_and_grouping_to_duckdb(tmp_path: Path)
     loader = lambda asset_id: source if asset_id == source.id else view
 
     preview = visualization.preview(view, 10, loader)
+    drill = visualization.drill(view, DataAssetDrillRequest.model_validate({
+        "filters": {"bucket": {"operator": "equals", "value": "2"}},
+    }), loader)
 
     assert preview["row_count"] == 5
     assert [column["name"] for column in preview["columns"]] == ["bucket", "species", "records", "Sum value"]
     assert all(record["species"] == "virginica" for record in preview["records"])
     assert sum(record["records"] for record in preview["records"]) == 5_000
+    assert drill["row_count"] == 1
+    assert drill["records"][0]["bucket"] == 2
+    assert drill["records"][0]["records"] == 1_000
 
 
 def test_nested_data_views_resolve_recursively(tmp_path: Path) -> None:

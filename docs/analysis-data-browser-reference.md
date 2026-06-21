@@ -14,9 +14,9 @@ The Analysis workspace currently contains:
   univariate, comparison, target-aware, and segment summaries.
 - `Visualization and Trends` - interactive, full-dataset dashboard composition and visual analysis.
 
-Dataset selection is shared by Data Roles, Data Browsing, and Descriptive
-Analysis. Visualization and Trends keeps an independent, session-scoped dataset
-and dashboard state so entering the tab does not automatically execute work.
+Dataset selection is shared by Data Roles, Data Browsing, Descriptive Analysis,
+and Visualization and Trends. Dashboard state remains session-scoped per dataset
+and entering the tab does not automatically create charts.
 
 ## Descriptive Analysis
 
@@ -184,11 +184,42 @@ edges and centers, collision detection rejects overlapping placements, Tidy
 layout creates a balanced grid, and Clear canvas removes all cards.
 
 Chart configuration supports axes, primary and additional aggregations,
-categorical grouping, and All/None/explicit group selection. A group keeps one
-high-contrast color while its metrics use ordered line patterns (solid, dashed,
-dash-dot, dotted, and further variants). Legends are scrollable and preserve
-the rendered line pattern. Axes use adaptive ticks; charts support exact-value
+categorical grouping, and All/None/explicit group selection. Trend lines keep
+one high-contrast color per group while their metrics use ordered line patterns
+(solid, dashed, dash-dot, dotted, and further variants). Charts without lines
+encode every series with a distinct high-contrast color instead: bar legends use
+rectangular swatches and scatter legends use circular markers. Legends are
+scrollable and reproduce the marks used by the chart. Axes use adaptive ticks;
+charts support exact-value
 tooltips, cursor-centered wheel zoom, buttons, range scrolling, and pan.
+
+Numeric axes use human-readable steps from the `1 / 2 / 2.5 / 5 × 10^n`
+sequence and derive label precision from the selected step. This prevents small
+values such as `0.025`, `0.05`, and `0.075` from collapsing into duplicate
+rounded labels. Bar and histogram scales retain a zero baseline; line and
+scatter scales use padded data extents so a distant zero does not flatten useful
+variation. Categorical axes skip labels at a constant integer stride and retain
+the final category instead of selecting irregular rounded indices. Before any
+labels are skipped, the renderer estimates the actual width and position of
+every shortened label. All values are therefore shown whenever their text boxes
+fit with a safe gap; a stride greater than one is introduced only after a real
+collision is detected.
+
+Category bars support the same full-dataset grouping and group selection as
+Trend lines. By default, returned series are placed side by side within each X
+category. The `Stacked` control is available only when a series/group column is
+selected; it combines groups vertically while keeping separate stacks for each
+requested aggregation so semantically different metrics are never added into a
+single bar. Positive and negative values use independent stack baselines. A
+series column cannot duplicate either chart axis; changing an axis clears such a
+conflicting series configuration automatically.
+
+The vertical measure remains numeric for line, bar, scatter, and KPI views.
+`Count` is still available and counts non-null values of that numeric measure in
+each X/group partition. Categorical dimensions belong in `Color / series`, which
+produces an explicit grouped split without overloading the meaning of the Y axis.
+Histogram measures are numeric as well. The backend enforces the same rules
+independently of the UI.
 
 For numeric X axes in line and bar charts, `X epsilon` optionally reduces dense
 continuous coordinates before aggregation. `epsilon = 0` preserves exact X
@@ -209,6 +240,15 @@ When the number of aggregated points exceeds the response contract, the chart
 explicitly marks the display as capped. Aggregation still scans the complete
 selected relation, and `valid_count` continues to describe all matching rows;
 only the points transferred to and rendered by the browser are bounded.
+
+Double-clicking a chart mark drills into its source data and switches to Data
+Browsing on the same dataset or Data View. It applies the predicates represented
+by that mark: exact X values or X-epsilon buckets, histogram bin boundaries,
+scatter X/Y cells, and the selected series group. Half-open ranges remain
+half-open, except for the final histogram/scatter bin which includes its upper
+boundary. DuckDB evaluates these predicates against the complete relation. Data
+Browsing receives a 5,000-row exploratory window together with the full match
+count; the API keeps a hard maximum of 50,000 rows for explicit clients.
 
 ## Data Roles
 
@@ -414,6 +454,10 @@ Important dataset endpoints:
   full-dataset chart query.
 - `POST /api/v1/datasets/{dataset_id}/visualization/groups` - return complete
   grouping context with a bounded categorical result.
+- `POST /api/v1/datasets/{dataset_id}/drill` - apply chart source predicates to
+  the full dataset or Data View and return a bounded browser-ready result plus
+  its complete match count. Drill requests require at least one source predicate
+  and accept at most 20 filter columns.
 - `PATCH /api/v1/datasets/{dataset_id}/metadata` - update metadata, including
   `data_roles`.
 - `POST /api/v1/datasets/views` - save a Data View.
@@ -430,4 +474,6 @@ Important dataset endpoints:
   `backend/app/modules/datasets/columnar.py`.
 - Full-dataset chart queries live in
   `backend/app/modules/datasets/visualizations.py`.
+- Chart-mark Drill filter translation lives in
+  `frontend/src/analysis/drillContext.ts`.
 - Source adapters live in `backend/app/modules/datasets/sources.py`.

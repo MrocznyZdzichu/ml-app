@@ -7,7 +7,7 @@ from fastapi import HTTPException, status
 
 from app.modules.datasets.columnar import ColumnarDatasetStore
 from app.modules.datasets.domain import DataAsset
-from app.modules.datasets.schemas import DataAssetVisualizationRequest
+from app.modules.datasets.schemas import DataAssetDrillRequest, DataAssetVisualizationRequest
 
 
 class FullDatasetVisualization:
@@ -84,14 +84,10 @@ class FullDatasetVisualization:
         connection = self.store.connect(asset)
         relation = self.store.relation_sql(asset, load_asset)
         try:
-            described = connection.execute(f"DESCRIBE SELECT * FROM {relation}").fetchall()
-            columns = [{"name": str(row[0]), "type": self._frontend_type(str(row[1]))} for row in described]
+            columns = self._preview_columns(connection, relation)
             row_count = int(connection.execute(f"SELECT count(*) FROM {relation}").fetchone()[0])
             rows = connection.execute(f"SELECT * FROM {relation} LIMIT ?", [limit]).fetchall()
-            records = [
-                {columns[index]["name"]: self._json_value(value) for index, value in enumerate(row)}
-                for row in rows
-            ]
+            records = self._serialize_records(columns, rows)
             return {
                 "dataset_id": asset.id,
                 "columns": columns,
@@ -100,6 +96,54 @@ class FullDatasetVisualization:
                 "returned_count": len(records),
                 "limit": limit,
             }
+        finally:
+            connection.close()
+
+    def drill(
+        self,
+        asset: DataAsset,
+        request: DataAssetDrillRequest,
+        load_asset: Callable[[str], DataAsset] | None = None,
+    ) -> dict[str, Any]:
+        connection = self.store.connect(asset)
+        relation = self.store.relation_sql(asset, load_asset)
+        try:
+            columns = self._preview_columns(connection, relation)
+            column_names = [column["name"] for column in columns]
+            unknown_filters = sorted(set(request.filters) - set(column_names))
+            if unknown_filters:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Unknown drill filter column: {unknown_filters[0]}",
+                )
+            definition = {
+                "filters": {
+                    column: config.model_dump()
+                    for column, config in request.filters.items()
+                }
+            }
+            query, parameters = self.store.compile_browser_query(
+                relation,
+                column_names,
+                definition,
+            )
+            rows = connection.execute(
+                f"WITH drill_source AS ({query}) "
+                f"SELECT *, count(*) OVER () AS __mlapp_total_count FROM drill_source LIMIT ?",
+                [*parameters, request.limit],
+            ).fetchall()
+            row_count = int(rows[0][-1]) if rows else 0
+            records = self._serialize_records(columns, rows)
+            return {
+                "dataset_id": asset.id,
+                "columns": columns,
+                "records": records,
+                "row_count": row_count,
+                "returned_count": len(records),
+                "limit": request.limit,
+            }
+        except duckdb.Error as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Drill query failed: {exc}") from exc
         finally:
             connection.close()
 
@@ -212,6 +256,11 @@ class FullDatasetVisualization:
                     "x": index,
                     "y": counts.get(index, 0),
                     "xLabel": f"{self._format(low_number + index * width)}–{self._format(high_number if index == request.bins - 1 else low_number + (index + 1) * width)}",
+                    "xRange": [
+                        low_number + index * width,
+                        high_number if index == request.bins - 1 else low_number + (index + 1) * width,
+                    ],
+                    "xRangeInclusive": index == request.bins - 1,
                     "series": "Count",
                     "group": "Count",
                 }
@@ -223,15 +272,15 @@ class FullDatasetVisualization:
         x, y = self.store.identifier(request.x), self.store.identifier(request.y)
         group = self.store.identifier(request.group) if request.group else ""
         where, parameters = self._where(request, x, y, group)
-        bounds = connection.execute(f"SELECT min({x}), max({x}), min({y}), max({y}) FROM {relation} {where}", parameters).fetchone()
+        group_count_sql = f"count(DISTINCT {group})" if group else "1"
+        bounds = connection.execute(
+            f"SELECT min({x}), max({x}), min({y}), max({y}), {group_count_sql} FROM {relation} {where}",
+            parameters,
+        ).fetchone()
         if bounds[0] is None:
             return {"points": [], "series": [], "kpi": None, "valid_count": 0}
-        x_low, x_high, y_low, y_high = map(float, bounds)
-        group_count = 1
-        if group:
-            group_count = max(1, int(connection.execute(
-                f"SELECT count(DISTINCT {group}) FROM {relation} {where}", parameters
-            ).fetchone()[0]))
+        x_low, x_high, y_low, y_high = map(float, bounds[:4])
+        group_count = max(1, int(bounds[4]))
         grid = max(5, min(50, int((request.max_points / group_count) ** 0.5)))
         x_width = (x_high - x_low) / grid or 1.0
         y_width = (y_high - y_low) / grid or 1.0
@@ -239,10 +288,13 @@ class FullDatasetVisualization:
         group_by = "x_bin, y_bin, group_value"
         rows = self._fetch_dicts(
             connection,
+            f"WITH binned AS ("
             f"SELECT least(?, floor(({x} - ?) / ?))::INTEGER AS x_bin, least(?, floor(({y} - ?) / ?))::INTEGER AS y_bin{group_select}, "
             f"avg({x}) AS x_center, avg({y}) AS y_center, count(*) AS point_count "
-            f"FROM {relation} {where} GROUP BY {group_by} ORDER BY x_bin, y_bin",
-            [grid - 1, x_low, x_width, grid - 1, y_low, y_width, *parameters],
+            f"FROM {relation} {where} GROUP BY {group_by}"
+            f") SELECT *, sum(point_count) OVER () AS total_valid_count, count(*) OVER () AS total_bin_count "
+            f"FROM binned ORDER BY x_bin, y_bin LIMIT ?",
+            [grid - 1, x_low, x_width, grid - 1, y_low, y_width, *parameters, request.max_points],
         )
         points = [
             {
@@ -252,14 +304,27 @@ class FullDatasetVisualization:
                 "series": str(row["group_value"]),
                 "group": str(row["group_value"]),
                 "count": int(row["point_count"]),
+                "xRange": [
+                    x_low + int(row["x_bin"]) * x_width,
+                    x_high if int(row["x_bin"]) == grid - 1 else x_low + (int(row["x_bin"]) + 1) * x_width,
+                ],
+                "yRange": [
+                    y_low + int(row["y_bin"]) * y_width,
+                    y_high if int(row["y_bin"]) == grid - 1 else y_low + (int(row["y_bin"]) + 1) * y_width,
+                ],
+                "xRangeInclusive": int(row["x_bin"]) == grid - 1,
+                "yRangeInclusive": int(row["y_bin"]) == grid - 1,
             }
-            for row in rows[: request.max_points]
+            for row in rows
         ]
+        total_valid_count = int(rows[0]["total_valid_count"]) if rows else 0
+        total_bin_count = int(rows[0]["total_bin_count"]) if rows else 0
         return {
             "points": points,
             "series": list(dict.fromkeys(point["series"] for point in points)),
             "kpi": None,
-            "valid_count": sum(int(row["point_count"]) for row in rows),
+            "valid_count": total_valid_count,
+            "truncated": total_bin_count > request.max_points,
         }
 
     def _where(self, request: DataAssetVisualizationRequest, x: str, y: str, group: str) -> tuple[str, list[Any]]:
@@ -280,6 +345,26 @@ class FullDatasetVisualization:
         required = [name for name in [request.x if request.kind != "kpi" else "", request.y if request.kind != "histogram" else "", request.group] if name]
         for name in required:
             self._require_column(name, columns)
+        if request.group and request.group in {request.x, request.y}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Series column must be different from chart axes",
+            )
+        if request.kind == "histogram" and self._frontend_type(columns[request.x]) != "number":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Histogram measure must be numeric",
+            )
+        if request.kind == "scatter" and any(self._frontend_type(columns[name]) != "number" for name in [request.x, request.y]):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Scatter axes must be numeric",
+            )
+        if request.kind in {"line", "bar", "kpi"} and self._frontend_type(columns[request.y]) != "number":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Visualization measure must be numeric",
+            )
 
     @staticmethod
     def _require_column(name: str, columns: dict[str, str]) -> None:
@@ -300,6 +385,22 @@ class FullDatasetVisualization:
     @staticmethod
     def _columns(connection: duckdb.DuckDBPyConnection, relation: str) -> dict[str, str]:
         return {str(row[0]): str(row[1]) for row in connection.execute(f"DESCRIBE SELECT * FROM {relation}").fetchall()}
+
+    def _preview_columns(self, connection: duckdb.DuckDBPyConnection, relation: str) -> list[dict[str, str]]:
+        return [
+            {"name": str(row[0]), "type": self._frontend_type(str(row[1]))}
+            for row in connection.execute(f"DESCRIBE SELECT * FROM {relation}").fetchall()
+        ]
+
+    def _serialize_records(
+        self,
+        columns: list[dict[str, str]],
+        rows: list[tuple[Any, ...]],
+    ) -> list[dict[str, Any]]:
+        return [
+            {column["name"]: self._json_value(row[index]) for index, column in enumerate(columns)}
+            for row in rows
+        ]
 
     @staticmethod
     def _fetch_dicts(

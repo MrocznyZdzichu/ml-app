@@ -126,6 +126,23 @@ export type VisualizationPoint = {
   aggregation?: VisualizationAggregation;
   count?: number;
   xRange?: [number, number];
+  yRange?: [number, number];
+  xRangeInclusive?: boolean;
+  yRangeInclusive?: boolean;
+};
+
+export type DatasetDrillOperator = "contains" | "equals" | "not_equals" | "in" | "regex" | "starts_with" | "ends_with" | "gt" | "gte" | "lt" | "lte" | "between" | "empty" | "not_empty";
+
+export type DatasetDrillFilter = {
+  operator: DatasetDrillOperator;
+  value?: string;
+  values?: string[];
+  upper_inclusive?: boolean;
+};
+
+export type DatasetDrillRequest = {
+  filters: Record<string, DatasetDrillFilter>;
+  limit?: number;
 };
 
 export type DatasetVisualization = {
@@ -270,6 +287,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
       signal
+    }),
+  drillDataset: (datasetId: string, payload: DatasetDrillRequest) =>
+    request<DatasetPreview>(`/datasets/${datasetId}/drill`, {
+      method: "POST",
+      body: JSON.stringify(payload)
     }),
   visualizationGroups: (datasetId: string, column: string, limit = 100) =>
     request<DatasetVisualizationGroups>(`/datasets/${datasetId}/visualization/groups`, {

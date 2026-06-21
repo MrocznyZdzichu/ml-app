@@ -120,9 +120,9 @@ class ColumnarDatasetStore:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Data View SQL must be one read-only SELECT query")
             return sql, []
         columns = [str(row[0]) for row in connection.execute(f"DESCRIBE SELECT * FROM {source_relation}").fetchall()]
-        return self._browser_query(source_relation, columns, definition)
+        return self.compile_browser_query(source_relation, columns, definition)
 
-    def _browser_query(self, relation: str, columns: list[str], definition: dict[str, Any]) -> tuple[str, list[Any]]:
+    def compile_browser_query(self, relation: str, columns: list[str], definition: dict[str, Any]) -> tuple[str, list[Any]]:
         filters = self._record(definition.get("filters"))
         aggregation_filters = self._record(definition.get("aggregation_filters"))
         grouping = self._record(definition.get("grouping"))
@@ -193,6 +193,13 @@ class ColumnarDatasetStore:
             return f"({column} IS NOT NULL AND {text} <> '')", []
         if operator == "in":
             return (f"{text} IN ({', '.join('?' for _ in values)})", values) if values else ("", [])
+        if operator == "between" and len(values) >= 2:
+            upper_symbol = "<=" if bool(config.get("upper_inclusive")) else "<"
+            return (
+                f"try_cast({column} AS DOUBLE) >= try_cast(? AS DOUBLE) "
+                f"AND try_cast({column} AS DOUBLE) {upper_symbol} try_cast(? AS DOUBLE)",
+                values[:2],
+            )
         if operator in {"gt", "gte", "lt", "lte"}:
             symbol = {"gt": ">", "gte": ">=", "lt": "<", "lte": "<="}[operator]
             return f"try_cast({column} AS DOUBLE) {symbol} try_cast(? AS DOUBLE)", [value]

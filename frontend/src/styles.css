@@ -2226,6 +2226,33 @@ textarea {
   line-height: 1.35;
 }
 
+.chart-inspector .stacked-bars-toggle {
+  align-items: center;
+  background: #f5faf9;
+  border: 1px solid #bcd5d2;
+  border-radius: 7px;
+  display: flex;
+  gap: 9px;
+  padding: 8px;
+}
+
+.chart-inspector .stacked-bars-toggle input {
+  accent-color: #1e6f68;
+  flex: 0 0 auto;
+  min-height: 15px;
+  width: 15px;
+}
+
+.chart-inspector .stacked-bars-toggle span {
+  display: grid;
+  gap: 2px;
+}
+
+.chart-inspector .stacked-bars-toggle small {
+  color: #70808d;
+  font-size: 10px;
+}
+
 .metric-series-fieldset {
   border: 1px solid #d8e1e7;
   border-radius: 7px;
@@ -2719,6 +2746,18 @@ textarea {
   height: 7px;
   overflow: visible;
   width: 30px;
+}
+
+.chart-legend .legend-color-marker {
+  border: 1px solid rgb(255 255 255 / 45%);
+  border-radius: 3px;
+  flex: 0 0 auto;
+  height: 13px;
+  width: 13px;
+}
+
+.chart-legend .legend-color-marker.round {
+  border-radius: 50%;
 }
 
 .kpi-view {

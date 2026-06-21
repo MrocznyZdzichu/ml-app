@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.modules.datasets.domain import DataAssetStatus, SourceType
 
@@ -130,6 +130,30 @@ class DataAssetSqlQueryRequest(BaseModel):
     limit: int = Field(default=50_000, ge=1, le=50_000)
 
 
+DataAssetDrillOperator = Literal[
+    "contains", "equals", "not_equals", "in", "regex", "starts_with", "ends_with",
+    "gt", "gte", "lt", "lte", "between", "empty", "not_empty",
+]
+
+
+class DataAssetDrillFilter(BaseModel):
+    operator: DataAssetDrillOperator
+    value: str = ""
+    values: list[str] = Field(default_factory=list, max_length=1_000)
+    upper_inclusive: bool = False
+
+    @model_validator(mode="after")
+    def validate_operator_values(self) -> Self:
+        if self.operator == "between" and len(self.values) != 2:
+            raise ValueError("Between drill filters require exactly two values")
+        return self
+
+
+class DataAssetDrillRequest(BaseModel):
+    filters: dict[str, DataAssetDrillFilter] = Field(min_length=1, max_length=20)
+    limit: int = Field(default=50_000, ge=1, le=50_000)
+
+
 VisualizationKind = Literal["line", "bar", "scatter", "histogram", "kpi"]
 VisualizationAggregation = Literal["average", "median", "std", "sum", "count", "min", "max"]
 
@@ -140,7 +164,7 @@ class DataAssetVisualizationRequest(BaseModel):
     y: str = ""
     group: str = ""
     aggregations: list[VisualizationAggregation] = Field(default_factory=lambda: ["average"], max_length=7)
-    selected_groups: list[str] | None = None
+    selected_groups: list[str] | None = Field(default=None, max_length=1_000)
     x_epsilon: float = Field(default=0, ge=0, le=1e100)
     max_points: int = Field(default=2_000, ge=50, le=10_000)
     bins: int = Field(default=16, ge=5, le=100)

@@ -112,7 +112,12 @@ display payload. The frontend aborts superseded requests and navigates by unique
 X coordinates so multi-series lines are not split during zoom and pan. Keep the
 request lifecycle in `frontend/src/analysis/useVisualizationResult.ts`; chart
 components should consume its state rather than duplicate debounce, cancellation,
-and error handling. When changing this path, run:
+and error handling. Chart-mark double-click Drill requests must remain
+server-side: compile mark ranges and group values through
+`ColumnarDatasetStore.compile_browser_query`, count the complete match set in the same
+windowed query, and bound only the returned record window. Preserve explicit
+upper-bound inclusion for final histogram and scatter bins, and test the same
+path against Data Views. When changing this path, run:
 
 ```powershell
 docker exec ml-app-api-1 pytest tests/test_visualizations.py tests/test_datasets_upload.py tests/test_full_profile.py
@@ -126,6 +131,14 @@ under `examples/data` instead.
 
 Python bytecode, test caches, Vite output, node modules, local env files, model
 artifacts, and runtime data should not be committed.
+
+Integration tests create uniquely named accounts in the local PostgreSQL
+database. The autouse fixture in `backend/tests/conftest.py` tags generated
+accounts with a unique per-test token and removes only those accounts, their
+dataset records, and their repository directories afterward. This remains safe
+when tests run concurrently. Keep test account names within the explicit pattern
+in that fixture; never broaden cleanup to all `example.com` accounts or all users
+created during a time window.
 
 The root-level `sandbox.ipynb` notebook is also ignored. It is intended for quick
 local experiments and scratch calculations, not shared documentation.
