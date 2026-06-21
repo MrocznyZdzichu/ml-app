@@ -98,7 +98,9 @@ than calculating and discarding additional results.
 
 `backend/tests/test_visualizations.py` verifies full-row visualization
 aggregates, density binning, group selection, SQL and Browser Data Views,
-nested views, and continuation from a view into descriptive profiling.
+nested views, independent scatter epsilon bins, bounded density-first output,
+per-group trend fitting and metadata, typed response aliases, and continuation
+from a view into descriptive profiling.
 
 `backend/tests/benchmark_full_profile.py` is intentionally manual so routine
 test runs remain fast while performance can be measured at realistic scales.

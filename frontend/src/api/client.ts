@@ -104,6 +104,7 @@ export type DatasetPreview = {
 
 export type VisualizationKind = "line" | "bar" | "scatter" | "histogram" | "kpi";
 export type VisualizationAggregation = "average" | "median" | "std" | "sum" | "count" | "min" | "max";
+export type VisualizationTrend = "none" | "linear" | "spline" | "polynomial" | "exponential";
 
 export type DatasetVisualizationRequest = {
   kind: VisualizationKind;
@@ -113,6 +114,9 @@ export type DatasetVisualizationRequest = {
   aggregations: VisualizationAggregation[];
   selected_groups: string[] | null;
   x_epsilon: number;
+  y_epsilon: number;
+  trend: VisualizationTrend;
+  polynomial_degree: number;
   max_points: number;
   bins: number;
 };
@@ -129,6 +133,17 @@ export type VisualizationPoint = {
   yRange?: [number, number];
   xRangeInclusive?: boolean;
   yRangeInclusive?: boolean;
+};
+
+export type VisualizationTrendCurve = {
+  series: string;
+  kind: Exclude<VisualizationTrend, "none">;
+  valid_count: number;
+  approximate?: boolean;
+  parameters: Record<string, number | number[]>;
+  r_squared?: number | null;
+  fit_space: "y" | "log_y" | "binned_y";
+  points: Array<{ x: number; y: number }>;
 };
 
 export type DatasetDrillOperator = "contains" | "equals" | "not_equals" | "in" | "regex" | "starts_with" | "ends_with" | "gt" | "gte" | "lt" | "lte" | "between" | "empty" | "not_empty";
@@ -150,6 +165,7 @@ export type DatasetVisualization = {
   row_count: number;
   scanned_row_count: number;
   points: VisualizationPoint[];
+  trends: VisualizationTrendCurve[];
   series: string[];
   kpi: number | null;
   valid_count: number;

@@ -179,9 +179,13 @@ use Smart start. The workspace supports:
 - line, bar, scatter/density-bin, histogram, and KPI views,
 - drag-and-drop positioning, fine-grained resizing, snapping guides, collision
   detection, Tidy layout, and Clear canvas,
-- configurable axes, per-chart X-epsilon bucketing for continuous variables,
-  grouping, full-dataset aggregations, multiple metrics per group, and explicit
-  group selection,
+- numeric-only scatter axes, per-chart X-epsilon bucketing for line/bar/scatter,
+  independent scatter Y epsilon, contextual epsilon help, grouping,
+  full-dataset aggregations, multiple metrics per group, and explicit group
+  selection,
+- optional straight-line, spline, degree 2–5 polynomial, and exponential scatter
+  fits calculated per group, with equations, fitted-row counts, coefficients,
+  and R-squared diagnostics,
 - grouped Category bars with side-by-side or per-metric stacked presentation,
 - adaptive axes, tooltips, zoom, pan, and scrollable mark-aware legends,
 - double-click Drill on chart marks that opens Data Browsing with the exact
@@ -240,10 +244,14 @@ records created in the main API.
 - Users and dataset metadata are durable in PostgreSQL. Uploaded files and
   generated Parquet sidecars are stored in `data/repository`; MinIO is started
   for future object-storage work but is not the active dataset store.
-- Full-dataset descriptive profiling is implemented for uploaded CSV datasets.
-  Data View profiling is currently preview-based, as noted above.
+- Full-dataset descriptive profiling is implemented for uploaded CSV datasets
+  and materialized SQL/Browser Data Views.
 - Visualization, chart drill-down, and Data View materialization use DuckDB over
   the complete physical or transformed relation and return bounded results.
+- Scatter trend output is capped at 80 render points per curve and 100 selected
+  groups. Spline fits smooth at most 24 full-data aggregate nodes per group and
+  are explicitly marked as approximate; other supported fits use full-data
+  regression aggregates or sufficient statistics.
 - Interactive Data Browsing is a bounded client-side exploration path. Custom
   SQL currently materializes the relation in API-process memory and SQLite.
 - Analytics scalability is currently single-node. There is no distributed query

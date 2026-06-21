@@ -221,13 +221,28 @@ produces an explicit grouped split without overloading the meaning of the Y axis
 Histogram measures are numeric as well. The backend enforces the same rules
 independently of the UI.
 
-For numeric X axes in line and bar charts, `X epsilon` optionally reduces dense
-continuous coordinates before aggregation. `epsilon = 0` preserves exact X
-values. A positive epsilon creates non-overlapping buckets of width `2 × ε`,
+For numeric X axes in line, bar, and scatter charts, `X epsilon` optionally
+reduces dense continuous coordinates before aggregation. Scatter charts also
+provide an independent `Y epsilon`. `epsilon = 0` preserves exact values for
+line/bar aggregation; scatter then uses its automatic bounded density-bin
+resolution. A positive epsilon creates non-overlapping buckets of width `2 × ε`,
 anchored at zero and represented by their center. For example, `ε = 0.2`
 aggregates values in `[0.8, 1.2)` into the point centered at `x = 1`. Epsilon is
 stored independently for each chart, and tooltips report the bucket range and
 row count.
+
+Scatter axes expose numeric columns only. An optional straight-line, natural
+spline, polynomial (degree 2–5), or exponential trend is fitted server-side;
+when a color/series column is selected, DuckDB partitions the full selected data
+and returns one bounded curve per group. Linear and exponential fits use native
+full-data DuckDB regression aggregates; polynomial fits use full-data sufficient
+statistics. The spline smooths 24 full-data aggregate bins and is explicitly
+marked as approximate. Exponential fitting
+uses positive Y values and reports its fitted-row count in the chart status.
+The expandable trend-details panel reports the fitted equation and scope per
+series: slope/intercept for a line, amplitude/rate for an exponential curve,
+original-X polynomial coefficients, or spline node counts. Regression fits also
+report R²; exponential R² is explicitly identified as operating in log(Y) space.
 
 The visualization endpoint scans the complete Parquet relation with DuckDB.
 Line/bar aggregates, histograms, KPI values, group choices, and scatter density
@@ -464,6 +479,24 @@ Important dataset endpoints:
 - `DELETE /api/v1/datasets/{dataset_id}` - soft-delete metadata and remove local
   physical file for file-backed datasets.
 
+### Visualization API contract
+
+`DataAssetVisualizationRequest` accepts `kind`, `x`, `y`, optional `group`,
+selected groups, aggregations, bounded output controls, and epsilon settings.
+`x_epsilon` applies to numeric line/bar/scatter X axes; `y_epsilon`, `trend`, and
+`polynomial_degree` are scatter-only. Polynomial degree is constrained to 2–5.
+The backend rejects categorical scatter axes, duplicated axis/group columns,
+non-scatter trend options, unsafe epsilon widths, and trend requests spanning
+more than 100 selected groups.
+
+`DataAssetVisualizationRead` is a typed bounded response. It reports the source
+and valid row counts, full-dataset execution mode, truncation state, chart
+points, series, and optional trend curves. Every trend includes its fit kind,
+series, fitted-row count, at most 80 render points, parameters, fit space, and
+optional R²/approximation metadata. Point range fields retain their camel-case
+JSON names (`xRange`, `yRange`, and inclusive-bound flags) for frontend and
+drill compatibility while using snake-case model attributes in Python.
+
 ## Implementation Notes
 
 - UI role helpers live in `frontend/src/analysis/dataRoles.ts`.
@@ -474,6 +507,11 @@ Important dataset endpoints:
   `backend/app/modules/datasets/columnar.py`.
 - Full-dataset chart queries live in
   `backend/app/modules/datasets/visualizations.py`.
+- Scatter fitting and its bounded numerical curve contract live in
+  `backend/app/modules/datasets/visualization_trends.py`.
 - Chart-mark Drill filter translation lives in
   `frontend/src/analysis/drillContext.ts`.
+- Scatter fit diagnostics live in
+  `frontend/src/analysis/TrendFitDetails.tsx`; shared numeric display formatting
+  lives in `frontend/src/analysis/visualizationFormatters.ts`.
 - Source adapters live in `backend/app/modules/datasets/sources.py`.

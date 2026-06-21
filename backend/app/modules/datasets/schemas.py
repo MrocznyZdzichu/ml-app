@@ -156,6 +156,8 @@ class DataAssetDrillRequest(BaseModel):
 
 VisualizationKind = Literal["line", "bar", "scatter", "histogram", "kpi"]
 VisualizationAggregation = Literal["average", "median", "std", "sum", "count", "min", "max"]
+VisualizationTrend = Literal["none", "linear", "spline", "polynomial", "exponential"]
+VisualizationFittedTrend = Literal["linear", "spline", "polynomial", "exponential"]
 
 
 class DataAssetVisualizationRequest(BaseModel):
@@ -166,15 +168,51 @@ class DataAssetVisualizationRequest(BaseModel):
     aggregations: list[VisualizationAggregation] = Field(default_factory=lambda: ["average"], max_length=7)
     selected_groups: list[str] | None = Field(default=None, max_length=1_000)
     x_epsilon: float = Field(default=0, ge=0, le=1e100)
+    y_epsilon: float = Field(default=0, ge=0, le=1e100)
+    trend: VisualizationTrend = "none"
+    polynomial_degree: int = Field(default=2, ge=2, le=5)
     max_points: int = Field(default=2_000, ge=50, le=10_000)
     bins: int = Field(default=16, ge=5, le=100)
+
+
+class DataAssetVisualizationPointRead(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    x: float
+    y: float
+    x_label: str = Field(alias="xLabel")
+    series: str
+    group: str | None = None
+    aggregation: VisualizationAggregation | None = None
+    count: int | None = None
+    x_range: tuple[float, float] | None = Field(default=None, alias="xRange")
+    y_range: tuple[float, float] | None = Field(default=None, alias="yRange")
+    x_range_inclusive: bool = Field(default=False, alias="xRangeInclusive")
+    y_range_inclusive: bool = Field(default=False, alias="yRangeInclusive")
+
+
+class DataAssetVisualizationTrendPointRead(BaseModel):
+    x: float
+    y: float
+
+
+class DataAssetVisualizationTrendRead(BaseModel):
+    series: str
+    kind: VisualizationFittedTrend
+    valid_count: int
+    points: list[DataAssetVisualizationTrendPointRead] = Field(default_factory=list)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    r_squared: float | None = None
+    fit_space: Literal["y", "log_y", "binned_y"]
+    approximate: bool = False
 
 
 class DataAssetVisualizationRead(BaseModel):
     dataset_id: str
     row_count: int
     scanned_row_count: int
-    points: list[dict[str, Any]] = Field(default_factory=list)
+    points: list[DataAssetVisualizationPointRead] = Field(default_factory=list)
+    trends: list[DataAssetVisualizationTrendRead] = Field(default_factory=list)
     series: list[str] = Field(default_factory=list)
     kpi: float | None = None
     valid_count: int = 0

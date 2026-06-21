@@ -2,6 +2,7 @@ import {
   Activity,
   BarChart3,
   GripVertical,
+  Info,
   LayoutDashboard,
   LineChart,
   Maximize2,
@@ -25,13 +26,17 @@ import type {
   DatasetPreview,
   DatasetVisualizationRequest,
   VisualizationAggregation,
-  VisualizationKind
+  VisualizationKind,
+  VisualizationTrend,
+  VisualizationTrendCurve
 } from "../api/client";
 import {
   createVisualizationDrillRequest,
   type VisualizationDrillRequest,
 } from "./drillContext";
+import { TrendFitDetails } from "./TrendFitDetails";
 import { useVisualizationResult } from "./useVisualizationResult";
+import { formatInteger, formatNumber } from "./visualizationFormatters";
 
 type CellValue = string | number | boolean | null;
 type RecordRow = Record<string, CellValue>;
@@ -47,6 +52,9 @@ type ChartConfig = {
   x: string;
   y: string;
   xEpsilon: number;
+  yEpsilon: number;
+  trend: VisualizationTrend;
+  polynomialDegree: number;
   group: string;
   aggregation: Aggregation;
   comparisonAggregations: Aggregation[];
@@ -441,32 +449,42 @@ function ChartInspector({ chart, columns, datasetId, rows, onChange }: { chart: 
               ? { x, xEpsilon: 0, group: "", selectedGroups: null, stacked: false }
               : { x, xEpsilon: 0 });
           }}>
-            {(chart.kind === "histogram" ? numericColumns : columns).map((column) => <option key={column.name} value={column.name}>{column.name} · {column.type}</option>)}
+            {(chart.kind === "histogram" || chart.kind === "scatter" ? numericColumns : columns).map((column) => <option key={column.name} value={column.name}>{column.name} · {column.type}</option>)}
           </select>
         </label>
       )}
-      {(chart.kind === "line" || chart.kind === "bar") && xColumn?.type === "number" && (
-        <label>X epsilon
-          <input
-            min="0"
-            onChange={(event) => onChange({ xEpsilon: Math.max(0, Number(event.target.value) || 0) })}
-            step="any"
-            type="number"
-            value={chart.xEpsilon ?? 0}
-          />
-          <span className="epsilon-hint">0 keeps exact X values. A positive value groups [center − ε, center + ε).</span>
-        </label>
+      {(chart.kind === "line" || chart.kind === "bar" || chart.kind === "scatter") && xColumn?.type === "number" && (
+        <EpsilonField axis="X" automaticAtZero={chart.kind === "scatter"} value={chart.xEpsilon ?? 0} onChange={(xEpsilon) => onChange({ xEpsilon })} />
       )}
       {chart.kind !== "histogram" && (
         <label>{chart.kind === "kpi" ? "Measure" : "Vertical axis"}
           <select value={chart.y} onChange={(event) => {
             const y = event.target.value;
             onChange(y === chart.group
-              ? { y, group: "", selectedGroups: null, stacked: false }
-              : { y });
+              ? { y, yEpsilon: 0, group: "", selectedGroups: null, stacked: false }
+              : { y, yEpsilon: 0 });
           }}>
             {numericColumns.map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}
           </select>
+        </label>
+      )}
+      {chart.kind === "scatter" && (
+        <EpsilonField axis="Y" automaticAtZero value={chart.yEpsilon ?? 0} onChange={(yEpsilon) => onChange({ yEpsilon })} />
+      )}
+      {chart.kind === "scatter" && (
+        <label>Trend
+          <select value={chart.trend ?? "none"} onChange={(event) => onChange({ trend: event.target.value as VisualizationTrend })}>
+            <option value="none">None</option>
+            <option value="linear">Straight line</option>
+            <option value="spline">Spline</option>
+            <option value="polynomial">Polynomial</option>
+            <option value="exponential">Exponential curve</option>
+          </select>
+        </label>
+      )}
+      {chart.kind === "scatter" && chart.trend === "polynomial" && (
+        <label>Polynomial degree
+          <input min="2" max="5" step="1" type="number" value={chart.polynomialDegree ?? 2} onChange={(event) => onChange({ polynomialDegree: Math.max(2, Math.min(5, Number(event.target.value) || 2)) })} />
         </label>
       )}
       {(chart.kind === "line" || chart.kind === "bar" || chart.kind === "kpi") && (
@@ -548,6 +566,20 @@ function ChartInspector({ chart, columns, datasetId, rows, onChange }: { chart: 
   );
 }
 
+function EpsilonField({ axis, automaticAtZero = false, value, onChange }: { axis: "X" | "Y"; automaticAtZero?: boolean; value: number; onChange: (value: number) => void }) {
+  return (
+    <label>
+      <span className="epsilon-label">{axis} epsilon
+        <span className="epsilon-info" tabIndex={0} aria-label={`${axis} epsilon information`}>
+          <Info size={13} />
+          <span className="epsilon-tooltip">{automaticAtZero ? "0 selects an automatic density-bin width for bounded rendering. " : "0 keeps exact values. "}A positive epsilon groups values into non-overlapping buckets of width 2 × ε: [center − ε, center + ε).</span>
+        </span>
+      </span>
+      <input min="0" onChange={(event) => onChange(Math.max(0, Number(event.target.value) || 0))} step="any" type="number" value={value} />
+    </label>
+  );
+}
+
 function ChartView({ chart, datasetId, onDrill, xType }: { chart: ChartConfig; datasetId: string; onDrill: (request: VisualizationDrillRequest) => void; xType?: DatasetColumn["type"] }) {
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState(0);
@@ -565,9 +597,12 @@ function ChartView({ chart, datasetId, onDrill, xType }: { chart: ChartConfig; d
     aggregations: unique([chart.aggregation, ...(chart.comparisonAggregations ?? [])]),
     selected_groups: requestGroup ? chart.selectedGroups ?? null : null,
     x_epsilon: chart.xEpsilon ?? 0,
+    y_epsilon: chart.yEpsilon ?? 0,
+    trend: chart.kind === "scatter" ? chart.trend ?? "none" : "none",
+    polynomial_degree: chart.polynomialDegree ?? 2,
     max_points: 2000,
     bins: 16
-  }), [chart.aggregation, chart.comparisonAggregations, chart.kind, chart.selectedGroups, chart.x, chart.xEpsilon, chart.y, requestGroup]);
+  }), [chart.aggregation, chart.comparisonAggregations, chart.kind, chart.polynomialDegree, chart.selectedGroups, chart.trend, chart.x, chart.xEpsilon, chart.y, chart.yEpsilon, requestGroup]);
   const { result, loading: chartLoading, error: chartError } = useVisualizationResult(datasetId, query);
   const metricOrder = useMemo(
     () => unique([chart.aggregation, ...(chart.comparisonAggregations ?? [])]),
@@ -582,6 +617,10 @@ function ChartView({ chart, datasetId, onDrill, xType }: { chart: ChartConfig; d
 
   const points = result?.points ?? [];
   const series = result?.series ?? [];
+  const trendValidCount = result?.trends?.reduce((total, trend) => total + trend.valid_count, 0) ?? 0;
+  const trendScope = chart.kind === "scatter" && chart.trend !== "none" && result?.trends?.length
+    ? ` · ${chart.trend} trend per series · ${formatInteger(trendValidCount)} fitted rows${result.trends.some((trend) => trend.approximate) ? " · spline smoothed from 24 full-data bins" : ""}`
+    : "";
   const colorAssignments = useMemo(
     () => assignDistinctColors(points, chart.kind, colorAssignmentsRef.current),
     [chart.kind, points]
@@ -670,7 +709,7 @@ function ChartView({ chart, datasetId, onDrill, xType }: { chart: ChartConfig; d
         <span>
           {chartLoading
             ? "Refreshing…"
-            : `${formatInteger(result.scanned_row_count)} rows · full dataset${result.truncated ? ` · display capped at ${formatInteger(points.length)} points` : ""}`}
+            : `${formatInteger(result.scanned_row_count)} rows · full dataset${result.truncated ? ` · display capped at ${formatInteger(points.length)} points` : ""}${trendScope}`}
           {" · Wheel to zoom · drag to pan · Double-click element to drill the data"}
         </span>
         <button aria-label="Zoom out" disabled={zoom === 1} onClick={() => changeZoom(zoom - 1)} type="button"><ZoomOut size={14} /></button>
@@ -693,6 +732,7 @@ function ChartView({ chart, datasetId, onDrill, xType }: { chart: ChartConfig; d
           chart={chart}
           onPointDoubleClick={(point) => onDrill(createVisualizationDrillRequest(datasetId, chart, point, xType))}
           points={visible}
+          trends={result.trends ?? []}
           series={result.series}
           seriesVisuals={seriesVisuals}
           setTooltip={setTooltip}
@@ -700,6 +740,7 @@ function ChartView({ chart, datasetId, onDrill, xType }: { chart: ChartConfig; d
         />
         {tooltip && <div className="chart-tooltip" style={{ left: tooltip.x, top: tooltip.y }}><strong>{tooltip.title}</strong><span>{tooltip.value}</span></div>}
       </div>
+      {result.trends?.length > 0 && <TrendFitDetails trends={result.trends} />}
       {maxOffset > 0 && <input aria-label="Visible data range" className="chart-scroll" max={maxOffset} min={0} onChange={(event) => setOffset(Number(event.target.value))} type="range" value={safeOffset} />}
       {result.series.length > 1 && <SeriesLegend chartKind={chart.kind} visuals={seriesVisuals} />}
     </div>
@@ -746,16 +787,17 @@ function SeriesLegend({ chartKind, visuals }: { chartKind: ChartKind; visuals: S
   );
 }
 
-function SvgChart({ chart, onPointDoubleClick, points, series, seriesVisuals, setTooltip, xType }: { chart: ChartConfig; onPointDoubleClick: (point: PlotPoint) => void; points: PlotPoint[]; series: string[]; seriesVisuals: SeriesVisual[]; setTooltip: (tooltip: Tooltip) => void; xType?: DatasetColumn["type"] }) {
+function SvgChart({ chart, onPointDoubleClick, points, trends, series, seriesVisuals, setTooltip, xType }: { chart: ChartConfig; onPointDoubleClick: (point: PlotPoint) => void; points: PlotPoint[]; trends: VisualizationTrendCurve[]; series: string[]; seriesVisuals: SeriesVisual[]; setTooltip: (tooltip: Tooltip) => void; xType?: DatasetColumn["type"] }) {
   const width = 720;
   const height = 270;
   const pad = { left: 64, right: 18, top: 18, bottom: 58 };
   const plotWidth = width - pad.left - pad.right;
   const plotHeight = height - pad.top - pad.bottom;
   const xValues = points.map((point) => point.x);
-  const yValues = points.map((point) => point.y);
   const xMin = Math.min(...xValues);
   const xMax = Math.max(...xValues);
+  const visibleTrends = trends.map((trend) => ({ ...trend, points: trend.points.filter((point) => point.x >= xMin && point.x <= xMax) }));
+  const yValues = [...points.map((point) => point.y), ...visibleTrends.flatMap((trend) => trend.points.map((point) => point.y))];
   const stackedBounds = chart.kind === "bar" && chart.stacked ? stackedBarBounds(points) : null;
   const dataYMin = stackedBounds?.[0] ?? Math.min(...yValues);
   const dataYMax = stackedBounds?.[1] ?? Math.max(...yValues);
@@ -820,6 +862,10 @@ function SvgChart({ chart, onPointDoubleClick, points, series, seriesVisuals, se
     <svg aria-label={`${chart.title}, interactive ${kindLabels[chart.kind]}`} preserveAspectRatio="none" role="img" viewBox={`0 0 ${width} ${height}`}>
       {yScale.ticks.map((value) => <g key={value}><line className="chart-gridline" x1={pad.left} x2={width - pad.right} y1={yPx(value)} y2={yPx(value)} /><text className="chart-axis-label" x={pad.left - 8} y={yPx(value) + 4} textAnchor="end">{formatAxisTick(value, yScale.step)}</text></g>)}
       {xTicks.map((tick) => <g key={`${tick.value}-${tick.label}`}><line className="chart-gridline vertical" x1={xTickPosition(tick)} x2={xTickPosition(tick)} y1={pad.top} y2={pad.top + plotHeight} /><text className="chart-axis-label" textAnchor="middle" x={xTickPosition(tick)} y={height - 29}>{shortAxisLabel(tick.label)}</text></g>)}
+      {chart.kind === "scatter" && visibleTrends.map((trend) => {
+        const path = trend.points.map((point, index) => `${index === 0 ? "M" : "L"}${xPx(point.x)},${yPx(point.y)}`).join(" ");
+        return <path className="chart-trend" d={path} key={`${trend.series}-${trend.kind}`} stroke={visualBySeries.get(trend.series)?.color ?? PALETTE[0]} />;
+      })}
       {chart.kind === "bar" || chart.kind === "histogram" ? barMarks.map((mark, index) => {
         const startY = yPx(mark.start);
         const endY = yPx(mark.end);
@@ -922,13 +968,13 @@ function buildSmartDashboard(columns: DatasetColumn[], rows: RecordRow[]): Chart
 function createChart(kind: ChartKind, columns: DatasetColumn[], rows: RecordRow[], index: number) {
   const numeric = columns.filter((column) => column.type === "number");
   const categorical = columns.find((column) => column.type !== "number" && cardinality(rows, column.name) < 40);
-  const x = kind === "histogram" ? numeric[0]?.name ?? "" : kind === "scatter" ? numeric[0]?.name ?? columns[0]?.name ?? "" : categorical?.name ?? columns[0]?.name ?? "";
+  const x = kind === "histogram" ? numeric[0]?.name ?? "" : kind === "scatter" ? numeric[0]?.name ?? "" : categorical?.name ?? columns[0]?.name ?? "";
   const y = kind === "scatter" ? numeric[1]?.name ?? numeric[0]?.name ?? "" : numeric[0]?.name ?? "";
   return makeConfig(kind, x, y, "", `${kindLabels[kind]} ${index + 1}`, defaultLayout(kind, index));
 }
 
 function makeConfig(kind: ChartKind, x: string, y: string, group: string, title: string, layout: ChartLayout): ChartConfig {
-  return { id: `${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, kind, title, x, y, xEpsilon: 0, group, aggregation: "average", comparisonAggregations: [], selectedGroups: null, stacked: false, layout };
+  return { id: `${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, kind, title, x, y, xEpsilon: 0, yEpsilon: 0, trend: "none", polynomialDegree: 2, group, aggregation: "average", comparisonAggregations: [], selectedGroups: null, stacked: false, layout };
 }
 
 function readSessionDashboard(datasetId: string, columns: DatasetColumn[]): ChartConfig[] | null {
@@ -960,6 +1006,9 @@ function readSessionDashboard(datasetId: string, columns: DatasetColumn[]): Char
           ...chart,
           group: validGroup ? chart.group : "",
           xEpsilon: chart.xEpsilon ?? 0,
+          yEpsilon: chart.yEpsilon ?? 0,
+          trend: chart.trend ?? "none",
+          polynomialDegree: chart.polynomialDegree ?? 2,
           comparisonAggregations: chart.comparisonAggregations ?? [],
           selectedGroups: validGroup ? chart.selectedGroups ?? null : null,
           stacked: validGroup && chart.kind === "bar" ? chart.stacked ?? false : false,
@@ -977,7 +1026,7 @@ function readSessionDashboard(datasetId: string, columns: DatasetColumn[]): Char
 function describeEncoding(chart: ChartConfig) {
   if (chart.kind === "histogram") return `${chart.x} · binned count`;
   if (chart.kind === "kpi") return `${chart.aggregation} of ${chart.y}`;
-  return `${chart.x || "row"} → ${chart.y || "count"}${chart.xEpsilon > 0 ? ` · ε=${formatNumber(chart.xEpsilon)}` : ""}${chart.group ? ` · by ${chart.group}` : ""}${chart.kind === "bar" && chart.stacked ? " · stacked" : ""}`;
+  return `${chart.x || "row"} → ${chart.y || "count"}${chart.xEpsilon > 0 ? ` · xε=${formatNumber(chart.xEpsilon)}` : ""}${chart.yEpsilon > 0 ? ` · yε=${formatNumber(chart.yEpsilon)}` : ""}${chart.group ? ` · by ${chart.group}` : ""}${chart.kind === "scatter" && chart.trend !== "none" ? ` · ${chart.trend} trend` : ""}${chart.kind === "bar" && chart.stacked ? " · stacked" : ""}`;
 }
 
 function defaultLayout(kind: ChartKind, index: number): ChartLayout {
@@ -1331,5 +1380,3 @@ function aggregationLabel(aggregation: Aggregation) {
   if (aggregation === "std") return "Std. dev.";
   return aggregation.charAt(0).toUpperCase() + aggregation.slice(1);
 }
-function formatInteger(value: number) { return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(value); }
-function formatNumber(value: number) { return new Intl.NumberFormat(undefined, { maximumFractionDigits: 4 }).format(value); }

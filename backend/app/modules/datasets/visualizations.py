@@ -1,3 +1,4 @@
+import math
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Callable
@@ -8,6 +9,16 @@ from fastapi import HTTPException, status
 from app.modules.datasets.columnar import ColumnarDatasetStore
 from app.modules.datasets.domain import DataAsset
 from app.modules.datasets.schemas import DataAssetDrillRequest, DataAssetVisualizationRequest
+from app.modules.datasets.visualization_trends import (
+    MAX_TREND_GROUP_COUNT,
+    ScatterTrendFitter,
+    finite_number,
+)
+
+
+SCATTER_MIN_GRID_SIZE = 5
+SCATTER_MAX_GRID_SIZE = 50
+MAX_SAFE_SCATTER_BIN_INDEX = 9e18
 
 
 class FullDatasetVisualization:
@@ -15,6 +26,7 @@ class FullDatasetVisualization:
 
     def __init__(self, store: ColumnarDatasetStore | None = None) -> None:
         self.store = store or ColumnarDatasetStore()
+        self.trend_fitter = ScatterTrendFitter(self._fetch_dicts)
 
     def render(
         self,
@@ -175,6 +187,9 @@ class FullDatasetVisualization:
         )
         group_select = f", CAST({group} AS VARCHAR) AS group_value" if group else ", 'Values' AS group_value"
         where, parameters = self._where(request, x, y, group)
+        where += f" AND isfinite(CAST({y} AS DOUBLE))"
+        if numeric_x:
+            where += f" AND isfinite(CAST({x} AS DOUBLE))"
         group_by = f"{x_expression}, {group}" if group else x_expression
         output_limit = max(1, request.max_points // max(1, len(aggregations)))
         rows = self._fetch_dicts(
@@ -229,14 +244,16 @@ class FullDatasetVisualization:
         y = self.store.identifier(request.y)
         aggregation = (request.aggregations or ["average"])[0]
         row = connection.execute(
-            f"SELECT {self._aggregate_sql(aggregation, y)}, count({y}) FROM {relation} WHERE {y} IS NOT NULL"
+            f"SELECT {self._aggregate_sql(aggregation, y)}, count({y}) FROM {relation} "
+            f"WHERE {y} IS NOT NULL AND isfinite(CAST({y} AS DOUBLE))"
         ).fetchone()
         return {"points": [], "series": [], "kpi": self._number(row[0]), "valid_count": int(row[1])}
 
     def _histogram(self, connection: duckdb.DuckDBPyConnection, relation: str, request: DataAssetVisualizationRequest) -> dict[str, Any]:
         x = self.store.identifier(request.x)
         low, high, count = connection.execute(
-            f"SELECT min({x}), max({x}), count({x}) FROM {relation} WHERE {x} IS NOT NULL"
+            f"SELECT min({x}), max({x}), count({x}) FROM {relation} "
+            f"WHERE {x} IS NOT NULL AND isfinite(CAST({x} AS DOUBLE))"
         ).fetchone()
         if not count:
             return {"points": [], "series": ["Count"], "kpi": None, "valid_count": 0}
@@ -247,7 +264,7 @@ class FullDatasetVisualization:
             width = (high_number - low_number) / request.bins
             rows = connection.execute(
                 f"SELECT least(?, floor(({x} - ?) / ?))::INTEGER AS bin, count(*) FROM {relation} "
-                f"WHERE {x} IS NOT NULL GROUP BY bin ORDER BY bin",
+                f"WHERE {x} IS NOT NULL AND isfinite(CAST({x} AS DOUBLE)) GROUP BY bin ORDER BY bin",
                 [request.bins - 1, low_number, width],
             ).fetchall()
             counts = {int(row[0]): int(row[1]) for row in rows}
@@ -272,6 +289,7 @@ class FullDatasetVisualization:
         x, y = self.store.identifier(request.x), self.store.identifier(request.y)
         group = self.store.identifier(request.group) if request.group else ""
         where, parameters = self._where(request, x, y, group)
+        where += f" AND isfinite(CAST({x} AS DOUBLE)) AND isfinite(CAST({y} AS DOUBLE))"
         group_count_sql = f"count(DISTINCT {group})" if group else "1"
         bounds = connection.execute(
             f"SELECT min({x}), max({x}), min({y}), max({y}), {group_count_sql} FROM {relation} {where}",
@@ -281,39 +299,57 @@ class FullDatasetVisualization:
             return {"points": [], "series": [], "kpi": None, "valid_count": 0}
         x_low, x_high, y_low, y_high = map(float, bounds[:4])
         group_count = max(1, int(bounds[4]))
-        grid = max(5, min(50, int((request.max_points / group_count) ** 0.5)))
-        x_width = (x_high - x_low) / grid or 1.0
-        y_width = (y_high - y_low) / grid or 1.0
+        if request.trend != "none" and group_count > MAX_TREND_GROUP_COUNT:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Scatter trends support at most {MAX_TREND_GROUP_COUNT} selected groups; narrow the group selection",
+            )
+        grid = max(
+            SCATTER_MIN_GRID_SIZE,
+            min(SCATTER_MAX_GRID_SIZE, int((request.max_points / group_count) ** 0.5)),
+        )
+        x_width = request.x_epsilon * 2 if request.x_epsilon > 0 else self._scatter_auto_width(x_low, x_high, grid)
+        y_width = request.y_epsilon * 2 if request.y_epsilon > 0 else self._scatter_auto_width(y_low, y_high, grid)
+        self._validate_scatter_bucket_width("X", x_low, x_high, x_width, request.x_epsilon > 0)
+        self._validate_scatter_bucket_width("Y", y_low, y_high, y_width, request.y_epsilon > 0)
+        x_origin = 0.0 if request.x_epsilon > 0 else x_low
+        y_origin = 0.0 if request.y_epsilon > 0 else y_low
+        x_bin_expression = f"floor(({x} - ?) / ? + 1e-12)::BIGINT" if request.x_epsilon > 0 else f"least({grid - 1}, floor(({x} - ?) / ?))::BIGINT"
+        y_bin_expression = f"floor(({y} - ?) / ? + 1e-12)::BIGINT" if request.y_epsilon > 0 else f"least({grid - 1}, floor(({y} - ?) / ?))::BIGINT"
         group_select = f", CAST({group} AS VARCHAR) AS group_value" if group else ", 'Values' AS group_value"
         group_by = "x_bin, y_bin, group_value"
         rows = self._fetch_dicts(
             connection,
             f"WITH binned AS ("
-            f"SELECT least(?, floor(({x} - ?) / ?))::INTEGER AS x_bin, least(?, floor(({y} - ?) / ?))::INTEGER AS y_bin{group_select}, "
+            f"SELECT {x_bin_expression} AS x_bin, {y_bin_expression} AS y_bin{group_select}, "
             f"avg({x}) AS x_center, avg({y}) AS y_center, count(*) AS point_count "
             f"FROM {relation} {where} GROUP BY {group_by}"
-            f") SELECT *, sum(point_count) OVER () AS total_valid_count, count(*) OVER () AS total_bin_count "
-            f"FROM binned ORDER BY x_bin, y_bin LIMIT ?",
-            [grid - 1, x_low, x_width, grid - 1, y_low, y_width, *parameters, request.max_points],
+            f"), ranked AS ("
+            f"SELECT *, sum(point_count) OVER () AS total_valid_count, count(*) OVER () AS total_bin_count, "
+            f"row_number() OVER (PARTITION BY group_value ORDER BY point_count DESC, x_bin, y_bin) AS group_rank "
+            f"FROM binned"
+            f") SELECT * FROM ranked ORDER BY group_rank, point_count DESC, group_value LIMIT ?",
+            [x_origin, x_width, y_origin, y_width, *parameters, request.max_points],
         )
+        rows.sort(key=lambda row: (int(row["x_bin"]), int(row["y_bin"]), str(row["group_value"])))
         points = [
             {
-                "x": float(row["x_center"]),
-                "y": float(row["y_center"]),
-                "xLabel": f"{request.x}: {self._format(float(row['x_center']))}",
+                "x": x_origin + (int(row["x_bin"]) + 0.5) * x_width if request.x_epsilon > 0 else float(row["x_center"]),
+                "y": y_origin + (int(row["y_bin"]) + 0.5) * y_width if request.y_epsilon > 0 else float(row["y_center"]),
+                "xLabel": f"{request.x}: {self._format(x_origin + (int(row['x_bin']) + 0.5) * x_width if request.x_epsilon > 0 else float(row['x_center']))}",
                 "series": str(row["group_value"]),
                 "group": str(row["group_value"]),
                 "count": int(row["point_count"]),
                 "xRange": [
-                    x_low + int(row["x_bin"]) * x_width,
-                    x_high if int(row["x_bin"]) == grid - 1 else x_low + (int(row["x_bin"]) + 1) * x_width,
+                    x_origin + int(row["x_bin"]) * x_width,
+                    x_origin + (int(row["x_bin"]) + 1) * x_width,
                 ],
                 "yRange": [
-                    y_low + int(row["y_bin"]) * y_width,
-                    y_high if int(row["y_bin"]) == grid - 1 else y_low + (int(row["y_bin"]) + 1) * y_width,
+                    y_origin + int(row["y_bin"]) * y_width,
+                    y_origin + (int(row["y_bin"]) + 1) * y_width,
                 ],
-                "xRangeInclusive": int(row["x_bin"]) == grid - 1,
-                "yRangeInclusive": int(row["y_bin"]) == grid - 1,
+                "xRangeInclusive": request.x_epsilon <= 0 and int(row["x_bin"]) == grid - 1,
+                "yRangeInclusive": request.y_epsilon <= 0 and int(row["y_bin"]) == grid - 1,
             }
             for row in rows
         ]
@@ -321,11 +357,32 @@ class FullDatasetVisualization:
         total_bin_count = int(rows[0]["total_bin_count"]) if rows else 0
         return {
             "points": points,
+            "trends": self.trend_fitter.fit(connection, relation, request, x, y, group, where, parameters),
             "series": list(dict.fromkeys(point["series"] for point in points)),
             "kpi": None,
             "valid_count": total_valid_count,
             "truncated": total_bin_count > request.max_points,
         }
+
+    @staticmethod
+    def _scatter_auto_width(low: float, high: float, grid: int) -> float:
+        span = high - low
+        if math.isfinite(span):
+            return span / grid or 1.0
+        return high / grid - low / grid
+
+    @staticmethod
+    def _validate_scatter_bucket_width(axis: str, low: float, high: float, width: float, explicit: bool) -> None:
+        if not math.isfinite(width) or width <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{axis} epsilon produces a non-finite scatter bucket width",
+            )
+        if explicit and max(abs(low / width), abs(high / width)) > MAX_SAFE_SCATTER_BIN_INDEX:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{axis} epsilon is too small for this data range; increase epsilon",
+            )
 
     def _where(self, request: DataAssetVisualizationRequest, x: str, y: str, group: str) -> tuple[str, list[Any]]:
         clauses = [f"{x} IS NOT NULL", f"{y} IS NOT NULL"]
@@ -359,6 +416,16 @@ class FullDatasetVisualization:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Scatter axes must be numeric",
+            )
+        if request.kind != "scatter" and (request.y_epsilon > 0 or request.trend != "none"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Y epsilon and trend fitting are available only for scatter charts",
+            )
+        if request.kind not in {"line", "bar", "scatter"} and request.x_epsilon > 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="X epsilon is available only for line, bar, and scatter charts",
             )
         if request.kind in {"line", "bar", "kpi"} and self._frontend_type(columns[request.y]) != "number":
             raise HTTPException(
@@ -419,7 +486,7 @@ class FullDatasetVisualization:
 
     @staticmethod
     def _number(value: Any) -> float | None:
-        return None if value is None else float(value)
+        return finite_number(value)
 
     @staticmethod
     def _json_value(value: Any) -> Any:

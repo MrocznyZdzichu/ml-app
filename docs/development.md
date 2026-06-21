@@ -109,15 +109,32 @@ React. Grouped queries calculate full valid-row and group counts before applying
 the response limit. Keep that distinction intact: `valid_count` describes the
 whole selected analytical range, while `truncated` describes only the bounded
 display payload. The frontend aborts superseded requests and navigates by unique
-X coordinates so multi-series lines are not split during zoom and pan. Keep the
-request lifecycle in `frontend/src/analysis/useVisualizationResult.ts`; chart
+X coordinates so multi-series lines are not split during zoom and pan. Scatter
+also supports independent `y_epsilon` bucketing. Validate explicit epsilon
+widths against the finite data range before creating signed 64-bit bin indices.
+If the bounded output must be truncated, rank dense cells fairly across groups
+instead of taking a coordinate-ordered prefix. Trend regression remains
+server-side and should use native grouped aggregates or bounded sufficient
+statistics, never browser points or materialized raw rows. Keep the request
+lifecycle in `frontend/src/analysis/useVisualizationResult.ts`; chart
 components should consume its state rather than duplicate debounce, cancellation,
 and error handling. Chart-mark double-click Drill requests must remain
 server-side: compile mark ranges and group values through
 `ColumnarDatasetStore.compile_browser_query`, count the complete match set in the same
 windowed query, and bound only the returned record window. Preserve explicit
 upper-bound inclusion for final histogram and scatter bins, and test the same
-path against Data Views. When changing this path, run:
+path against Data Views.
+
+Trend-fitting SQL and numerical helpers belong in
+`backend/app/modules/datasets/visualization_trends.py`; keep chart orchestration,
+binning, and drill metadata in `visualizations.py`. Trend response models are
+typed in `schemas.py`, so new fit kinds must update backend literals, response
+models, frontend API types, rendering, and this documentation together.
+Keep fit-equation presentation in `TrendFitDetails.tsx` and reusable chart
+number formatting in `visualizationFormatters.ts`; do not move model-specific
+display branches back into the dashboard orchestration component.
+
+When changing this path, run:
 
 ```powershell
 docker exec ml-app-api-1 pytest tests/test_visualizations.py tests/test_datasets_upload.py tests/test_full_profile.py

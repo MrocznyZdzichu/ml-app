@@ -132,10 +132,11 @@ Visualization measures remain numeric, including when `count` is selected;
 DuckDB then counts their non-null values in each analytical partition.
 Categorical dimensions are represented through the grouped series contract
 rather than overloaded as measures. These type rules are validated server-side.
-Numeric line/bar specifications may include an X epsilon. DuckDB converts the
-continuous X expression into deterministic, non-overlapping `2 × epsilon`
-buckets and aggregates Y over every row in each bucket. Only the bucket centers,
-ranges, counts, and requested metrics are returned to React.
+Numeric line/bar/scatter specifications may include an X epsilon, and scatter
+may independently include a Y epsilon. DuckDB converts each configured axis into
+deterministic, non-overlapping `2 × epsilon` buckets and aggregates every row in
+each bucket. Only the bucket centers, ranges, counts, and requested metrics are
+returned to React.
 
 Chart-mark double-click Drill uses mark metadata to build parameterized source
 predicates. The API compiles them through the columnar Browser query builder and
@@ -151,6 +152,27 @@ components and the general application shell do not duplicate that contract.
 Scatter bounds and group cardinality are calculated in one pass. The binned
 query computes full valid-row and bin counts with window functions, applies its
 point limit in SQL, and never materializes overflow bins as Python dictionaries.
+When an explicit epsilon produces more cells than the response contract, cells
+are ranked by density within each group before the global limit is applied. This
+keeps the bounded view representative across series instead of returning only a
+low-coordinate prefix. Non-finite coordinates are excluded, and epsilon widths
+that cannot produce safe 64-bit bucket indices are rejected explicitly.
+Optional scatter trends are calculated from the full filtered relation and
+partitioned by the selected series. Regression fits transfer only sufficient
+statistics to Python; splines transfer at most 24 aggregate nodes per group.
+Every returned curve is bounded to 80 points and carries its fitted-row count.
+Regression curve metadata contains original-axis coefficients and R² alongside
+the bounded render points, so React presents fit diagnostics without repeating
+statistical calculations in the browser.
+Straight-line and exponential fits use DuckDB's native `regr_*` aggregates in a
+single grouped pass. Polynomial and spline fits use compact per-group bounds
+joined back to the projected X/Y relation, avoiding full-row partition windows.
+`FullDatasetVisualization` owns chart orchestration, validation, bounded binning,
+and drill contracts. `ScatterTrendFitter` in
+`backend/app/modules/datasets/visualization_trends.py` owns regression SQL,
+polynomial sufficient-statistic solving, spline interpolation, and the typed
+bounded trend contract. This keeps numerical fitting independent from endpoint
+and chart-kind orchestration.
 
 ## Data Views
 

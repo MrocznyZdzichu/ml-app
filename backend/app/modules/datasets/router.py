@@ -84,7 +84,11 @@ def query_dataset(
     return service.query(dataset_id, payload, principal)
 
 
-@router.post("/{dataset_id}/visualization", response_model=DataAssetVisualizationRead)
+@router.post(
+    "/{dataset_id}/visualization",
+    response_model=DataAssetVisualizationRead,
+    response_model_exclude_none=True,
+)
 def visualize_dataset(
     dataset_id: str,
     payload: DataAssetVisualizationRequest,

@@ -6,7 +6,11 @@ from fastapi import HTTPException
 from app.modules.analysis.full_profile import FullDatasetProfiler
 from app.modules.datasets.columnar import ColumnarDatasetStore
 from app.modules.datasets.domain import DataAsset, DataAssetStatus, SourceType
-from app.modules.datasets.schemas import DataAssetDrillRequest, DataAssetVisualizationRequest
+from app.modules.datasets.schemas import (
+    DataAssetDrillRequest,
+    DataAssetVisualizationRead,
+    DataAssetVisualizationRequest,
+)
 from app.modules.datasets.sources import CsvFileDatasetSource
 from app.modules.datasets.visualizations import FullDatasetVisualization
 
@@ -152,6 +156,19 @@ def test_scatter_bounds_high_cardinality_groups_before_python_materialization(tm
     assert len(result["points"]) == 50
 
 
+def test_scatter_trend_requires_bounded_group_selection(tmp_path: Path) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+
+    with pytest.raises(HTTPException, match="at most 100 selected groups"):
+        visualization.render(asset, DataAssetVisualizationRequest(
+            kind="scatter",
+            x="x",
+            y="y",
+            group="segment",
+            trend="linear",
+        ))
+
+
 def test_x_epsilon_groups_continuous_axis_into_centered_full_dataset_buckets(tmp_path: Path) -> None:
     visualization, asset = visualization_fixture(tmp_path)
     result = visualization.render(asset, DataAssetVisualizationRequest(
@@ -254,6 +271,161 @@ def test_scatter_uses_full_dataset_density_bins(tmp_path: Path) -> None:
     assert result["valid_count"] == 10_000
     assert len(result["points"]) <= 500
     assert sum(point["count"] for point in result["points"]) == 10_000
+
+
+def test_scatter_supports_independent_x_and_y_epsilon_buckets(tmp_path: Path) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+    result = visualization.render(asset, DataAssetVisualizationRequest(
+        kind="scatter",
+        x="x",
+        y="y",
+        group="species",
+        x_epsilon=5,
+        y_epsilon=20,
+        max_points=500,
+    ))
+
+    assert result["valid_count"] == 10_000
+    assert sum(point["count"] for point in result["points"]) == 10_000
+    assert {point["x"] for point in result["points"]} == set(range(5, 100, 10))
+    assert {point["y"] for point in result["points"]} == {20, 60, 100, 140, 180}
+    assert all(point["xRange"][1] - point["xRange"][0] == 10 for point in result["points"])
+    assert all(point["yRange"][1] - point["yRange"][0] == 40 for point in result["points"])
+
+
+def test_scatter_rejects_epsilon_too_small_for_safe_bucket_indices(tmp_path: Path) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+
+    with pytest.raises(HTTPException, match="X epsilon is too small"):
+        visualization.render(asset, DataAssetVisualizationRequest(
+            kind="scatter", x="x", y="y", x_epsilon=1e-20,
+        ))
+
+
+def test_scatter_truncation_keeps_dense_regions_instead_of_coordinate_prefix(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    dataset_dir = repository / "users" / "owner" / "dense-tail"
+    dataset_dir.mkdir(parents=True)
+    csv_path = dataset_dir / "data.csv"
+    with csv_path.open("w", encoding="utf-8", newline="") as output:
+        output.write("x,y\n")
+        for value in range(100):
+            output.write(f"{value},{value}\n")
+        for _ in range(1_000):
+            output.write("999,999\n")
+    source = CsvFileDatasetSource(repository)
+    has_header, row_count, schema = source.inspect_path_with_schema(csv_path)
+    asset = DataAsset(
+        id="dense-tail", owner_id="owner", name="dense-tail", source_type=SourceType.FILE,
+        format="csv", location_uri=f"file://{csv_path.as_posix()}", row_count=row_count,
+        has_header=has_header, status=DataAssetStatus.READY, metadata={"source_schema": schema},
+    )
+    result = FullDatasetVisualization(ColumnarDatasetStore(repository)).render(
+        asset,
+        DataAssetVisualizationRequest(kind="scatter", x="x", y="y", x_epsilon=0.25, y_epsilon=0.25, max_points=50),
+    )
+
+    assert result["truncated"] is True
+    assert result["valid_count"] == 1_100
+    assert len(result["points"]) == 50
+    assert any(point["count"] == 1_000 and point["xRange"] == [999, 999.5] for point in result["points"])
+
+
+def test_visualization_rejects_scatter_only_options_for_other_chart_types(tmp_path: Path) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+
+    with pytest.raises(HTTPException, match="only for scatter"):
+        visualization.render(asset, DataAssetVisualizationRequest(
+            kind="line", x="x", y="y", y_epsilon=1,
+        ))
+    with pytest.raises(HTTPException, match="only for scatter"):
+        visualization.render(asset, DataAssetVisualizationRequest(
+            kind="bar", x="bucket", y="value", trend="linear",
+        ))
+
+
+def test_visualization_number_serialization_rejects_non_finite_values() -> None:
+    assert FullDatasetVisualization._number(float("nan")) is None
+    assert FullDatasetVisualization._number(float("inf")) is None
+    assert FullDatasetVisualization._number(float("-inf")) is None
+
+
+def test_visualization_response_contract_preserves_frontend_field_aliases(tmp_path: Path) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+    result = visualization.render(asset, DataAssetVisualizationRequest(
+        kind="scatter", x="x", y="y", trend="linear",
+    ))
+
+    serialized = DataAssetVisualizationRead.model_validate(result).model_dump(by_alias=True)
+
+    assert serialized["points"][0]["xLabel"].startswith("x:")
+    assert "xRange" in serialized["points"][0]
+    assert serialized["trends"][0]["kind"] == "linear"
+    assert serialized["trends"][0]["parameters"]["slope"] == pytest.approx(2)
+
+
+@pytest.mark.parametrize("trend", ["linear", "spline", "polynomial"])
+def test_scatter_trend_is_fitted_from_full_data_per_group(tmp_path: Path, trend: str) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+    result = visualization.render(asset, DataAssetVisualizationRequest(
+        kind="scatter",
+        x="x",
+        y="y",
+        group="species",
+        trend=trend,
+        polynomial_degree=3,
+    ))
+
+    assert {curve["series"] for curve in result["trends"]} == {"setosa", "virginica"}
+    assert all(curve["valid_count"] == 5_000 for curve in result["trends"])
+    assert all(len(curve["points"]) == 80 for curve in result["trends"])
+    assert all(abs(point["y"] - 2 * point["x"]) < 1e-6 for curve in result["trends"] for point in curve["points"])
+    if trend == "linear":
+        assert all(curve["parameters"]["slope"] == pytest.approx(2) for curve in result["trends"])
+        assert all(curve["parameters"]["intercept"] == pytest.approx(0, abs=1e-8) for curve in result["trends"])
+        assert all(curve["r_squared"] == pytest.approx(1) for curve in result["trends"])
+    elif trend == "polynomial":
+        assert all(curve["parameters"]["coefficients"][0] == pytest.approx(0, abs=1e-8) for curve in result["trends"])
+        assert all(curve["parameters"]["coefficients"][1] == pytest.approx(2) for curve in result["trends"])
+        assert all(curve["parameters"]["degree"] == 3 for curve in result["trends"])
+    else:
+        assert all(curve["parameters"] == {"nodes": 24, "source_bins": 24} for curve in result["trends"])
+
+
+def test_scatter_exponential_trend_ignores_nonpositive_y_and_reports_scope(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    dataset_dir = repository / "users" / "owner" / "exponential"
+    dataset_dir.mkdir(parents=True)
+    csv_path = dataset_dir / "data.csv"
+    csv_path.write_text("x,y,group\n0,3,a\n1,6,a\n2,12,a\n3,-1,a\n0,2,b\n1,4,b\n2,8,b\n", encoding="utf-8")
+    source = CsvFileDatasetSource(repository)
+    has_header, row_count, schema = source.inspect_path_with_schema(csv_path)
+    asset = DataAsset(
+        id="exponential",
+        owner_id="owner",
+        name="exponential",
+        source_type=SourceType.FILE,
+        format="csv",
+        location_uri=f"file://{csv_path.as_posix()}",
+        row_count=row_count,
+        has_header=has_header,
+        status=DataAssetStatus.READY,
+        metadata={"source_schema": schema},
+    )
+    result = FullDatasetVisualization(ColumnarDatasetStore(repository)).render(
+        asset,
+        DataAssetVisualizationRequest(kind="scatter", x="x", y="y", group="group", trend="exponential"),
+    )
+
+    by_group = {curve["series"]: curve for curve in result["trends"]}
+    assert by_group["a"]["valid_count"] == 3
+    assert by_group["b"]["valid_count"] == 3
+    assert by_group["a"]["points"][0]["y"] == pytest.approx(3)
+    assert by_group["a"]["points"][-1]["y"] == pytest.approx(12)
+    assert by_group["a"]["parameters"]["amplitude"] == pytest.approx(3)
+    assert by_group["a"]["parameters"]["rate"] == pytest.approx(0.69314718056)
+    assert by_group["a"]["r_squared"] == pytest.approx(1)
+    assert by_group["a"]["fit_space"] == "log_y"
 
 
 def test_sql_data_view_is_materialized_and_visualized(tmp_path: Path) -> None:
