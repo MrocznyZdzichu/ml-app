@@ -113,7 +113,11 @@ DuckDB scans the complete physical dataset or materialized Data View and returns
 only bounded points, series metadata, counts, or KPI values. Grouped line/bar
 charts use exact full-data aggregates; histograms use full-data bins; scatter
 plots use full-data two-dimensional bins so browser cost does not scale with row
-count. Group-value selectors also query the complete relation.
+count. Group-value selectors also query the complete relation. A window over the
+grouped result records the complete valid-row and group counts before the output
+cap is applied, so bounded transport never makes partial results look complete.
+Chart navigation slices the X domain rather than the flat point array, preserving
+all returned series for each visible coordinate.
 Numeric line/bar specifications may include an X epsilon. DuckDB converts the
 continuous X expression into deterministic, non-overlapping `2 × epsilon`
 buckets and aggregates Y over every row in each bucket. Only the bucket centers,

@@ -102,13 +102,28 @@ export type DatasetPreview = {
   limit: number;
 };
 
+export type VisualizationKind = "line" | "bar" | "scatter" | "histogram" | "kpi";
+export type VisualizationAggregation = "average" | "median" | "std" | "sum" | "count" | "min" | "max";
+
+export type DatasetVisualizationRequest = {
+  kind: VisualizationKind;
+  x: string;
+  y: string;
+  group: string;
+  aggregations: VisualizationAggregation[];
+  selected_groups: string[] | null;
+  x_epsilon: number;
+  max_points: number;
+  bins: number;
+};
+
 export type VisualizationPoint = {
   x: number;
   y: number;
   xLabel: string;
   series: string;
   group?: string;
-  aggregation?: "average" | "median" | "std" | "sum" | "count" | "min" | "max";
+  aggregation?: VisualizationAggregation;
   count?: number;
   xRange?: [number, number];
 };
@@ -250,10 +265,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ sql, limit })
     }),
-  visualizeDataset: (datasetId: string, payload: Record<string, unknown>) =>
+  visualizeDataset: (datasetId: string, payload: DatasetVisualizationRequest, signal?: AbortSignal) =>
     request<DatasetVisualization>(`/datasets/${datasetId}/visualization`, {
       method: "POST",
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      signal
     }),
   visualizationGroups: (datasetId: string, column: string, limit = 100) =>
     request<DatasetVisualizationGroups>(`/datasets/${datasetId}/visualization/groups`, {

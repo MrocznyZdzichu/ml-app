@@ -126,6 +126,23 @@ def test_visualization_group_selection_and_values_use_full_dataset(tmp_path: Pat
     assert result["series"] == ["setosa"]
 
 
+def test_grouped_visualization_reports_full_valid_count_when_output_is_bounded(tmp_path: Path) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+    result = visualization.render(asset, DataAssetVisualizationRequest(
+        kind="line",
+        x="x",
+        y="value",
+        group="species",
+        aggregations=["average"],
+        max_points=50,
+    ))
+
+    assert result["truncated"] is True
+    assert len(result["points"]) == 50
+    assert sum(point["count"] for point in result["points"]) == 5_000
+    assert result["valid_count"] == 10_000
+
+
 def test_scatter_uses_full_dataset_density_bins(tmp_path: Path) -> None:
     visualization, asset = visualization_fixture(tmp_path)
     result = visualization.render(asset, DataAssetVisualizationRequest(

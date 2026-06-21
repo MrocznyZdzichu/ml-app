@@ -205,6 +205,11 @@ results cross the API boundary. The UI reports `rows analyzed` and
 `Full dataset · server-side`; it does not present a schema preview sample as an
 analytical result.
 
+When the number of aggregated points exceeds the response contract, the chart
+explicitly marks the display as capped. Aggregation still scans the complete
+selected relation, and `valid_count` continues to describe all matching rows;
+only the points transferred to and rendered by the browser are bounded.
+
 ## Data Roles
 
 Data Roles are stored in dataset metadata under:

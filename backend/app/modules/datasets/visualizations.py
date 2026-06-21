@@ -133,42 +133,51 @@ class FullDatasetVisualization:
         where, parameters = self._where(request, x, y, group)
         group_by = f"{x_expression}, {group}" if group else x_expression
         output_limit = max(1, request.max_points // max(1, len(aggregations)))
-        rows = connection.execute(
+        rows = self._fetch_dicts(
+            connection,
+            f"WITH grouped AS ("
             f"SELECT {x_expression} AS x_value{group_select}, {select_aggregates}, count({y}) AS valid_count "
-            f"FROM {relation} {where} GROUP BY {group_by} ORDER BY x_value, group_value LIMIT ?",
-            [*parameters, output_limit + 1],
-        ).fetchall()
-        truncated = len(rows) > output_limit
-        rows = rows[:output_limit]
-        labels = list(dict.fromkeys(self._format(float(row[0])) if numeric_x else self._label(row[0]) for row in rows))
+            f"FROM {relation} {where} GROUP BY {group_by}"
+            f") SELECT *, sum(valid_count) OVER () AS total_valid_count, count(*) OVER () AS total_group_count "
+            f"FROM grouped ORDER BY x_value, group_value LIMIT ?",
+            [*parameters, output_limit],
+        )
+        total_valid_count = int(rows[0]["total_valid_count"]) if rows else 0
+        total_group_count = int(rows[0]["total_group_count"]) if rows else 0
+        truncated = total_group_count > output_limit
+        labels = list(dict.fromkeys(
+            self._format(float(row["x_value"])) if numeric_x else self._label(row["x_value"])
+            for row in rows
+        ))
         label_positions = {label: index for index, label in enumerate(labels)}
         points: list[dict[str, Any]] = []
         for row in rows:
-            label = self._format(float(row[0])) if numeric_x else self._label(row[0])
-            group_value = str(row[1])
-            for index, aggregation in enumerate(aggregations):
-                value = self._number(row[2 + index])
+            x_value = row["x_value"]
+            label = self._format(float(x_value)) if numeric_x else self._label(x_value)
+            group_value = str(row["group_value"])
+            for aggregation in aggregations:
+                value = self._number(row[f"metric_{aggregation}"])
                 if value is None:
                     continue
                 series = group_value if len(aggregations) == 1 else f"{group_value} · {self._aggregation_label(aggregation)}"
                 point = {
-                    "x": self._number(row[0]) if numeric_x else label_positions[label],
+                    "x": self._number(x_value) if numeric_x else label_positions[label],
                     "y": value,
                     "xLabel": label,
                     "series": series,
                     "group": group_value,
                     "aggregation": aggregation,
-                    "count": int(row[-1]),
+                    "count": int(row["valid_count"]),
                 }
                 if request.x_epsilon > 0:
-                    center = float(row[0])
+                    center = float(x_value)
                     point["xRange"] = [center - request.x_epsilon, center + request.x_epsilon]
                 points.append(point)
         return {
             "points": points,
             "series": list(dict.fromkeys(point["series"] for point in points)),
             "kpi": None,
-            "valid_count": sum(int(row[-1]) for row in rows),
+            "valid_count": total_valid_count,
             "truncated": truncated,
         }
 
@@ -228,16 +237,30 @@ class FullDatasetVisualization:
         y_width = (y_high - y_low) / grid or 1.0
         group_select = f", CAST({group} AS VARCHAR) AS group_value" if group else ", 'Values' AS group_value"
         group_by = "x_bin, y_bin, group_value"
-        rows = connection.execute(
+        rows = self._fetch_dicts(
+            connection,
             f"SELECT least(?, floor(({x} - ?) / ?))::INTEGER AS x_bin, least(?, floor(({y} - ?) / ?))::INTEGER AS y_bin{group_select}, "
-            f"avg({x}), avg({y}), count(*) FROM {relation} {where} GROUP BY {group_by} ORDER BY x_bin, y_bin",
+            f"avg({x}) AS x_center, avg({y}) AS y_center, count(*) AS point_count "
+            f"FROM {relation} {where} GROUP BY {group_by} ORDER BY x_bin, y_bin",
             [grid - 1, x_low, x_width, grid - 1, y_low, y_width, *parameters],
-        ).fetchall()
+        )
         points = [
-            {"x": float(row[3]), "y": float(row[4]), "xLabel": f"{request.x}: {self._format(float(row[3]))}", "series": str(row[2]), "group": str(row[2]), "count": int(row[5])}
+            {
+                "x": float(row["x_center"]),
+                "y": float(row["y_center"]),
+                "xLabel": f"{request.x}: {self._format(float(row['x_center']))}",
+                "series": str(row["group_value"]),
+                "group": str(row["group_value"]),
+                "count": int(row["point_count"]),
+            }
             for row in rows[: request.max_points]
         ]
-        return {"points": points, "series": list(dict.fromkeys(point["series"] for point in points)), "kpi": None, "valid_count": sum(int(row[5]) for row in rows)}
+        return {
+            "points": points,
+            "series": list(dict.fromkeys(point["series"] for point in points)),
+            "kpi": None,
+            "valid_count": sum(int(row["point_count"]) for row in rows),
+        }
 
     def _where(self, request: DataAssetVisualizationRequest, x: str, y: str, group: str) -> tuple[str, list[Any]]:
         clauses = [f"{x} IS NOT NULL", f"{y} IS NOT NULL"]
@@ -277,6 +300,16 @@ class FullDatasetVisualization:
     @staticmethod
     def _columns(connection: duckdb.DuckDBPyConnection, relation: str) -> dict[str, str]:
         return {str(row[0]): str(row[1]) for row in connection.execute(f"DESCRIBE SELECT * FROM {relation}").fetchall()}
+
+    @staticmethod
+    def _fetch_dicts(
+        connection: duckdb.DuckDBPyConnection,
+        sql: str,
+        parameters: list[Any],
+    ) -> list[dict[str, Any]]:
+        cursor = connection.execute(sql, parameters)
+        names = [str(column[0]) for column in cursor.description]
+        return [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
 
     @staticmethod
     def _frontend_type(value: str) -> str:

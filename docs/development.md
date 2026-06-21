@@ -105,7 +105,14 @@ of being evaluated over Python records.
 Visualization requests scan complete physical or view relations and return
 bounded aggregate contracts. Continuous X bucketing is performed by DuckDB from
 the per-chart `x_epsilon` request field; do not reproduce this aggregation in
-React. When changing this path, run:
+React. Grouped queries calculate full valid-row and group counts before applying
+the response limit. Keep that distinction intact: `valid_count` describes the
+whole selected analytical range, while `truncated` describes only the bounded
+display payload. The frontend aborts superseded requests and navigates by unique
+X coordinates so multi-series lines are not split during zoom and pan. Keep the
+request lifecycle in `frontend/src/analysis/useVisualizationResult.ts`; chart
+components should consume its state rather than duplicate debounce, cancellation,
+and error handling. When changing this path, run:
 
 ```powershell
 docker exec ml-app-api-1 pytest tests/test_visualizations.py tests/test_datasets_upload.py tests/test_full_profile.py

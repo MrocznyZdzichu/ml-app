@@ -19,13 +19,21 @@ import type { DragEvent, PointerEvent as ReactPointerEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api/client";
-import type { DataAsset, DatasetColumn, DatasetPreview, DatasetVisualization } from "../api/client";
+import type {
+  DataAsset,
+  DatasetColumn,
+  DatasetPreview,
+  DatasetVisualizationRequest,
+  VisualizationAggregation,
+  VisualizationKind
+} from "../api/client";
+import { useVisualizationResult } from "./useVisualizationResult";
 
 type CellValue = string | number | boolean | null;
 type RecordRow = Record<string, CellValue>;
-type ChartKind = "line" | "bar" | "scatter" | "histogram" | "kpi";
+type ChartKind = VisualizationKind;
 type ChartSize = "compact" | "medium" | "wide";
-type Aggregation = "average" | "median" | "std" | "sum" | "count" | "min" | "max";
+type Aggregation = VisualizationAggregation;
 type ChartLayout = { x: number; y: number; w: number; h: number };
 
 type ChartConfig = {
@@ -508,14 +516,10 @@ function ChartView({ chart, datasetId }: { chart: ChartConfig; datasetId: string
   const [offset, setOffset] = useState(0);
   const [tooltip, setTooltip] = useState<Tooltip>(null);
   const [pointerStart, setPointerStart] = useState<number | null>(null);
-  const [data, setData] = useState<ChartData | null>(null);
-  const [serverResult, setServerResult] = useState<DatasetVisualization | null>(null);
-  const [chartLoading, setChartLoading] = useState(true);
-  const [chartError, setChartError] = useState("");
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const lastWheelAtRef = useRef(0);
   const groupColorsRef = useRef<Map<string, string>>(new Map());
-  const queryKey = useMemo(() => JSON.stringify({
+  const query = useMemo<DatasetVisualizationRequest>(() => ({
     kind: chart.kind,
     x: chart.x,
     y: chart.y,
@@ -526,52 +530,31 @@ function ChartView({ chart, datasetId }: { chart: ChartConfig; datasetId: string
     max_points: 2000,
     bins: 16
   }), [chart.aggregation, chart.comparisonAggregations, chart.group, chart.kind, chart.selectedGroups, chart.x, chart.xEpsilon, chart.y]);
+  const { result, loading: chartLoading, error: chartError } = useVisualizationResult(datasetId, query);
   const metricOrder = useMemo(
     () => unique([chart.aggregation, ...(chart.comparisonAggregations ?? [])]),
     [chart.aggregation, chart.comparisonAggregations]
   );
 
   useEffect(() => {
-    let current = true;
-    setChartLoading(true);
-    setChartError("");
-    const timeout = window.setTimeout(() => {
-      api.visualizeDataset(datasetId, JSON.parse(queryKey) as Record<string, unknown>)
-        .then((result) => {
-          if (!current) return;
-          setServerResult(result);
-          setData({
-            isValid: result.kpi !== null || result.points.length > 0,
-            points: result.points,
-            series: result.series,
-            kpi: result.kpi,
-            validCount: result.valid_count
-          });
-          setOffset(0);
-          setZoom(1);
-        })
-        .catch((error: unknown) => {
-          if (!current) return;
-          setChartError(error instanceof Error ? error.message : "Visualization query failed");
-          setData(null);
-        })
-        .finally(() => current && setChartLoading(false));
-    }, 180);
-    return () => {
-      current = false;
-      window.clearTimeout(timeout);
-    };
-  }, [datasetId, queryKey]);
+    if (!result) return;
+    setOffset(0);
+    setZoom(1);
+  }, [result]);
 
-  const points = data?.points ?? [];
-  const series = data?.series ?? [];
+  const points = result?.points ?? [];
+  const series = result?.series ?? [];
   const groupColors = useMemo(() => assignDistinctGroupColors(points, groupColorsRef.current), [points]);
   const seriesVisuals = useMemo(() => buildSeriesVisuals(points, series, metricOrder, groupColors), [groupColors, metricOrder, points, series]);
-  const length = points.length;
+  const xDomain = useMemo(() => Array.from(new Set(points.map((point) => point.x))), [points]);
+  const length = xDomain.length;
   const visibleCount = Math.max(3, Math.ceil(length / zoom));
   const maxOffset = Math.max(0, length - visibleCount);
   const safeOffset = Math.min(offset, maxOffset);
-  const visible = points.slice(safeOffset, safeOffset + visibleCount);
+  const visible = useMemo(() => {
+    const visibleX = new Set(xDomain.slice(safeOffset, safeOffset + visibleCount));
+    return points.filter((point) => visibleX.has(point.x));
+  }, [points, safeOffset, visibleCount, xDomain]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -615,7 +598,7 @@ function ChartView({ chart, datasetId }: { chart: ChartConfig; datasetId: string
     }
   }
 
-  if (!data && chartLoading) {
+  if (!result && chartLoading) {
     return <div className="viz-chart-empty"><Activity size={22} /><span>Aggregating the full dataset…</span></div>;
   }
 
@@ -623,7 +606,7 @@ function ChartView({ chart, datasetId }: { chart: ChartConfig; datasetId: string
     return <div className="viz-chart-empty error-state"><Activity size={22} /><span>{chartError}</span></div>;
   }
 
-  if (!data?.isValid) {
+  if (!result || (result.kpi === null && result.points.length === 0)) {
     return <div className="viz-chart-empty"><Activity size={22} /><span>Select compatible columns in the inspector.</span></div>;
   }
 
@@ -631,8 +614,8 @@ function ChartView({ chart, datasetId }: { chart: ChartConfig; datasetId: string
     return (
       <div className="kpi-view">
         <span>{chart.aggregation}</span>
-        <strong>{formatNumber(data.kpi ?? 0)}</strong>
-        <small>{chart.y} · {formatInteger(data.validCount)} valid rows</small>
+        <strong>{formatNumber(result.kpi ?? 0)}</strong>
+        <small>{chart.y} · {formatInteger(result.valid_count)} valid rows</small>
       </div>
     );
   }
@@ -640,7 +623,12 @@ function ChartView({ chart, datasetId }: { chart: ChartConfig; datasetId: string
   return (
     <div className="chart-stage">
       <div className="chart-toolbar" aria-label="Chart navigation">
-        <span>{chartLoading ? "Refreshing…" : `${formatInteger(serverResult?.scanned_row_count ?? 0)} rows · full dataset`} · Wheel to zoom · drag to pan</span>
+        <span>
+          {chartLoading
+            ? "Refreshing…"
+            : `${formatInteger(result.scanned_row_count)} rows · full dataset${result.truncated ? ` · display capped at ${formatInteger(points.length)} points` : ""}`}
+          {" · Wheel to zoom · drag to pan"}
+        </span>
         <button aria-label="Zoom out" disabled={zoom === 1} onClick={() => changeZoom(zoom - 1)} type="button"><ZoomOut size={14} /></button>
         <strong>{zoom}×</strong>
         <button aria-label="Zoom in" disabled={zoom === 8 || length < 4} onClick={() => changeZoom(zoom + 1)} type="button"><ZoomIn size={14} /></button>
@@ -657,17 +645,16 @@ function ChartView({ chart, datasetId }: { chart: ChartConfig; datasetId: string
         onPointerMove={handlePointerMove}
         onPointerUp={() => setPointerStart(null)}
       >
-        <SvgChart chart={chart} points={visible} series={data.series} seriesVisuals={seriesVisuals} setTooltip={setTooltip} />
+        <SvgChart chart={chart} points={visible} series={result.series} seriesVisuals={seriesVisuals} setTooltip={setTooltip} />
         {tooltip && <div className="chart-tooltip" style={{ left: tooltip.x, top: tooltip.y }}><strong>{tooltip.title}</strong><span>{tooltip.value}</span></div>}
       </div>
       {maxOffset > 0 && <input aria-label="Visible data range" className="chart-scroll" max={maxOffset} min={0} onChange={(event) => setOffset(Number(event.target.value))} type="range" value={safeOffset} />}
-      {data.series.length > 1 && <div aria-label="Chart legend" className="chart-legend">{seriesVisuals.map((visual) => <span key={visual.name} title={visual.name}><svg aria-hidden="true" className="legend-line" viewBox="0 0 30 6"><line stroke={visual.color} strokeDasharray={visual.dash} strokeWidth="3" x1="0" x2="30" y1="3" y2="3" /></svg>{visual.name}</span>)}</div>}
+      {result.series.length > 1 && <div aria-label="Chart legend" className="chart-legend">{seriesVisuals.map((visual) => <span key={visual.name} title={visual.name}><svg aria-hidden="true" className="legend-line" viewBox="0 0 30 6"><line stroke={visual.color} strokeDasharray={visual.dash} strokeWidth="3" x1="0" x2="30" y1="3" y2="3" /></svg>{visual.name}</span>)}</div>}
     </div>
   );
 }
 
 type PlotPoint = { x: number; y: number; xLabel: string; xRange?: [number, number]; series: string; group?: string; aggregation?: Aggregation; count?: number };
-type ChartData = { isValid: boolean; points: PlotPoint[]; series: string[]; kpi: number | null; validCount: number };
 type SeriesVisual = { name: string; color: string; dash: string | undefined };
 
 function SvgChart({ chart, points, series, seriesVisuals, setTooltip }: { chart: ChartConfig; points: PlotPoint[]; series: string[]; seriesVisuals: SeriesVisual[]; setTooltip: (tooltip: Tooltip) => void }) {
@@ -684,6 +671,12 @@ function SvgChart({ chart, points, series, seriesVisuals, setTooltip }: { chart:
   const rawYMax = Math.max(...yValues);
   const xRange = xMax - xMin || 1;
   const yRange = rawYMax - rawYMin || 1;
+  const visualBySeries = new Map(seriesVisuals.map((visual) => [visual.name, visual]));
+  const pointsBySeries = new Map(series.map((seriesName) => [seriesName, [] as PlotPoint[]]));
+  for (const point of points) {
+    const seriesPoints = pointsBySeries.get(point.series);
+    if (seriesPoints) seriesPoints.push(point);
+  }
   const xPx = (value: number) => pad.left + ((value - xMin) / xRange) * plotWidth;
   const yPx = (value: number) => pad.top + plotHeight - ((value - rawYMin) / yRange) * plotHeight;
   const setPointTooltip = (event: ReactPointerEvent<SVGElement>, point: PlotPoint) => {
@@ -728,11 +721,11 @@ function SvgChart({ chart, points, series, seriesVisuals, setTooltip }: { chart:
       {chart.kind === "bar" || chart.kind === "histogram" ? points.map((point, index) => {
         const barWidth = Math.max(4, plotWidth / Math.max(points.length, 1) * 0.7);
         const x = pad.left + index * (plotWidth / Math.max(points.length, 1)) + (plotWidth / Math.max(points.length, 1) - barWidth) / 2;
-        return <rect className="chart-bar" fill={seriesVisuals.find((visual) => visual.name === point.series)?.color ?? PALETTE[0]} height={Math.max(1, yPx(rawYMin) - yPx(point.y))} key={`${point.xLabel}-${index}`} onPointerEnter={(event) => setPointTooltip(event, point)} onPointerMove={(event) => setPointTooltip(event, point)} rx={3} width={barWidth} x={x} y={yPx(point.y)} />;
-      }) : chart.kind === "scatter" ? points.map((point, index) => <circle className="chart-point" cx={xPx(point.x)} cy={yPx(point.y)} fill={seriesVisuals.find((visual) => visual.name === point.series)?.color ?? PALETTE[0]} key={`${point.x}-${point.y}-${index}`} onPointerEnter={(event) => setPointTooltip(event, point)} onPointerMove={(event) => setPointTooltip(event, point)} r={4.5} />) : series.map((seriesName) => {
-        const seriesPoints = points.filter((point) => point.series === seriesName);
+        return <rect className="chart-bar" fill={visualBySeries.get(point.series)?.color ?? PALETTE[0]} height={Math.max(1, yPx(rawYMin) - yPx(point.y))} key={`${point.xLabel}-${index}`} onPointerEnter={(event) => setPointTooltip(event, point)} onPointerMove={(event) => setPointTooltip(event, point)} rx={3} width={barWidth} x={x} y={yPx(point.y)} />;
+      }) : chart.kind === "scatter" ? points.map((point, index) => <circle className="chart-point" cx={xPx(point.x)} cy={yPx(point.y)} fill={visualBySeries.get(point.series)?.color ?? PALETTE[0]} key={`${point.x}-${point.y}-${index}`} onPointerEnter={(event) => setPointTooltip(event, point)} onPointerMove={(event) => setPointTooltip(event, point)} r={4.5} />) : series.map((seriesName) => {
+        const seriesPoints = pointsBySeries.get(seriesName) ?? [];
         const line = seriesPoints.map((point, index) => `${index === 0 ? "M" : "L"}${xPx(point.x)},${yPx(point.y)}`).join(" ");
-        const visual = seriesVisuals.find((item) => item.name === seriesName) ?? { color: PALETTE[0], dash: undefined };
+        const visual = visualBySeries.get(seriesName) ?? { color: PALETTE[0], dash: undefined };
         return <g key={seriesName}><path className="chart-line" d={line} stroke={visual.color} strokeDasharray={visual.dash} />{seriesPoints.map((point, index) => <circle className="chart-point" cx={xPx(point.x)} cy={yPx(point.y)} fill={visual.color} key={`${point.x}-${index}`} onPointerEnter={(event) => setPointTooltip(event, point)} onPointerMove={(event) => setPointTooltip(event, point)} r={4} />)}</g>;
       })}
       <text className="chart-axis-title" textAnchor="middle" x={pad.left + plotWidth / 2} y={height - 7}>{xAxisLabel}</text>
