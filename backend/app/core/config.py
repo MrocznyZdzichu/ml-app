@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,10 +26,21 @@ class Settings(BaseSettings):
         ge=60,
         alias="DESCRIPTIVE_PROFILE_RESULT_EXPIRES_SECONDS",
     )
-    descriptive_profile_duckdb_threads: int = Field(
+    duckdb_threads: int = Field(
         default=4,
         ge=1,
-        alias="DESCRIPTIVE_PROFILE_DUCKDB_THREADS",
+        validation_alias=AliasChoices("DUCKDB_THREADS", "DESCRIPTIVE_PROFILE_DUCKDB_THREADS"),
+    )
+    duckdb_memory_limit: str = Field(
+        default="1GB",
+        pattern=r"(?i)^\d+(\.\d+)?\s*(KB|MB|GB|TB)$",
+        alias="DUCKDB_MEMORY_LIMIT",
+    )
+    visualization_max_concurrency: int = Field(
+        default=2,
+        ge=1,
+        le=32,
+        alias="VISUALIZATION_MAX_CONCURRENCY",
     )
 
     object_storage_endpoint: str = Field(default="minio:9000", alias="OBJECT_STORAGE_ENDPOINT")

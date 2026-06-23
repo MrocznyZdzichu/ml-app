@@ -102,7 +102,7 @@ export type DatasetPreview = {
   limit: number;
 };
 
-export type VisualizationKind = "line" | "bar" | "scatter" | "histogram" | "kpi";
+export type VisualizationKind = "line" | "bar" | "scatter" | "histogram" | "boxplot" | "kpi";
 export type VisualizationAggregation = "average" | "median" | "std" | "sum" | "count" | "min" | "max";
 export type VisualizationTrend = "none" | "linear" | "spline" | "polynomial" | "exponential";
 
@@ -133,6 +133,14 @@ export type VisualizationPoint = {
   yRange?: [number, number];
   xRangeInclusive?: boolean;
   yRangeInclusive?: boolean;
+  minimum?: number;
+  q1?: number;
+  median?: number;
+  q3?: number;
+  maximum?: number;
+  lowerWhisker?: number;
+  upperWhisker?: number;
+  outlierCount?: number;
 };
 
 export type VisualizationTrendCurve = {
@@ -171,6 +179,8 @@ export type DatasetVisualization = {
   valid_count: number;
   execution_mode: "full_dataset";
   truncated: boolean;
+  approximate: boolean;
+  approximation_method?: "binned_gaussian_kde";
 };
 
 export type DatasetVisualizationGroups = {

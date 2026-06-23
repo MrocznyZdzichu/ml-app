@@ -1,8 +1,13 @@
 from pathlib import Path
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 from fastapi import HTTPException
 
+from app.core.config import settings
 from app.modules.analysis.full_profile import FullDatasetProfiler
 from app.modules.datasets.columnar import ColumnarDatasetStore
 from app.modules.datasets.domain import DataAsset, DataAssetStatus, SourceType
@@ -13,6 +18,35 @@ from app.modules.datasets.schemas import (
 )
 from app.modules.datasets.sources import CsvFileDatasetSource
 from app.modules.datasets.visualizations import FullDatasetVisualization
+
+
+class QueryTrackingConnection:
+    def __init__(self, connection: object, statements: list[str]) -> None:
+        self.connection = connection
+        self.statements = statements
+
+    def execute(self, query: str, parameters: list[object] | None = None) -> object:
+        self.statements.append(" ".join(query.split()))
+        if parameters is None:
+            return self.connection.execute(query)  # type: ignore[attr-defined,no-any-return]
+        return self.connection.execute(query, parameters)  # type: ignore[attr-defined,no-any-return]
+
+    def close(self) -> None:
+        self.connection.close()  # type: ignore[attr-defined]
+
+
+def track_visualization_queries(
+    visualization: FullDatasetVisualization,
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[str]:
+    statements: list[str] = []
+    original_connect = visualization.store.connect
+    monkeypatch.setattr(
+        visualization.store,
+        "connect",
+        lambda asset: QueryTrackingConnection(original_connect(asset), statements),
+    )
+    return statements
 
 
 def visualization_fixture(tmp_path: Path) -> tuple[FullDatasetVisualization, DataAsset]:
@@ -238,6 +272,221 @@ def test_visualization_group_selection_and_values_use_full_dataset(tmp_path: Pat
     assert set(groups["values"]) == {"setosa", "virginica"}
     assert result["valid_count"] == 5_000
     assert result["series"] == ["setosa"]
+
+
+def test_kpi_filters_full_dataset_by_selected_values(tmp_path: Path) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+    result = visualization.render(asset, DataAssetVisualizationRequest(
+        kind="kpi",
+        y="value",
+        group="species",
+        selected_groups=["setosa"],
+        aggregations=["sum"],
+    ))
+
+    assert result["scanned_row_count"] == 10_000
+    assert result["valid_count"] == 5_000
+    assert result["kpi"] == 100_000
+
+
+def test_boxplot_returns_grouped_quartiles_and_tukey_whiskers(tmp_path: Path) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+    result = visualization.render(asset, DataAssetVisualizationRequest(
+        kind="boxplot",
+        x="value",
+        group="species",
+    ))
+
+    assert result["scanned_row_count"] == 10_000
+    assert result["valid_count"] == 10_000
+    assert result["series"] == ["setosa", "virginica"]
+    assert len(result["points"]) == 2
+    for point in result["points"]:
+        assert point["count"] == 5_000
+        assert point["minimum"] == 10
+        assert point["q1"] == 10
+        assert point["median"] == 20
+        assert point["q3"] == 30
+        assert point["maximum"] == 30
+        assert point["lowerWhisker"] == 10
+        assert point["upperWhisker"] == 30
+        assert point["outlierCount"] == 0
+        assert point["xRange"] == [10, 30]
+    serialized = DataAssetVisualizationRead.model_validate(result).model_dump(by_alias=True, exclude_none=True)
+    assert serialized["points"][0]["lowerWhisker"] == 10
+    assert serialized["points"][0]["upperWhisker"] == 30
+    assert serialized["points"][0]["outlierCount"] == 0
+
+
+def test_boxplot_whiskers_exclude_outliers_without_materializing_them(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    dataset_dir = repository / "users" / "owner" / "boxplot-outlier"
+    dataset_dir.mkdir(parents=True)
+    csv_path = dataset_dir / "values.csv"
+    csv_path.write_text("value\n1\n2\n3\n4\n100\n", encoding="utf-8")
+    source = CsvFileDatasetSource(repository)
+    has_header, row_count, schema = source.inspect_path_with_schema(csv_path)
+    asset = DataAsset(
+        id="boxplot-outlier",
+        owner_id="owner",
+        name="boxplot",
+        source_type=SourceType.FILE,
+        format="csv",
+        location_uri=f"file://{csv_path.as_posix()}",
+        row_count=row_count,
+        has_header=has_header,
+        status=DataAssetStatus.READY,
+        metadata={"source_schema": schema},
+    )
+
+    result = FullDatasetVisualization(ColumnarDatasetStore(repository)).render(
+        asset,
+        DataAssetVisualizationRequest(kind="boxplot", x="value"),
+    )
+
+    point = result["points"][0]
+    assert point["minimum"] == 1
+    assert point["q1"] == 2
+    assert point["median"] == 3
+    assert point["q3"] == 4
+    assert point["maximum"] == 100
+    assert point["lowerWhisker"] == 1
+    assert point["upperWhisker"] == 4
+    assert point["outlierCount"] == 1
+
+
+def test_visualization_uses_trusted_row_count_without_an_extra_full_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+    statements = track_visualization_queries(visualization, monkeypatch)
+    result = visualization.render(asset, DataAssetVisualizationRequest(kind="kpi", y="value"))
+
+    assert result["row_count"] == 10_000
+    assert result["valid_count"] == 10_000
+    assert not any(statement.upper().startswith("SELECT COUNT(*) FROM") for statement in statements)
+
+
+@pytest.mark.parametrize(("kind", "expensive_operation"), [
+    ("histogram", "STDDEV_SAMP"),
+    ("boxplot", "QUANTILE_CONT"),
+])
+def test_distribution_views_reject_high_cardinality_before_expensive_statistics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    expensive_operation: str,
+) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+    statements = track_visualization_queries(visualization, monkeypatch)
+    with pytest.raises(HTTPException, match="at most 20 selected groups"):
+        visualization.render(asset, DataAssetVisualizationRequest(kind=kind, x="value", group="segment"))
+
+    normalized_statements = [statement.upper() for statement in statements]
+    assert any("SELECT DISTINCT" in statement for statement in normalized_statements)
+    assert not any(expensive_operation in statement for statement in normalized_statements)
+
+
+def test_visualization_limits_parallel_heavy_renders(monkeypatch: pytest.MonkeyPatch) -> None:
+    visualization = FullDatasetVisualization()
+    active = 0
+    maximum_active = 0
+    lock = threading.Lock()
+
+    def fake_render(*_args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal active, maximum_active
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        time.sleep(0.04)
+        with lock:
+            active -= 1
+        return {}
+
+    monkeypatch.setattr(visualization, "_render_in_execution_slot", fake_render)
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = [executor.submit(visualization.render, object(), object()) for _ in range(6)]
+        for future in futures:
+            future.result()
+
+    assert maximum_active == min(settings.visualization_max_concurrency, 6)
+
+
+def test_distribution_returns_grouped_full_dataset_kde_curves(tmp_path: Path) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+    result = visualization.render(asset, DataAssetVisualizationRequest(
+        kind="histogram",
+        x="value",
+        group="species",
+        bins=80,
+    ))
+
+    assert result["scanned_row_count"] == 10_000
+    assert result["valid_count"] == 10_000
+    assert result["series"] == ["setosa", "virginica"]
+    assert result["approximate"] is True
+    assert result["approximation_method"] == "binned_gaussian_kde"
+    assert len(result["points"]) == 160
+    for group in result["series"]:
+        curve = [point for point in result["points"] if point["group"] == group]
+        assert len(curve) == 80
+        assert all(point["count"] == 5_000 for point in curve)
+        assert all(point["y"] >= 0 for point in curve)
+        area = sum(
+            (left["y"] + right["y"]) * (right["x"] - left["x"]) / 2
+            for left, right in zip(curve, curve[1:])
+        )
+        assert area == pytest.approx(1, abs=0.02)
+
+
+def test_distribution_group_selection_limits_the_full_dataset_curve(tmp_path: Path) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+    result = visualization.render(asset, DataAssetVisualizationRequest(
+        kind="histogram",
+        x="value",
+        group="species",
+        selected_groups=["setosa"],
+        bins=40,
+    ))
+
+    assert result["scanned_row_count"] == 10_000
+    assert result["valid_count"] == 5_000
+    assert result["series"] == ["setosa"]
+    assert len(result["points"]) == 40
+    assert {point["group"] for point in result["points"]} == {"setosa"}
+
+
+def test_distribution_does_not_extend_nonnegative_data_below_zero(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    dataset_dir = repository / "users" / "owner" / "nonnegative-distribution"
+    dataset_dir.mkdir(parents=True)
+    csv_path = dataset_dir / "prices.csv"
+    csv_path.write_text(
+        "price\n" + "\n".join(["135000"] * 50 + ["3200000"] * 50) + "\n",
+        encoding="utf-8",
+    )
+    source = CsvFileDatasetSource(repository)
+    has_header, row_count, schema = source.inspect_path_with_schema(csv_path)
+    asset = DataAsset(
+        id="nonnegative-distribution",
+        owner_id="owner",
+        name="prices",
+        source_type=SourceType.FILE,
+        format="csv",
+        location_uri=f"file://{csv_path.as_posix()}",
+        row_count=row_count,
+        has_header=has_header,
+        status=DataAssetStatus.READY,
+        metadata={"source_schema": schema},
+    )
+
+    result = FullDatasetVisualization(ColumnarDatasetStore(repository)).render(
+        asset,
+        DataAssetVisualizationRequest(kind="histogram", x="price", bins=80),
+    )
+
+    assert min(point["x"] for point in result["points"]) == 0
+    assert min(point["xRange"][0] for point in result["points"]) == 0
+    assert all(point["x"] >= 0 for point in result["points"])
+    assert all(point["xRange"][0] >= 0 for point in result["points"])
 
 
 def test_grouped_visualization_reports_full_valid_count_when_output_is_bounded(tmp_path: Path) -> None:

@@ -36,12 +36,16 @@ Core statistics are full-data calculations. The configured graphic source-point
 limit only bounds scatterplot observations. Histograms and density-like curves
 are built from full-data bin counts.
 
-DuckDB defaults to four execution threads, disk spilling, disabled
-insertion-order preservation, and a dataset-local temporary directory. Celery
-defaults to two worker processes, late acknowledgements, and a prefetch
+DuckDB defaults to four execution threads, a 1 GB per-connection memory limit,
+disk spilling, disabled insertion-order preservation, and a dataset-local
+temporary directory. Interactive visualization rendering is limited to two
+concurrent queries per API process. Celery defaults to two worker processes,
+late acknowledgements, and a prefetch
 multiplier of one. These values favor predictable memory use over maximum
 concurrent throughput on the local Docker stack. They can be tuned with
-`DESCRIPTIVE_PROFILE_DUCKDB_THREADS`, `PROFILE_WORKER_CONCURRENCY`, and
+`DUCKDB_THREADS` (or the legacy `DESCRIPTIVE_PROFILE_DUCKDB_THREADS`),
+`DUCKDB_MEMORY_LIMIT`,
+`VISUALIZATION_MAX_CONCURRENCY`, `PROFILE_WORKER_CONCURRENCY`, and
 `DESCRIPTIVE_PROFILE_RESULT_EXPIRES_SECONDS`.
 
 ## Reproducible Benchmark

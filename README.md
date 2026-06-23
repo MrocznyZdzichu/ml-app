@@ -176,7 +176,8 @@ Visualization and Trends is an interactive dashboard canvas. Analysts explicitly
 choose a dataset, start with an empty canvas, and either add charts manually or
 use Smart start. The workspace supports:
 
-- line, bar, scatter/density-bin, histogram, and KPI views,
+- line, bar, scatter/density-bin, KDE distribution, grouped box plot, and KPI views,
+- KPI segment filters and configurable equality/range targets with pass/fail status,
 - drag-and-drop positioning, fine-grained resizing, snapping guides, collision
   detection, Tidy layout, and Clear canvas,
 - numeric-only scatter axes, per-chart X-epsilon bucketing for line/bar/scatter,

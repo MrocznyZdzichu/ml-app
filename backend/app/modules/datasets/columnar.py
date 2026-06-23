@@ -39,7 +39,8 @@ class ColumnarDatasetStore:
         temporary_dir.mkdir(parents=True, exist_ok=True)
         connection = duckdb.connect(database=":memory:")
         connection.execute(f"SET temp_directory = {self.literal(str(temporary_dir))}")
-        connection.execute(f"SET threads = {settings.descriptive_profile_duckdb_threads}")
+        connection.execute(f"SET threads = {settings.duckdb_threads}")
+        connection.execute(f"SET memory_limit = {self.literal(settings.duckdb_memory_limit)}")
         connection.execute("SET preserve_insertion_order = false")
         return connection
 

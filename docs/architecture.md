@@ -111,13 +111,21 @@ analytical computation remains server-side.
 Each chart sends a declarative specification to the dataset visualization API.
 DuckDB scans the complete physical dataset or materialized Data View and returns
 only bounded points, series metadata, counts, or KPI values. Grouped line/bar
-charts use exact full-data aggregates; histograms use full-data bins; scatter
-plots use full-data two-dimensional bins so browser cost does not scale with row
+charts use exact full-data aggregates; distributions use bounded KDE source
+bins; box plots use full-data quartiles and Tukey whiskers; scatter plots use
+full-data two-dimensional bins so browser cost does not scale with row
 count. Group-value selectors also query the complete relation. A window over the
 grouped result records the complete valid-row and group counts before the output
 cap is applied, so bounded transport never makes partial results look complete.
 Chart navigation slices the X domain rather than the flat point array, preserving
 all returned series for each visible coordinate.
+
+Uploaded files and materialized Data Views carry an immutable row count, so
+chart responses reuse that metadata instead of issuing a redundant full
+`count(*)` scan for every card. DuckDB connections have a configurable memory
+limit and dataset-local spill directory, while each API process bounds parallel
+chart renders. KDE and box-plot comparisons reject excessive group cardinality
+before running their expensive statistical aggregates.
 Category bars consume the same grouped aggregate contract as trend lines. Their
 side-by-side and stacked layouts are presentation concerns in React; stacked
 mode creates one stack per aggregation and maintains separate positive and

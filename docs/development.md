@@ -77,13 +77,18 @@ to the dataset-local temporary directory.
 
 The main local tuning variables are documented in `.env.example`:
 
-- `DESCRIPTIVE_PROFILE_DUCKDB_THREADS` controls DuckDB threads per profiling job.
+- `DUCKDB_THREADS` controls threads per DuckDB analytical connection. The legacy
+  `DESCRIPTIVE_PROFILE_DUCKDB_THREADS` name remains accepted.
+- `DUCKDB_MEMORY_LIMIT` caps memory per DuckDB connection; larger intermediates
+  spill to the dataset-local temporary directory.
+- `VISUALIZATION_MAX_CONCURRENCY` limits simultaneous heavy chart renders in
+  each API process.
 - `PROFILE_WORKER_CONCURRENCY` controls concurrent Celery jobs.
 - `DESCRIPTIVE_PROFILE_RESULT_EXPIRES_SECONDS` controls Redis result lifetime.
 
-Keep the product of DuckDB threads and worker concurrency appropriate for the
-host CPU and memory. The defaults favor predictable local development over
-maximum throughput.
+Keep the product of DuckDB threads, worker concurrency, and visualization
+concurrency appropriate for the host CPU and memory. The defaults favor
+predictable local development over maximum throughput.
 
 Run the synthetic full-profile benchmark inside the API container:
 

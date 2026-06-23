@@ -1,6 +1,7 @@
 import {
   Activity,
   BarChart3,
+  Box as BoxIcon,
   GripVertical,
   Info,
   LayoutDashboard,
@@ -37,13 +38,33 @@ import {
 import { TrendFitDetails } from "./TrendFitDetails";
 import { useVisualizationResult } from "./useVisualizationResult";
 import { formatInteger, formatNumber } from "./visualizationFormatters";
+import { createNumericScale, formatAxisTick, selectCategoricalAxisTicks, shortAxisLabel } from "./visualizationScales";
+import { assignDistinctColors, buildSeriesVisuals, SERIES_PALETTE as PALETTE, type SeriesVisual } from "./visualizationSeries";
+import {
+  CANVAS_PADDING,
+  calculateInteractionLayout,
+  canvasMetrics,
+  defaultLayout,
+  findOpenLayout,
+  GRID_COLUMNS,
+  GRID_GAP,
+  GRID_ROW_HEIGHT,
+  hasLayoutCollision,
+  legacyLayout,
+  normalizeLayout,
+  scaleLegacyGridLayout,
+  tidyChartLayouts,
+  type AlignmentGuides,
+  type ChartLayout,
+  type LayoutInteraction,
+} from "./visualizationLayout";
 
 type CellValue = string | number | boolean | null;
 type RecordRow = Record<string, CellValue>;
 type ChartKind = VisualizationKind;
 type ChartSize = "compact" | "medium" | "wide";
 type Aggregation = VisualizationAggregation;
-type ChartLayout = { x: number; y: number; w: number; h: number };
+type KpiCondition = "none" | "eq" | "lt" | "lte" | "gt" | "gte";
 
 type ChartConfig = {
   id: string;
@@ -60,20 +81,10 @@ type ChartConfig = {
   comparisonAggregations: Aggregation[];
   selectedGroups: string[] | null;
   stacked: boolean;
+  kpiCondition: KpiCondition;
+  kpiThreshold: number;
   layout: ChartLayout;
 };
-
-type LayoutInteraction = {
-  type: "move" | "resize";
-  id: string;
-  startClientX: number;
-  startClientY: number;
-  initial: ChartLayout;
-  preview: ChartLayout;
-  colliding: boolean;
-};
-
-type AlignmentGuides = { vertical: number | null; horizontal: number | null };
 
 type Tooltip = { x: number; y: number; title: string; value: string } | null;
 
@@ -86,12 +97,8 @@ type VisualizationDashboardProps = {
 };
 
 const SAMPLE_LIMIT = 1000;
-const GRID_COLUMNS = 48;
-const GRID_ROW_HEIGHT = 7;
-const GRID_GAP = 2;
-const CANVAS_PADDING = { top: 12, right: 12, bottom: 12, left: 12 };
 const LAYOUT_VERSION = 2;
-const PALETTE = ["#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#F0E442", "#7A5AF8", "#8C564B", "#E7298A", "#66A61E", "#17BECF"];
+const NATURAL_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 const aggregationOptions: Array<{ value: Aggregation; label: string }> = [
   { value: "average", label: "Average" },
   { value: "median", label: "Median" },
@@ -106,6 +113,7 @@ const chartCatalog: Array<{ kind: ChartKind; label: string; description: string;
   { kind: "bar", label: "Category bars", description: "Compare grouped values", icon: BarChart3 },
   { kind: "scatter", label: "Scatter plot", description: "Explore relationships", icon: ScatterChart },
   { kind: "histogram", label: "Distribution", description: "Shape, spread and outliers", icon: Activity },
+  { kind: "boxplot", label: "Box plot", description: "Quartiles, spread and outliers", icon: BoxIcon },
   { kind: "kpi", label: "KPI", description: "A single key measure", icon: Maximize2 }
 ];
 
@@ -114,6 +122,7 @@ const kindLabels: Record<ChartKind, string> = {
   bar: "Category bars",
   scatter: "Scatter plot",
   histogram: "Distribution",
+  boxplot: "Box plot",
   kpi: "KPI"
 };
 
@@ -426,7 +435,7 @@ function ChartInspector({ chart, columns, datasetId, rows, onChange }: { chart: 
       api.visualizationGroups(datasetId, chart.group)
         .then((result) => {
           if (!current) return;
-          setAvailableGroups(result.values.sort((a, b) => a.localeCompare(b)));
+          setAvailableGroups(result.values.sort(naturalCompare));
           setGroupsTruncated(result.truncated);
         })
         .catch(() => current && setAvailableGroups([]))
@@ -442,21 +451,21 @@ function ChartInspector({ chart, columns, datasetId, rows, onChange }: { chart: 
       <div className="viz-sidebar-heading"><div><p className="eyebrow">Selected view</p><h2>Configure</h2></div><Settings2 size={17} /></div>
       <label>Title<input value={chart.title} onChange={(event) => onChange({ title: event.target.value })} /></label>
       {chart.kind !== "kpi" && (
-        <label>{chart.kind === "histogram" ? "Measure" : "Horizontal axis"}
+        <label>{chart.kind === "histogram" || chart.kind === "boxplot" ? "Measure" : "Horizontal axis"}
           <select value={chart.x} onChange={(event) => {
             const x = event.target.value;
             onChange(x === chart.group
               ? { x, xEpsilon: 0, group: "", selectedGroups: null, stacked: false }
               : { x, xEpsilon: 0 });
           }}>
-            {(chart.kind === "histogram" || chart.kind === "scatter" ? numericColumns : columns).map((column) => <option key={column.name} value={column.name}>{column.name} · {column.type}</option>)}
+            {(chart.kind === "histogram" || chart.kind === "boxplot" || chart.kind === "scatter" ? numericColumns : columns).map((column) => <option key={column.name} value={column.name}>{column.name} · {column.type}</option>)}
           </select>
         </label>
       )}
       {(chart.kind === "line" || chart.kind === "bar" || chart.kind === "scatter") && xColumn?.type === "number" && (
         <EpsilonField axis="X" automaticAtZero={chart.kind === "scatter"} value={chart.xEpsilon ?? 0} onChange={(xEpsilon) => onChange({ xEpsilon })} />
       )}
-      {chart.kind !== "histogram" && (
+      {chart.kind !== "histogram" && chart.kind !== "boxplot" && (
         <label>{chart.kind === "kpi" ? "Measure" : "Vertical axis"}
           <select value={chart.y} onChange={(event) => {
             const y = event.target.value;
@@ -495,6 +504,26 @@ function ChartInspector({ chart, columns, datasetId, rows, onChange }: { chart: 
           {aggregationOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select></label>
       )}
+      {chart.kind === "kpi" && (
+        <fieldset className="kpi-threshold-fieldset">
+          <legend>Target condition</legend>
+          <label>Condition
+            <select value={chart.kpiCondition ?? "none"} onChange={(event) => onChange({ kpiCondition: event.target.value as KpiCondition })}>
+              <option value="none">No target</option>
+              <option value="eq">Equals</option>
+              <option value="lt">Less than</option>
+              <option value="lte">Less than or equal</option>
+              <option value="gt">Greater than</option>
+              <option value="gte">Greater than or equal</option>
+            </select>
+          </label>
+          {chart.kpiCondition !== "none" && (
+            <label>Threshold
+              <input step="any" type="number" value={chart.kpiThreshold ?? 0} onChange={(event) => onChange({ kpiThreshold: Number(event.target.value) || 0 })} />
+            </label>
+          )}
+        </fieldset>
+      )}
       {(chart.kind === "line" || chart.kind === "bar") && (
         <fieldset className="metric-series-fieldset">
           <legend>Additional metrics</legend>
@@ -516,12 +545,12 @@ function ChartInspector({ chart, columns, datasetId, rows, onChange }: { chart: 
           </div>
         </fieldset>
       )}
-      {(chart.kind === "line" || chart.kind === "bar" || chart.kind === "scatter") && (
-        <label>Color / series<select value={hasSeriesGroup ? chart.group : ""} onChange={(event) => {
+      {(chart.kind === "line" || chart.kind === "bar" || chart.kind === "scatter" || chart.kind === "histogram" || chart.kind === "boxplot" || chart.kind === "kpi") && (
+        <label>{chart.kind === "kpi" ? "Filter column" : "Color / series"}<select value={hasSeriesGroup ? chart.group : ""} onChange={(event) => {
           const group = event.target.value;
           onChange({ group, selectedGroups: null, stacked: group ? chart.stacked : false });
         }}>
-          <option value="">Single series</option>{groupingColumns.map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}
+          <option value="">{chart.kind === "kpi" ? "No filter" : "Single series"}</option>{groupingColumns.map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}
         </select></label>
       )}
       {chart.kind === "bar" && hasSeriesGroup && (
@@ -536,7 +565,7 @@ function ChartInspector({ chart, columns, datasetId, rows, onChange }: { chart: 
       )}
       {hasSeriesGroup && (
         <fieldset className="group-selection-fieldset">
-          <legend>Group selection</legend>
+          <legend>{chart.kind === "kpi" ? "Filter values" : "Group selection"}</legend>
           <div className="group-selection-actions">
             <span>{groupsLoading ? "Loading full dataset…" : chart.selectedGroups == null ? `All (${availableGroups.length})` : `${effectiveSelectedGroups.length} of ${availableGroups.length}`}</span>
             <button onClick={() => onChange({ selectedGroups: null })} type="button">All</button>
@@ -601,7 +630,7 @@ function ChartView({ chart, datasetId, onDrill, xType }: { chart: ChartConfig; d
     trend: chart.kind === "scatter" ? chart.trend ?? "none" : "none",
     polynomial_degree: chart.polynomialDegree ?? 2,
     max_points: 2000,
-    bins: 16
+    bins: 80
   }), [chart.aggregation, chart.comparisonAggregations, chart.kind, chart.polynomialDegree, chart.selectedGroups, chart.trend, chart.x, chart.xEpsilon, chart.y, chart.yEpsilon, requestGroup]);
   const { result, loading: chartLoading, error: chartError } = useVisualizationResult(datasetId, query);
   const metricOrder = useMemo(
@@ -615,8 +644,17 @@ function ChartView({ chart, datasetId, onDrill, xType }: { chart: ChartConfig; d
     setZoom(1);
   }, [result]);
 
-  const points = result?.points ?? [];
-  const series = result?.series ?? [];
+  const points = useMemo(() => {
+    const source = result?.points ?? [];
+    if (chart.kind !== "boxplot") return source;
+    return [...source]
+      .sort((left, right) => naturalCompare(left.xLabel, right.xLabel))
+      .map((point, index) => ({ ...point, x: index }));
+  }, [chart.kind, result?.points]);
+  const series = useMemo(
+    () => [...(result?.series ?? [])].sort(naturalCompare),
+    [result?.series]
+  );
   const trendValidCount = result?.trends?.reduce((total, trend) => total + trend.valid_count, 0) ?? 0;
   const trendScope = chart.kind === "scatter" && chart.trend !== "none" && result?.trends?.length
     ? ` · ${chart.trend} trend per series · ${formatInteger(trendValidCount)} fitted rows${result.trends.some((trend) => trend.approximate) ? " · spline smoothed from 24 full-data bins" : ""}`
@@ -689,16 +727,28 @@ function ChartView({ chart, datasetId, onDrill, xType }: { chart: ChartConfig; d
     return <div className="viz-chart-empty error-state"><Activity size={22} /><span>{chartError}</span></div>;
   }
 
-  if (!result || (result.kpi === null && result.points.length === 0)) {
+  if (!result) {
     return <div className="viz-chart-empty"><Activity size={22} /><span>Select compatible columns in the inspector.</span></div>;
   }
 
+  if (result.kpi === null && result.points.length === 0) {
+    return <div className="viz-chart-empty"><Activity size={22} /><span>No valid rows match the selected filters.</span></div>;
+  }
+
   if (chart.kind === "kpi") {
+    const value = result.kpi ?? 0;
+    const condition = chart.kpiCondition ?? "none";
+    const hasTarget = condition !== "none";
+    const targetMet = !hasTarget || evaluateKpiCondition(value, condition, chart.kpiThreshold ?? 0);
+    const filterLabel = chart.group
+      ? ` · ${chart.group}: ${chart.selectedGroups == null ? "all" : chart.selectedGroups.join(", ") || "none"}`
+      : "";
     return (
-      <div className="kpi-view">
+      <div className={`kpi-view ${hasTarget ? targetMet ? "target-met" : "target-missed" : ""}`}>
         <span>{chart.aggregation}</span>
-        <strong>{formatNumber(result.kpi ?? 0)}</strong>
-        <small>{chart.y} · {formatInteger(result.valid_count)} valid rows</small>
+        <strong>{formatNumber(value)}</strong>
+        <small>{chart.y}{filterLabel} · {formatInteger(result.valid_count)} valid rows</small>
+        {hasTarget && <div className="kpi-target-status"><b>{targetMet ? "Target met" : "Target missed"}</b><span>{kpiConditionSymbol(condition)} {formatNumber(chart.kpiThreshold ?? 0)}</span></div>}
       </div>
     );
   }
@@ -709,7 +759,7 @@ function ChartView({ chart, datasetId, onDrill, xType }: { chart: ChartConfig; d
         <span>
           {chartLoading
             ? "Refreshing…"
-            : `${formatInteger(result.scanned_row_count)} rows · full dataset${result.truncated ? ` · display capped at ${formatInteger(points.length)} points` : ""}${trendScope}`}
+            : `${formatInteger(result.scanned_row_count)} rows · full dataset${result.approximation_method === "binned_gaussian_kde" ? " · KDE from full-data aggregates" : ""}${result.truncated ? ` · display capped at ${formatInteger(points.length)} points` : ""}${trendScope}`}
           {" · Wheel to zoom · drag to pan · Double-click element to drill the data"}
         </span>
         <button aria-label="Zoom out" disabled={zoom === 1} onClick={() => changeZoom(zoom - 1)} type="button"><ZoomOut size={14} /></button>
@@ -733,7 +783,7 @@ function ChartView({ chart, datasetId, onDrill, xType }: { chart: ChartConfig; d
           onPointDoubleClick={(point) => onDrill(createVisualizationDrillRequest(datasetId, chart, point, xType))}
           points={visible}
           trends={result.trends ?? []}
-          series={result.series}
+          series={series}
           seriesVisuals={seriesVisuals}
           setTooltip={setTooltip}
           xType={xType}
@@ -759,17 +809,23 @@ type PlotPoint = {
   group?: string;
   aggregation?: Aggregation;
   count?: number;
+  minimum?: number;
+  q1?: number;
+  median?: number;
+  q3?: number;
+  maximum?: number;
+  lowerWhisker?: number;
+  upperWhisker?: number;
+  outlierCount?: number;
 };
-type SeriesVisual = { name: string; color: string; dash: string | undefined };
 type AxisTick = { value: number; label: string; categoryIndex?: number };
-type NumericScale = { min: number; max: number; step: number; ticks: number[] };
 
 function SeriesLegend({ chartKind, visuals }: { chartKind: ChartKind; visuals: SeriesVisual[] }) {
   return (
     <div aria-label="Chart legend" className="chart-legend">
       {visuals.map((visual) => (
         <span key={visual.name} title={visual.name}>
-          {chartKind === "line" ? (
+          {chartKind === "line" || chartKind === "histogram" ? (
             <svg aria-hidden="true" className="legend-line" viewBox="0 0 30 6">
               <line stroke={visual.color} strokeDasharray={visual.dash} strokeWidth="3" x1="0" x2="30" y1="3" y2="3" />
             </svg>
@@ -797,14 +853,20 @@ function SvgChart({ chart, onPointDoubleClick, points, trends, series, seriesVis
   const xMin = Math.min(...xValues);
   const xMax = Math.max(...xValues);
   const visibleTrends = trends.map((trend) => ({ ...trend, points: trend.points.filter((point) => point.x >= xMin && point.x <= xMax) }));
-  const yValues = [...points.map((point) => point.y), ...visibleTrends.flatMap((trend) => trend.points.map((point) => point.y))];
+  const yValues = [
+    ...points.flatMap((point) => chart.kind === "boxplot"
+      ? [point.lowerWhisker, point.q1, point.median, point.q3, point.upperWhisker].filter((value): value is number => value !== undefined)
+      : [point.y]),
+    ...visibleTrends.flatMap((trend) => trend.points.map((point) => point.y)),
+  ];
   const stackedBounds = chart.kind === "bar" && chart.stacked ? stackedBarBounds(points) : null;
   const dataYMin = stackedBounds?.[0] ?? Math.min(...yValues);
   const dataYMax = stackedBounds?.[1] ?? Math.max(...yValues);
   const yScale = createNumericScale(dataYMin, dataYMax, 5, chart.kind === "bar" || chart.kind === "histogram");
-  const numericXAxis = chart.kind === "scatter" || (chart.kind === "line" && xType === "number");
+  const numericXAxis = chart.kind === "scatter" || chart.kind === "histogram" || (chart.kind === "line" && xType === "number");
   const xTickLimit = Math.max(2, Math.floor(plotWidth / 90));
-  const xScale = numericXAxis ? createNumericScale(xMin, xMax, xTickLimit, false) : null;
+  const xScaleIncludesZeroBoundary = chart.kind === "histogram" && (xMin === 0 || xMax === 0);
+  const xScale = numericXAxis ? createNumericScale(xMin, xMax, xTickLimit, xScaleIncludesZeroBoundary) : null;
   const categoricalXRange = xMax - xMin || 1;
   const visualBySeries = new Map(seriesVisuals.map((visual) => [visual.name, visual]));
   const pointsBySeries = new Map(series.map((seriesName) => [seriesName, [] as PlotPoint[]]));
@@ -821,10 +883,19 @@ function SvgChart({ chart, onPointDoubleClick, points, trends, series, seriesVis
   const setPointTooltip = (event: ReactPointerEvent<SVGElement>, point: PlotPoint) => {
     const rect = event.currentTarget.ownerSVGElement?.getBoundingClientRect();
     if (!rect) return;
+    if (chart.kind === "boxplot") {
+      setTooltip({
+        x: Math.min(rect.width - 210, event.clientX - rect.left + 10),
+        y: Math.max(8, event.clientY - rect.top - 70),
+        title: `${point.xLabel} · n=${formatInteger(point.count ?? 0)}`,
+        value: `min ${formatNumber(point.minimum ?? 0)} · Q1 ${formatNumber(point.q1 ?? 0)} · median ${formatNumber(point.median ?? 0)} · Q3 ${formatNumber(point.q3 ?? 0)} · max ${formatNumber(point.maximum ?? 0)} · outliers ${formatInteger(point.outlierCount ?? 0)}`,
+      });
+      return;
+    }
     const range = point.xRange
       ? ` · [${formatNumber(point.xRange[0])}, ${formatNumber(point.xRange[1])}${point.xRangeInclusive ? "]" : ")"}`
       : "";
-    const measure = point.aggregation === "count" ? `Count of ${chart.y || "rows"}` : chart.y || "Count";
+    const measure = chart.kind === "histogram" ? "Density" : point.aggregation === "count" ? `Count of ${chart.y || "rows"}` : chart.y || "Count";
     setTooltip({ x: Math.min(rect.width - 180, event.clientX - rect.left + 10), y: Math.max(8, event.clientY - rect.top - 48), title: `${point.xLabel}${range}`, value: `${point.series} · ${measure}: ${formatNumber(point.y)}${point.count ? ` · n=${point.count}` : ""}` });
   };
   const xGroups = [...points.reduce((groups, point, index) => {
@@ -844,12 +915,15 @@ function SvgChart({ chart, onPointDoubleClick, points, trends, series, seriesVis
   const xTickPosition = (tick: AxisTick) => tick.categoryIndex === undefined
     ? xPx(tick.value)
     : pad.left + ((tick.categoryIndex + 0.5) / Math.max(xGroups.length, 1)) * plotWidth;
-  const barMarks = chart.kind === "bar" || chart.kind === "histogram"
+  const categoricalXPx = (value: number) => pad.left + (((xGroupIndex.get(value) ?? 0) + 0.5) / Math.max(xGroups.length, 1)) * plotWidth;
+  const barMarks = chart.kind === "bar"
     ? layoutBarMarks(chart, points, series, plotWidth, pad.left)
     : [];
-  const xAxisLabel = chart.x || "Rows";
+  const xAxisLabel = chart.kind === "boxplot" ? chart.group || "Dataset" : chart.x || "Rows";
   const yAxisLabel = chart.kind === "histogram"
-    ? "Count"
+    ? "Density"
+    : chart.kind === "boxplot"
+      ? chart.x
     : chart.kind === "scatter"
       ? chart.y
       : chart.y && (chart.comparisonAggregations ?? []).length > 0
@@ -866,15 +940,34 @@ function SvgChart({ chart, onPointDoubleClick, points, trends, series, seriesVis
         const path = trend.points.map((point, index) => `${index === 0 ? "M" : "L"}${xPx(point.x)},${yPx(point.y)}`).join(" ");
         return <path className="chart-trend" d={path} key={`${trend.series}-${trend.kind}`} stroke={visualBySeries.get(trend.series)?.color ?? PALETTE[0]} />;
       })}
-      {chart.kind === "bar" || chart.kind === "histogram" ? barMarks.map((mark, index) => {
+      {chart.kind === "bar" ? barMarks.map((mark, index) => {
         const startY = yPx(mark.start);
         const endY = yPx(mark.end);
         return <rect className="chart-bar" fill={visualBySeries.get(mark.point.series)?.color ?? PALETTE[0]} height={Math.max(1, Math.abs(startY - endY))} key={`${mark.point.xLabel}-${mark.point.series}-${index}`} onDoubleClick={(event) => { event.stopPropagation(); onPointDoubleClick(mark.point); }} onPointerEnter={(event) => setPointTooltip(event, mark.point)} onPointerMove={(event) => setPointTooltip(event, mark.point)} rx={3} width={mark.width} x={mark.x} y={Math.min(startY, endY)} />;
+      }) : chart.kind === "boxplot" ? points.map((point, index) => {
+        const q1 = point.q1 ?? point.y;
+        const median = point.median ?? point.y;
+        const q3 = point.q3 ?? point.y;
+        const lower = point.lowerWhisker ?? q1;
+        const upper = point.upperWhisker ?? q3;
+        const center = categoricalXPx(point.x);
+        const boxWidth = Math.min(58, (plotWidth / Math.max(1, xGroups.length)) * 0.48);
+        const color = visualBySeries.get(point.series)?.color ?? PALETTE[index % PALETTE.length];
+        return <g className="chart-boxplot" key={`${point.xLabel}-${index}`} onDoubleClick={(event) => { event.stopPropagation(); onPointDoubleClick(point); }} onPointerEnter={(event) => setPointTooltip(event, point)} onPointerMove={(event) => setPointTooltip(event, point)}>
+          <line className="boxplot-whisker" stroke={color} x1={center} x2={center} y1={yPx(lower)} y2={yPx(upper)} />
+          <line className="boxplot-whisker" stroke={color} x1={center - boxWidth * 0.28} x2={center + boxWidth * 0.28} y1={yPx(lower)} y2={yPx(lower)} />
+          <line className="boxplot-whisker" stroke={color} x1={center - boxWidth * 0.28} x2={center + boxWidth * 0.28} y1={yPx(upper)} y2={yPx(upper)} />
+          <rect className="boxplot-box" fill={color} stroke={color} height={Math.max(2, yPx(q1) - yPx(q3))} width={boxWidth} x={center - boxWidth / 2} y={yPx(q3)} />
+          <line className="boxplot-median" x1={center - boxWidth / 2} x2={center + boxWidth / 2} y1={yPx(median)} y2={yPx(median)} />
+        </g>;
       }) : chart.kind === "scatter" ? points.map((point, index) => <circle className="chart-point" cx={xPx(point.x)} cy={yPx(point.y)} fill={visualBySeries.get(point.series)?.color ?? PALETTE[0]} key={`${point.x}-${point.y}-${index}`} onDoubleClick={(event) => { event.stopPropagation(); onPointDoubleClick(point); }} onPointerEnter={(event) => setPointTooltip(event, point)} onPointerMove={(event) => setPointTooltip(event, point)} r={4.5} />) : series.map((seriesName) => {
         const seriesPoints = pointsBySeries.get(seriesName) ?? [];
         const line = seriesPoints.map((point, index) => `${index === 0 ? "M" : "L"}${xPx(point.x)},${yPx(point.y)}`).join(" ");
         const visual = visualBySeries.get(seriesName) ?? { color: PALETTE[0], dash: undefined };
-        return <g key={seriesName}><path className="chart-line" d={line} stroke={visual.color} strokeDasharray={visual.dash} />{seriesPoints.map((point, index) => <circle className="chart-point" cx={xPx(point.x)} cy={yPx(point.y)} fill={visual.color} key={`${point.x}-${index}`} onDoubleClick={(event) => { event.stopPropagation(); onPointDoubleClick(point); }} onPointerEnter={(event) => setPointTooltip(event, point)} onPointerMove={(event) => setPointTooltip(event, point)} r={4} />)}</g>;
+        const area = chart.kind === "histogram" && seriesPoints.length
+          ? `M${xPx(seriesPoints[0].x)},${yPx(0)} ${line.replace(/^M/, "L")} L${xPx(seriesPoints[seriesPoints.length - 1].x)},${yPx(0)} Z`
+          : "";
+        return <g key={seriesName}>{area && <path className="chart-density-area" d={area} fill={visual.color} />}<path className="chart-line" d={line} stroke={visual.color} strokeDasharray={visual.dash} />{seriesPoints.map((point, index) => <circle className="chart-point" cx={xPx(point.x)} cy={yPx(point.y)} fill={visual.color} key={`${point.x}-${index}`} onDoubleClick={(event) => { event.stopPropagation(); onPointDoubleClick(point); }} onPointerEnter={(event) => setPointTooltip(event, point)} onPointerMove={(event) => setPointTooltip(event, point)} r={chart.kind === "histogram" ? 2.5 : 4} />)}</g>;
       })}
       <text className="chart-axis-title" textAnchor="middle" x={pad.left + plotWidth / 2} y={height - 7}>{xAxisLabel}</text>
       <text className="chart-axis-title" textAnchor="middle" transform={`rotate(-90 14 ${pad.top + plotHeight / 2})`} x={14} y={pad.top + plotHeight / 2}>{yAxisLabel}</text>
@@ -968,13 +1061,13 @@ function buildSmartDashboard(columns: DatasetColumn[], rows: RecordRow[]): Chart
 function createChart(kind: ChartKind, columns: DatasetColumn[], rows: RecordRow[], index: number) {
   const numeric = columns.filter((column) => column.type === "number");
   const categorical = columns.find((column) => column.type !== "number" && cardinality(rows, column.name) < 40);
-  const x = kind === "histogram" ? numeric[0]?.name ?? "" : kind === "scatter" ? numeric[0]?.name ?? "" : categorical?.name ?? columns[0]?.name ?? "";
+  const x = kind === "histogram" || kind === "boxplot" ? numeric[0]?.name ?? "" : kind === "scatter" ? numeric[0]?.name ?? "" : categorical?.name ?? columns[0]?.name ?? "";
   const y = kind === "scatter" ? numeric[1]?.name ?? numeric[0]?.name ?? "" : numeric[0]?.name ?? "";
   return makeConfig(kind, x, y, "", `${kindLabels[kind]} ${index + 1}`, defaultLayout(kind, index));
 }
 
 function makeConfig(kind: ChartKind, x: string, y: string, group: string, title: string, layout: ChartLayout): ChartConfig {
-  return { id: `${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, kind, title, x, y, xEpsilon: 0, yEpsilon: 0, trend: "none", polynomialDegree: 2, group, aggregation: "average", comparisonAggregations: [], selectedGroups: null, stacked: false, layout };
+  return { id: `${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, kind, title, x, y, xEpsilon: 0, yEpsilon: 0, trend: "none", polynomialDegree: 2, group, aggregation: "average", comparisonAggregations: [], selectedGroups: null, stacked: false, kpiCondition: "none", kpiThreshold: 0, layout };
 }
 
 function readSessionDashboard(datasetId: string, columns: DatasetColumn[]): ChartConfig[] | null {
@@ -996,7 +1089,7 @@ function readSessionDashboard(datasetId: string, columns: DatasetColumn[]): Char
     return parsed
       .filter((chart) => {
         if (!chart || !kindLabels[chart.kind] || (chart.x && !names.has(chart.x)) || (chart.y && !names.has(chart.y))) return false;
-        if (chart.kind === "histogram") return columnTypes.get(chart.x) === "number";
+        if (chart.kind === "histogram" || chart.kind === "boxplot") return columnTypes.get(chart.x) === "number";
         if (columnTypes.get(chart.y) !== "number") return false;
         return chart.kind !== "scatter" || columnTypes.get(chart.x) === "number";
       })
@@ -1012,6 +1105,8 @@ function readSessionDashboard(datasetId: string, columns: DatasetColumn[]): Char
           comparisonAggregations: chart.comparisonAggregations ?? [],
           selectedGroups: validGroup ? chart.selectedGroups ?? null : null,
           stacked: validGroup && chart.kind === "bar" ? chart.stacked ?? false : false,
+          kpiCondition: chart.kpiCondition ?? "none",
+          kpiThreshold: chart.kpiThreshold ?? 0,
           layout: normalizeLayout(chart.layout
             ? shouldScaleLegacyGrid ? scaleLegacyGridLayout(chart.layout) : chart.layout
             : legacyLayout(chart.size, index)
@@ -1024,356 +1119,28 @@ function readSessionDashboard(datasetId: string, columns: DatasetColumn[]): Char
 }
 
 function describeEncoding(chart: ChartConfig) {
-  if (chart.kind === "histogram") return `${chart.x} · binned count`;
-  if (chart.kind === "kpi") return `${chart.aggregation} of ${chart.y}`;
+  if (chart.kind === "histogram") return `${chart.x} · KDE density${chart.group ? ` · by ${chart.group}` : ""}`;
+  if (chart.kind === "boxplot") return `${chart.x} · quartiles${chart.group ? ` · by ${chart.group}` : ""}`;
+  if (chart.kind === "kpi") return `${chart.aggregation} of ${chart.y}${chart.group ? ` · filtered by ${chart.group}` : ""}${chart.kpiCondition !== "none" ? ` · target ${kpiConditionSymbol(chart.kpiCondition)} ${formatNumber(chart.kpiThreshold)}` : ""}`;
   return `${chart.x || "row"} → ${chart.y || "count"}${chart.xEpsilon > 0 ? ` · xε=${formatNumber(chart.xEpsilon)}` : ""}${chart.yEpsilon > 0 ? ` · yε=${formatNumber(chart.yEpsilon)}` : ""}${chart.group ? ` · by ${chart.group}` : ""}${chart.kind === "scatter" && chart.trend !== "none" ? ` · ${chart.trend} trend` : ""}${chart.kind === "bar" && chart.stacked ? " · stacked" : ""}`;
 }
 
-function defaultLayout(kind: ChartKind, index: number): ChartLayout {
-  const isKpi = kind === "kpi";
-  return {
-    x: (index % 2) * 24,
-    y: Math.floor(index / 2) * 40,
-    w: isKpi ? 16 : 24,
-    h: isKpi ? 28 : 40
-  };
-}
-
-function legacyLayout(size: ChartSize | undefined, index: number): ChartLayout {
-  const width = size === "wide" ? 48 : size === "compact" ? 16 : 24;
-  return { x: width === 48 ? 0 : index % 2 ? 48 - width : 0, y: Math.floor(index / 2) * 40, w: width, h: size === "compact" ? 28 : 40 };
-}
-
-function scaleLegacyGridLayout(layout: ChartLayout): ChartLayout {
-  return { x: layout.x * 4, y: layout.y * 4, w: layout.w * 4, h: layout.h * 4 };
-}
-
-function normalizeLayout(layout: ChartLayout): ChartLayout {
-  const w = Math.max(12, Math.min(GRID_COLUMNS, Math.round(layout.w)));
-  const h = Math.max(24, Math.round(layout.h));
-  return {
-    x: Math.max(0, Math.min(GRID_COLUMNS - w, Math.round(layout.x))),
-    y: Math.max(0, Math.round(layout.y)),
-    w,
-    h
-  };
-}
-
-function tidyChartLayouts(charts: ChartConfig[]) {
-  let y = 0;
-  return charts.map((chart, index) => {
-    const isLastOdd = charts.length % 2 === 1 && index === charts.length - 1;
-    const rowMate = !isLastOdd && index % 2 === 0 ? charts[index + 1] : null;
-    const h = chart.kind === "kpi" ? 28 : 40;
-    const layout = { x: isLastOdd ? 0 : index % 2 * 24, y, w: isLastOdd ? 48 : 24, h };
-    if (isLastOdd || index % 2 === 1) {
-      const mateHeight = rowMate?.kind === "kpi" ? 28 : 40;
-      y += Math.max(h, mateHeight);
-    }
-    return { ...chart, layout };
-  });
-}
-
-function findOpenLayout(preferred: ChartLayout, charts: ChartConfig[]) {
-  let candidate = normalizeLayout(preferred);
-  while (hasLayoutCollision(candidate, "", charts)) {
-    candidate = { ...candidate, y: candidate.y + 1 };
-  }
-  return candidate;
-}
-
-function hasLayoutCollision(layout: ChartLayout, chartId: string, charts: ChartConfig[]) {
-  return charts.some((chart) => chart.id !== chartId
-    && layout.x < chart.layout.x + chart.layout.w
-    && layout.x + layout.w > chart.layout.x
-    && layout.y < chart.layout.y + chart.layout.h
-    && layout.y + layout.h > chart.layout.y
-  );
-}
-
-function canvasMetrics(canvas: HTMLElement) {
-  const rect = canvas.getBoundingClientRect();
-  const contentWidth = rect.width - CANVAS_PADDING.left - CANVAS_PADDING.right - GRID_GAP * (GRID_COLUMNS - 1);
-  const columnWidth = Math.max(1, contentWidth / GRID_COLUMNS);
-  return {
-    rect,
-    columnWidth,
-    pitchX: columnWidth + GRID_GAP,
-    pitchY: GRID_ROW_HEIGHT + GRID_GAP
-  };
-}
-
-function calculateInteractionLayout(
-  interaction: LayoutInteraction,
-  event: PointerEvent,
-  canvas: HTMLElement,
-  charts: ChartConfig[]
-): { layout: ChartLayout; guides: AlignmentGuides } {
-  const metrics = canvasMetrics(canvas);
-  const dx = (event.clientX - interaction.startClientX) / metrics.pitchX;
-  const dy = (event.clientY - interaction.startClientY) / metrics.pitchY;
-  const others = charts.filter((chart) => chart.id !== interaction.id).map((chart) => chart.layout);
-  const xTargets = others.flatMap((layout) => [layout.x, layout.x + layout.w / 2, layout.x + layout.w]);
-  const yTargets = others.flatMap((layout) => [layout.y, layout.y + layout.h / 2, layout.y + layout.h]);
-  let raw: ChartLayout;
-  let verticalGuide: number | null = null;
-  let horizontalGuide: number | null = null;
-
-  if (interaction.type === "move") {
-    const xSnap = snapPosition(interaction.initial.x + dx, [0, interaction.initial.w / 2, interaction.initial.w], xTargets);
-    const ySnap = snapPosition(interaction.initial.y + dy, [0, interaction.initial.h / 2, interaction.initial.h], yTargets);
-    raw = { ...interaction.initial, x: xSnap.value, y: ySnap.value };
-    verticalGuide = xSnap.guide;
-    horizontalGuide = ySnap.guide;
-  } else {
-    const rightSnap = snapEdge(interaction.initial.x + interaction.initial.w + dx, xTargets);
-    const bottomSnap = snapEdge(interaction.initial.y + interaction.initial.h + dy, yTargets);
-    raw = {
-      ...interaction.initial,
-      w: rightSnap.value - interaction.initial.x,
-      h: bottomSnap.value - interaction.initial.y
-    };
-    verticalGuide = rightSnap.guide;
-    horizontalGuide = bottomSnap.guide;
-  }
-
-  const layout = normalizeLayout(raw);
-  const alignedX = verticalGuide ?? findAlignedEdge([layout.x, layout.x + layout.w / 2, layout.x + layout.w], xTargets);
-  const alignedY = horizontalGuide ?? findAlignedEdge([layout.y, layout.y + layout.h / 2, layout.y + layout.h], yTargets);
-  return {
-    layout,
-    guides: {
-      vertical: alignedX === null ? null : CANVAS_PADDING.left + alignedX * metrics.pitchX,
-      horizontal: alignedY === null ? null : CANVAS_PADDING.top + alignedY * metrics.pitchY
-    }
-  };
-}
-
-function snapPosition(rawStart: number, ownOffsets: number[], targets: number[]) {
-  let best = { distance: Number.POSITIVE_INFINITY, value: rawStart, guide: null as number | null };
-  for (const offset of ownOffsets) {
-    for (const target of targets) {
-      const difference = target - (rawStart + offset);
-      if (Math.abs(difference) < 0.8 && Math.abs(difference) < best.distance) {
-        best = { distance: Math.abs(difference), value: rawStart + difference, guide: target };
-      }
-    }
-  }
-  return best;
-}
-
-function snapEdge(rawEdge: number, targets: number[]) {
-  const target = targets.reduce<number | null>((best, current) => {
-    if (Math.abs(current - rawEdge) >= 0.8) return best;
-    return best === null || Math.abs(current - rawEdge) < Math.abs(best - rawEdge) ? current : best;
-  }, null);
-  return { value: target ?? rawEdge, guide: target };
-}
-
-function findAlignedEdge(edges: number[], targets: number[]) {
-  return targets.find((target) => edges.some((edge) => Math.abs(edge - target) < 0.01)) ?? null;
-}
-
-function selectCategoricalAxisTicks<T extends { label: string }>(values: T[], plotWidth: number) {
-  if (values.length < 2) return values;
-  const slotWidth = plotWidth / values.length;
-  for (let stride = 1; stride < values.length; stride += 1) {
-    const indices = Array.from({ length: Math.ceil(values.length / stride) }, (_, index) => index * stride)
-      .filter((index) => index < values.length);
-    if (indices[indices.length - 1] !== values.length - 1) indices.push(values.length - 1);
-    if (axisLabelsFit(indices, values, slotWidth)) return indices.map((index) => values[index]);
-  }
-  return [values[0], values[values.length - 1]];
-}
-
-function axisLabelsFit<T extends { label: string }>(indices: number[], values: T[], slotWidth: number) {
-  const minimumGap = 9;
-  let previousRight = Number.NEGATIVE_INFINITY;
-  for (const index of indices) {
-    const center = (index + 0.5) * slotWidth;
-    const width = estimateAxisLabelWidth(shortAxisLabel(values[index].label));
-    const left = center - width / 2;
-    if (left < previousRight + minimumGap) return false;
-    previousRight = center + width / 2;
-  }
+function evaluateKpiCondition(value: number, condition: KpiCondition, threshold: number) {
+  if (condition === "eq") return value === threshold;
+  if (condition === "lt") return value < threshold;
+  if (condition === "lte") return value <= threshold;
+  if (condition === "gt") return value > threshold;
+  if (condition === "gte") return value >= threshold;
   return true;
 }
 
-function estimateAxisLabelWidth(value: string) {
-  return [...value].reduce((width, character) => {
-    if ("1ilI.,:;'|".includes(character)) return width + 3;
-    if ("MW@%#".includes(character)) return width + 8;
-    if (character === " " || character === "-") return width + 3.5;
-    return width + 5.5;
-  }, 0);
-}
-
-function createNumericScale(dataMin: number, dataMax: number, targetTickCount: number, includeZero: boolean): NumericScale {
-  let min = Number.isFinite(dataMin) ? dataMin : 0;
-  let max = Number.isFinite(dataMax) ? dataMax : 1;
-  if (min > max) [min, max] = [max, min];
-  if (includeZero) {
-    min = Math.min(0, min);
-    max = Math.max(0, max);
-  }
-  if (min === max) {
-    const padding = Math.abs(min) * 0.1 || 1;
-    if (includeZero) max = min + padding;
-    else {
-      min -= padding;
-      max += padding;
-    }
-  } else if (!includeZero) {
-    const padding = (max - min) * 0.05;
-    min -= padding;
-    max += padding;
-  }
-
-  const step = niceAxisStep((max - min) / Math.max(1, targetTickCount - 1));
-  const scaleMin = roundAxisValue(Math.floor(min / step) * step);
-  const scaleMax = roundAxisValue(Math.ceil(max / step) * step);
-  const tickCount = Math.max(1, Math.round((scaleMax - scaleMin) / step));
-  const ticks = Array.from({ length: tickCount + 1 }, (_, index) => roundAxisValue(scaleMin + index * step));
-  return { min: scaleMin, max: scaleMax, step, ticks };
-}
-
-function niceAxisStep(roughStep: number) {
-  if (!Number.isFinite(roughStep) || roughStep <= 0) return 1;
-  const magnitude = 10 ** Math.floor(Math.log10(roughStep));
-  const normalized = roughStep / magnitude;
-  const niceNormalized = [1, 2, 2.5, 5, 10].find((candidate) => candidate >= normalized) ?? 10;
-  return niceNormalized * magnitude;
-}
-
-function roundAxisValue(value: number) {
-  return Number(value.toPrecision(12));
-}
-
-function formatAxisTick(value: number, step: number) {
-  const absoluteValue = Math.abs(value);
-  if (absoluteValue >= 1_000_000) {
-    return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 2 }).format(value);
-  }
-  if (absoluteValue > 0 && (absoluteValue < 0.000001 || Math.abs(step) < 0.000001)) {
-    return new Intl.NumberFormat(undefined, { notation: "scientific", maximumFractionDigits: 2 }).format(value);
-  }
-  const exponent = Math.floor(Math.log10(Math.abs(step) || 1));
-  const normalizedStep = Math.abs(step) / 10 ** exponent;
-  const fractionAdjustment = Number.isInteger(roundAxisValue(normalizedStep)) ? 0 : 1;
-  const fractionDigits = Math.max(0, Math.min(8, -exponent + fractionAdjustment));
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits: fractionDigits }).format(value);
-}
-
-function buildSeriesVisuals(
-  chartKind: ChartKind,
-  points: PlotPoint[],
-  series: string[],
-  metricOrder: Aggregation[],
-  colorAssignments: Map<string, string>
-): SeriesVisual[] {
-  const firstPointBySeries = new Map<string, PlotPoint>();
-  for (const point of points) {
-    if (!firstPointBySeries.has(point.series)) firstPointBySeries.set(point.series, point);
-  }
-  const metricIndex = new Map(metricOrder.map((metric, index) => [metric, index]));
-  return series.map((name) => {
-    const point = firstPointBySeries.get(name);
-    const dashIndex = point?.aggregation ? metricIndex.get(point.aggregation) ?? 0 : 0;
-    const colorKey = seriesColorKey(chartKind, point, name);
-    return {
-      name,
-      color: colorAssignments.get(colorKey) ?? PALETTE[0],
-      dash: chartKind === "line" ? seriesDash(dashIndex) : undefined
-    };
-  });
-}
-
-function assignDistinctColors(points: PlotPoint[], chartKind: ChartKind, assignments: Map<string, string>) {
-  const colorKeys = unique(points.map((point) => seriesColorKey(chartKind, point, point.series)))
-    .sort((left, right) => left.localeCompare(right));
-  for (const colorKey of colorKeys) {
-    if (assignments.has(colorKey)) continue;
-    const used = new Set(assignments.values());
-    const available = PALETTE.filter((color) => !used.has(color));
-    if (available.length === 0) {
-      assignments.set(colorKey, generatedGroupColor(colorKey, used));
-      continue;
-    }
-    if (used.size === 0) {
-      assignments.set(colorKey, available[stableHash(colorKey) % available.length]);
-      continue;
-    }
-    assignments.set(colorKey, available.reduce((best, candidate) =>
-      minimumColorDistance(candidate, used) > minimumColorDistance(best, used) ? candidate : best
-    ));
-  }
-  return assignments;
-}
-
-function seriesColorKey(chartKind: ChartKind, point: PlotPoint | undefined, seriesName: string) {
-  return chartKind === "line" ? point?.group ?? seriesName : seriesName;
-}
-
-function minimumColorDistance(candidate: string, used: Set<string>) {
-  return Math.min(...[...used].map((color) => colorDistance(candidate, color)));
-}
-
-function colorDistance(left: string, right: string) {
-  const [leftRed, leftGreen, leftBlue] = hexToRgb(left);
-  const [rightRed, rightGreen, rightBlue] = hexToRgb(right);
-  const redMean = (leftRed + rightRed) / 2;
-  const red = leftRed - rightRed;
-  const green = leftGreen - rightGreen;
-  const blue = leftBlue - rightBlue;
-  return Math.sqrt((2 + redMean / 256) * red ** 2 + 4 * green ** 2 + (2 + (255 - redMean) / 256) * blue ** 2);
-}
-
-function hexToRgb(value: string): [number, number, number] {
-  return [Number.parseInt(value.slice(1, 3), 16), Number.parseInt(value.slice(3, 5), 16), Number.parseInt(value.slice(5, 7), 16)];
-}
-
-function generatedGroupColor(group: string, used: Set<string>) {
-  const baseHue = stableHash(group) % 360;
-  const candidates = Array.from({ length: 24 }, (_, index) => hslToHex((baseHue + index * 137.508) % 360, 72, index % 2 ? 58 : 46));
-  return candidates.reduce((best, candidate) => minimumColorDistance(candidate, used) > minimumColorDistance(best, used) ? candidate : best);
-}
-
-function hslToHex(hue: number, saturation: number, lightness: number) {
-  const s = saturation / 100;
-  const l = lightness / 100;
-  const chroma = (1 - Math.abs(2 * l - 1)) * s;
-  const section = hue / 60;
-  const x = chroma * (1 - Math.abs(section % 2 - 1));
-  const [red, green, blue] = section < 1 ? [chroma, x, 0] : section < 2 ? [x, chroma, 0] : section < 3 ? [0, chroma, x] : section < 4 ? [0, x, chroma] : section < 5 ? [x, 0, chroma] : [chroma, 0, x];
-  const match = l - chroma / 2;
-  return `#${[red, green, blue].map((channel) => Math.round((channel + match) * 255).toString(16).padStart(2, "0")).join("")}`;
-}
-
-function stableHash(value: string) {
-  let hash = 0;
-  for (let index = 0; index < value.length; index += 1) hash = (hash * 31 + value.charCodeAt(index)) >>> 0;
-  return hash;
-}
-
-function seriesDash(index: number) {
-  const patterns: Array<string | undefined> = [
-    undefined,
-    "11 5",
-    "11 4 2 4",
-    "2 4",
-    "15 4 5 4",
-    "7 3 2 3 2 3",
-    "18 5"
-  ];
-  return patterns[index % patterns.length];
-}
-
-function shortAxisLabel(value: string) {
-  return value.length > 16 ? `${value.slice(0, 14)}…` : value;
+function kpiConditionSymbol(condition: KpiCondition) {
+  return { none: "", eq: "=", lt: "<", lte: "≤", gt: ">", gte: "≥" }[condition];
 }
 
 function storageKey(datasetId: string) { return `ml-app:visual-dashboard:${datasetId}`; }
 function unique<T>(values: T[]) { return [...new Set(values)]; }
+function naturalCompare(left: string, right: string) { return NATURAL_COLLATOR.compare(left, right); }
 function cardinality(rows: RecordRow[], column: string) { return new Set(rows.slice(0, 1000).map((row) => displayValue(row[column]))).size; }
 function displayValue(value: CellValue) { return value === null || value === "" ? "Missing" : String(value); }
 function aggregationLabel(aggregation: Aggregation) {

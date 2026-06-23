@@ -2295,6 +2295,22 @@ textarea {
   padding: 8px;
 }
 
+.kpi-threshold-fieldset {
+  border: 1px solid #d8e1e7;
+  border-radius: 7px;
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 8px;
+}
+
+.kpi-threshold-fieldset legend {
+  color: #465667;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 0 4px;
+}
+
 .metric-series-fieldset legend {
   color: #465667;
   font-size: 11px;
@@ -2709,6 +2725,11 @@ textarea {
   stroke-width: 2.5;
 }
 
+.chart-density-area {
+  opacity: 0.14;
+  pointer-events: none;
+}
+
 .chart-trend {
   fill: none;
   pointer-events: none;
@@ -2845,6 +2866,17 @@ textarea {
   display: grid;
   gap: 6px;
   padding: 22px;
+  transition: background 160ms ease, box-shadow 160ms ease;
+}
+
+.kpi-view.target-met {
+  background: linear-gradient(145deg, #f7fffb, #dff5e8);
+  box-shadow: inset 4px 0 #258552;
+}
+
+.kpi-view.target-missed {
+  background: linear-gradient(145deg, #fffafa, #fbe4e4);
+  box-shadow: inset 4px 0 #c74444;
 }
 
 .kpi-view span {
@@ -2861,6 +2893,55 @@ textarea {
 
 .kpi-view small {
   color: #71808e;
+}
+
+.kpi-target-status {
+  align-items: center;
+  display: flex;
+  font-size: 11px;
+  gap: 8px;
+}
+
+.kpi-target-status b {
+  color: inherit;
+}
+
+.kpi-target-status span {
+  color: inherit;
+  font-size: 11px;
+  text-transform: none;
+}
+
+.target-met .kpi-target-status {
+  color: #167044;
+}
+
+.target-missed .kpi-target-status {
+  color: #a83232;
+}
+
+.chart-boxplot {
+  cursor: pointer;
+}
+
+.boxplot-whisker {
+  stroke-linecap: round;
+  stroke-width: 2;
+}
+
+.boxplot-box {
+  fill-opacity: 0.3;
+  stroke: currentColor;
+  stroke-width: 2;
+}
+
+.boxplot-median {
+  stroke: #173a39;
+  stroke-width: 2.5;
+}
+
+.chart-boxplot:hover .boxplot-box {
+  fill-opacity: 0.48;
 }
 
 .viz-chart-empty {

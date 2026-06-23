@@ -178,7 +178,11 @@ The analyst starts with an empty canvas, adds charts manually, or explicitly
 requests Smart start. Canvas state is saved in session storage per dataset;
 returning to a dataset during the same browser session restores its layout.
 
-Supported views include line, bar, scatter/density-bin, histogram, and KPI.
+Supported views include line, bar, scatter/density-bin, KDE distribution,
+grouped box plot, and KPI. KPI cards can filter the full dataset by selected
+values of one dimension and evaluate equality or ordering targets with a
+green/red pass state. Box plots report exact full-data quartiles, Tukey
+whiskers, observed extrema, and bounded per-group outlier counts.
 Charts can be moved and resized on a fine 48-column grid. Alignment guides snap
 edges and centers, collision detection rejects overlapping placements, Tidy
 layout creates a balanced grid, and Clear canvas removes all cards.
@@ -245,7 +249,8 @@ original-X polynomial coefficients, or spline node counts. Regression fits also
 report R²; exponential R² is explicitly identified as operating in log(Y) space.
 
 The visualization endpoint scans the complete Parquet relation with DuckDB.
-Line/bar aggregates, histograms, KPI values, group choices, and scatter density
+Line/bar aggregates, KDE source bins, box-plot quartiles, filtered KPI values,
+group choices, and scatter density
 bins therefore use the full selected dataset or Data View. Only bounded chart
 results cross the API boundary. The UI reports `rows analyzed` and
 `Full dataset · server-side`; it does not present a schema preview sample as an

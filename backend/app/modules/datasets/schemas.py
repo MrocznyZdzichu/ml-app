@@ -154,7 +154,7 @@ class DataAssetDrillRequest(BaseModel):
     limit: int = Field(default=50_000, ge=1, le=50_000)
 
 
-VisualizationKind = Literal["line", "bar", "scatter", "histogram", "kpi"]
+VisualizationKind = Literal["line", "bar", "scatter", "histogram", "boxplot", "kpi"]
 VisualizationAggregation = Literal["average", "median", "std", "sum", "count", "min", "max"]
 VisualizationTrend = Literal["none", "linear", "spline", "polynomial", "exponential"]
 VisualizationFittedTrend = Literal["linear", "spline", "polynomial", "exponential"]
@@ -172,7 +172,7 @@ class DataAssetVisualizationRequest(BaseModel):
     trend: VisualizationTrend = "none"
     polynomial_degree: int = Field(default=2, ge=2, le=5)
     max_points: int = Field(default=2_000, ge=50, le=10_000)
-    bins: int = Field(default=16, ge=5, le=100)
+    bins: int = Field(default=80, ge=20, le=200)
 
 
 class DataAssetVisualizationPointRead(BaseModel):
@@ -189,6 +189,14 @@ class DataAssetVisualizationPointRead(BaseModel):
     y_range: tuple[float, float] | None = Field(default=None, alias="yRange")
     x_range_inclusive: bool = Field(default=False, alias="xRangeInclusive")
     y_range_inclusive: bool = Field(default=False, alias="yRangeInclusive")
+    minimum: float | None = None
+    q1: float | None = None
+    median: float | None = None
+    q3: float | None = None
+    maximum: float | None = None
+    lower_whisker: float | None = Field(default=None, alias="lowerWhisker")
+    upper_whisker: float | None = Field(default=None, alias="upperWhisker")
+    outlier_count: int | None = Field(default=None, alias="outlierCount")
 
 
 class DataAssetVisualizationTrendPointRead(BaseModel):
@@ -218,6 +226,8 @@ class DataAssetVisualizationRead(BaseModel):
     valid_count: int = 0
     execution_mode: Literal["full_dataset"] = "full_dataset"
     truncated: bool = False
+    approximate: bool = False
+    approximation_method: Literal["binned_gaussian_kde"] | None = None
 
 
 class DataAssetVisualizationGroupsRequest(BaseModel):
