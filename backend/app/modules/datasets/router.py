@@ -3,12 +3,17 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile
 from app.core.security import Principal, require_user
 from app.modules.datasets.schemas import (
     DataAssetCreate,
+    DataAssetDrillRequest,
     DataAssetMetadataUpdate,
     DataAssetPreviewRead,
     DataAssetProfileRead,
     DataAssetProfileRequest,
     DataAssetRead,
     DataAssetSqlQueryRequest,
+    DataAssetVisualizationGroupsRead,
+    DataAssetVisualizationGroupsRequest,
+    DataAssetVisualizationRead,
+    DataAssetVisualizationRequest,
     DataViewCreate,
     FullDescriptiveProfileJobRead,
     FullDescriptiveProfileRequest,
@@ -77,6 +82,37 @@ def query_dataset(
     principal: Principal = Depends(require_user),
 ) -> DataAssetPreviewRead:
     return service.query(dataset_id, payload, principal)
+
+
+@router.post(
+    "/{dataset_id}/visualization",
+    response_model=DataAssetVisualizationRead,
+    response_model_exclude_none=True,
+)
+def visualize_dataset(
+    dataset_id: str,
+    payload: DataAssetVisualizationRequest,
+    principal: Principal = Depends(require_user),
+) -> DataAssetVisualizationRead:
+    return DataAssetVisualizationRead.model_validate(service.visualize(dataset_id, payload, principal))
+
+
+@router.post("/{dataset_id}/drill", response_model=DataAssetPreviewRead)
+def drill_dataset(
+    dataset_id: str,
+    payload: DataAssetDrillRequest,
+    principal: Principal = Depends(require_user),
+) -> DataAssetPreviewRead:
+    return DataAssetPreviewRead.model_validate(service.drill(dataset_id, payload, principal))
+
+
+@router.post("/{dataset_id}/visualization/groups", response_model=DataAssetVisualizationGroupsRead)
+def visualization_groups(
+    dataset_id: str,
+    payload: DataAssetVisualizationGroupsRequest,
+    principal: Principal = Depends(require_user),
+) -> DataAssetVisualizationGroupsRead:
+    return DataAssetVisualizationGroupsRead.model_validate(service.visualization_groups(dataset_id, payload, principal))
 
 
 @router.get("/{dataset_id}", response_model=DataAssetRead)

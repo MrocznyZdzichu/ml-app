@@ -60,6 +60,7 @@ services:
         condition: service_started
     volumes:
       - ./backend/app:/app/app
+      - ./backend/tests:/app/tests:ro
       - ./data:/app/data
 
   worker:
@@ -79,6 +80,7 @@ services:
         condition: service_healthy
     volumes:
       - ./backend/app:/app/app
+      - ./backend/tests:/app/tests:ro
       - ./data:/app/data
 
   frontend:

@@ -102,6 +102,93 @@ export type DatasetPreview = {
   limit: number;
 };
 
+export type VisualizationKind = "line" | "bar" | "scatter" | "histogram" | "boxplot" | "kpi";
+export type VisualizationAggregation = "average" | "median" | "std" | "sum" | "count" | "min" | "max";
+export type VisualizationTrend = "none" | "linear" | "spline" | "polynomial" | "exponential";
+
+export type DatasetVisualizationRequest = {
+  kind: VisualizationKind;
+  x: string;
+  y: string;
+  group: string;
+  aggregations: VisualizationAggregation[];
+  selected_groups: string[] | null;
+  x_epsilon: number;
+  y_epsilon: number;
+  trend: VisualizationTrend;
+  polynomial_degree: number;
+  max_points: number;
+  bins: number;
+};
+
+export type VisualizationPoint = {
+  x: number;
+  y: number;
+  xLabel: string;
+  series: string;
+  group?: string;
+  aggregation?: VisualizationAggregation;
+  count?: number;
+  xRange?: [number, number];
+  yRange?: [number, number];
+  xRangeInclusive?: boolean;
+  yRangeInclusive?: boolean;
+  minimum?: number;
+  q1?: number;
+  median?: number;
+  q3?: number;
+  maximum?: number;
+  lowerWhisker?: number;
+  upperWhisker?: number;
+  outlierCount?: number;
+};
+
+export type VisualizationTrendCurve = {
+  series: string;
+  kind: Exclude<VisualizationTrend, "none">;
+  valid_count: number;
+  approximate?: boolean;
+  parameters: Record<string, number | number[]>;
+  r_squared?: number | null;
+  fit_space: "y" | "log_y" | "binned_y";
+  points: Array<{ x: number; y: number }>;
+};
+
+export type DatasetDrillOperator = "contains" | "equals" | "not_equals" | "in" | "regex" | "starts_with" | "ends_with" | "gt" | "gte" | "lt" | "lte" | "between" | "empty" | "not_empty";
+
+export type DatasetDrillFilter = {
+  operator: DatasetDrillOperator;
+  value?: string;
+  values?: string[];
+  upper_inclusive?: boolean;
+};
+
+export type DatasetDrillRequest = {
+  filters: Record<string, DatasetDrillFilter>;
+  limit?: number;
+};
+
+export type DatasetVisualization = {
+  dataset_id: string;
+  row_count: number;
+  scanned_row_count: number;
+  points: VisualizationPoint[];
+  trends: VisualizationTrendCurve[];
+  series: string[];
+  kpi: number | null;
+  valid_count: number;
+  execution_mode: "full_dataset";
+  truncated: boolean;
+  approximate: boolean;
+  approximation_method?: "binned_gaussian_kde";
+};
+
+export type DatasetVisualizationGroups = {
+  dataset_id: string;
+  values: string[];
+  truncated: boolean;
+};
+
 export type FullDescriptiveProfileResponse = {
   dataset_id: string;
   columns: DatasetColumn[];
@@ -220,6 +307,22 @@ export const api = {
     request<DatasetPreview>(`/datasets/${datasetId}/query`, {
       method: "POST",
       body: JSON.stringify({ sql, limit })
+    }),
+  visualizeDataset: (datasetId: string, payload: DatasetVisualizationRequest, signal?: AbortSignal) =>
+    request<DatasetVisualization>(`/datasets/${datasetId}/visualization`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+      signal
+    }),
+  drillDataset: (datasetId: string, payload: DatasetDrillRequest) =>
+    request<DatasetPreview>(`/datasets/${datasetId}/drill`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  visualizationGroups: (datasetId: string, column: string, limit = 100) =>
+    request<DatasetVisualizationGroups>(`/datasets/${datasetId}/visualization/groups`, {
+      method: "POST",
+      body: JSON.stringify({ column, limit })
     }),
   createDataView: (payload: DataViewCreatePayload) =>
     request<DataAsset>("/datasets/views", {

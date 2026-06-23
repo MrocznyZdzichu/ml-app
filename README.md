@@ -1,7 +1,9 @@
 # ML App
 
-ML App is a containerized analytics workbench for dataset ingestion, metadata
-management, exploratory analysis, custom SQL views, and future ML workflows.
+ML App is a containerized analytics workbench for CSV ingestion, metadata
+management, exploratory analysis, reusable SQL/browser views, full-dataset
+profiling, and visualization. It also contains prototype interfaces for future
+model-training, serving, sharing, and export workflows.
 
 > **AI-developed project:** This application has been designed and implemented
 > with substantial AI assistance. Treat the codebase as an actively evolving
@@ -16,8 +18,13 @@ The current product slice focuses on a practical analyst workflow:
 - profile datasets with descriptive, target-aware, and comparison summaries,
 - run read-only Custom SQL,
 - save reusable Data Views,
-- use the same Data Roles and Data Browsing tools on saved views,
-- keep one shared Analysis dataset selection across Analysis tools.
+- continue from saved views into browsing, visualization, and descriptive analysis,
+- compose reusable interactive dashboards over full datasets and Data Views,
+- exercise placeholder model registry, deployment, sharing, and export contracts.
+
+The analytics paths described as full-dataset below execute against all rows.
+The explicitly identified preview and prototype paths have important limitations;
+see [Current Implementation Boundaries](#current-implementation-boundaries).
 
 ## Repository Layout
 
@@ -29,6 +36,9 @@ The current product slice focuses on a practical analyst workflow:
 - `docs` - architecture, development, and feature reference notes.
 
 ## Quick Start
+
+Prerequisites are Docker with the Compose v2 plugin and available default ports
+`5173`, `8000`, `5432`, `6379`, `9000`, and `9001`.
 
 Start the local stack:
 
@@ -42,7 +52,11 @@ Then open:
 - API docs: `http://localhost:8000/docs`
 - MinIO console: `http://localhost:9001`
 
-Create `.env` from `.env.example` only when you want to override defaults.
+The checked-in `.env.example` supplies local-development container settings.
+Create a root `.env` only to override variables interpolated by
+`docker-compose.yml`, such as ports, database connection values, worker
+concurrency, or the frontend API URL. The shipped credentials and secret are for
+local development only.
 
 ## Refresh After Code Changes
 
@@ -74,7 +88,8 @@ For a clean no-cache rebuild:
 
 ### Data Assets
 
-- CSV upload with header detection, row count, file metadata, tags, and status.
+- UTF-8 CSV upload with delimiter/header detection, a streaming row/schema scan,
+  file metadata, tags, and status.
 - Dataset metadata persisted in PostgreSQL.
 - Uploaded file content stored under local `data/repository` in development.
 - Soft deletion of dataset metadata with physical local file cleanup.
@@ -99,7 +114,8 @@ by later tools.
 Data Browsing supports:
 
 - shared dataset selection with the Data Roles tab,
-- full-dataset filtering/searching before preview limits are applied,
+- bounded interactive preview filtering and searching with explicit returned-row
+  and total-row counts,
 - column selection with presets,
 - multi-column sorting,
 - flexible filters: equals, not equals, contains, regex, in, numeric
@@ -111,6 +127,14 @@ Data Browsing supports:
 - paging with direct page number input,
 - Custom SQL with a helper sidebar and read-only execution,
 - Save View for persisting the current analysis as a reusable Data View.
+
+The interactive table operates on a bounded preview (up to 50,000 returned rows),
+and its browser-side filtering, grouping, aggregation, and sorting therefore do
+not represent rows outside that preview. Saving its state as a Data View
+recompiles those operations into DuckDB and applies them to the complete source
+relation. Custom SQL results are also bounded, but the current Custom SQL
+execution path first loads the source relation into an in-process SQLite
+database; it is not yet appropriate for very large datasets.
 
 ### Analysis: Descriptive Analysis
 
@@ -144,20 +168,96 @@ Full-dataset profiling runs in the Celery analytics worker and scans every row
 for tabular statistics, relationships, and segments. Only bounded scatterplot
 source points are sampled. See
 [`docs/descriptive-profiling-performance.md`](docs/descriptive-profiling-performance.md)
-for the architecture, benchmark results, and current Data View limitation.
+for the architecture and benchmark results.
+
+### Analysis: Visualization and Trends
+
+Visualization and Trends is an interactive dashboard canvas. Analysts explicitly
+choose a dataset, start with an empty canvas, and either add charts manually or
+use Smart start. The workspace supports:
+
+- line, bar, scatter/density-bin, KDE distribution, grouped box plot, and KPI views,
+- KPI segment filters and configurable equality/range targets with pass/fail status,
+- drag-and-drop positioning, fine-grained resizing, snapping guides, collision
+  detection, Tidy layout, and Clear canvas,
+- numeric-only scatter axes, per-chart X-epsilon bucketing for line/bar/scatter,
+  independent scatter Y epsilon, contextual epsilon help, grouping,
+  full-dataset aggregations, multiple metrics per group, and explicit group
+  selection,
+- optional straight-line, spline, degree 2–5 polynomial, and exponential scatter
+  fits calculated per group, with equations, fitted-row counts, coefficients,
+  and R-squared diagnostics,
+- grouped Category bars with side-by-side or per-metric stacked presentation,
+- adaptive axes, tooltips, zoom, pan, and scrollable mark-aware legends,
+- double-click Drill on chart marks that opens Data Browsing with the exact
+  source range and series filters applied over the full dataset or Data View,
+- stable high-contrast series colors for bar/scatter views, plus group colors
+  and metric-specific line styles for trend lines,
+- session-scoped layouts restored independently for each dataset.
+
+Chart queries run in DuckDB over the complete Parquet-backed relation. React
+receives only bounded aggregates. Scatter views use full-dataset spatial binning
+rather than silently substituting a row sample. The UI reports the number of
+rows scanned and labels the execution mode as full-dataset server analytics.
+Drill queries also execute in DuckDB before a bounded set of matching records is
+returned to the browser; the total match count remains visible.
 
 ### Data Views
 
 Data Views are saved, reusable transformations over source datasets. They can be
-created from a clicked Data Browser state or Custom SQL. Views are shown in
-Overview, Data, and Analysis, and they behave like normal datasets in Data Roles
-and Data Browsing.
+created from a clicked Data Browser state or Custom SQL. SQL and Browser
+definitions are compiled into DuckDB queries and materialized as reusable,
+definition-versioned Parquet artifacts. Nested views are supported with bounded
+recursion, and caches are invalidated when the definition or source changes.
+
+Views are shown in Overview, Data, and Analysis, and they can be used in Data
+Roles, Data Browsing, Visualization and Trends, and Descriptive Analysis.
+Visualization queries operate on the full transformed relation. Descriptive
+Analysis for a Data View currently uses its explicitly bounded preview range and
+must not be interpreted as a full-view profile.
 
 When possible, data roles are inherited from the source dataset for columns that
 survive in the view.
 
 Deleted datasets and views remain visible in the Data workspace deletion history
 but are excluded from Overview metrics, Recent assets, and Analysis selectors.
+
+### Prototype ML, Serving, Sharing, and Export
+
+The Models, Serving, and Share tabs expose the intended API and UI contracts,
+but they are scaffolding rather than production workflows:
+
+- training requests create in-memory job and model metadata; no estimator is
+  fitted and no artifact is written,
+- deployment requests create in-memory metadata but do not start a runtime,
+- online scoring returns placeholder `0.0` predictions,
+- sharing grants, batch-score jobs, and export jobs are metadata-only and are
+  lost when the API process restarts.
+
+The optional `model-runtime` Compose service can load a joblib artifact and
+expose `/health` and `/score`, but it is not wired automatically to deployment
+records created in the main API.
+
+## Current Implementation Boundaries
+
+- Local ingestion supports UTF-8 CSV files only. Parquet, XLSX, remote databases,
+  and object-storage ingestion are not implemented.
+- Users and dataset metadata are durable in PostgreSQL. Uploaded files and
+  generated Parquet sidecars are stored in `data/repository`; MinIO is started
+  for future object-storage work but is not the active dataset store.
+- Full-dataset descriptive profiling is implemented for uploaded CSV datasets
+  and materialized SQL/Browser Data Views.
+- Visualization, chart drill-down, and Data View materialization use DuckDB over
+  the complete physical or transformed relation and return bounded results.
+- Scatter trend output is capped at 80 render points per curve and 100 selected
+  groups. Spline fits smooth at most 24 full-data aggregate nodes per group and
+  are explicitly marked as approximate; other supported fits use full-data
+  regression aggregates or sufficient statistics.
+- Interactive Data Browsing is a bounded client-side exploration path. Custom
+  SQL currently materializes the relation in API-process memory and SQLite.
+- Analytics scalability is currently single-node. There is no distributed query
+  engine, persisted query cancellation, quota enforcement, or production job
+  scheduler yet.
 
 ## Example Data
 
@@ -212,6 +312,9 @@ artifact is available:
 ```powershell
 docker compose --profile serving up --build model-runtime
 ```
+
+Its default host endpoint is `http://localhost:8010`; this standalone runtime is
+separate from the placeholder deployment records in the application UI.
 
 ## Documentation
 

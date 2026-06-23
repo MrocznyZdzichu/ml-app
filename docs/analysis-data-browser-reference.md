@@ -12,11 +12,11 @@ The Analysis workspace currently contains:
   aggregation, Custom SQL, drill down, and Data View creation.
 - `Descriptive Analysis` - explicit, role-aware descriptive profiling with
   univariate, comparison, target-aware, and segment summaries.
-- `Visualization and Trends` - placeholder for visual analysis.
+- `Visualization and Trends` - interactive, full-dataset dashboard composition and visual analysis.
 
-Dataset selection is shared across Analysis tabs. Selecting a dataset in
-`Data Browsing` keeps the same dataset selected when switching to `Data Roles`,
-and vice versa.
+Dataset selection is shared by Data Roles, Data Browsing, Descriptive Analysis,
+and Visualization and Trends. Dashboard state remains session-scoped per dataset
+and entering the tab does not automatically create charts.
 
 ## Descriptive Analysis
 
@@ -24,8 +24,9 @@ Descriptive Analysis profiles a selected dataset only after the analyst clicks
 `Run profiling`. Selecting a dataset loads lightweight configuration context for
 target and target-type choices, but the heavier profiling work remains explicit.
 
-For uploaded CSV datasets, profiling is submitted to a background worker. The
-worker materializes a reusable Parquet representation and computes statistics,
+For uploaded CSV datasets and materialized Data Views, profiling is submitted
+to a background worker. The worker materializes a reusable Parquet
+representation and computes statistics,
 relationships, and segment aggregates over every row with DuckDB. Raw profile
 rows are not transferred to the browser. The existing progress state remains
 visible while the frontend polls the background job.
@@ -117,8 +118,7 @@ For ordinal features with a binary target, the card additionally reports a
 Spearman trend against the selected target value. Numeric ordinal labels are
 ordered numerically. Backend full-file profiles use lexicographic order for
 non-numeric labels and identify that basis explicitly, so analysts can verify
-whether it matches the domain order. Legacy Data View profiles retain their
-first-observed order.
+whether it matches the domain order.
 
 ### Multivariate Segment Scan
 
@@ -163,10 +163,112 @@ a dataset-local temporary directory rather than requiring the full relation in
 RAM. Celery result data contains only compact aggregates and expires from Redis
 after one hour; the existing frontend cache remains session-scoped.
 
-Saved Data Views currently retain the legacy preview-backed profiling path. They
-preserve existing behavior but do not yet have the same large-data guarantees as
-physical CSV assets. Moving browser filters, grouping, and Custom SQL to a
-validated DuckDB relation is the remaining pushdown step.
+Saved SQL and Browser Data Views are resolved recursively to their physical
+source, compiled into validated DuckDB queries, and materialized as reusable,
+definition-versioned Parquet artifacts. Filters, search, projection, grouping,
+aggregation filters, and sorting are pushed into DuckDB. The cached view is
+invalidated when its source Parquet or definition changes. Visualization and
+descriptive profiling therefore use the complete Data View result without
+materializing raw rows in the browser or Python process.
+
+## Visualization and Trends
+
+Selecting a dataset prepares schema context but does not create a dashboard.
+The analyst starts with an empty canvas, adds charts manually, or explicitly
+requests Smart start. Canvas state is saved in session storage per dataset;
+returning to a dataset during the same browser session restores its layout.
+
+Supported views include line, bar, scatter/density-bin, KDE distribution,
+grouped box plot, and KPI. KPI cards can filter the full dataset by selected
+values of one dimension and evaluate equality or ordering targets with a
+green/red pass state. Box plots report exact full-data quartiles, Tukey
+whiskers, observed extrema, and bounded per-group outlier counts.
+Charts can be moved and resized on a fine 48-column grid. Alignment guides snap
+edges and centers, collision detection rejects overlapping placements, Tidy
+layout creates a balanced grid, and Clear canvas removes all cards.
+
+Chart configuration supports axes, primary and additional aggregations,
+categorical grouping, and All/None/explicit group selection. Trend lines keep
+one high-contrast color per group while their metrics use ordered line patterns
+(solid, dashed, dash-dot, dotted, and further variants). Charts without lines
+encode every series with a distinct high-contrast color instead: bar legends use
+rectangular swatches and scatter legends use circular markers. Legends are
+scrollable and reproduce the marks used by the chart. Axes use adaptive ticks;
+charts support exact-value
+tooltips, cursor-centered wheel zoom, buttons, range scrolling, and pan.
+
+Numeric axes use human-readable steps from the `1 / 2 / 2.5 / 5 × 10^n`
+sequence and derive label precision from the selected step. This prevents small
+values such as `0.025`, `0.05`, and `0.075` from collapsing into duplicate
+rounded labels. Bar and histogram scales retain a zero baseline; line and
+scatter scales use padded data extents so a distant zero does not flatten useful
+variation. Categorical axes skip labels at a constant integer stride and retain
+the final category instead of selecting irregular rounded indices. Before any
+labels are skipped, the renderer estimates the actual width and position of
+every shortened label. All values are therefore shown whenever their text boxes
+fit with a safe gap; a stride greater than one is introduced only after a real
+collision is detected.
+
+Category bars support the same full-dataset grouping and group selection as
+Trend lines. By default, returned series are placed side by side within each X
+category. The `Stacked` control is available only when a series/group column is
+selected; it combines groups vertically while keeping separate stacks for each
+requested aggregation so semantically different metrics are never added into a
+single bar. Positive and negative values use independent stack baselines. A
+series column cannot duplicate either chart axis; changing an axis clears such a
+conflicting series configuration automatically.
+
+The vertical measure remains numeric for line, bar, scatter, and KPI views.
+`Count` is still available and counts non-null values of that numeric measure in
+each X/group partition. Categorical dimensions belong in `Color / series`, which
+produces an explicit grouped split without overloading the meaning of the Y axis.
+Histogram measures are numeric as well. The backend enforces the same rules
+independently of the UI.
+
+For numeric X axes in line, bar, and scatter charts, `X epsilon` optionally
+reduces dense continuous coordinates before aggregation. Scatter charts also
+provide an independent `Y epsilon`. `epsilon = 0` preserves exact values for
+line/bar aggregation; scatter then uses its automatic bounded density-bin
+resolution. A positive epsilon creates non-overlapping buckets of width `2 × ε`,
+anchored at zero and represented by their center. For example, `ε = 0.2`
+aggregates values in `[0.8, 1.2)` into the point centered at `x = 1`. Epsilon is
+stored independently for each chart, and tooltips report the bucket range and
+row count.
+
+Scatter axes expose numeric columns only. An optional straight-line, natural
+spline, polynomial (degree 2–5), or exponential trend is fitted server-side;
+when a color/series column is selected, DuckDB partitions the full selected data
+and returns one bounded curve per group. Linear and exponential fits use native
+full-data DuckDB regression aggregates; polynomial fits use full-data sufficient
+statistics. The spline smooths 24 full-data aggregate bins and is explicitly
+marked as approximate. Exponential fitting
+uses positive Y values and reports its fitted-row count in the chart status.
+The expandable trend-details panel reports the fitted equation and scope per
+series: slope/intercept for a line, amplitude/rate for an exponential curve,
+original-X polynomial coefficients, or spline node counts. Regression fits also
+report R²; exponential R² is explicitly identified as operating in log(Y) space.
+
+The visualization endpoint scans the complete Parquet relation with DuckDB.
+Line/bar aggregates, KDE source bins, box-plot quartiles, filtered KPI values,
+group choices, and scatter density
+bins therefore use the full selected dataset or Data View. Only bounded chart
+results cross the API boundary. The UI reports `rows analyzed` and
+`Full dataset · server-side`; it does not present a schema preview sample as an
+analytical result.
+
+When the number of aggregated points exceeds the response contract, the chart
+explicitly marks the display as capped. Aggregation still scans the complete
+selected relation, and `valid_count` continues to describe all matching rows;
+only the points transferred to and rendered by the browser are bounded.
+
+Double-clicking a chart mark drills into its source data and switches to Data
+Browsing on the same dataset or Data View. It applies the predicates represented
+by that mark: exact X values or X-epsilon buckets, histogram bin boundaries,
+scatter X/Y cells, and the selected series group. Half-open ranges remain
+half-open, except for the final histogram/scatter bin which includes its upper
+boundary. DuckDB evaluates these predicates against the complete relation. Data
+Browsing receives a 5,000-row exploratory window together with the full match
+count; the API keeps a hard maximum of 50,000 rows for explicit clients.
 
 ## Data Roles
 
@@ -219,10 +321,16 @@ Data Roles are stored in dataset metadata under:
 
 ## Data Browsing
 
-The browser works on the full dataset before applying the display limit. This
-means filtering, searching, grouping, aggregation, sorting, and Custom SQL are
-computed against all currently loaded records, and only the final result is
-limited/paged for display.
+The interactive browser table is a bounded exploratory preview and reports both
+returned and total row counts. Local filtering, searching, grouping,
+aggregation, and sorting affect the currently returned preview rows. Custom SQL
+uses the current interactive query path and also returns a bounded result.
+
+Saving the state as a Data View changes the execution path: the persisted
+filters, search, grouping, aggregation filters, projection, sorting, or SQL are
+compiled into DuckDB and applied to the complete source relation. Downstream
+visualization and descriptive analysis therefore operate on the full transformed
+view rather than the browser preview.
 
 ### Column Selection
 
@@ -308,9 +416,10 @@ Drill down opens a detail view for the selected group. The detail view:
 
 ### Custom SQL
 
-Custom SQL opens a modal editor. The SQL runs against an in-memory table named
-after the selected dataset. If the dataset name contains spaces or other special
-characters, quote it with double quotes:
+Custom SQL opens a modal editor. During interactive Data Browser execution, SQL
+runs against a bounded in-memory SQLite table named after the selected dataset.
+If the dataset name contains spaces or other special characters, quote it with
+double quotes:
 
 ```sql
 SELECT
@@ -332,6 +441,8 @@ Only read-only `SELECT` and `WITH` queries are supported. The editor supports:
 
 When Custom SQL is active, the Custom SQL button is highlighted. Reset View
 returns to the original dataset preview and clears the active SQL state.
+After Save View, the same SQL definition is executed and cached by DuckDB over
+the source Parquet for scalable downstream analysis.
 
 ## Data Views
 
@@ -346,7 +457,10 @@ Save View persists the current browser state as a Data View. A view stores:
 - inherited data roles where applicable.
 
 Data Views appear in Overview, Data, and Analysis. In Analysis they can be
-selected like regular datasets and used with Data Roles and Data Browsing.
+selected like regular datasets and used with Data Roles, Data Browsing,
+Visualization and Trends, and Descriptive Analysis. SQL and Browser views are
+materialized as definition-versioned Parquet relations and can themselves be
+used as sources of nested views.
 
 ## Backend API
 
@@ -356,15 +470,53 @@ Important dataset endpoints:
 - `GET /api/v1/datasets` - list current user's datasets and views.
 - `GET /api/v1/datasets/{dataset_id}/preview` - preview dataset or view.
 - `POST /api/v1/datasets/{dataset_id}/query` - run read-only SQL.
+- `POST /api/v1/datasets/{dataset_id}/visualization` - execute a bounded,
+  full-dataset chart query.
+- `POST /api/v1/datasets/{dataset_id}/visualization/groups` - return complete
+  grouping context with a bounded categorical result.
+- `POST /api/v1/datasets/{dataset_id}/drill` - apply chart source predicates to
+  the full dataset or Data View and return a bounded browser-ready result plus
+  its complete match count. Drill requests require at least one source predicate
+  and accept at most 20 filter columns.
 - `PATCH /api/v1/datasets/{dataset_id}/metadata` - update metadata, including
   `data_roles`.
 - `POST /api/v1/datasets/views` - save a Data View.
 - `DELETE /api/v1/datasets/{dataset_id}` - soft-delete metadata and remove local
   physical file for file-backed datasets.
 
+### Visualization API contract
+
+`DataAssetVisualizationRequest` accepts `kind`, `x`, `y`, optional `group`,
+selected groups, aggregations, bounded output controls, and epsilon settings.
+`x_epsilon` applies to numeric line/bar/scatter X axes; `y_epsilon`, `trend`, and
+`polynomial_degree` are scatter-only. Polynomial degree is constrained to 2–5.
+The backend rejects categorical scatter axes, duplicated axis/group columns,
+non-scatter trend options, unsafe epsilon widths, and trend requests spanning
+more than 100 selected groups.
+
+`DataAssetVisualizationRead` is a typed bounded response. It reports the source
+and valid row counts, full-dataset execution mode, truncation state, chart
+points, series, and optional trend curves. Every trend includes its fit kind,
+series, fitted-row count, at most 80 render points, parameters, fit space, and
+optional R²/approximation metadata. Point range fields retain their camel-case
+JSON names (`xRange`, `yRange`, and inclusive-bound flags) for frontend and
+drill compatibility while using snake-case model attributes in Python.
+
 ## Implementation Notes
 
 - UI role helpers live in `frontend/src/analysis/dataRoles.ts`.
 - Dataset use cases live in `backend/app/modules/datasets/service.py`.
-- Query/view execution lives in `backend/app/modules/datasets/query_engine.py`.
+- Interactive query execution lives in
+  `backend/app/modules/datasets/query_engine.py`; columnar relations, saved view
+  pushdown, and cache materialization live in
+  `backend/app/modules/datasets/columnar.py`.
+- Full-dataset chart queries live in
+  `backend/app/modules/datasets/visualizations.py`.
+- Scatter fitting and its bounded numerical curve contract live in
+  `backend/app/modules/datasets/visualization_trends.py`.
+- Chart-mark Drill filter translation lives in
+  `frontend/src/analysis/drillContext.ts`.
+- Scatter fit diagnostics live in
+  `frontend/src/analysis/TrendFitDetails.tsx`; shared numeric display formatting
+  lives in `frontend/src/analysis/visualizationFormatters.ts`.
 - Source adapters live in `backend/app/modules/datasets/sources.py`.

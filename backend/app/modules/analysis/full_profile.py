@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from itertools import combinations
-from typing import Any
+from typing import Any, Callable
 
 import duckdb
 
@@ -54,10 +54,15 @@ class FullDatasetProfiler:
     def __init__(self, store: ColumnarDatasetStore | None = None) -> None:
         self.store = store or ColumnarDatasetStore()
 
-    def profile(self, asset: DataAsset, settings: dict[str, Any]) -> dict[str, Any]:
+    def profile(
+        self,
+        asset: DataAsset,
+        settings: dict[str, Any],
+        load_asset: Callable[[str], DataAsset] | None = None,
+    ) -> dict[str, Any]:
         options = ProfileOptions.from_mapping(settings)
         connection = self.store.connect(asset)
-        relation = self.store.relation_sql(asset)
+        relation = self.store.relation_sql(asset, load_asset)
         try:
             columns = self._asset_columns(connection, relation, asset)
             row_count = int(connection.execute(f"SELECT count(*) FROM {relation}").fetchone()[0])

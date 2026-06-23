@@ -10,10 +10,18 @@ def profile_dataset(dataset_id: str) -> dict[str, str]:
 
 @celery_app.task(name="app.worker.tasks.descriptive_profile_dataset", track_started=True)
 def descriptive_profile_dataset(dataset_id: str, owner_id: str, settings: dict) -> dict:
-    asset = PostgresDatasetRepository().get(dataset_id)
+    repository = PostgresDatasetRepository()
+    asset = repository.get(dataset_id)
     if asset is None or asset.owner_id != owner_id:
         raise ValueError("Dataset not found")
-    return FullDatasetProfiler().profile(asset, settings)
+
+    def load_asset(asset_id: str):
+        loaded = repository.get(asset_id)
+        if loaded is None or loaded.owner_id != owner_id:
+            raise ValueError("Data View source not found")
+        return loaded
+
+    return FullDatasetProfiler().profile(asset, settings, load_asset)
 
 
 @celery_app.task(name="app.worker.tasks.train_model")

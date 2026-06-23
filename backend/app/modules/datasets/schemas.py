@@ -1,7 +1,7 @@
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.modules.datasets.domain import DataAssetStatus, SourceType
 
@@ -128,3 +128,114 @@ class DataAssetPreviewRead(BaseModel):
 class DataAssetSqlQueryRequest(BaseModel):
     sql: str = Field(min_length=1)
     limit: int = Field(default=50_000, ge=1, le=50_000)
+
+
+DataAssetDrillOperator = Literal[
+    "contains", "equals", "not_equals", "in", "regex", "starts_with", "ends_with",
+    "gt", "gte", "lt", "lte", "between", "empty", "not_empty",
+]
+
+
+class DataAssetDrillFilter(BaseModel):
+    operator: DataAssetDrillOperator
+    value: str = ""
+    values: list[str] = Field(default_factory=list, max_length=1_000)
+    upper_inclusive: bool = False
+
+    @model_validator(mode="after")
+    def validate_operator_values(self) -> Self:
+        if self.operator == "between" and len(self.values) != 2:
+            raise ValueError("Between drill filters require exactly two values")
+        return self
+
+
+class DataAssetDrillRequest(BaseModel):
+    filters: dict[str, DataAssetDrillFilter] = Field(min_length=1, max_length=20)
+    limit: int = Field(default=50_000, ge=1, le=50_000)
+
+
+VisualizationKind = Literal["line", "bar", "scatter", "histogram", "boxplot", "kpi"]
+VisualizationAggregation = Literal["average", "median", "std", "sum", "count", "min", "max"]
+VisualizationTrend = Literal["none", "linear", "spline", "polynomial", "exponential"]
+VisualizationFittedTrend = Literal["linear", "spline", "polynomial", "exponential"]
+
+
+class DataAssetVisualizationRequest(BaseModel):
+    kind: VisualizationKind
+    x: str = ""
+    y: str = ""
+    group: str = ""
+    aggregations: list[VisualizationAggregation] = Field(default_factory=lambda: ["average"], max_length=7)
+    selected_groups: list[str] | None = Field(default=None, max_length=1_000)
+    x_epsilon: float = Field(default=0, ge=0, le=1e100)
+    y_epsilon: float = Field(default=0, ge=0, le=1e100)
+    trend: VisualizationTrend = "none"
+    polynomial_degree: int = Field(default=2, ge=2, le=5)
+    max_points: int = Field(default=2_000, ge=50, le=10_000)
+    bins: int = Field(default=80, ge=20, le=200)
+
+
+class DataAssetVisualizationPointRead(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    x: float
+    y: float
+    x_label: str = Field(alias="xLabel")
+    series: str
+    group: str | None = None
+    aggregation: VisualizationAggregation | None = None
+    count: int | None = None
+    x_range: tuple[float, float] | None = Field(default=None, alias="xRange")
+    y_range: tuple[float, float] | None = Field(default=None, alias="yRange")
+    x_range_inclusive: bool = Field(default=False, alias="xRangeInclusive")
+    y_range_inclusive: bool = Field(default=False, alias="yRangeInclusive")
+    minimum: float | None = None
+    q1: float | None = None
+    median: float | None = None
+    q3: float | None = None
+    maximum: float | None = None
+    lower_whisker: float | None = Field(default=None, alias="lowerWhisker")
+    upper_whisker: float | None = Field(default=None, alias="upperWhisker")
+    outlier_count: int | None = Field(default=None, alias="outlierCount")
+
+
+class DataAssetVisualizationTrendPointRead(BaseModel):
+    x: float
+    y: float
+
+
+class DataAssetVisualizationTrendRead(BaseModel):
+    series: str
+    kind: VisualizationFittedTrend
+    valid_count: int
+    points: list[DataAssetVisualizationTrendPointRead] = Field(default_factory=list)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    r_squared: float | None = None
+    fit_space: Literal["y", "log_y", "binned_y"]
+    approximate: bool = False
+
+
+class DataAssetVisualizationRead(BaseModel):
+    dataset_id: str
+    row_count: int
+    scanned_row_count: int
+    points: list[DataAssetVisualizationPointRead] = Field(default_factory=list)
+    trends: list[DataAssetVisualizationTrendRead] = Field(default_factory=list)
+    series: list[str] = Field(default_factory=list)
+    kpi: float | None = None
+    valid_count: int = 0
+    execution_mode: Literal["full_dataset"] = "full_dataset"
+    truncated: bool = False
+    approximate: bool = False
+    approximation_method: Literal["binned_gaussian_kde"] | None = None
+
+
+class DataAssetVisualizationGroupsRequest(BaseModel):
+    column: str
+    limit: int = Field(default=100, ge=1, le=1_000)
+
+
+class DataAssetVisualizationGroupsRead(BaseModel):
+    dataset_id: str
+    values: list[str]
+    truncated: bool = False
