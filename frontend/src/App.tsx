@@ -53,6 +53,7 @@ import {
   type VisualizationDrillRequest,
 } from "./analysis/drillContext";
 import { VisualizationDashboard } from "./analysis/VisualizationDashboard";
+import { TimeSeriesWorkbench } from "./analysis/TimeSeriesWorkbench";
 
 type TabId = "overview" | "data" | "analysis" | "models" | "serving" | "share";
 
@@ -1972,6 +1973,16 @@ function DescriptiveAnalysisPanel({
         )}
       </section>
 
+      {datasetId && columns.length > 0 && (
+        <TimeSeriesWorkbench
+          columns={columns}
+          datasetId={datasetId}
+          defaultTimeColumn={rolesMetadata.timestamp_column}
+          defaultValueColumn={effectiveTargetColumn || rolesMetadata.target_column}
+          mode="descriptive"
+        />
+      )}
+
       {!isLoading && !error && activeProfilePreview && activeProfilePreview.row_count > 0 && (
         <>
           {profilingRange.includeUnivariate && <section className="panel">
@@ -3515,6 +3526,18 @@ function DataBrowsingPanel({
 
   return (
     <div className="data-browser-layout">
+      <TimeSeriesWorkbench
+        columns={columns}
+        datasetId={datasetId}
+        defaultTimeColumn={rolesMetadata.timestamp_column}
+        defaultValueColumn={rolesMetadata.target_column}
+        mode="browser"
+        onChronologicalSort={(column) => {
+          setSortRules([{ column, direction: "asc" }]);
+          setSortingCollapsed(false);
+          setPage(1);
+        }}
+      />
       <main className="panel data-browser-main">
         {isLoading && <div className="empty-state">Loading dataset</div>}
         {!isLoading && error && <div className="empty-state error-state">{error}</div>}

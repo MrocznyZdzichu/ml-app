@@ -266,6 +266,8 @@ Use these files for manual testing:
 - `examples/data/iris.csv`
 - `examples/data/general-example.csv`
 - `examples/data/regression-example.csv`
+- `examples/data/dynamic-reactor-timeseries.csv`
+- `examples/data/equipment-operating-regimes.csv`
 
 `general-example.csv` contains 10,000 synthetic customer-churn-like rows with
 mixed numeric and categorical columns, useful for testing filtering, grouping,
@@ -273,6 +275,11 @@ aggregation, sorting, Custom SQL, and Data Views.
 
 `regression-example.csv` contains 10,000 synthetic real-estate transaction rows
 for a regression task where the target is `sale_price_pln`.
+
+`dynamic-reactor-timeseries.csv` is a dynamic, delayed thermal-process forecasting
+case. `equipment-operating-regimes.csv` is an unlabeled machine-telemetry clustering
+case. Their business context, modeling cautions, and deterministic generator are
+documented in `docs/synthetic-ml-scenarios.md`.
 
 ## Verification
 

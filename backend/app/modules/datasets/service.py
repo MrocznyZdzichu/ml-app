@@ -9,6 +9,7 @@ from fastapi import HTTPException, status
 from app.core.security import Principal
 from app.modules.analysis.full_profile import FullDatasetProfiler
 from app.modules.analysis.profile_jobs import DescriptiveProfileJobs
+from app.modules.analysis.time_series_jobs import TimeSeriesAnalysisJobs
 from app.modules.datasets.domain import DataAsset, DataAssetStatus, SourceType
 from app.modules.datasets.query_engine import DatasetQueryEngine
 from app.modules.datasets.repository import DatasetRepository, PostgresDatasetRepository
@@ -24,9 +25,11 @@ from app.modules.datasets.schemas import (
     DataAssetVisualizationRequest,
     DataViewCreate,
     FullDescriptiveProfileRequest,
+    TimeSeriesAnalysisRequest,
 )
 from app.modules.datasets.sources import DatasetSourceRegistry
 from app.modules.datasets.visualizations import FullDatasetVisualization
+from app.modules.datasets.time_series import FullDatasetTimeSeriesAnalyzer
 
 
 class DatasetService:
@@ -39,6 +42,8 @@ class DatasetService:
         self.query_engine = DatasetQueryEngine(self.sources)
         self.full_profiler = FullDatasetProfiler()
         self.full_visualization = FullDatasetVisualization()
+        self.time_series = FullDatasetTimeSeriesAnalyzer(self.full_visualization.store)
+        self.time_series_jobs = TimeSeriesAnalysisJobs()
         self.profile_jobs = DescriptiveProfileJobs()
 
     def register(self, payload: DataAssetCreate, principal: Principal) -> DataAsset:
@@ -326,6 +331,35 @@ class DatasetService:
             payload.limit,
             lambda asset_id: self.get_asset(asset_id, principal),
         )
+
+    def analyze_time_series(
+        self,
+        dataset_id: str,
+        payload: TimeSeriesAnalysisRequest,
+        principal: Principal,
+    ) -> dict[str, Any]:
+        asset = self.get_asset(dataset_id, principal)
+        connection = self.full_visualization.store.connect(asset)
+        relation = self.full_visualization.store.relation_sql(asset, lambda asset_id: self.get_asset(asset_id, principal))
+        try:
+            columns = self.full_visualization._columns(connection, relation)
+            result = self.time_series.analyze(connection, relation, payload, columns)
+            return {
+                "dataset_id": asset.id,
+                "time_column": payload.time_column,
+                "value_column": payload.value_column,
+                **result,
+            }
+        finally:
+            connection.close()
+
+    def start_time_series_analysis(self, dataset_id: str, payload: TimeSeriesAnalysisRequest, principal: Principal) -> dict[str, Any]:
+        self.get_asset(dataset_id, principal)
+        return self.time_series_jobs.start(dataset_id, principal.user_id, payload.model_dump())
+
+    def time_series_analysis_status(self, dataset_id: str, job_id: str, principal: Principal) -> dict[str, Any]:
+        self.get_asset(dataset_id, principal)
+        return self.time_series_jobs.status(dataset_id, principal.user_id, job_id)
 
     def delete_asset(self, dataset_id: str, principal: Principal) -> DataAsset:
         asset = self.get_asset(dataset_id, principal)
