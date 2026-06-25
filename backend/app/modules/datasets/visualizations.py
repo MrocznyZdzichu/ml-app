@@ -16,6 +16,8 @@ from app.modules.datasets.visualization_trends import (
     ScatterTrendFitter,
     finite_number,
 )
+from app.modules.datasets.dimensionality import FullDatasetPcaProjection
+from app.modules.datasets.time_series import FullDatasetTimeSeriesAnalyzer
 
 
 SCATTER_MIN_GRID_SIZE = 5
@@ -32,6 +34,8 @@ class FullDatasetVisualization:
     def __init__(self, store: ColumnarDatasetStore | None = None) -> None:
         self.store = store or ColumnarDatasetStore()
         self.trend_fitter = ScatterTrendFitter(self._fetch_dicts)
+        self.pca_projection = FullDatasetPcaProjection(self.store)
+        self.time_series = FullDatasetTimeSeriesAnalyzer(self.store)
         self._execution_slots = threading.BoundedSemaphore(settings.visualization_max_concurrency)
 
     def render(
@@ -59,7 +63,11 @@ class FullDatasetVisualization:
                 if asset.row_count is not None
                 else int(connection.execute(f"SELECT count(*) FROM {relation}").fetchone()[0])
             )
-            if request.kind == "kpi":
+            if request.kind in {"time_series", "autocorrelation", "lag_relationship"}:
+                result = self.time_series.visualization(connection, relation, request, columns)
+            elif request.kind == "projection":
+                result = self.pca_projection.render(connection, relation, request, columns)
+            elif request.kind == "kpi":
                 result = self._render_kpi(connection, relation, request)
             elif request.kind == "histogram":
                 result = self._render_distribution(connection, relation, request)
@@ -575,9 +583,21 @@ class FullDatasetVisualization:
         )
 
     def _validate_columns(self, request: DataAssetVisualizationRequest, columns: dict[str, str]) -> None:
-        required = [name for name in [request.x if request.kind != "kpi" else "", request.y if request.kind not in {"histogram", "boxplot"} else "", request.group] if name]
+        required = request.feature_columns + ([request.target_column] if request.target_column else []) if request.kind == "projection" else [name for name in [request.x if request.kind != "kpi" else "", request.y if request.kind not in {"histogram", "boxplot"} else "", request.group] if name]
         for name in required:
             self._require_column(name, columns)
+        if request.kind == "projection":
+            if any(self._frontend_type(columns[name]) != "number" for name in request.feature_columns):
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="PCA feature columns must be numeric")
+            return
+        if request.kind in {"time_series", "autocorrelation", "lag_relationship"}:
+            if self._frontend_type(columns[request.y]) != "number":
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Time-series value column must be numeric")
+            if request.group:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Time-series charts do not support series grouping yet")
+            if request.kind == "lag_relationship":
+                self._require_column(request.driver_column, columns)
+            return
         if request.group and request.group in {request.x, request.y}:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

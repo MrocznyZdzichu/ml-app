@@ -83,6 +83,11 @@ type ChartConfig = {
   stacked: boolean;
   kpiCondition: KpiCondition;
   kpiThreshold: number;
+  featureColumns: string[];
+  targetColumn: string;
+  maxLag: number;
+  rollingWindow: number;
+  driverColumn: string;
   layout: ChartLayout;
 };
 
@@ -114,7 +119,11 @@ const chartCatalog: Array<{ kind: ChartKind; label: string; description: string;
   { kind: "scatter", label: "Scatter plot", description: "Explore relationships", icon: ScatterChart },
   { kind: "histogram", label: "Distribution", description: "Shape, spread and outliers", icon: Activity },
   { kind: "boxplot", label: "Box plot", description: "Quartiles, spread and outliers", icon: BoxIcon },
-  { kind: "kpi", label: "KPI", description: "A single key measure", icon: Maximize2 }
+  { kind: "kpi", label: "KPI", description: "A single key measure", icon: Maximize2 },
+  { kind: "projection", label: "PCA projection", description: "Reduce many features to a 2-D map", icon: Sparkles },
+  { kind: "time_series", label: "Time series", description: "Full-data temporal trend and rolling mean", icon: LineChart },
+  { kind: "autocorrelation", label: "Autocorrelation", description: "Correlation across ordered lags", icon: Activity },
+  { kind: "lag_relationship", label: "Lag relationship", description: "Driver-to-signal correlation by lag", icon: Activity }
 ];
 
 const kindLabels: Record<ChartKind, string> = {
@@ -123,7 +132,11 @@ const kindLabels: Record<ChartKind, string> = {
   scatter: "Scatter plot",
   histogram: "Distribution",
   boxplot: "Box plot",
-  kpi: "KPI"
+  kpi: "KPI",
+  projection: "PCA projection",
+  time_series: "Time series",
+  autocorrelation: "Autocorrelation",
+  lag_relationship: "Lag relationship"
 };
 
 export function VisualizationDashboard({ datasets, datasetId, setDatasetId, setNotice, onDrill }: VisualizationDashboardProps) {
@@ -409,6 +422,7 @@ export function VisualizationDashboard({ datasets, datasetId, setDatasetId, setN
 
 function ChartInspector({ chart, columns, datasetId, rows, onChange }: { chart: ChartConfig; columns: DatasetColumn[]; datasetId: string; rows: RecordRow[]; onChange: (patch: Partial<ChartConfig>) => void }) {
   const numericColumns = columns.filter((column) => column.type === "number");
+  const timeColumns = columns.filter((column) => column.type === "date" || /time|date/i.test(column.name));
   const xColumn = columns.find((column) => column.name === chart.x);
   const groupingColumns = columns.filter((column) => column.name !== chart.x && column.name !== chart.y && cardinality(rows, column.name) <= 20);
   const hasSeriesGroup = groupingColumns.some((column) => column.name === chart.group);
@@ -450,7 +464,36 @@ function ChartInspector({ chart, columns, datasetId, rows, onChange }: { chart: 
     <div className="chart-inspector">
       <div className="viz-sidebar-heading"><div><p className="eyebrow">Selected view</p><h2>Configure</h2></div><Settings2 size={17} /></div>
       <label>Title<input value={chart.title} onChange={(event) => onChange({ title: event.target.value })} /></label>
-      {chart.kind !== "kpi" && (
+      {chart.kind === "projection" && (
+        <fieldset className="metric-series-fieldset projection-fields">
+          <legend>Numeric input features</legend>
+          <div className="metric-series-options">
+            {numericColumns.filter((column) => column.name !== chart.targetColumn).map((column) => (
+              <label key={column.name}>
+                <input
+                  checked={chart.featureColumns.includes(column.name)}
+                  disabled={chart.featureColumns.includes(column.name) && chart.featureColumns.length <= 2}
+                  onChange={(event) => onChange({
+                    featureColumns: event.target.checked
+                      ? unique([...chart.featureColumns, column.name]).slice(0, 50)
+                      : chart.featureColumns.filter((name) => name !== column.name)
+                  })}
+                  type="checkbox"
+                />
+                {column.name}
+              </label>
+            ))}
+          </div>
+          <label>Target / color
+            <select value={chart.targetColumn} onChange={(event) => onChange({ targetColumn: event.target.value })}>
+              <option value="">No target (structure only)</option>
+              {columns.filter((column) => !chart.featureColumns.includes(column.name)).map((column) => <option key={column.name} value={column.name}>{column.name} · {column.type}</option>)}
+            </select>
+          </label>
+          <p className="group-selection-note">PCA is fitted on every complete row. Numeric targets use a continuous color scale; categorical targets use class colors.</p>
+        </fieldset>
+      )}
+      {chart.kind !== "kpi" && chart.kind !== "projection" && (
         <label>{chart.kind === "histogram" || chart.kind === "boxplot" ? "Measure" : "Horizontal axis"}
           <select value={chart.x} onChange={(event) => {
             const x = event.target.value;
@@ -458,14 +501,14 @@ function ChartInspector({ chart, columns, datasetId, rows, onChange }: { chart: 
               ? { x, xEpsilon: 0, group: "", selectedGroups: null, stacked: false }
               : { x, xEpsilon: 0 });
           }}>
-            {(chart.kind === "histogram" || chart.kind === "boxplot" || chart.kind === "scatter" ? numericColumns : columns).map((column) => <option key={column.name} value={column.name}>{column.name} · {column.type}</option>)}
+            {(chart.kind === "time_series" || chart.kind === "autocorrelation" || chart.kind === "lag_relationship" ? timeColumns : chart.kind === "histogram" || chart.kind === "boxplot" || chart.kind === "scatter" ? numericColumns : columns).map((column) => <option key={column.name} value={column.name}>{column.name} · {column.type}</option>)}
           </select>
         </label>
       )}
       {(chart.kind === "line" || chart.kind === "bar" || chart.kind === "scatter") && xColumn?.type === "number" && (
         <EpsilonField axis="X" automaticAtZero={chart.kind === "scatter"} value={chart.xEpsilon ?? 0} onChange={(xEpsilon) => onChange({ xEpsilon })} />
       )}
-      {chart.kind !== "histogram" && chart.kind !== "boxplot" && (
+      {chart.kind !== "histogram" && chart.kind !== "boxplot" && chart.kind !== "projection" && (
         <label>{chart.kind === "kpi" ? "Measure" : "Vertical axis"}
           <select value={chart.y} onChange={(event) => {
             const y = event.target.value;
@@ -495,6 +538,17 @@ function ChartInspector({ chart, columns, datasetId, rows, onChange }: { chart: 
         <label>Polynomial degree
           <input min="2" max="5" step="1" type="number" value={chart.polynomialDegree ?? 2} onChange={(event) => onChange({ polynomialDegree: Math.max(2, Math.min(5, Number(event.target.value) || 2)) })} />
         </label>
+      )}
+      {chart.kind === "time_series" && (
+        <label>Rolling window (display bins)<input min="2" max="200" type="number" value={chart.rollingWindow} onChange={(event) => onChange({ rollingWindow: Math.max(2, Math.min(200, Number(event.target.value) || 12)) })} /></label>
+      )}
+      {(chart.kind === "autocorrelation" || chart.kind === "lag_relationship") && (
+        <label>Maximum lag<input min="1" max="120" type="number" value={chart.maxLag} onChange={(event) => onChange({ maxLag: Math.max(1, Math.min(120, Number(event.target.value) || 48)) })} /></label>
+      )}
+      {chart.kind === "lag_relationship" && (
+        <label>Driver signal<select value={chart.driverColumn} onChange={(event) => onChange({ driverColumn: event.target.value })}>
+          {numericColumns.filter((column) => column.name !== chart.y).map((column) => <option key={column.name} value={column.name}>{column.name}</option>)}
+        </select></label>
       )}
       {(chart.kind === "line" || chart.kind === "bar" || chart.kind === "kpi") && (
         <label>Primary aggregation<select value={chart.aggregation} onChange={(event) => {
@@ -630,8 +684,14 @@ function ChartView({ chart, datasetId, onDrill, xType }: { chart: ChartConfig; d
     trend: chart.kind === "scatter" ? chart.trend ?? "none" : "none",
     polynomial_degree: chart.polynomialDegree ?? 2,
     max_points: 2000,
-    bins: 80
-  }), [chart.aggregation, chart.comparisonAggregations, chart.kind, chart.polynomialDegree, chart.selectedGroups, chart.trend, chart.x, chart.xEpsilon, chart.y, chart.yEpsilon, requestGroup]);
+    bins: 80,
+    feature_columns: chart.kind === "projection" ? chart.featureColumns : [],
+    target_column: chart.kind === "projection" ? chart.targetColumn : "",
+    reduction_method: "pca",
+    max_lag: chart.maxLag,
+    rolling_window: chart.rollingWindow,
+    driver_column: chart.driverColumn
+  }), [chart.aggregation, chart.comparisonAggregations, chart.driverColumn, chart.featureColumns, chart.kind, chart.maxLag, chart.polynomialDegree, chart.rollingWindow, chart.selectedGroups, chart.targetColumn, chart.trend, chart.x, chart.xEpsilon, chart.y, chart.yEpsilon, requestGroup]);
   const { result, loading: chartLoading, error: chartError } = useVisualizationResult(datasetId, query);
   const metricOrder = useMemo(
     () => unique([chart.aggregation, ...(chart.comparisonAggregations ?? [])]),
@@ -658,6 +718,9 @@ function ChartView({ chart, datasetId, onDrill, xType }: { chart: ChartConfig; d
   const trendValidCount = result?.trends?.reduce((total, trend) => total + trend.valid_count, 0) ?? 0;
   const trendScope = chart.kind === "scatter" && chart.trend !== "none" && result?.trends?.length
     ? ` · ${chart.trend} trend per series · ${formatInteger(trendValidCount)} fitted rows${result.trends.some((trend) => trend.approximate) ? " · spline smoothed from 24 full-data bins" : ""}`
+    : "";
+  const reductionScope = result?.reduction_metadata
+    ? ` · PCA fit on ${formatInteger(result.reduction_metadata.complete_case_rows)} complete rows · PC1/PC2 explain ${formatNumber(100 * (result.reduction_metadata.explained_variance_ratio ?? []).reduce((sum, value) => sum + value, 0))}%`
     : "";
   const colorAssignments = useMemo(
     () => assignDistinctColors(points, chart.kind, colorAssignmentsRef.current),
@@ -759,8 +822,8 @@ function ChartView({ chart, datasetId, onDrill, xType }: { chart: ChartConfig; d
         <span>
           {chartLoading
             ? "Refreshing…"
-            : `${formatInteger(result.scanned_row_count)} rows · full dataset${result.approximation_method === "binned_gaussian_kde" ? " · KDE from full-data aggregates" : ""}${result.truncated ? ` · display capped at ${formatInteger(points.length)} points` : ""}${trendScope}`}
-          {" · Wheel to zoom · drag to pan · Double-click element to drill the data"}
+            : `${formatInteger(result.scanned_row_count)} rows · full dataset${result.approximation_method === "binned_gaussian_kde" ? " · KDE from full-data aggregates" : ""}${result.truncated ? ` · display capped at ${formatInteger(points.length)} points` : ""}${trendScope}${reductionScope}`}
+          {chart.kind === "projection" ? " · Wheel to zoom · drag to pan" : " · Wheel to zoom · drag to pan · Double-click element to drill the data"}
         </span>
         <button aria-label="Zoom out" disabled={zoom === 1} onClick={() => changeZoom(zoom - 1)} type="button"><ZoomOut size={14} /></button>
         <strong>{zoom}×</strong>
@@ -780,7 +843,7 @@ function ChartView({ chart, datasetId, onDrill, xType }: { chart: ChartConfig; d
       >
         <SvgChart
           chart={chart}
-          onPointDoubleClick={(point) => onDrill(createVisualizationDrillRequest(datasetId, chart, point, xType))}
+          onPointDoubleClick={(point) => { if (chart.kind !== "projection") onDrill(createVisualizationDrillRequest(datasetId, chart, point, xType)); }}
           points={visible}
           trends={result.trends ?? []}
           series={series}
@@ -793,6 +856,7 @@ function ChartView({ chart, datasetId, onDrill, xType }: { chart: ChartConfig; d
       {result.trends?.length > 0 && <TrendFitDetails trends={result.trends} />}
       {maxOffset > 0 && <input aria-label="Visible data range" className="chart-scroll" max={maxOffset} min={0} onChange={(event) => setOffset(Number(event.target.value))} type="range" value={safeOffset} />}
       {result.series.length > 1 && <SeriesLegend chartKind={chart.kind} visuals={seriesVisuals} />}
+      {chart.kind === "projection" && result.reduction_metadata?.target_type === "continuous" && <ContinuousTargetLegend label={chart.targetColumn} points={points} />}
     </div>
   );
 }
@@ -817,6 +881,7 @@ type PlotPoint = {
   lowerWhisker?: number;
   upperWhisker?: number;
   outlierCount?: number;
+  targetValue?: number | null;
 };
 type AxisTick = { value: number; label: string; categoryIndex?: number };
 
@@ -843,6 +908,12 @@ function SeriesLegend({ chartKind, visuals }: { chartKind: ChartKind; visuals: S
   );
 }
 
+function ContinuousTargetLegend({ label, points }: { label: string; points: PlotPoint[] }) {
+  const values = points.map((point) => point.targetValue).filter((value): value is number => value !== null && value !== undefined);
+  if (!values.length) return null;
+  return <div className="projection-gradient-legend"><span>{label}</span><i /><small>{formatNumber(Math.min(...values))}</small><small>{formatNumber(Math.max(...values))}</small></div>;
+}
+
 function SvgChart({ chart, onPointDoubleClick, points, trends, series, seriesVisuals, setTooltip, xType }: { chart: ChartConfig; onPointDoubleClick: (point: PlotPoint) => void; points: PlotPoint[]; trends: VisualizationTrendCurve[]; series: string[]; seriesVisuals: SeriesVisual[]; setTooltip: (tooltip: Tooltip) => void; xType?: DatasetColumn["type"] }) {
   const width = 720;
   const height = 270;
@@ -863,12 +934,15 @@ function SvgChart({ chart, onPointDoubleClick, points, trends, series, seriesVis
   const dataYMin = stackedBounds?.[0] ?? Math.min(...yValues);
   const dataYMax = stackedBounds?.[1] ?? Math.max(...yValues);
   const yScale = createNumericScale(dataYMin, dataYMax, 5, chart.kind === "bar" || chart.kind === "histogram");
-  const numericXAxis = chart.kind === "scatter" || chart.kind === "histogram" || (chart.kind === "line" && xType === "number");
+  const numericXAxis = chart.kind === "scatter" || chart.kind === "projection" || chart.kind === "autocorrelation" || chart.kind === "lag_relationship" || chart.kind === "histogram" || (chart.kind === "line" && xType === "number");
   const xTickLimit = Math.max(2, Math.floor(plotWidth / 90));
   const xScaleIncludesZeroBoundary = chart.kind === "histogram" && (xMin === 0 || xMax === 0);
   const xScale = numericXAxis ? createNumericScale(xMin, xMax, xTickLimit, xScaleIncludesZeroBoundary) : null;
   const categoricalXRange = xMax - xMin || 1;
   const visualBySeries = new Map(seriesVisuals.map((visual) => [visual.name, visual]));
+  const targetValues = points.map((point) => point.targetValue).filter((value): value is number => value !== null && value !== undefined);
+  const targetMin = targetValues.length ? Math.min(...targetValues) : 0;
+  const targetMax = targetValues.length ? Math.max(...targetValues) : 1;
   const pointsBySeries = new Map(series.map((seriesName) => [seriesName, [] as PlotPoint[]]));
   for (const point of points) {
     const seriesPoints = pointsBySeries.get(point.series);
@@ -895,8 +969,9 @@ function SvgChart({ chart, onPointDoubleClick, points, trends, series, seriesVis
     const range = point.xRange
       ? ` · [${formatNumber(point.xRange[0])}, ${formatNumber(point.xRange[1])}${point.xRangeInclusive ? "]" : ")"}`
       : "";
-    const measure = chart.kind === "histogram" ? "Density" : point.aggregation === "count" ? `Count of ${chart.y || "rows"}` : chart.y || "Count";
-    setTooltip({ x: Math.min(rect.width - 180, event.clientX - rect.left + 10), y: Math.max(8, event.clientY - rect.top - 48), title: `${point.xLabel}${range}`, value: `${point.series} · ${measure}: ${formatNumber(point.y)}${point.count ? ` · n=${point.count}` : ""}` });
+    const measure = chart.kind === "projection" ? "PC2" : chart.kind === "histogram" ? "Density" : point.aggregation === "count" ? `Count of ${chart.y || "rows"}` : chart.y || "Count";
+    const targetLabel = chart.kind === "projection" && chart.targetColumn ? ` · ${chart.targetColumn}: ${point.targetValue == null ? point.series : formatNumber(point.targetValue)}` : "";
+    setTooltip({ x: Math.min(rect.width - 180, event.clientX - rect.left + 10), y: Math.max(8, event.clientY - rect.top - 48), title: `${point.xLabel}${range}`, value: `${point.series} · ${measure}: ${formatNumber(point.y)}${targetLabel}${point.count ? ` · n=${point.count}` : ""}` });
   };
   const xGroups = [...points.reduce((groups, point, index) => {
     const existing = groups.get(point.x) ?? { x: point.x, label: point.xLabel, indices: [] as number[] };
@@ -919,11 +994,15 @@ function SvgChart({ chart, onPointDoubleClick, points, trends, series, seriesVis
   const barMarks = chart.kind === "bar"
     ? layoutBarMarks(chart, points, series, plotWidth, pad.left)
     : [];
-  const xAxisLabel = chart.kind === "boxplot" ? chart.group || "Dataset" : chart.x || "Rows";
+  const xAxisLabel = chart.kind === "projection" ? "Principal component 1" : chart.kind === "autocorrelation" || chart.kind === "lag_relationship" ? "Lag" : chart.kind === "boxplot" ? chart.group || "Dataset" : chart.x || "Rows";
   const yAxisLabel = chart.kind === "histogram"
     ? "Density"
     : chart.kind === "boxplot"
       ? chart.x
+    : chart.kind === "autocorrelation" || chart.kind === "lag_relationship"
+      ? "Correlation"
+    : chart.kind === "projection"
+      ? "Principal component 2"
     : chart.kind === "scatter"
       ? chart.y
       : chart.y && (chart.comparisonAggregations ?? []).length > 0
@@ -960,7 +1039,7 @@ function SvgChart({ chart, onPointDoubleClick, points, trends, series, seriesVis
           <rect className="boxplot-box" fill={color} stroke={color} height={Math.max(2, yPx(q1) - yPx(q3))} width={boxWidth} x={center - boxWidth / 2} y={yPx(q3)} />
           <line className="boxplot-median" x1={center - boxWidth / 2} x2={center + boxWidth / 2} y1={yPx(median)} y2={yPx(median)} />
         </g>;
-      }) : chart.kind === "scatter" ? points.map((point, index) => <circle className="chart-point" cx={xPx(point.x)} cy={yPx(point.y)} fill={visualBySeries.get(point.series)?.color ?? PALETTE[0]} key={`${point.x}-${point.y}-${index}`} onDoubleClick={(event) => { event.stopPropagation(); onPointDoubleClick(point); }} onPointerEnter={(event) => setPointTooltip(event, point)} onPointerMove={(event) => setPointTooltip(event, point)} r={4.5} />) : series.map((seriesName) => {
+      }) : chart.kind === "scatter" || chart.kind === "projection" ? points.map((point, index) => <circle className="chart-point" cx={xPx(point.x)} cy={yPx(point.y)} fill={chart.kind === "projection" && point.targetValue != null ? continuousTargetColor(point.targetValue, targetMin, targetMax) : visualBySeries.get(point.series)?.color ?? PALETTE[0]} key={`${point.x}-${point.y}-${index}`} onDoubleClick={(event) => { event.stopPropagation(); onPointDoubleClick(point); }} onPointerEnter={(event) => setPointTooltip(event, point)} onPointerMove={(event) => setPointTooltip(event, point)} r={Math.max(3.5, Math.min(8, 3.5 + Math.log10(point.count ?? 1)))} />) : series.map((seriesName) => {
         const seriesPoints = pointsBySeries.get(seriesName) ?? [];
         const line = seriesPoints.map((point, index) => `${index === 0 ? "M" : "L"}${xPx(point.x)},${yPx(point.y)}`).join(" ");
         const visual = visualBySeries.get(seriesName) ?? { color: PALETTE[0], dash: undefined };
@@ -1060,14 +1139,21 @@ function buildSmartDashboard(columns: DatasetColumn[], rows: RecordRow[]): Chart
 
 function createChart(kind: ChartKind, columns: DatasetColumn[], rows: RecordRow[], index: number) {
   const numeric = columns.filter((column) => column.type === "number");
+  const temporal = columns.find((column) => column.type === "date" || /time|date/i.test(column.name));
   const categorical = columns.find((column) => column.type !== "number" && cardinality(rows, column.name) < 40);
-  const x = kind === "histogram" || kind === "boxplot" ? numeric[0]?.name ?? "" : kind === "scatter" ? numeric[0]?.name ?? "" : categorical?.name ?? columns[0]?.name ?? "";
+  const x = kind === "projection" ? "" : kind === "time_series" || kind === "autocorrelation" || kind === "lag_relationship" ? temporal?.name ?? "" : kind === "histogram" || kind === "boxplot" ? numeric[0]?.name ?? "" : kind === "scatter" ? numeric[0]?.name ?? "" : categorical?.name ?? columns[0]?.name ?? "";
   const y = kind === "scatter" ? numeric[1]?.name ?? numeric[0]?.name ?? "" : numeric[0]?.name ?? "";
-  return makeConfig(kind, x, y, "", `${kindLabels[kind]} ${index + 1}`, defaultLayout(kind, index));
+  const config = makeConfig(kind, x, kind === "projection" ? "" : y, "", `${kindLabels[kind]} ${index + 1}`, defaultLayout(kind, index));
+  if (kind === "projection") {
+    config.featureColumns = numeric.slice(0, Math.min(6, numeric.length)).map((column) => column.name);
+    config.targetColumn = categorical?.name ?? "";
+  }
+  if (kind === "lag_relationship") config.driverColumn = numeric.find((column) => column.name !== config.y)?.name ?? "";
+  return config;
 }
 
 function makeConfig(kind: ChartKind, x: string, y: string, group: string, title: string, layout: ChartLayout): ChartConfig {
-  return { id: `${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, kind, title, x, y, xEpsilon: 0, yEpsilon: 0, trend: "none", polynomialDegree: 2, group, aggregation: "average", comparisonAggregations: [], selectedGroups: null, stacked: false, kpiCondition: "none", kpiThreshold: 0, layout };
+  return { id: `${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, kind, title, x, y, xEpsilon: 0, yEpsilon: 0, trend: "none", polynomialDegree: 2, group, aggregation: "average", comparisonAggregations: [], selectedGroups: null, stacked: false, kpiCondition: "none", kpiThreshold: 0, featureColumns: [], targetColumn: "", maxLag: 48, rollingWindow: 12, driverColumn: "", layout };
 }
 
 function readSessionDashboard(datasetId: string, columns: DatasetColumn[]): ChartConfig[] | null {
@@ -1089,6 +1175,8 @@ function readSessionDashboard(datasetId: string, columns: DatasetColumn[]): Char
     return parsed
       .filter((chart) => {
         if (!chart || !kindLabels[chart.kind] || (chart.x && !names.has(chart.x)) || (chart.y && !names.has(chart.y))) return false;
+        if (chart.kind === "projection") return (chart.featureColumns ?? []).length >= 2 && (chart.featureColumns ?? []).every((name) => columnTypes.get(name) === "number") && (!chart.targetColumn || names.has(chart.targetColumn));
+        if (chart.kind === "time_series" || chart.kind === "autocorrelation" || chart.kind === "lag_relationship") return columnTypes.get(chart.y) === "number" && Boolean(chart.x) && (chart.kind !== "lag_relationship" || columnTypes.get(chart.driverColumn) === "number");
         if (chart.kind === "histogram" || chart.kind === "boxplot") return columnTypes.get(chart.x) === "number";
         if (columnTypes.get(chart.y) !== "number") return false;
         return chart.kind !== "scatter" || columnTypes.get(chart.x) === "number";
@@ -1107,6 +1195,11 @@ function readSessionDashboard(datasetId: string, columns: DatasetColumn[]): Char
           stacked: validGroup && chart.kind === "bar" ? chart.stacked ?? false : false,
           kpiCondition: chart.kpiCondition ?? "none",
           kpiThreshold: chart.kpiThreshold ?? 0,
+          featureColumns: chart.featureColumns ?? [],
+          targetColumn: chart.targetColumn ?? "",
+          maxLag: chart.maxLag ?? 48,
+          rollingWindow: chart.rollingWindow ?? 12,
+          driverColumn: chart.driverColumn ?? "",
           layout: normalizeLayout(chart.layout
             ? shouldScaleLegacyGrid ? scaleLegacyGridLayout(chart.layout) : chart.layout
             : legacyLayout(chart.size, index)
@@ -1119,6 +1212,10 @@ function readSessionDashboard(datasetId: string, columns: DatasetColumn[]): Char
 }
 
 function describeEncoding(chart: ChartConfig) {
+  if (chart.kind === "time_series") return `${chart.y} over ${chart.x} · rolling ${chart.rollingWindow} display bins`;
+  if (chart.kind === "autocorrelation") return `${chart.y} ACF · lags 1–${chart.maxLag}`;
+  if (chart.kind === "lag_relationship") return `${chart.driverColumn}(t−lag) → ${chart.y}(t) · lags 0–${chart.maxLag}`;
+  if (chart.kind === "projection") return `PCA of ${chart.featureColumns.length} features${chart.targetColumn ? ` · colored by ${chart.targetColumn}` : ""}`;
   if (chart.kind === "histogram") return `${chart.x} · KDE density${chart.group ? ` · by ${chart.group}` : ""}`;
   if (chart.kind === "boxplot") return `${chart.x} · quartiles${chart.group ? ` · by ${chart.group}` : ""}`;
   if (chart.kind === "kpi") return `${chart.aggregation} of ${chart.y}${chart.group ? ` · filtered by ${chart.group}` : ""}${chart.kpiCondition !== "none" ? ` · target ${kpiConditionSymbol(chart.kpiCondition)} ${formatNumber(chart.kpiThreshold)}` : ""}`;
@@ -1143,6 +1240,14 @@ function unique<T>(values: T[]) { return [...new Set(values)]; }
 function naturalCompare(left: string, right: string) { return NATURAL_COLLATOR.compare(left, right); }
 function cardinality(rows: RecordRow[], column: string) { return new Set(rows.slice(0, 1000).map((row) => displayValue(row[column]))).size; }
 function displayValue(value: CellValue) { return value === null || value === "" ? "Missing" : String(value); }
+function continuousTargetColor(value: number, minimum: number, maximum: number) {
+  const ratio = maximum === minimum ? 0.5 : Math.max(0, Math.min(1, (value - minimum) / (maximum - minimum)));
+  const stops: Array<[number, number, number]> = [[49, 54, 149], [69, 117, 180], [116, 173, 209], [253, 174, 97], [215, 48, 39]];
+  const position = ratio * (stops.length - 1);
+  const index = Math.min(stops.length - 2, Math.floor(position));
+  const local = position - index;
+  return `rgb(${stops[index].map((channel, channelIndex) => Math.round(channel + (stops[index + 1][channelIndex] - channel) * local)).join(",")})`;
+}
 function aggregationLabel(aggregation: Aggregation) {
   if (aggregation === "std") return "Std. dev.";
   return aggregation.charAt(0).toUpperCase() + aggregation.slice(1);

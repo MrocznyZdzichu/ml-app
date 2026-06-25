@@ -17,6 +17,9 @@ from app.modules.datasets.schemas import (
     DataViewCreate,
     FullDescriptiveProfileJobRead,
     FullDescriptiveProfileRequest,
+    TimeSeriesAnalysisRead,
+    TimeSeriesAnalysisJobRead,
+    TimeSeriesAnalysisRequest,
 )
 from app.modules.datasets.service import DatasetService
 
@@ -113,6 +116,24 @@ def visualization_groups(
     principal: Principal = Depends(require_user),
 ) -> DataAssetVisualizationGroupsRead:
     return DataAssetVisualizationGroupsRead.model_validate(service.visualization_groups(dataset_id, payload, principal))
+
+
+@router.post("/{dataset_id}/time-series-analysis", response_model=TimeSeriesAnalysisJobRead, status_code=202)
+def analyze_time_series(
+    dataset_id: str,
+    payload: TimeSeriesAnalysisRequest,
+    principal: Principal = Depends(require_user),
+) -> TimeSeriesAnalysisJobRead:
+    return TimeSeriesAnalysisJobRead.model_validate(service.start_time_series_analysis(dataset_id, payload, principal))
+
+
+@router.get("/{dataset_id}/time-series-analysis/{job_id}", response_model=TimeSeriesAnalysisJobRead)
+def time_series_analysis_status(
+    dataset_id: str,
+    job_id: str,
+    principal: Principal = Depends(require_user),
+) -> TimeSeriesAnalysisJobRead:
+    return TimeSeriesAnalysisJobRead.model_validate(service.time_series_analysis_status(dataset_id, job_id, principal))
 
 
 @router.get("/{dataset_id}", response_model=DataAssetRead)

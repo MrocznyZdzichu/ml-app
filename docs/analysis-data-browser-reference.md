@@ -15,8 +15,45 @@ The Analysis workspace currently contains:
 - `Visualization and Trends` - interactive, full-dataset dashboard composition and visual analysis.
 
 Dataset selection is shared by Data Roles, Data Browsing, Descriptive Analysis,
-and Visualization and Trends. Dashboard state remains session-scoped per dataset
+and Visualization and Trends. Dashboard state remains session-scoped per dataset,
 and entering the tab does not automatically create charts.
+
+## Time-series analysis
+
+All three Analysis surfaces share one full-dataset time-series engine. The engine
+requires a timestamp and a numeric signal; an optional numeric driver enables
+input-to-output lag diagnostics. Data Roles remains the preferred place to mark
+the timestamp and target, while name/type inference provides a usable fallback.
+
+The engine orders valid observations by time and reports:
+
+- valid, missing, and invalid time/value counts;
+- start, end, observed span, median/mean/min/max cadence, and cadence dispersion;
+- timestamp duplicates, gaps larger than 1.5 times the median cadence, and the
+  share of intervals within five percent of the median cadence;
+- level mean, standard deviation, range, linear trend per day and trend R-squared;
+- first-difference mean and standard deviation;
+- ACF for configurable lags, lag-1 autocorrelation, and a candidate seasonal lag;
+- an optional cross-correlation curve for `driver(t-lag)` against `signal(t)`;
+- a configurable phase profile for a selected or ACF-suggested seasonal period;
+- a bounded full-data time plot using temporal bins with mean, min, max, count,
+  rolling mean, and rolling standard deviation.
+
+ACF and cross-correlation are diagnostics, not proofs of stationarity or
+causality. The UI explicitly warns against random train/test splitting when
+autocorrelation is strong and recommends chronological validation. Irregular
+series should be resampled with an explicit aggregation policy before applying
+algorithms that assume a fixed cadence.
+
+Data Browsing adds a temporal check panel, a chronological-sort shortcut, and a
+bounded first/last-row preview of lag-1, candidate-season lag, first difference,
+rolling mean, and rolling standard deviation. These columns are an exploratory
+recipe, not silently materialized training features.
+Descriptive Analysis adds full diagnostics, ACF, seasonal profile, driver lag
+profile, and data-quality guidance. Visualization and Trends adds Time series,
+Autocorrelation, and Lag relationship chart types. Expensive descriptive
+diagnostics run asynchronously through Celery/Redis; chart outputs remain bounded
+aggregates even though their statistics scan the complete selected dataset.
 
 ## Descriptive Analysis
 
@@ -179,7 +216,11 @@ requests Smart start. Canvas state is saved in session storage per dataset;
 returning to a dataset during the same browser session restores its layout.
 
 Supported views include line, bar, scatter/density-bin, KDE distribution,
-grouped box plot, and KPI. KPI cards can filter the full dataset by selected
+grouped box plot, KPI, PCA projection, full-data time series, autocorrelation,
+and driver-to-signal lag relationship. Time-series charts bin the complete time
+range into a bounded number of display points, retain bin minima/maxima/counts,
+and can overlay a configurable rolling mean. ACF plots lags 1..N; lag
+relationship plots lag 0..N for `driver(t-lag)` against `signal(t)`. KPI cards can filter the full dataset by selected
 values of one dimension and evaluate equality or ordering targets with a
 green/red pass state. Box plots report exact full-data quartiles, Tukey
 whiskers, observed extrema, and bounded per-group outlier counts.

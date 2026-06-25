@@ -112,6 +112,48 @@ def test_category_bars_support_full_dataset_group_series(tmp_path: Path) -> None
     assert {point["group"] for point in result["points"]} == {"setosa", "virginica"}
 
 
+def test_pca_projection_fits_complete_full_dataset_and_colors_classes(tmp_path: Path) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+    result = visualization.render(asset, DataAssetVisualizationRequest(
+        kind="projection",
+        feature_columns=["value", "x", "y"],
+        target_column="species",
+        max_points=500,
+    ))
+
+    assert result["scanned_row_count"] == 10_000
+    assert result["valid_count"] == 10_000
+    assert result["reduction_metadata"]["fit_scope"] == "full_dataset_complete_cases"
+    assert result["reduction_metadata"]["target_type"] == "categorical"
+    assert result["reduction_metadata"]["feature_columns"] == ["value", "x", "y"]
+    assert len(result["reduction_metadata"]["explained_variance_ratio"]) == 2
+    assert set(result["series"]) == {"setosa", "virginica"}
+    assert 0 < len(result["points"]) <= 500
+
+
+def test_pca_projection_aggregates_continuous_target_into_gradient_values(tmp_path: Path) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+    result = visualization.render(asset, DataAssetVisualizationRequest(
+        kind="projection",
+        feature_columns=["bucket", "x", "y"],
+        target_column="value",
+        max_points=200,
+    ))
+
+    assert result["reduction_metadata"]["target_type"] == "continuous"
+    assert result["series"] == ["Target gradient"]
+    assert all(point["targetValue"] is not None for point in result["points"])
+
+
+def test_pca_projection_rejects_non_numeric_features(tmp_path: Path) -> None:
+    visualization, asset = visualization_fixture(tmp_path)
+    with pytest.raises(HTTPException, match="feature columns must be numeric"):
+        visualization.render(asset, DataAssetVisualizationRequest(
+            kind="projection",
+            feature_columns=["species", "x"],
+        ))
+
+
 def test_visualization_rejects_categorical_measure_even_for_count(tmp_path: Path) -> None:
     visualization, asset = visualization_fixture(tmp_path)
 

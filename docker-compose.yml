@@ -61,6 +61,7 @@ services:
     volumes:
       - ./backend/app:/app/app
       - ./backend/tests:/app/tests:ro
+      - ./examples:/app/examples:ro
       - ./data:/app/data
 
   worker:

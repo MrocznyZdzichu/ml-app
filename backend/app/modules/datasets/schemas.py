@@ -154,7 +154,7 @@ class DataAssetDrillRequest(BaseModel):
     limit: int = Field(default=50_000, ge=1, le=50_000)
 
 
-VisualizationKind = Literal["line", "bar", "scatter", "histogram", "boxplot", "kpi"]
+VisualizationKind = Literal["line", "bar", "scatter", "histogram", "boxplot", "kpi", "projection", "time_series", "autocorrelation", "lag_relationship"]
 VisualizationAggregation = Literal["average", "median", "std", "sum", "count", "min", "max"]
 VisualizationTrend = Literal["none", "linear", "spline", "polynomial", "exponential"]
 VisualizationFittedTrend = Literal["linear", "spline", "polynomial", "exponential"]
@@ -173,6 +173,23 @@ class DataAssetVisualizationRequest(BaseModel):
     polynomial_degree: int = Field(default=2, ge=2, le=5)
     max_points: int = Field(default=2_000, ge=50, le=10_000)
     bins: int = Field(default=80, ge=20, le=200)
+    feature_columns: list[str] = Field(default_factory=list, max_length=50)
+    target_column: str = ""
+    reduction_method: Literal["pca"] = "pca"
+    max_lag: int = Field(default=48, ge=1, le=120)
+    rolling_window: int = Field(default=12, ge=2, le=200)
+    driver_column: str = ""
+
+    @model_validator(mode="after")
+    def validate_projection_options(self) -> Self:
+        if self.kind == "projection":
+            if not 2 <= len(self.feature_columns) <= 50:
+                raise ValueError("PCA projection requires between 2 and 50 feature columns")
+            if len(set(self.feature_columns)) != len(self.feature_columns):
+                raise ValueError("PCA feature columns must be unique")
+            if self.target_column in self.feature_columns:
+                raise ValueError("Projection target must be different from feature columns")
+        return self
 
 
 class DataAssetVisualizationPointRead(BaseModel):
@@ -197,6 +214,7 @@ class DataAssetVisualizationPointRead(BaseModel):
     lower_whisker: float | None = Field(default=None, alias="lowerWhisker")
     upper_whisker: float | None = Field(default=None, alias="upperWhisker")
     outlier_count: int | None = Field(default=None, alias="outlierCount")
+    target_value: float | None = Field(default=None, alias="targetValue")
 
 
 class DataAssetVisualizationTrendPointRead(BaseModel):
@@ -228,6 +246,7 @@ class DataAssetVisualizationRead(BaseModel):
     truncated: bool = False
     approximate: bool = False
     approximation_method: Literal["binned_gaussian_kde"] | None = None
+    reduction_metadata: dict[str, Any] | None = None
 
 
 class DataAssetVisualizationGroupsRequest(BaseModel):
@@ -239,3 +258,41 @@ class DataAssetVisualizationGroupsRead(BaseModel):
     dataset_id: str
     values: list[str]
     truncated: bool = False
+
+
+class TimeSeriesAnalysisRequest(BaseModel):
+    time_column: str
+    value_column: str
+    max_lag: int = Field(default=48, ge=1, le=120)
+    seasonal_period: int = Field(default=0, ge=0, le=10_000)
+    rolling_window: int = Field(default=12, ge=2, le=200)
+    max_points: int = Field(default=600, ge=100, le=2_000)
+    driver_column: str = ""
+    driver_columns: list[str] = Field(default_factory=list, max_length=50)
+
+
+class TimeSeriesAnalysisRead(BaseModel):
+    dataset_id: str
+    time_column: str
+    value_column: str
+    row_count: int
+    scanned_row_count: int
+    valid_count: int
+    execution_mode: Literal["full_dataset"] = "full_dataset"
+    summary: dict[str, Any]
+    series: list[dict[str, Any]] = Field(default_factory=list)
+    autocorrelation: list[dict[str, Any]] = Field(default_factory=list)
+    cross_correlation: list[dict[str, Any]] = Field(default_factory=list)
+    driver_relationships: list[dict[str, Any]] = Field(default_factory=list)
+    seasonal_profile: list[dict[str, Any]] = Field(default_factory=list)
+    decomposition: list[dict[str, Any]] = Field(default_factory=list)
+    difference_series: list[dict[str, Any]] = Field(default_factory=list)
+    feature_preview: list[dict[str, Any]] = Field(default_factory=list)
+    quality_notes: list[str] = Field(default_factory=list)
+
+
+class TimeSeriesAnalysisJobRead(BaseModel):
+    job_id: str
+    status: Literal["queued", "running", "completed", "failed"]
+    result: TimeSeriesAnalysisRead | None = None
+    error: str | None = None
