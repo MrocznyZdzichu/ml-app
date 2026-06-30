@@ -45,6 +45,22 @@ function readErrorMessage(body: string) {
     if (typeof parsed.detail === "string") {
       return parsed.detail;
     }
+    if (parsed.detail && typeof parsed.detail === "object") {
+      const detail = parsed.detail as { message?: unknown; errors?: unknown };
+      if (typeof detail.message === "string") {
+        const errors = Array.isArray(detail.errors)
+          ? detail.errors
+              .filter((item) => item && typeof item === "object")
+              .slice(0, 3)
+              .map((item) => {
+                const error = item as { path?: unknown; message?: unknown };
+                return `${typeof error.path === "string" && error.path ? `${error.path}: ` : ""}${String(error.message ?? "")}`;
+              })
+              .filter(Boolean)
+          : [];
+        return [detail.message, ...errors].join(" · ");
+      }
+    }
   } catch {
     return body;
   }
@@ -370,6 +386,138 @@ export type ScoreResponse = {
   predictions: Array<Record<string, unknown>>;
 };
 
+export type BusinessCase = {
+  id: string;
+  owner_id: string;
+  name: string;
+  description: string;
+  problem_type: string;
+  status: string;
+  business_owner: string;
+  primary_metric: string;
+  target_column: string;
+  business_goal: string;
+  success_criteria: string;
+  created_by: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type BusinessCaseDataAttachment = {
+  id: string;
+  owner_id: string;
+  business_case_id: string;
+  artifact_id: string;
+  data_asset_id: string;
+  data_asset_kind: "dataset" | "data_view";
+  role: string;
+  context_note: string;
+  primary_key_column: string;
+  target_column: string;
+  created_by: string;
+  created_at: string;
+};
+
+export type Pipeline = {
+  id: string;
+  owner_id: string;
+  business_case_id: string;
+  name: string;
+  description: string;
+  type: string;
+  status: string;
+  created_by: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PipelineVersion = {
+  id: string;
+  owner_id: string;
+  pipeline_id: string;
+  business_case_id: string;
+  version_number: number;
+  status: string;
+  definition: Record<string, unknown>;
+  definition_hash: string;
+  created_by: string;
+  created_at: string;
+  published_by: string;
+  published_at: string | null;
+};
+
+export type PipelineRun = {
+  id: string;
+  owner_id: string;
+  pipeline_id: string;
+  pipeline_version_id: string;
+  business_case_id: string;
+  status: string;
+  trigger_type: string;
+  runtime_parameters: Record<string, unknown>;
+  is_dry_run: boolean;
+  requested_step_id: string;
+  input_row_count: number | null;
+  processed_row_count: number | null;
+  output_row_count: number | null;
+  rejected_row_count: number | null;
+  warnings: string[];
+  output_artifact_ids: string[];
+  output_manifest: Array<{
+    output_id: string;
+    materialization: "temporary";
+    location_uri: string;
+    row_count: number;
+    schema: Array<{ name: string; type: string }>;
+    data_scope: "full";
+    is_dry_run: boolean;
+    dataset_name: string;
+    business_case_role: string;
+    dataset_id?: string;
+    artifact_id?: string;
+    file_size_bytes?: number;
+    preview?: {
+      records: Array<Record<string, unknown>>;
+      returned_count: number;
+      limit: number;
+      sampled: boolean;
+    };
+  }>;
+  error_message: string;
+  created_by: string;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+export type PipelineRunOutputPreview = {
+  output_id: string;
+  row_count: number;
+  limit: number;
+  offset: number;
+  returned_count: number;
+  records: Array<Record<string, unknown>>;
+  has_next: boolean;
+  has_previous: boolean;
+  columns: Array<{ name: string; type: string }>;
+};
+
+export type PipelineRunOutputProfile = {
+  output_id: string;
+  row_count: number;
+  profiled_column_count: number;
+  total_column_count: number;
+  columns: Array<{
+    name: string;
+    null_count: number;
+    non_null_count: number;
+    approx_distinct_count: number;
+    top_values: Array<{ value: unknown; count: number; share: number }>;
+  }>;
+};
+
 export const api = {
   health: () => fetch(`${API_ROOT_URL}/health`).then((response) => response.json()),
   register: (payload: { email: string; password: string; display_name?: string }) =>
@@ -384,6 +532,72 @@ export const api = {
     }),
   me: () => request<UserProfile>("/auth/me"),
   listDatasets: () => request<DataAsset[]>("/datasets"),
+  listBusinessCases: () => request<BusinessCase[]>("/business-cases"),
+  createBusinessCase: (payload: Record<string, unknown>) =>
+    request<BusinessCase>("/business-cases", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  updateBusinessCase: (businessCaseId: string, payload: Record<string, unknown>) =>
+    request<BusinessCase>(`/business-cases/${businessCaseId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
+  attachBusinessCaseData: (businessCaseId: string, payload: Record<string, unknown>) =>
+    request<BusinessCaseDataAttachment>(`/business-cases/${businessCaseId}/data-attachments`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  listBusinessCaseDataAttachments: (businessCaseId: string) =>
+    request<BusinessCaseDataAttachment[]>(`/business-cases/${businessCaseId}/data-attachments`),
+  updateBusinessCaseDataAttachment: (businessCaseId: string, attachmentId: string, payload: Record<string, unknown>) =>
+    request<BusinessCaseDataAttachment>(`/business-cases/${businessCaseId}/data-attachments/${attachmentId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
+  deleteBusinessCaseDataAttachment: (businessCaseId: string, attachmentId: string) =>
+    request<{ deleted: boolean }>(`/business-cases/${businessCaseId}/data-attachments/${attachmentId}`, {
+      method: "DELETE"
+    }),
+  listPipelines: (businessCaseId?: string) =>
+    request<Pipeline[]>(businessCaseId ? `/pipelines?business_case_id=${encodeURIComponent(businessCaseId)}` : "/pipelines"),
+  createPipeline: (payload: Record<string, unknown>) =>
+    request<Pipeline>("/pipelines", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  listPipelineVersions: (pipelineId: string) =>
+    request<PipelineVersion[]>(`/pipelines/${pipelineId}/versions`),
+  updateDraftPipelineVersion: (pipelineId: string, definition: Record<string, unknown>) =>
+    request<PipelineVersion>(`/pipelines/${pipelineId}/versions/draft`, {
+      method: "PATCH",
+      body: JSON.stringify({ definition })
+    }),
+  publishDraftPipelineVersion: (pipelineId: string) =>
+    request<PipelineVersion>(`/pipelines/${pipelineId}/versions/draft/publish`, {
+      method: "POST"
+    }),
+  createNextDraftPipelineVersion: (pipelineId: string) =>
+    request<PipelineVersion>(`/pipelines/${pipelineId}/versions/draft`, {
+      method: "POST"
+    }),
+  runPipeline: (pipelineId: string, payload: Record<string, unknown>) =>
+    request<PipelineRun>(`/pipelines/${pipelineId}/runs`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  listPipelineRuns: (pipelineId: string) =>
+    request<PipelineRun[]>(`/pipelines/${pipelineId}/runs`),
+  getPipelineRun: (pipelineId: string, runId: string) =>
+    request<PipelineRun>(`/pipelines/${pipelineId}/runs/${runId}`),
+  previewPipelineRunOutput: (pipelineId: string, runId: string, outputId: string, limit: number, offset: number) =>
+    request<PipelineRunOutputPreview>(
+      `/pipelines/${pipelineId}/runs/${runId}/preview?output_id=${encodeURIComponent(outputId)}&limit=${limit}&offset=${offset}`
+    ),
+  profilePipelineRunOutput: (pipelineId: string, runId: string, outputId: string) =>
+    request<PipelineRunOutputProfile>(
+      `/pipelines/${pipelineId}/runs/${runId}/profile?output_id=${encodeURIComponent(outputId)}`
+    ),
   createDataset: (payload: Record<string, unknown>) =>
     request<DataAsset>("/datasets", { method: "POST", body: JSON.stringify(payload) }),
   uploadDataset: (payload: FormData) =>

@@ -50,6 +50,8 @@ class ColumnarDatasetStore:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Data View source resolver is not available")
             return self._ensure_view_parquet(asset, load_asset, depth)
         source_path = self.source_path(asset)
+        if asset.format.lower() == "parquet":
+            return source_path
         parquet_path = source_path.with_name("dataset.mlapp.parquet")
         if parquet_path.exists() and parquet_path.stat().st_mtime_ns >= source_path.stat().st_mtime_ns:
             return parquet_path
@@ -295,10 +297,10 @@ class ColumnarDatasetStore:
         ]
 
     def source_path(self, asset: DataAsset) -> Path:
-        if asset.source_type != SourceType.FILE or asset.format.lower() != "csv":
+        if asset.source_type != SourceType.FILE or asset.format.lower() not in {"csv", "parquet"}:
             raise HTTPException(
                 status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-                detail="Full-dataset profiling currently requires an uploaded CSV dataset",
+                detail="Full-dataset profiling currently requires a CSV or Parquet dataset",
             )
         if not asset.location_uri or not asset.location_uri.startswith("file://"):
             raise HTTPException(

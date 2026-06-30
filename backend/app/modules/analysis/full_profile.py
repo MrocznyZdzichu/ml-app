@@ -125,7 +125,11 @@ class FullDatasetProfiler:
 
     def schema(self, asset: DataAsset, limit: int = 1000) -> dict[str, Any]:
         connection = self.store.connect(asset)
-        relation = self.store.lightweight_csv_relation_sql(asset)
+        relation = (
+            self.store.relation_sql(asset)
+            if asset.format.lower() == "parquet"
+            else self.store.lightweight_csv_relation_sql(asset)
+        )
         try:
             columns = self._asset_columns(connection, relation, asset)
             row_count = int(asset.row_count or 0)
@@ -153,7 +157,14 @@ class FullDatasetProfiler:
         asset: DataAsset,
     ) -> list[dict[str, str]]:
         stored = asset.metadata.get("source_schema") if isinstance(asset.metadata, dict) else None
-        return stored if isinstance(stored, list) and stored else self._columns(connection, relation)
+        frontend_types = {"text", "number", "date", "boolean", "empty", "mixed", "unsupported"}
+        if (
+            isinstance(stored, list)
+            and stored
+            and all(isinstance(item, dict) and item.get("type") in frontend_types for item in stored)
+        ):
+            return stored
+        return self._columns(connection, relation)
 
     def _column_profile(
         self,

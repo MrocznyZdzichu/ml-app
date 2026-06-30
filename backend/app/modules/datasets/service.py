@@ -234,7 +234,7 @@ class DatasetService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Deleted dataset cannot be browsed",
             )
-        if asset.source_type == SourceType.FILE and asset.format.lower() == "csv":
+        if asset.source_type == SourceType.FILE and asset.format.lower() in {"csv", "parquet"}:
             return DataAssetPreviewRead.model_validate(self.full_profiler.schema(asset, limit))
         if asset.source_type == SourceType.VIEW:
             return DataAssetPreviewRead.model_validate(

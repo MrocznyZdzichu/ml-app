@@ -1,14 +1,77 @@
+from datetime import datetime, timezone
+
 from app.worker.celery_app import celery_app
 from app.modules.analysis.full_profile import FullDatasetProfiler
 from app.modules.datasets.repository import PostgresDatasetRepository
 from app.modules.datasets.columnar import ColumnarDatasetStore
 from app.modules.datasets.schemas import TimeSeriesAnalysisRequest
 from app.modules.datasets.time_series import FullDatasetTimeSeriesAnalyzer
+from app.modules.pipelines.dag import PipelineDefinition
+from app.modules.pipelines.domain import PipelineRunStatus
+from app.modules.pipelines.execution import DuckDbPipelineExecutionEngine
+from app.modules.pipelines.materialization import PipelineOutputMaterializer
+from app.modules.pipelines.repository import PostgresPipelineRepository
+from app.modules.pipelines.workflow import WorkflowDefinition, data_engineering_step
 
 
 @celery_app.task(name="app.worker.tasks.profile_dataset")
 def profile_dataset(dataset_id: str) -> dict[str, str]:
     return {"dataset_id": dataset_id, "status": "queued"}
+
+
+@celery_app.task(name="app.worker.tasks.execute_pipeline_run", track_started=True)
+def execute_pipeline_run(run_id: str) -> dict:
+    repository = PostgresPipelineRepository()
+    run = repository.get_run(run_id)
+    if run is None:
+        raise ValueError("Pipeline run not found")
+    version = repository.get_version(run.pipeline_version_id)
+    if version is None:
+        raise ValueError("Pipeline version not found")
+    if run.status in {PipelineRunStatus.CANCELLED, PipelineRunStatus.SUCCEEDED}:
+        return {"run_id": run.id, "status": run.status.value}
+
+    run.status = PipelineRunStatus.RUNNING
+    run.started_at = datetime.now(timezone.utc)
+    repository.update_run(run)
+    try:
+        workflow = WorkflowDefinition.model_validate(version.definition)
+        step = data_engineering_step(workflow)
+        if run.requested_step_id and run.requested_step_id != step.step_id:
+            raise ValueError("Requested workflow step does not match the executable DE step")
+        definition = PipelineDefinition.model_validate(step.config["definition"])
+        result = DuckDbPipelineExecutionEngine().execute(
+            definition=definition,
+            run_id=run.id,
+            owner_id=run.owner_id,
+            is_dry_run=run.is_dry_run,
+        )
+        run.input_row_count = result.input_row_count
+        run.processed_row_count = result.processed_row_count
+        run.output_row_count = result.output_row_count
+        run.rejected_row_count = 0
+        run.output_manifest = result.output_manifest
+        if not run.is_dry_run:
+            run.output_manifest, run.output_artifact_ids = PipelineOutputMaterializer().materialize(
+                run=run,
+                version=version,
+                workflow=workflow,
+                output_manifest=result.output_manifest,
+            )
+        run.warnings = result.warnings
+        run.status = PipelineRunStatus.SUCCEEDED
+    except Exception as exc:
+        run.status = PipelineRunStatus.FAILED
+        run.error_message = str(exc)[:4000]
+    finally:
+        run.finished_at = datetime.now(timezone.utc)
+        repository.update_run(run)
+    return {
+        "run_id": run.id,
+        "status": run.status.value,
+        "input_row_count": run.input_row_count,
+        "output_row_count": run.output_row_count,
+    }
 
 
 @celery_app.task(name="app.worker.tasks.descriptive_profile_dataset", track_started=True)

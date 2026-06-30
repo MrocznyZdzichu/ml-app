@@ -107,6 +107,45 @@ Poniższe ustalenia są obowiązującym kierunkiem rozwoju platformy po rozmowie
 - `deprecated` oznacza zastąpiony, ale historycznie używany pipeline. `abandoned` oznacza rozpoczęty i porzucony/nieukończony pipeline. `archived` oznacza zamknięty artefakt historyczny.
 - Ról `champion`, `shadow`, `challenger` nie przypisuj do pipeline'u jako takiego. Te role dotyczą modelu/deploymentu albo zestawu: model version + pipeline version + kanały servingowe.
 
+### Data Engineering i ETL
+
+- Nie tworz osobnego bytu `ETL Job` konkurujacego z `Pipeline`. Data Engineering jest rodzina wykonywalnych pipeline'ow i korzysta z tego samego wersjonowania, runow, audytu, artifact registry oraz lineage.
+- Pipeline'y typu `data_preparation` i `feature_engineering` sa pierwszym zakresem DE. W przyszlosci katalog moze zostac rozszerzony o wyspecjalizowane typy `ingestion` i `data_quality`, bez tworzenia drugiego silnika orkiestracji.
+- Pierwszym realnie wspieranym typem wejscia jest dataset CSV juz zaladowany do platformy.
+- Projektuj warstwe danych przez adaptery zrodel i materializacji. Architektura nie moze zakladac, ze wszystkie przyszle assety sa plikami; musi pozwolic pozniej dodac Parquet, tabele bazodanowe, object storage i query pushdown bez zmiany kontraktu definicji pipeline'u.
+- CSV jest poczatkowym formatem wejscia, a Parquet preferowanym formatem materializowanego outputu. PostgreSQL i inne bazy maja byc pozniej obslugiwane przez adaptery i pushdown, a nie przez kopiowanie calych tabel do procesu aplikacji.
+- Pierwszy execution engine powinien wykorzystywac DuckDB do kolumnowych transformacji plikow oraz zapisu Parquet. Ukryj silnik za kontraktem wykonawczym, aby w przyszlosci mozna bylo dodac wykonanie bazodanowe lub rozproszone bez zmiany API pipeline'ow.
+- Runy DE projektuj jako asynchroniczne i odporne na duze dane. Nie laduj calego CSV do pamieci backendu ani przegladarki; wykorzystuj skanowanie kolumnowe, projekcje, predicate pushdown, streaming i materializacje po stronie silnika.
+- Definicja DE pozostaje DAG-iem z wezlami/rolami `source`, `transform`, `quality_check` i `sink`. Pierwszy edytor UI moze prezentowac uporzadkowana liste krokow, ale backend musi obslugiwac wiele wejsc, joiny, rozgalezienia i wiele wyjsc.
+- Kazdy wezel i port wejscia/wyjscia musi miec stabilny identyfikator. Definicja musi jawnie opisywac zaleznosci miedzy krokami, a nie polegac jedynie na kolejnosci elementow tablicy.
+- Pierwszy realny katalog operacji DE powinien obejmowac: wybor kolumn, zmiane nazw i typow, filtrowanie, sortowanie, deduplikacje, obsluge brakow, wyliczanie kolumn, agregacje, operacje okienkowe, join, union, mapowanie kategorii oraz kontrole schematu i jakosci.
+- Architektura od poczatku ma uwzgledniac transformacje szeregow czasowych, takie jak lag, rolling window i resampling, ale ich wykonanie nalezy do drugiej paczki operacji.
+- Uzytkownik powinien miec dwa sposoby definiowania transformacji: standardowe, walidowane klocki oraz zaawansowany krok z wlasnym kodem.
+- W pierwszej wersji `user written code` oznacza kontrolowany krok SQL. Nie uruchamiaj dowolnego kodu Python na tym etapie.
+- Custom SQL musi miec ograniczenia bezpieczenstwa i zasobow, jasno okreslone wejscia/wyjscia oraz oznaczenie, ze automatyczny column lineage moze byc niepelny. Nie pozwalaj mu obchodzic kontroli dostepu do assetow.
+- Edytor powinien oferowac formularz/liste krokow oraz zaawansowany widok JSON tej samej definicji. Oba widoki musza korzystac z jednego kontraktu backendowego i zachowywac stabilne `step_id`.
+- Pipeline DE moze miec wiele wejsc od pierwszej wersji, w tym join wielu datasetow. Nie upraszczaj modelu wykonawczego do jednego inputu.
+- Output jest wybierany jawnie przez uzytkownika. Dozwolone tryby materializacji powinny obejmowac co najmniej `dataset`, `data_view` oraz `temporary`; domyslnym trwalym wynikiem jest nowy dataset Parquet.
+- Sposob zapisu wyniku powinien poczatkowo obslugiwac `replace`. Kontrakty przygotuj pod `append`, `incremental` i `merge/upsert`, ale nie implementuj ich bez ustalenia kluczy, watermarkow, idempotencji i obslugi spoznionych danych.
+- Kazdy trwaly output jest nowym artefaktem z lineage. Test/dry-run moze utworzyc tylko output tymczasowy i nie moze udawac oficjalnego datasetu.
+- Wejscia i wyjscia powinny wspierac data contracts: wymagane kolumny, typy, nullable, unikalnosc, zakresy lub dozwolone wartosci oraz opcjonalne primary key i event timestamp.
+- Polityka blednych rekordow jest konfigurowalna per walidacja lub output: `fail`, `warn`, `reject`; domyslnie `fail`. Tryb `reject` tworzy osobny output rejected records z identyfikatorem rekordu i powodem odrzucenia.
+- Lineage powinien obejmowac artefakty i, dla standardowych operacji, pochodzenie kolumn: kopiowanie, rename, derive, join i agregacje. Nie obiecuj pelnego column lineage dla dowolnego SQL.
+- Harmonogramy nie naleza do pierwszej dzialajacej wersji DE. Najpierw zapewnij poprawne reczne runy, powtarzalnosc, liczniki, logi, walidacje i artefakty wynikowe; kontrakt `trigger_type` nadal zachowuje przyszle `api` i `schedule`.
+- Zapisany pipeline feature engineering nie jest jeszcze feature store'em. Na tym etapie buduj wersjonowane feature pipelines i feature datasets.
+- Feature store wymaga osobnego przyszlego zakresu: encji, event time, point-in-time correctness, offline/online store, definicji cech oraz spojnosci training-serving.
+- Transformacje uczone na danych, np. imputacja, encoding i scaling, musza w przyszlosci zapisywac fitted state jako wersjonowany artefakt i byc fitowane tylko na danych treningowych. Nie dopuszczaj data leakage przez ponowne dopasowanie na validation, test lub scoring input.
+- Nie dodawaj osobnej glownej sekcji `Data Engineering` na pierwszym etapie. Rozwijaj globalna sekcje `Pipelines` o widoki definicji i runow, a pozniej harmonogramow i connectorow. Typ/szablon pipeline'u steruje katalogiem operacji i walidacjami UI.
+
+### Kolejnosc wdrazania Data Engineering
+
+- Etap 1: formalny kontrakt DAG i walidacja definicji, adapter wejscia CSV, execution engine DuckDB, podstawowe operacje, wiele wejsc i join, reczny run oraz tymczasowy test run.
+- Etap 2: materializacja Parquet/DataView, artifact i lineage, data contracts, polityki `fail/warn/reject`, rejected records, liczniki i diagnostyka runu.
+- Etap 3: wygodny edytor krokow zsynchronizowany z JSON, custom SQL z ograniczeniami, podglad schematu i planu wykonania.
+- Etap 4: operacje szeregow czasowych, fitted transformations dla FE oraz ponowne wykorzystanie opublikowanej wersji w treningu i scoringu.
+- Etap 5: adaptery baz danych i pushdown, zapisy `append`/`incremental`/`merge`, harmonogramy i connector management. Dodawaj je dopiero wraz z konkretnymi wymaganiami dotyczacymi kluczy, watermarkow, sekretow i idempotencji.
+- Po szkielecie BC/Pipelines kolejnym funkcjonalnym zakresem jest Etap 1 Data Engineering. Nie przechodz do realnego treningu i servingu przed ustaleniem wykonywalnego, wersjonowanego przeplywu przygotowania danych.
+
 ### PipelineVersion
 
 - Rozdzielaj `Pipeline` i `PipelineVersion` od początku.
@@ -181,3 +220,21 @@ Poniższe ustalenia są obowiązującym kierunkiem rozwoju platformy po rozmowie
 - Pierwszy skeleton powinien obejmować minimalne `Business Cases` + `Pipelines` + endpointy API + frontend placeholder.
 - Nie zaczynaj od trenowania modeli. Modele i operacjonalizacja są następną warstwą po stabilnym szkielecie: pipeline, version, run, artifact, lineage.
 - Nie dodawaj mockowanych danych demonstracyjnych tylko po to, aby zapełnić UI. Aplikacja ma już przygotowane datasety pokrywające standardowe przypadki ML i to na nich użytkownik będzie testował kolejne etapy.
+
+### Aktualne ustalenia: pipeline wysokopoziomowy i kroki
+
+- `Pipeline` jest elastycznym, wysokopoziomowym workflow DAG należącym do Business Case, a nie pojedynczym jobem DE, FE, treningowym albo scoringowym.
+- Jeden Business Case może i zwykle powinien mieć wiele niezależnych pipeline'ów, np. `train & operate`, `train challenger`, `production scoring`, `actuals joining` i `monitoring`.
+- Pipeline nie musi zawierać określonego zestawu kroków. Rodzaj/purpose pipeline'u jest szablonem i metadanymi, a nie ograniczeniem katalogu dozwolonych kroków.
+- Rozróżniaj dwa poziomy definicji:
+  - wysokopoziomowy `PipelineStep`, np. Data Engineering, Feature Engineering, Training, Approval Gate, Deployment, Scoring, Target Joining albo Monitoring;
+  - wewnętrzny klocek operacyjny danego kroku, np. `select_columns`, `filter_rows`, `join` lub `custom_sql` wewnątrz kroku Data Engineering.
+- Backendowa definicja pipeline'u pozostaje DAG-iem ze stabilnymi identyfikatorami kroków i portów, nawet jeśli pierwsze UI prezentuje prostą sekwencję.
+- Pipeline'y wymieniają dane przez wersjonowane artefakty, datasety, modele i deploymenty. Nie twórz bezpośrednich zależności wykonawczych między odrębnymi pipeline'ami.
+- Manualnie użytkownik ma docelowo móc uruchomić cały pipeline oraz pojedynczy krok. Uruchomienie kroku musi jawnie wskazywać inputy albo artefakty z konkretnego wcześniejszego runu; nie wybieraj po cichu „najnowszego” wyniku.
+- Operationalization/deployment ma być poprzedzony osobnym ręcznym `Approval Gate`. PipelineRun oczekujący na decyzję nie jest zakończony ani failed; docelowo ma status oczekiwania i po zatwierdzeniu wznawia ten sam run.
+- Każdy krok wykonywanego workflow powinien docelowo mieć osobny `StepRun`, status, logi, liczniki i artefakty.
+- Rozwijaj funkcjonalność przyrostowo. Pierwszy prototyp wysokopoziomowego pipeline'u obsługuje jeden wykonywalny krok `Data Engineering`; kolejne typy kroków dodawaj dopiero w następnych zakresach i nie pokazuj niewykonywalnych kroków jako gotowych funkcji.
+- Edytor DE jest zagnieżdżoną konfiguracją kroku Data Engineering. Wewnątrz obsługuje źródła danych, standardowe klocki transformacji oraz kontrolowany `User Written SQL`; nie eksponuj operacji DE jako kroków wysokopoziomowego lifecycle.
+- Dry-run kroku DE tworzy wyłącznie tymczasowy Parquet i jawnie ograniczony preview. Zwykły run opublikowanej wersji tworzy trwały dataset Parquet, Artifact, minimalny lineage i przypięcie do Business Case.
+- Pierwsze UI ma rozdzielać listę/tworzenie pipeline'ów od edytora wybranego pipeline'u. Edytor pokazuje DAG kroków wysokopoziomowych, a konfiguracja wybranego kroku otwiera właściwy edytor domenowy.
