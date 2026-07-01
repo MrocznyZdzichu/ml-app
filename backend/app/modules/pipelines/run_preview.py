@@ -82,6 +82,11 @@ class PipelineRunOutputReader:
             "columns": summaries,
         }
 
+    def resolve_output(self, run: PipelineRun, output_id: str | None = None) -> tuple[dict[str, Any], Path]:
+        """Resolve an authorized run's temporary output without exposing its filesystem path."""
+        output = self._resolve_output(run, output_id)
+        return output, self._resolve_output_path(output)
+
     def _column_summary(
         self,
         connection: duckdb.DuckDBPyConnection,

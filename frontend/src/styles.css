@@ -567,6 +567,12 @@ textarea {
   justify-content: space-between;
 }
 
+.run-output-heading-actions {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+
 .run-output-heading h3,
 .run-output-heading p {
   margin: 2px 0 0;
@@ -923,6 +929,68 @@ textarea {
   position: sticky;
   top: 8px;
   z-index: 20;
+}
+
+.modal-backdrop.dry-run-examine-backdrop {
+  z-index: 120;
+}
+
+.dry-run-examine-dialog {
+  align-self: center;
+  background: #eef1f4;
+  border: 1px solid #aab8c5;
+  border-radius: 10px;
+  box-sizing: border-box;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: min(900px, calc(100vh - 48px));
+  justify-self: center;
+  max-height: calc(100vh - 24px);
+  max-width: calc(100vw - 24px);
+  min-height: min(480px, calc(100vh - 24px));
+  min-width: min(680px, calc(100vw - 24px));
+  overflow: hidden;
+  position: relative;
+  resize: both;
+  width: min(1400px, calc(100vw - 48px));
+}
+
+.dry-run-examine-header {
+  align-items: flex-start;
+}
+
+.dry-run-examine-header h2,
+.dry-run-examine-header p {
+  margin: 2px 0 0;
+}
+
+.dry-run-examine-content {
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}
+
+.dry-run-examine-footer {
+  background: #ffffff;
+  border-top: 1px solid #d8e0e8;
+  color: #60717e;
+  font-size: 11px;
+  padding: 10px 32px 10px 16px;
+}
+
+.dry-run-examine-resize-hint {
+  background: repeating-linear-gradient(
+    135deg,
+    transparent 0 3px,
+    #6f8492 3px 5px
+  );
+  bottom: 4px;
+  height: 16px;
+  opacity: 0.8;
+  pointer-events: none;
+  position: absolute;
+  right: 4px;
+  width: 16px;
 }
 
 .pipeline-editor-title {

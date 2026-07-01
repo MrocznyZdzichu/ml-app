@@ -485,6 +485,40 @@ def test_pipeline_dry_run_executes_through_worker_on_full_uploaded_csv() -> None
     assert output_profile.status_code == 200
     assert output_profile.json()["row_count"] == 2
     assert {item["name"] for item in output_profile.json()["columns"]} == {"order_id", "gross_amount"}
+    temporary_asset_id = f"dry-run-output:{run_id}:{output_id}"
+    analysis_preview = client.get(
+        f"/api/v1/datasets/{temporary_asset_id}/preview",
+        headers=headers,
+        params={"limit": 10},
+    )
+    assert analysis_preview.status_code == 200
+    assert analysis_preview.json()["row_count"] == 2
+    assert analysis_preview.json()["returned_count"] == 2
+    analysis_visualization = client.post(
+        f"/api/v1/datasets/{temporary_asset_id}/visualization",
+        headers=headers,
+        json={"kind": "histogram", "x": "gross_amount", "bins": 20},
+    )
+    assert analysis_visualization.status_code == 200
+    assert analysis_visualization.json()["scanned_row_count"] == 2
+    assert analysis_visualization.json()["execution_mode"] == "full_dataset"
+    profile_job = client.post(
+        f"/api/v1/datasets/{temporary_asset_id}/descriptive-profile",
+        headers=headers,
+        json={"include_target_relations": False, "include_segments": False},
+    )
+    assert profile_job.status_code == 202
+    profile_status = profile_job.json()
+    profile_deadline = time.monotonic() + 20
+    while profile_status["status"] in {"queued", "running"} and time.monotonic() < profile_deadline:
+        time.sleep(0.1)
+        profile_status = client.get(
+            f"/api/v1/datasets/{temporary_asset_id}/descriptive-profile/{profile_status['job_id']}",
+            headers=headers,
+        ).json()
+    assert profile_status["status"] == "completed", profile_status["error"]
+    assert profile_status["result"]["row_count"] == 2
+    assert all(item["id"] != temporary_asset_id for item in client.get("/api/v1/datasets", headers=headers).json())
 
     published = client.post(
         f"/api/v1/pipelines/{pipeline_id}/versions/draft/publish",

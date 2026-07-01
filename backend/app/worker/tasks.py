@@ -6,6 +6,7 @@ from app.modules.datasets.repository import PostgresDatasetRepository
 from app.modules.datasets.columnar import ColumnarDatasetStore
 from app.modules.datasets.schemas import TimeSeriesAnalysisRequest
 from app.modules.datasets.time_series import FullDatasetTimeSeriesAnalyzer
+from app.modules.datasets.temporary import TemporaryPipelineOutputResolver
 from app.modules.pipelines.dag import PipelineDefinition
 from app.modules.pipelines.domain import PipelineRunStatus
 from app.modules.pipelines.execution import DuckDbPipelineExecutionEngine
@@ -81,9 +82,7 @@ def execute_pipeline_run(run_id: str) -> dict:
 @celery_app.task(name="app.worker.tasks.descriptive_profile_dataset", track_started=True)
 def descriptive_profile_dataset(dataset_id: str, owner_id: str, settings: dict) -> dict:
     repository = PostgresDatasetRepository()
-    asset = repository.get(dataset_id)
-    if asset is None or asset.owner_id != owner_id:
-        raise ValueError("Dataset not found")
+    asset = _load_analysis_asset(dataset_id, owner_id, repository)
 
     def load_asset(asset_id: str):
         loaded = repository.get(asset_id)
@@ -97,9 +96,7 @@ def descriptive_profile_dataset(dataset_id: str, owner_id: str, settings: dict) 
 @celery_app.task(name="app.worker.tasks.time_series_analysis_dataset", track_started=True)
 def time_series_analysis_dataset(dataset_id: str, owner_id: str, options: dict) -> dict:
     repository = PostgresDatasetRepository()
-    asset = repository.get(dataset_id)
-    if asset is None or asset.owner_id != owner_id:
-        raise ValueError("Dataset not found")
+    asset = _load_analysis_asset(dataset_id, owner_id, repository)
 
     def load_asset(asset_id: str):
         loaded = repository.get(asset_id)
@@ -117,6 +114,16 @@ def time_series_analysis_dataset(dataset_id: str, owner_id: str, options: dict) 
         return {"dataset_id": asset.id, "time_column": request.time_column, "value_column": request.value_column, **result}
     finally:
         connection.close()
+
+
+def _load_analysis_asset(dataset_id: str, owner_id: str, repository: PostgresDatasetRepository):
+    temporary_outputs = TemporaryPipelineOutputResolver()
+    if temporary_outputs.recognizes(dataset_id):
+        return temporary_outputs.resolve(dataset_id, owner_id)
+    asset = repository.get(dataset_id)
+    if asset is None or asset.owner_id != owner_id:
+        raise ValueError("Dataset not found")
+    return asset
 
 
 @celery_app.task(name="app.worker.tasks.train_model")

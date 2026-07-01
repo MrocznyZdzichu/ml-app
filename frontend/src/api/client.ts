@@ -104,6 +104,14 @@ export type DataAsset = {
   updated_at: string;
 };
 
+export function temporaryPipelineOutputId(runId: string, outputId: string) {
+  return `dry-run-output:${encodeURIComponent(runId)}:${encodeURIComponent(outputId)}`;
+}
+
+function datasetRouteId(datasetId: string) {
+  return encodeURIComponent(datasetId);
+}
+
 export type DatasetColumn = {
   name: string;
   type: "text" | "number" | "date" | "boolean" | "empty" | "mixed" | "unsupported";
@@ -288,13 +296,13 @@ type TimeSeriesAnalysisJob = {
 };
 
 async function analyzeTimeSeries(datasetId: string, payload: { time_column: string; value_column: string; max_lag: number; seasonal_period: number; rolling_window: number; max_points: number; driver_column: string; driver_columns: string[] }) {
-  let job = await request<TimeSeriesAnalysisJob>(`/datasets/${datasetId}/time-series-analysis`, {
+  let job = await request<TimeSeriesAnalysisJob>(`/datasets/${datasetRouteId(datasetId)}/time-series-analysis`, {
     method: "POST",
     body: JSON.stringify(payload)
   });
   while (job.status === "queued" || job.status === "running") {
     await abortableDelay(750);
-    job = await request<TimeSeriesAnalysisJob>(`/datasets/${datasetId}/time-series-analysis/${job.job_id}`);
+    job = await request<TimeSeriesAnalysisJob>(`/datasets/${datasetRouteId(datasetId)}/time-series-analysis/${job.job_id}`);
   }
   if (job.status === "failed" || !job.result) throw new Error(job.error || "Time-series analysis failed");
   return job.result;
@@ -315,14 +323,14 @@ type FullDescriptiveProfileJob = {
 };
 
 async function profileDataset(datasetId: string, payload: Record<string, unknown>, signal?: AbortSignal) {
-  let job = await request<FullDescriptiveProfileJob>(`/datasets/${datasetId}/descriptive-profile`, {
+  let job = await request<FullDescriptiveProfileJob>(`/datasets/${datasetRouteId(datasetId)}/descriptive-profile`, {
     method: "POST",
     body: JSON.stringify(payload),
     signal
   });
   while (job.status === "queued" || job.status === "running") {
     await abortableDelay(750, signal);
-    job = await request<FullDescriptiveProfileJob>(`/datasets/${datasetId}/descriptive-profile/${job.job_id}`, { signal });
+    job = await request<FullDescriptiveProfileJob>(`/datasets/${datasetRouteId(datasetId)}/descriptive-profile/${job.job_id}`, { signal });
   }
   if (job.status === "failed" || !job.result) {
     throw new Error(job.error || "Dataset profiling failed");
@@ -603,33 +611,33 @@ export const api = {
   uploadDataset: (payload: FormData) =>
     request<DataAsset>("/datasets/upload", { method: "POST", body: payload }),
   deleteDataset: (datasetId: string) =>
-    request<DataAsset>(`/datasets/${datasetId}`, { method: "DELETE" }),
+    request<DataAsset>(`/datasets/${datasetRouteId(datasetId)}`, { method: "DELETE" }),
   updateDatasetMetadata: (datasetId: string, metadata: Record<string, unknown>) =>
-    request<DataAsset>(`/datasets/${datasetId}/metadata`, {
+    request<DataAsset>(`/datasets/${datasetRouteId(datasetId)}/metadata`, {
       method: "PATCH",
       body: JSON.stringify({ metadata })
     }),
   previewDataset: (datasetId: string, limit = 5000) =>
-    request<DatasetPreview>(`/datasets/${datasetId}/preview?limit=${limit}`),
+    request<DatasetPreview>(`/datasets/${datasetRouteId(datasetId)}/preview?limit=${limit}`),
   profileDataset,
   queryDataset: (datasetId: string, sql: string, limit = 50000) =>
-    request<DatasetPreview>(`/datasets/${datasetId}/query`, {
+    request<DatasetPreview>(`/datasets/${datasetRouteId(datasetId)}/query`, {
       method: "POST",
       body: JSON.stringify({ sql, limit })
     }),
   visualizeDataset: (datasetId: string, payload: DatasetVisualizationRequest, signal?: AbortSignal) =>
-    request<DatasetVisualization>(`/datasets/${datasetId}/visualization`, {
+    request<DatasetVisualization>(`/datasets/${datasetRouteId(datasetId)}/visualization`, {
       method: "POST",
       body: JSON.stringify(payload),
       signal
     }),
   drillDataset: (datasetId: string, payload: DatasetDrillRequest) =>
-    request<DatasetPreview>(`/datasets/${datasetId}/drill`, {
+    request<DatasetPreview>(`/datasets/${datasetRouteId(datasetId)}/drill`, {
       method: "POST",
       body: JSON.stringify(payload)
     }),
   visualizationGroups: (datasetId: string, column: string, limit = 100) =>
-    request<DatasetVisualizationGroups>(`/datasets/${datasetId}/visualization/groups`, {
+    request<DatasetVisualizationGroups>(`/datasets/${datasetRouteId(datasetId)}/visualization/groups`, {
       method: "POST",
       body: JSON.stringify({ column, limit })
     }),

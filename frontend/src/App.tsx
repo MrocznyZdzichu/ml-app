@@ -27,7 +27,7 @@ import type { LucideIcon } from "lucide-react";
 import type { ChangeEvent, FormEvent, KeyboardEvent } from "react";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 
-import { api, getAccessToken, setAccessToken } from "./api/client";
+import { api, getAccessToken, setAccessToken, temporaryPipelineOutputId } from "./api/client";
 import type {
   BusinessCase,
   BusinessCaseDataAttachment,
@@ -981,6 +981,7 @@ function PipelinesPanel({
     detail: string;
   } | null>(null);
   const [dryRunResult, setDryRunResult] = useState<PipelineRun | null>(null);
+  const [examinedDryRun, setExaminedDryRun] = useState<PipelineRun | null>(null);
   const [isDefinitionDirty, setIsDefinitionDirty] = useState(false);
   const [workflowDefinition, setWorkflowDefinition] = useState<WorkflowDefinition>(emptyWorkflowDefinition());
   const [definitionText, setDefinitionText] = useState(JSON.stringify(emptyWorkflowDefinition(), null, 2));
@@ -1313,7 +1314,20 @@ function PipelinesPanel({
         </div>
       )}
 
-      {dryRunResult && <DryRunPreview run={dryRunResult} onClose={() => setDryRunResult(null)} />}
+      {dryRunResult && (
+        <DryRunPreview
+          run={dryRunResult}
+          onClose={() => setDryRunResult(null)}
+          onExamine={() => setExaminedDryRun(dryRunResult)}
+        />
+      )}
+      {examinedDryRun && (
+        <DryRunExamination
+          run={examinedDryRun}
+          onClose={() => setExaminedDryRun(null)}
+          setNotice={setNotice}
+        />
+      )}
 
       <div className="panel pipeline-canvas-panel">
         <DeferredPanel>
@@ -1366,7 +1380,15 @@ function PipelinesPanel({
   );
 }
 
-function DryRunPreview({ run, onClose }: { run: PipelineRun; onClose: () => void }) {
+function DryRunPreview({
+  run,
+  onClose,
+  onExamine
+}: {
+  run: PipelineRun;
+  onClose: () => void;
+  onExamine: () => void;
+}) {
   const output = run.output_manifest[0];
   const outputId = output?.output_id ?? "";
   const [activeView, setActiveView] = useState<"rows" | "profile">("rows");
@@ -1444,7 +1466,13 @@ function DryRunPreview({ run, onClose }: { run: PipelineRun; onClose: () => void
           <h3>Dry-run preview</h3>
           <p>Full run: {rowCount} rows. Output: {outputId || "not available"}.</p>
         </div>
-        <button className="icon-button" type="button" onClick={onClose} aria-label="Close dry-run preview"><X size={16} /></button>
+        <div className="run-output-heading-actions">
+          <button className="primary-button compact-button" type="button" onClick={onExamine} disabled={!outputId}>
+            <Search size={15} />
+            Examine
+          </button>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close dry-run preview"><X size={16} /></button>
+        </div>
       </div>
       <div className="dry-run-view-tabs">
         <button className={activeView === "rows" ? "active" : ""} type="button" onClick={() => setActiveView("rows")}>Rows</button>
@@ -1538,6 +1566,90 @@ function DryRunPreview({ run, onClose }: { run: PipelineRun; onClose: () => void
       )}
       <small>Temporary Parquet · no official dataset or artifact was created.</small>
     </section>
+  );
+}
+
+function DryRunExamination({
+  run,
+  onClose,
+  setNotice
+}: {
+  run: PipelineRun;
+  onClose: () => void;
+  setNotice: (message: string) => void;
+}) {
+  const output = run.output_manifest[0];
+  const outputId = output?.output_id ?? "";
+  const timestamp = run.finished_at ?? run.created_at;
+  const profileCache = useRef(new Map<string, DescriptiveProfileCacheEntry>());
+  const temporaryAsset = useMemo<DataAsset>(() => ({
+    id: temporaryPipelineOutputId(run.id, outputId),
+    owner_id: "",
+    name: `Dry-run output · ${outputId}`,
+    source_type: "file",
+    format: "parquet",
+    description: "Read-only temporary pipeline output",
+    original_filename: null,
+    location_uri: null,
+    file_size_bytes: null,
+    row_count: output?.row_count ?? run.output_row_count,
+    has_header: null,
+    uploaded_by: null,
+    uploaded_at: timestamp,
+    deleted_by: null,
+    deleted_at: null,
+    status: "ready",
+    tags: ["temporary", "dry-run"],
+    metadata: {
+      temporary: true,
+      pipeline_id: run.pipeline_id,
+      pipeline_run_id: run.id,
+      output_id: outputId,
+      scope: "full"
+    },
+    created_at: run.created_at,
+    updated_at: timestamp
+  }), [
+    output?.row_count,
+    outputId,
+    run.created_at,
+    run.id,
+    run.output_row_count,
+    run.pipeline_id,
+    timestamp
+  ]);
+  const temporaryDatasets = useMemo(() => [temporaryAsset], [temporaryAsset]);
+
+  return (
+    <div className="modal-backdrop dry-run-examine-backdrop" role="presentation">
+      <section className="dry-run-examine-dialog" role="dialog" aria-modal="true" aria-label="Examine dry-run output">
+        <header className="modal-header dry-run-examine-header">
+          <div>
+            <p className="eyebrow">Temporary result · full scope · {temporaryAsset.row_count ?? 0} rows</p>
+            <h2>Examine dry-run output</h2>
+            <p>Browse, profile, and visualize this Parquet without creating an official dataset or artifact.</p>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Close examination">
+            <X size={18} />
+          </button>
+        </header>
+        <div className="dry-run-examine-content">
+          <AnalysisPanel
+            datasets={temporaryDatasets}
+            descriptiveProfileCache={profileCache.current}
+            onRefresh={async () => undefined}
+            setNotice={setNotice}
+            initialTab="browse"
+            showDataRoles={false}
+            allowPersistence={false}
+          />
+        </div>
+        <footer className="dry-run-examine-footer">
+          Temporary Parquet · access follows the pipeline run · no official dataset or artifact was created. Drag the bottom-right corner to resize.
+        </footer>
+        <span className="dry-run-examine-resize-hint" aria-hidden="true" title="Drag to resize" />
+      </section>
+    </div>
   );
 }
 
@@ -1776,14 +1888,20 @@ function AnalysisPanel({
   datasets,
   descriptiveProfileCache,
   onRefresh,
-  setNotice
+  setNotice,
+  initialTab = "roles",
+  showDataRoles = true,
+  allowPersistence = true
 }: {
   datasets: DataAsset[];
   descriptiveProfileCache: Map<string, DescriptiveProfileCacheEntry>;
   onRefresh: () => Promise<void>;
   setNotice: (message: string) => void;
+  initialTab?: "roles" | "browse" | "descriptive" | "visualization";
+  showDataRoles?: boolean;
+  allowPersistence?: boolean;
 }) {
-  const [activeAnalysisTab, setActiveAnalysisTab] = useState<"roles" | "browse" | "descriptive" | "visualization">("roles");
+  const [activeAnalysisTab, setActiveAnalysisTab] = useState<"roles" | "browse" | "descriptive" | "visualization">(initialTab);
   const [datasetId, setDatasetId] = useState("");
   const [visualizationDrill, setVisualizationDrill] = useState<VisualizationDrillRequest | null>(null);
   const availableDatasets = useMemo(
@@ -1803,14 +1921,16 @@ function AnalysisPanel({
   return (
     <section className="analysis-workspace">
       <div className="analysis-tabs" role="tablist" aria-label="Analysis sections">
-        <button
-          className={activeAnalysisTab === "roles" ? "active" : ""}
-          onClick={() => setActiveAnalysisTab("roles")}
-          type="button"
-        >
-          <ListChecks size={16} />
-          Data Roles
-        </button>
+        {showDataRoles && (
+          <button
+            className={activeAnalysisTab === "roles" ? "active" : ""}
+            onClick={() => setActiveAnalysisTab("roles")}
+            type="button"
+          >
+            <ListChecks size={16} />
+            Data Roles
+          </button>
+        )}
         <button
           className={activeAnalysisTab === "browse" ? "active" : ""}
           onClick={() => setActiveAnalysisTab("browse")}
@@ -1857,6 +1977,7 @@ function AnalysisPanel({
           onVisualizationDrillConsumed={(requestId) => {
             setVisualizationDrill((current) => current?.id === requestId ? null : current);
           }}
+          allowPersistence={allowPersistence}
         />
       )}
       {activeAnalysisTab === "descriptive" && (
@@ -4102,7 +4223,8 @@ function DataBrowsingPanel({
   onRefresh,
   setNotice,
   visualizationDrill,
-  onVisualizationDrillConsumed
+  onVisualizationDrillConsumed,
+  allowPersistence = true
 }: {
   datasets: DataAsset[];
   datasetId: string;
@@ -4111,6 +4233,7 @@ function DataBrowsingPanel({
   setNotice: (message: string) => void;
   visualizationDrill: VisualizationDrillRequest | null;
   onVisualizationDrillConsumed: (requestId: string) => void;
+  allowPersistence?: boolean;
 }) {
   const [preview, setPreview] = useState<DatasetPreview | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -4784,15 +4907,17 @@ function DataBrowsingPanel({
             <Database size={16} />
             Custom SQL
           </button>
-          <button
-            className="primary-button toolbar-button"
-            disabled={!preview || isSavingView}
-            onClick={() => setIsSaveViewOpen(true)}
-            type="button"
-          >
-            <Save size={16} />
-            Save View
-          </button>
+          {allowPersistence && (
+            <button
+              className="primary-button toolbar-button"
+              disabled={!preview || isSavingView}
+              onClick={() => setIsSaveViewOpen(true)}
+              type="button"
+            >
+              <Save size={16} />
+              Save View
+            </button>
+          )}
         </div>
 
         {columns.length > 0 && (

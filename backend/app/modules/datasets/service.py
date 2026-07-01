@@ -31,12 +31,17 @@ from app.modules.datasets.sql_query import FullDatasetSqlQuery
 from app.modules.datasets.sources import DatasetSourceRegistry
 from app.modules.datasets.visualizations import FullDatasetVisualization
 from app.modules.datasets.time_series import FullDatasetTimeSeriesAnalyzer
+from app.modules.datasets.temporary import TemporaryPipelineOutputResolver
 
 
 class DatasetService:
     """Coordinates dataset lifecycle and delegates tabular execution to DatasetQueryEngine."""
 
-    def __init__(self, repository: DatasetRepository | None = None) -> None:
+    def __init__(
+        self,
+        repository: DatasetRepository | None = None,
+        temporary_outputs: TemporaryPipelineOutputResolver | None = None,
+    ) -> None:
         self.repository = repository or PostgresDatasetRepository()
         self.repository_root = Path("data/repository")
         self.sources = DatasetSourceRegistry(self.repository_root)
@@ -47,6 +52,7 @@ class DatasetService:
         self.time_series = FullDatasetTimeSeriesAnalyzer(self.full_visualization.store)
         self.time_series_jobs = TimeSeriesAnalysisJobs()
         self.profile_jobs = DescriptiveProfileJobs()
+        self.temporary_outputs = temporary_outputs or TemporaryPipelineOutputResolver()
 
     def register(self, payload: DataAssetCreate, principal: Principal) -> DataAsset:
         asset = DataAsset(
@@ -64,6 +70,10 @@ class DatasetService:
 
     def create_view(self, payload: DataViewCreate, principal: Principal) -> DataAsset:
         source = self.get_asset(payload.source_dataset_id, principal)
+        self._require_persistent_asset(
+            source,
+            "Temporary dry-run output must be materialized before it can back a Data View",
+        )
         if source.status == DataAssetStatus.DELETED:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -203,6 +213,8 @@ class DatasetService:
         return self.repository.list_for_owner(principal.user_id)
 
     def get_asset(self, dataset_id: str, principal: Principal) -> DataAsset:
+        if self.temporary_outputs.recognizes(dataset_id):
+            return self.temporary_outputs.resolve(dataset_id, principal.user_id)
         asset = self.repository.get(dataset_id)
         if not asset or asset.owner_id != principal.user_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found")
@@ -210,6 +222,10 @@ class DatasetService:
 
     def profile(self, dataset_id: str, payload: DataAssetProfileRequest, principal: Principal) -> DataAssetProfileRead:
         asset = self.get_asset(dataset_id, principal)
+        self._require_persistent_asset(
+            asset,
+            "Temporary dry-run output cannot have mutable profiling status",
+        )
         if asset.status == DataAssetStatus.DELETED:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -232,6 +248,7 @@ class DatasetService:
         principal: Principal,
     ) -> DataAsset:
         asset = self.get_asset(dataset_id, principal)
+        self._require_persistent_asset(asset, "Temporary dry-run output metadata cannot be changed")
         if asset.status == DataAssetStatus.DELETED:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -375,6 +392,7 @@ class DatasetService:
 
     def delete_asset(self, dataset_id: str, principal: Principal) -> DataAsset:
         asset = self.get_asset(dataset_id, principal)
+        self._require_persistent_asset(asset, "Temporary dry-run output is managed by its pipeline run")
         if asset.status == DataAssetStatus.DELETED:
             return asset
 
@@ -384,6 +402,10 @@ class DatasetService:
         asset.deleted_by = principal.user_id
         asset.deleted_at = now
         return self.repository.update(asset)
+
+    def _require_persistent_asset(self, asset: DataAsset, detail: str) -> None:
+        if self.temporary_outputs.recognizes(asset.id):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
     def _safe_filename(self, filename: str) -> str:
         return Path(filename.replace("\\", "_").replace("/", "_")).name
