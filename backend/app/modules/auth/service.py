@@ -9,7 +9,11 @@ from app.core.security import (
     verify_password,
 )
 from app.modules.auth.domain import UserAccount
-from app.modules.auth.repository import PostgresUserRepository, UserRepository
+from app.modules.auth.repository import (
+    DuplicateEmailError,
+    PostgresUserRepository,
+    UserRepository,
+)
 from app.modules.auth.schemas import LoginRequest, RegisterRequest, TokenResponse, UserProfile
 
 
@@ -34,7 +38,13 @@ class AuthService:
             display_name=display_name,
             password_hash=hash_password(payload.password),
         )
-        self.repository.add(user)
+        try:
+            self.repository.add(user)
+        except DuplicateEmailError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="User with this email already exists",
+            ) from exc
         return self._token_for(user)
 
     def login(self, payload: LoginRequest) -> TokenResponse:

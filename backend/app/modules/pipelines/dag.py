@@ -241,7 +241,7 @@ def validate_step_config(step: PipelineStep) -> None:
         if mode not in {"visual", "sql"}:
             raise ValueError(f"Step '{step.step_id}' filter mode must be visual or sql")
         if mode == "sql":
-            from app.modules.pipelines.sql_security import validate_filter_sql
+            from app.shared.sql_security import validate_filter_sql
 
             _non_empty_string(config.get("sql"), step.step_id, "sql")
             validate_filter_sql(config["sql"])
@@ -311,7 +311,7 @@ def validate_step_config(step: PipelineStep) -> None:
         if "output_column" in config:
             _non_empty_string(config["output_column"], step.step_id, "output_column")
     if step.type == "custom_sql":
-        from app.modules.pipelines.sql_security import validate_user_sql
+        from app.shared.sql_security import validate_user_sql
 
         _non_empty_string(config.get("sql"), step.step_id, "sql")
         validate_user_sql(config["sql"])

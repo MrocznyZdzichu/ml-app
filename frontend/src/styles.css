@@ -2569,6 +2569,21 @@ textarea {
   margin: 5px 0 0;
 }
 
+.bc-mapped-data-header {
+  gap: 16px;
+}
+
+.bc-mapped-data-header p,
+.bc-mapping-form .panel-header p {
+  color: #687987;
+  font-size: 12px;
+  margin: 4px 0 0;
+}
+
+.bc-mapping-form {
+  border-color: #a9c9c5;
+}
+
 .bc-detail-panel {
   display: grid;
   gap: 16px;
@@ -2648,6 +2663,15 @@ textarea {
   .bc-workspace-header {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .bc-mapped-data-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .bc-mapped-data-header .primary-button {
+    align-self: flex-start;
   }
 
   .bc-table-row,

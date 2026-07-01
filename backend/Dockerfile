@@ -6,11 +6,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements.lock ./
+RUN pip install --no-cache-dir -r requirements.lock
 
-COPY app ./app
-COPY tests ./tests
+RUN groupadd --system app && useradd --system --gid app --create-home app
+
+COPY --chown=app:app app ./app
+COPY --chown=app:app tests ./tests
+COPY docker-entrypoint.sh /usr/local/bin/ml-app-entrypoint
+RUN chmod 755 /usr/local/bin/ml-app-entrypoint && chown app:app /app
+
+ENTRYPOINT ["ml-app-entrypoint"]
 
 EXPOSE 8000
 

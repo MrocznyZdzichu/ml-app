@@ -8,10 +8,8 @@ import {
   CheckCircle2,
   Database,
   Drill,
-  Download,
   Filter,
   ListChecks,
-  LogIn,
   LogOut,
   Play,
   Plus,
@@ -23,12 +21,11 @@ import {
   Table2,
   Trash2,
   Upload,
-  UserPlus,
   X
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { ChangeEvent, FormEvent, KeyboardEvent } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 
 import { api, getAccessToken, setAccessToken } from "./api/client";
 import type {
@@ -43,9 +40,11 @@ import type {
   PipelineRunOutputPreview,
   PipelineRunOutputProfile,
   PipelineVersion,
-  ScoreResponse,
   UserProfile
 } from "./api/client";
+import { AssetList } from "./components/AssetList";
+import { AuthScreen } from "./workspace/AuthScreen";
+import { Metric, Overview } from "./workspace/Overview";
 import {
   columnRoleOptions,
   datasetRoleOptions,
@@ -60,14 +59,11 @@ import {
   type BrowserFilterConfig,
   type VisualizationDrillRequest,
 } from "./analysis/drillContext";
-import { VisualizationDashboard } from "./analysis/VisualizationDashboard";
-import { TimeSeriesWorkbench } from "./analysis/TimeSeriesWorkbench";
 import {
   emptyWorkflowDefinition,
-  normalizeWorkflowDefinition,
-  WorkflowEditor
-} from "./pipelines/WorkflowEditor";
-import type { WorkflowDefinition } from "./pipelines/WorkflowEditor";
+  normalizeWorkflowDefinition
+} from "./pipelines/workflowContract";
+import type { WorkflowDefinition } from "./pipelines/workflowContract";
 
 type TabId = "overview" | "business-cases" | "data" | "analysis" | "pipelines" | "models" | "serving" | "share";
 
@@ -87,6 +83,39 @@ const navItems: NavItem[] = [
   { id: "serving", label: "Serving", icon: Rocket },
   { id: "share", label: "Share", icon: Share2 }
 ];
+
+const ModelsPanel = lazy(() =>
+  import("./operational/LifecyclePanels").then((module) => ({ default: module.ModelsPanel }))
+);
+const ServingPanel = lazy(() =>
+  import("./operational/LifecyclePanels").then((module) => ({ default: module.ServingPanel }))
+);
+const SharePanel = lazy(() =>
+  import("./operational/LifecyclePanels").then((module) => ({ default: module.SharePanel }))
+);
+const VisualizationDashboard = lazy(() =>
+  import("./analysis/VisualizationDashboard").then((module) => ({
+    default: module.VisualizationDashboard
+  }))
+);
+const TimeSeriesWorkbench = lazy(() =>
+  import("./analysis/TimeSeriesWorkbench").then((module) => ({
+    default: module.TimeSeriesWorkbench
+  }))
+);
+const WorkflowEditor = lazy(() =>
+  import("./pipelines/WorkflowEditor").then((module) => ({
+    default: module.WorkflowEditor
+  }))
+);
+
+function DeferredPanel({ children }: { children: React.ReactNode }) {
+  return (
+    <Suspense fallback={<div className="panel"><div className="empty-state">Loading workspace</div></div>}>
+      {children}
+    </Suspense>
+  );
+}
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
@@ -285,255 +314,36 @@ export default function App() {
           />
         )}
         {activeTab === "models" && (
-          <ModelsPanel
-            datasets={datasets}
-            models={models}
-            onRefresh={refreshWorkspace}
-            setNotice={setNotice}
-          />
+          <DeferredPanel>
+            <ModelsPanel
+              datasets={datasets}
+              models={models}
+              onRefresh={refreshWorkspace}
+              setNotice={setNotice}
+            />
+          </DeferredPanel>
         )}
         {activeTab === "serving" && (
-          <ServingPanel
-            deployments={deployments}
-            models={models}
-            onRefresh={refreshWorkspace}
-            setNotice={setNotice}
-          />
+          <DeferredPanel>
+            <ServingPanel
+              deployments={deployments}
+              models={models}
+              onRefresh={refreshWorkspace}
+              setNotice={setNotice}
+            />
+          </DeferredPanel>
         )}
         {activeTab === "share" && (
-          <SharePanel
-            datasets={datasets}
-            models={models}
-            deployments={deployments}
-            setNotice={setNotice}
-          />
+          <DeferredPanel>
+            <SharePanel
+              datasets={datasets}
+              models={models}
+              deployments={deployments}
+              setNotice={setNotice}
+            />
+          </DeferredPanel>
         )}
       </main>
-    </div>
-  );
-}
-
-function AuthScreen({
-  apiStatus,
-  isChecking,
-  onAuthenticated
-}: {
-  apiStatus: string;
-  isChecking: boolean;
-  onAuthenticated: (token: string) => Promise<void>;
-}) {
-  const [mode, setMode] = useState<"login" | "register">("login");
-  const [email, setEmail] = useState("demo@example.com");
-  const [displayName, setDisplayName] = useState("Demo Analyst");
-  const [password, setPassword] = useState("password123");
-  const [message, setMessage] = useState(isChecking ? "Checking session" : "Sign in to continue");
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  useEffect(() => {
-    if (!isChecking && message === "Checking session") {
-      setMessage("Sign in to continue");
-    }
-  }, [isChecking, message]);
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    setIsSubmitting(true);
-    setMessage(mode === "login" ? "Signing in" : "Creating account");
-    try {
-      const response =
-        mode === "login"
-          ? await api.login({ email, password })
-          : await api.register({ email, password, display_name: displayName });
-      await onAuthenticated(response.access_token);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Authentication failed");
-    } finally {
-      setIsSubmitting(false);
-    }
-  }
-
-  return (
-    <main className="auth-layout">
-      <section className="auth-panel">
-        <div className="brand auth-brand">
-          <div className="brand-mark">ML</div>
-          <div>
-            <strong>ML App</strong>
-            <span>Private analytics workspace</span>
-          </div>
-        </div>
-
-        <div className="auth-tabs" role="tablist" aria-label="Authentication mode">
-          <button
-            className={mode === "login" ? "active" : ""}
-            onClick={() => setMode("login")}
-            type="button"
-          >
-            <LogIn size={16} />
-            Login
-          </button>
-          <button
-            className={mode === "register" ? "active" : ""}
-            onClick={() => setMode("register")}
-            type="button"
-          >
-            <UserPlus size={16} />
-            Register
-          </button>
-        </div>
-
-        <form className="auth-form" onSubmit={submit}>
-          <label>
-            Email
-            <input
-              autoComplete="email"
-              type="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              required
-            />
-          </label>
-          {mode === "register" && (
-            <label>
-              Display name
-              <input
-                autoComplete="name"
-                value={displayName}
-                onChange={(event) => setDisplayName(event.target.value)}
-              />
-            </label>
-          )}
-          <label>
-            Password
-            <input
-              autoComplete={mode === "login" ? "current-password" : "new-password"}
-              minLength={6}
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              required
-            />
-          </label>
-          <button className="primary-button" disabled={isSubmitting || isChecking} type="submit">
-            {mode === "login" ? <LogIn size={16} /> : <UserPlus size={16} />}
-            {mode === "login" ? "Login" : "Create account"}
-          </button>
-        </form>
-
-        <div className="auth-footer">
-          <span>{message}</span>
-          <span>API {apiStatus}</span>
-        </div>
-      </section>
-    </main>
-  );
-}
-
-function Overview({
-  businessCases,
-  datasets,
-  pipelines,
-  models,
-  deployments
-}: {
-  businessCases: BusinessCase[];
-  datasets: DataAsset[];
-  pipelines: Pipeline[];
-  models: ModelArtifact[];
-  deployments: Deployment[];
-}) {
-  const activeDataAssets = datasets.filter((dataset) => dataset.status !== "deleted");
-  const dataViews = activeDataAssets.filter(isDataView);
-  const sourceDatasets = activeDataAssets.filter((dataset) => !isDataView(dataset));
-  const recentAssets = [
-    ...businessCases.map((item) => ({
-      id: item.id,
-      name: item.name,
-      kind: "business case",
-      status: item.status
-    })),
-    ...pipelines.map((item) => ({
-      id: item.id,
-      name: item.name,
-      kind: "pipeline",
-      status: item.status
-    })),
-    ...sourceDatasets.map((item) => ({
-      id: item.id,
-      name: item.name,
-      kind: "dataset",
-      status: item.status
-    })),
-    ...dataViews.map((item) => ({
-      id: item.id,
-      name: item.name,
-      kind: "view",
-      status: item.status
-    })),
-    ...models.map((item) => ({
-      id: item.id,
-      name: item.name,
-      kind: "model",
-      status: item.stage
-    })),
-    ...deployments.map((item) => ({
-      id: item.id,
-      name: item.name,
-      kind: "deployment",
-      status: item.status
-    }))
-  ];
-
-  return (
-    <section className="overview-grid">
-      <Metric icon={ListChecks} label="Business Cases" value={businessCases.length} tone="teal" />
-      <Metric icon={Database} label="Datasets" value={sourceDatasets.length} tone="teal" />
-      <Metric icon={Table2} label="Data Views" value={dataViews.length} tone="blue" />
-      <Metric icon={Drill} label="Pipelines" value={pipelines.length} tone="amber" />
-      <Metric icon={Brain} label="Models" value={models.length} tone="blue" />
-      <Metric icon={Rocket} label="Deployments" value={deployments.length} tone="amber" />
-      <div className="panel wide">
-        <div className="panel-header">
-          <h2>Recent assets</h2>
-        </div>
-        <div className="table">
-          <div className="table-row table-head">
-            <span>Name</span>
-            <span>Kind</span>
-            <span>Status</span>
-          </div>
-          {recentAssets.slice(0, 8).map((item) => (
-            <div className="table-row" key={item.id}>
-              <span>{item.name}</span>
-              <span>{item.kind}</span>
-              <span>{item.status}</span>
-            </div>
-          ))}
-          {recentAssets.length === 0 && (
-            <div className="empty-state">No assets yet</div>
-          )}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function Metric({
-  icon: Icon,
-  label,
-  value,
-  tone
-}: {
-  icon: LucideIcon;
-  label: string;
-  value: number;
-  tone: string;
-}) {
-  return (
-    <div className={`metric ${tone}`}>
-      <Icon size={20} />
-      <span>{label}</span>
-      <strong>{value}</strong>
     </div>
   );
 }
@@ -576,6 +386,7 @@ function BusinessCasesPanel({
   const [attachments, setAttachments] = useState<BusinessCaseDataAttachment[]>([]);
   const [businessCaseSearch, setBusinessCaseSearch] = useState("");
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [isMappingFormOpen, setIsMappingFormOpen] = useState(false);
   const [editingAttachmentId, setEditingAttachmentId] = useState("");
   const [activeWorkspace, setActiveWorkspace] = useState<"details" | "data" | "pipelines">("details");
 
@@ -703,10 +514,13 @@ function BusinessCasesPanel({
       }
     });
     setNotice(`Attached ${dataAsset.name} as ${selectedRole}`);
-    setContextNote("");
-    setPrimaryKeyColumn("");
-    setMappingTargetColumn("");
+    resetDataMappingForm();
     setAttachments(await api.listBusinessCaseDataAttachments(selectedBusinessCase.id));
+  }
+
+  function startAddingAttachment() {
+    resetDataMappingForm();
+    setIsMappingFormOpen(true);
   }
 
   function startEditingAttachment(attachment: BusinessCaseDataAttachment) {
@@ -716,6 +530,7 @@ function BusinessCasesPanel({
     setContextNote(attachment.context_note);
     setMappingTargetColumn(attachment.target_column);
     setEditingAttachmentId(attachment.id);
+    setIsMappingFormOpen(true);
     setActiveWorkspace("data");
   }
 
@@ -726,6 +541,7 @@ function BusinessCasesPanel({
     setContextNote("");
     setMappingTargetColumn("");
     setEditingAttachmentId("");
+    setIsMappingFormOpen(false);
   }
 
   function resetBusinessCaseEditForm(businessCase: BusinessCase) {
@@ -940,66 +756,21 @@ function BusinessCasesPanel({
 
         {selectedBusinessCase && activeWorkspace === "data" && (
           <>
-            <form className="panel form-panel" onSubmit={attachData}>
-              <div className="panel-header">
-                <h2>{editingAttachmentId ? "Edit data mapping" : "Map data"}</h2>
-                <Database size={18} />
-              </div>
-              <label>
-                Dataset/Data View
-                <select
-                  value={selectedDataAssetId}
-                  onChange={(event) => setSelectedDataAssetId(event.target.value)}
-                  disabled={Boolean(editingAttachmentId)}
+            <div className="panel bc-mapped-data-panel">
+              <div className="panel-header bc-mapped-data-header">
+                <div>
+                  <h2>Mapped data</h2>
+                  <p>{activeAttachments.length} active mapping{activeAttachments.length === 1 ? "" : "s"}</p>
+                </div>
+                <button
+                  className="primary-button"
+                  type="button"
+                  onClick={startAddingAttachment}
+                  disabled={availableDataAssets.length === 0}
                 >
-                  <option value="">First available</option>
-                  {availableDataAssets.map((item) => (
-                    <option key={item.id} value={item.id}>{item.name}</option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                Role
-                <select value={selectedRole} onChange={(event) => setSelectedRole(event.target.value)}>
-                  <option value="source">Source</option>
-                  <option value="training">Training</option>
-                  <option value="validation">Validation</option>
-                  <option value="test">Test</option>
-                  <option value="scoring_input">Scoring input</option>
-                  <option value="scoring_output">Scoring output</option>
-                  <option value="monitoring_actuals">Monitoring actuals</option>
-                  <option value="reference">Reference</option>
-                </select>
-              </label>
-              <label>
-                Primary key column
-                <input value={primaryKeyColumn} onChange={(event) => setPrimaryKeyColumn(event.target.value)} />
-              </label>
-              <label>
-                Target column
-                <input value={mappingTargetColumn} onChange={(event) => setMappingTargetColumn(event.target.value)} />
-              </label>
-              <label>
-                Context note
-                <input value={contextNote} onChange={(event) => setContextNote(event.target.value)} />
-              </label>
-              <div className="button-row">
-                <button className="secondary-button" type="submit">
-                  <Save size={16} />
-                  {editingAttachmentId ? "Save mapping" : "Attach data"}
+                  <Plus size={16} />
+                  Add mapping
                 </button>
-                {editingAttachmentId && (
-                  <button className="secondary-button" type="button" onClick={resetDataMappingForm}>
-                    <X size={16} />
-                    Cancel edit
-                  </button>
-                )}
-              </div>
-            </form>
-
-            <div className="panel">
-              <div className="panel-header">
-                <h2>Mapped data</h2>
               </div>
               <div className="asset-list">
                 {activeAttachments.map((item) => {
@@ -1036,6 +807,70 @@ function BusinessCasesPanel({
                 {activeAttachments.length === 0 && <div className="empty-state">No data mapped to this business case yet</div>}
               </div>
             </div>
+
+            {isMappingFormOpen && (
+              <form className="panel form-panel bc-mapping-form" onSubmit={attachData}>
+                <div className="panel-header">
+                  <div>
+                    <h2>{editingAttachmentId ? "Edit data mapping" : "Add data mapping"}</h2>
+                    <p>
+                      {editingAttachmentId
+                        ? "Update the role and context of this mapping."
+                        : "Connect a dataset or Data View to this business case."}
+                    </p>
+                  </div>
+                  <Database size={18} />
+                </div>
+                <label>
+                  Dataset/Data View
+                  <select
+                    value={selectedDataAssetId}
+                    onChange={(event) => setSelectedDataAssetId(event.target.value)}
+                    disabled={Boolean(editingAttachmentId)}
+                  >
+                    <option value="">First available</option>
+                    {availableDataAssets.map((item) => (
+                      <option key={item.id} value={item.id}>{item.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Role
+                  <select value={selectedRole} onChange={(event) => setSelectedRole(event.target.value)}>
+                    <option value="source">Source</option>
+                    <option value="training">Training</option>
+                    <option value="validation">Validation</option>
+                    <option value="test">Test</option>
+                    <option value="scoring_input">Scoring input</option>
+                    <option value="scoring_output">Scoring output</option>
+                    <option value="monitoring_actuals">Monitoring actuals</option>
+                    <option value="reference">Reference</option>
+                  </select>
+                </label>
+                <label>
+                  Primary key column
+                  <input value={primaryKeyColumn} onChange={(event) => setPrimaryKeyColumn(event.target.value)} />
+                </label>
+                <label>
+                  Target column
+                  <input value={mappingTargetColumn} onChange={(event) => setMappingTargetColumn(event.target.value)} />
+                </label>
+                <label>
+                  Context note
+                  <input value={contextNote} onChange={(event) => setContextNote(event.target.value)} />
+                </label>
+                <div className="button-row">
+                  <button className="primary-button" type="submit">
+                    <Save size={16} />
+                    {editingAttachmentId ? "Save mapping" : "Add mapping"}
+                  </button>
+                  <button className="secondary-button" type="button" onClick={resetDataMappingForm}>
+                    <X size={16} />
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            )}
 
             {deletedAttachments.length > 0 && (
               <details className="panel editor-details deleted-assets-panel">
@@ -1481,14 +1316,16 @@ function PipelinesPanel({
       {dryRunResult && <DryRunPreview run={dryRunResult} onClose={() => setDryRunResult(null)} />}
 
       <div className="panel pipeline-canvas-panel">
-        <WorkflowEditor
-          definition={workflowDefinition}
-          datasets={datasets}
-          dataAttachments={pipelineDataAttachments}
-          outputNameSuggestion={selectedPipeline?.name ?? "result"}
-          onChange={updateWorkflowDefinition}
-          disabled={!hasDraft}
-        />
+        <DeferredPanel>
+          <WorkflowEditor
+            definition={workflowDefinition}
+            datasets={datasets}
+            dataAttachments={pipelineDataAttachments}
+            outputNameSuggestion={selectedPipeline?.name ?? "result"}
+            onChange={updateWorkflowDefinition}
+            disabled={!hasDraft}
+          />
+        </DeferredPanel>
       </div>
 
       <div className="editor-lower-grid">
@@ -2032,17 +1869,19 @@ function AnalysisPanel({
         />
       )}
       {activeAnalysisTab === "visualization" && (
-        <VisualizationDashboard
-          datasets={availableDatasets}
-          datasetId={datasetId}
-          setDatasetId={setDatasetId}
-          setNotice={setNotice}
-          onDrill={(request) => {
-            setDatasetId(request.datasetId);
-            setVisualizationDrill(request);
-            setActiveAnalysisTab("browse");
-          }}
-        />
+        <DeferredPanel>
+          <VisualizationDashboard
+            datasets={availableDatasets}
+            datasetId={datasetId}
+            setDatasetId={setDatasetId}
+            setNotice={setNotice}
+            onDrill={(request) => {
+              setDatasetId(request.datasetId);
+              setVisualizationDrill(request);
+              setActiveAnalysisTab("browse");
+            }}
+          />
+        </DeferredPanel>
       )}
     </section>
   );
@@ -3249,13 +3088,15 @@ function DescriptiveAnalysisPanel({
       </section>
 
       {datasetId && columns.length > 0 && (
-        <TimeSeriesWorkbench
-          columns={columns}
-          datasetId={datasetId}
-          defaultTimeColumn={rolesMetadata.timestamp_column}
-          defaultValueColumn={effectiveTargetColumn || rolesMetadata.target_column}
-          mode="descriptive"
-        />
+        <DeferredPanel>
+          <TimeSeriesWorkbench
+            columns={columns}
+            datasetId={datasetId}
+            defaultTimeColumn={rolesMetadata.timestamp_column}
+            defaultValueColumn={effectiveTargetColumn || rolesMetadata.target_column}
+            mode="descriptive"
+          />
+        </DeferredPanel>
       )}
 
       {!isLoading && !error && activeProfilePreview && activeProfilePreview.row_count > 0 && (
@@ -4801,18 +4642,20 @@ function DataBrowsingPanel({
 
   return (
     <div className="data-browser-layout">
-      <TimeSeriesWorkbench
-        columns={columns}
-        datasetId={datasetId}
-        defaultTimeColumn={rolesMetadata.timestamp_column}
-        defaultValueColumn={rolesMetadata.target_column}
-        mode="browser"
-        onChronologicalSort={(column) => {
-          setSortRules([{ column, direction: "asc" }]);
-          setSortingCollapsed(false);
-          setPage(1);
-        }}
-      />
+      <DeferredPanel>
+        <TimeSeriesWorkbench
+          columns={columns}
+          datasetId={datasetId}
+          defaultTimeColumn={rolesMetadata.timestamp_column}
+          defaultValueColumn={rolesMetadata.target_column}
+          mode="browser"
+          onChronologicalSort={(column) => {
+            setSortRules([{ column, direction: "asc" }]);
+            setSortingCollapsed(false);
+            setPage(1);
+          }}
+        />
+      </DeferredPanel>
       <main className="panel data-browser-main">
         {isLoading && <div className="empty-state">Loading dataset</div>}
         {!isLoading && error && <div className="empty-state error-state">{error}</div>}
@@ -7627,283 +7470,4 @@ function compareValues(left: unknown, right: unknown) {
     numeric: true,
     sensitivity: "base"
   });
-}
-
-function ModelsPanel({
-  datasets,
-  models,
-  onRefresh,
-  setNotice
-}: {
-  datasets: DataAsset[];
-  models: ModelArtifact[];
-  onRefresh: () => Promise<void>;
-  setNotice: (message: string) => void;
-}) {
-  const [datasetId, setDatasetId] = useState("");
-  const [target, setTarget] = useState("churn");
-  const [algorithm, setAlgorithm] = useState("random_forest");
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    await api.trainModel({
-      dataset_id: datasetId || datasets[0]?.id || "demo-dataset",
-      target_column: target,
-      algorithm,
-      feature_columns: []
-    });
-    setNotice("Training job queued");
-    await onRefresh();
-  }
-
-  return (
-    <section className="two-column">
-      <form className="panel form-panel" onSubmit={submit}>
-        <div className="panel-header">
-          <h2>Train model</h2>
-          <Brain size={18} />
-        </div>
-        <label>
-          Dataset
-          <select value={datasetId} onChange={(event) => setDatasetId(event.target.value)}>
-            <option value="">Demo dataset</option>
-            {datasets.map((dataset) => (
-              <option key={dataset.id} value={dataset.id}>
-                {dataset.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Target
-          <input value={target} onChange={(event) => setTarget(event.target.value)} />
-        </label>
-        <label>
-          Algorithm
-          <select value={algorithm} onChange={(event) => setAlgorithm(event.target.value)}>
-            <option value="random_forest">Random forest</option>
-            <option value="xgboost">XGBoost</option>
-            <option value="logistic_regression">Logistic regression</option>
-          </select>
-        </label>
-        <button className="primary-button" type="submit">
-          <Play size={16} />
-          Train
-        </button>
-      </form>
-
-      <AssetList title="Model registry" assets={models.map((item) => ({
-        id: item.id,
-        name: item.name,
-        meta: `${item.algorithm} / ${item.version}`,
-        status: item.stage
-      }))} />
-    </section>
-  );
-}
-
-function ServingPanel({
-  deployments,
-  models,
-  onRefresh,
-  setNotice
-}: {
-  deployments: Deployment[];
-  models: ModelArtifact[];
-  onRefresh: () => Promise<void>;
-  setNotice: (message: string) => void;
-}) {
-  const [modelId, setModelId] = useState("");
-  const [deploymentId, setDeploymentId] = useState("");
-  const [scoreResult, setScoreResult] = useState<ScoreResponse | null>(null);
-
-  async function createDeployment() {
-    const selectedModel = modelId || models[0]?.id || "demo-model";
-    await api.createDeployment({
-      model_id: selectedModel,
-      name: "online-scorer"
-    });
-    setNotice("Deployment requested");
-    await onRefresh();
-  }
-
-  async function score() {
-    const selectedDeployment = deploymentId || deployments[0]?.id;
-    if (!selectedDeployment) {
-      setNotice("Create a deployment first");
-      return;
-    }
-    const result = await api.score(selectedDeployment, [{ age: 39, income: 65000 }]);
-    setScoreResult(result);
-    setNotice("Online scoring completed");
-  }
-
-  return (
-    <section className="two-column">
-      <div className="panel form-panel">
-        <div className="panel-header">
-          <h2>Deploy and score</h2>
-          <Rocket size={18} />
-        </div>
-        <label>
-          Model
-          <select value={modelId} onChange={(event) => setModelId(event.target.value)}>
-            <option value="">Demo model</option>
-            {models.map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Deployment
-          <select value={deploymentId} onChange={(event) => setDeploymentId(event.target.value)}>
-            <option value="">First available</option>
-            {deployments.map((deployment) => (
-              <option key={deployment.id} value={deployment.id}>
-                {deployment.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="button-row">
-          <button className="secondary-button" onClick={createDeployment} type="button">
-            <Plus size={16} />
-            Deploy
-          </button>
-          <button className="primary-button" onClick={score} type="button">
-            <Play size={16} />
-            Score
-          </button>
-        </div>
-      </div>
-
-      <div className="panel">
-        <div className="panel-header">
-          <h2>Scoring output</h2>
-        </div>
-        <pre className="json-output">{JSON.stringify(scoreResult ?? { status: "waiting" }, null, 2)}</pre>
-      </div>
-    </section>
-  );
-}
-
-function SharePanel({
-  datasets,
-  models,
-  deployments,
-  setNotice
-}: {
-  datasets: DataAsset[];
-  models: ModelArtifact[];
-  deployments: Deployment[];
-  setNotice: (message: string) => void;
-}) {
-  const [targetUser, setTargetUser] = useState("analyst@example.com");
-
-  async function shareResource() {
-    const dataset = datasets[0];
-    await api.share({
-      target_user_id: targetUser,
-      resource_kind: "dataset",
-      resource_id: dataset?.id ?? "demo-dataset",
-      permission: "read"
-    });
-    setNotice("Share grant created");
-  }
-
-  async function exportResource() {
-    const model = models[0];
-    await api.exportResource({
-      resource_kind: model ? "model" : "dataset",
-      resource_id: model?.id ?? datasets[0]?.id ?? "demo-resource",
-      format: model ? "pickle" : "csv"
-    });
-    setNotice("Export job queued");
-  }
-
-  return (
-    <section className="two-column">
-      <div className="panel form-panel">
-        <div className="panel-header">
-          <h2>Collaboration</h2>
-          <Share2 size={18} />
-        </div>
-        <label>
-          User
-          <input value={targetUser} onChange={(event) => setTargetUser(event.target.value)} />
-        </label>
-        <div className="button-row">
-          <button className="secondary-button" onClick={shareResource} type="button">
-            <Share2 size={16} />
-            Share
-          </button>
-          <button className="primary-button" onClick={exportResource} type="button">
-            <Download size={16} />
-            Export
-          </button>
-        </div>
-      </div>
-
-      <div className="panel">
-        <div className="panel-header">
-          <h2>Available resources</h2>
-        </div>
-        <div className="resource-strip">
-          <span>{datasets.length} datasets</span>
-          <span>{models.length} models</span>
-          <span>{deployments.length} deployments</span>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function AssetList({
-  title,
-  assets
-}: {
-  title: string;
-  assets: Array<{
-    id: string;
-    name: string;
-    meta: string;
-    status: string;
-    canDelete?: boolean;
-    onDelete?: () => void;
-  }>;
-}) {
-  return (
-    <div className="panel">
-      <div className="panel-header">
-        <h2>{title}</h2>
-      </div>
-      <div className="asset-list">
-        {assets.map((asset) => (
-          <div className="asset-row" key={asset.id}>
-            <div>
-              <strong>{asset.name}</strong>
-              <span>{asset.meta}</span>
-            </div>
-            <div className="asset-actions">
-              <em>{asset.status}</em>
-              {asset.canDelete && asset.onDelete && (
-                <button
-                  aria-label={`Delete ${asset.name}`}
-                  className="icon-button danger-icon"
-                  onClick={asset.onDelete}
-                  title="Delete dataset"
-                  type="button"
-                >
-                  <Trash2 size={16} />
-                </button>
-              )}
-            </div>
-          </div>
-        ))}
-        {assets.length === 0 && <div className="empty-state">Nothing registered yet</div>}
-      </div>
-    </div>
-  );
 }

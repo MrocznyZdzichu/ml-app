@@ -3,57 +3,30 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api/client";
 import type { BusinessCaseDataAttachment, DataAsset, DatasetColumn } from "../api/client";
+import type {
+  PipelineDefinition,
+  PipelineInputDefinition,
+  PipelineOutputDefinition,
+  PipelinePortReference,
+  PipelineStepDefinition,
+  PipelineStepType
+} from "./pipelineContract";
+import {
+  emptyPipelineDefinition,
+  normalizePipelineDefinition,
+  rewireSequentialFlow,
+  sanitizeCategoryMapping
+} from "./pipelineContract";
 
-export type PipelinePortReference = {
-  node_id: string;
-  port_id: string;
-};
-
-export type PipelineInputDefinition = {
-  input_id: string;
-  dataset_id: string;
-  output_port_id: string;
-};
-
-export type PipelineStepDefinition = {
-  step_id: string;
-  type: PipelineStepType;
-  inputs: Array<{ port_id: string; source: PipelinePortReference }>;
-  output_port_id: string;
-  config: Record<string, unknown>;
-};
-
-export type PipelineOutputDefinition = {
-  output_id: string;
-  input: PipelinePortReference;
-  materialization: "temporary" | "dataset";
-  write_mode: "replace";
-  dataset_name: string;
-  business_case_role: "source" | "training" | "validation" | "test" | "scoring_input" | "scoring_output" | "monitoring_actuals" | "reference";
-};
-
-export type PipelineDefinition = {
-  contract_version: "1.0";
-  inputs: PipelineInputDefinition[];
-  steps: PipelineStepDefinition[];
-  outputs: PipelineOutputDefinition[];
-  parameters: Record<string, unknown>;
-};
-
-export type PipelineStepType =
-  | "select_columns"
-  | "rename_columns"
-  | "cast_columns"
-  | "filter_rows"
-  | "sort_rows"
-  | "deduplicate"
-  | "impute_missing"
-  | "derive_column"
-  | "aggregate"
-  | "join"
-  | "union"
-  | "map_categories"
-  | "custom_sql";
+export type {
+  PipelineDefinition,
+  PipelineInputDefinition,
+  PipelineOutputDefinition,
+  PipelinePortReference,
+  PipelineStepDefinition,
+  PipelineStepType
+} from "./pipelineContract";
+export { emptyPipelineDefinition, normalizePipelineDefinition } from "./pipelineContract";
 
 type PipelineColumn = DatasetColumn & {
   role?: string;
@@ -1071,69 +1044,6 @@ function datasetOutput(
     dataset_name: existing?.dataset_name || outputNameSuggestion || outputId || "result",
     business_case_role: existing?.business_case_role ?? "source"
   };
-}
-
-export function normalizePipelineDefinition(value: unknown): PipelineDefinition {
-  if (!value || typeof value !== "object") return emptyPipelineDefinition();
-  const raw = value as Record<string, unknown>;
-  const steps = Array.isArray(raw.steps)
-    ? (raw.steps as PipelineStepDefinition[]).map((step) => (
-        step.type === "map_categories"
-          ? { ...step, config: { ...step.config, mapping: sanitizeCategoryMapping(recordValue(step.config?.mapping)) } }
-          : step
-      ))
-    : [];
-  return rewireSequentialFlow({
-    contract_version: "1.0",
-    inputs: Array.isArray(raw.inputs) ? raw.inputs as PipelineInputDefinition[] : [],
-    steps,
-    outputs: Array.isArray(raw.outputs)
-      ? (raw.outputs as Array<Partial<PipelineOutputDefinition>>).map((output) => ({
-          output_id: String(output.output_id ?? "result"),
-          input: output.input as PipelinePortReference,
-          materialization: output.materialization === "temporary" ? "temporary" : "dataset",
-          write_mode: "replace",
-          dataset_name: String(output.dataset_name ?? output.output_id ?? "result"),
-          business_case_role: output.business_case_role ?? "source"
-        }))
-      : [],
-    parameters: raw.parameters && typeof raw.parameters === "object" ? raw.parameters as Record<string, unknown> : {}
-  });
-}
-
-function sanitizeCategoryMapping(mapping: Record<string, unknown>) {
-  if (Object.keys(mapping).length === 1 && mapping["old_value"] === "new_value") {
-    return {};
-  }
-  return mapping;
-}
-
-function rewireSequentialFlow(definition: PipelineDefinition): PipelineDefinition {
-  if (definition.inputs.length !== 1 || definition.steps.some((step) => step.inputs.length !== 1)) {
-    return definition;
-  }
-  const source = { node_id: definition.inputs[0].input_id, port_id: definition.inputs[0].output_port_id };
-  const steps = definition.steps.map((step, index) => ({
-    ...step,
-    inputs: [{
-      ...step.inputs[0],
-      source: index === 0
-        ? source
-        : { node_id: definition.steps[index - 1].step_id, port_id: definition.steps[index - 1].output_port_id }
-    }]
-  }));
-  const last = steps.at(-1);
-  return {
-    ...definition,
-    steps,
-    outputs: last
-      ? definition.outputs.map((output) => ({ ...output, input: { node_id: last.step_id, port_id: last.output_port_id } }))
-      : definition.outputs
-  };
-}
-
-export function emptyPipelineDefinition(): PipelineDefinition {
-  return { contract_version: "1.0", inputs: [], steps: [], outputs: [], parameters: {} };
 }
 
 function referenceKey(reference: PipelinePortReference | undefined) {

@@ -133,8 +133,9 @@ and its browser-side filtering, grouping, aggregation, and sorting therefore do
 not represent rows outside that preview. Saving its state as a Data View
 recompiles those operations into DuckDB and applies them to the complete source
 relation. Custom SQL results are also bounded, but the current Custom SQL
-execution path first loads the source relation into an in-process SQLite
-database; it is not yet appropriate for very large datasets.
+execution path runs in DuckDB over the complete Parquet-backed relation. The API
+returns at most the requested preview limit together with the exact total result
+row count; the full result is never transferred to the browser.
 
 ### Analysis: Descriptive Analysis
 
@@ -254,7 +255,7 @@ records created in the main API.
   are explicitly marked as approximate; other supported fits use full-data
   regression aggregates or sufficient statistics.
 - Interactive Data Browsing is a bounded client-side exploration path. Custom
-  SQL currently materializes the relation in API-process memory and SQLite.
+  SQL is a full-dataset DuckDB path with a bounded result contract.
 - Analytics scalability is currently single-node. There is no distributed query
   engine, persisted query cancellation, quota enforcement, or production job
   scheduler yet.
@@ -286,7 +287,7 @@ documented in `docs/synthetic-ml-scenarios.md`.
 Run backend tests:
 
 ```powershell
-docker exec ml-app-api-1 pytest tests
+docker exec --user app ml-app-api-1 pytest tests
 ```
 
 Build the frontend:

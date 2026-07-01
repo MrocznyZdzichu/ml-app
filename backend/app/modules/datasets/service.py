@@ -27,6 +27,7 @@ from app.modules.datasets.schemas import (
     FullDescriptiveProfileRequest,
     TimeSeriesAnalysisRequest,
 )
+from app.modules.datasets.sql_query import FullDatasetSqlQuery
 from app.modules.datasets.sources import DatasetSourceRegistry
 from app.modules.datasets.visualizations import FullDatasetVisualization
 from app.modules.datasets.time_series import FullDatasetTimeSeriesAnalyzer
@@ -40,6 +41,7 @@ class DatasetService:
         self.repository_root = Path("data/repository")
         self.sources = DatasetSourceRegistry(self.repository_root)
         self.query_engine = DatasetQueryEngine(self.sources)
+        self.sql_query = FullDatasetSqlQuery()
         self.full_profiler = FullDatasetProfiler()
         self.full_visualization = FullDatasetVisualization()
         self.time_series = FullDatasetTimeSeriesAnalyzer(self.full_visualization.store)
@@ -93,11 +95,22 @@ class DatasetService:
                 }
             },
         )
-        preview = self.full_visualization.preview(
-            view,
-            limit=1,
-            load_asset=lambda asset_id: self.get_asset(asset_id, principal),
-        )
+        try:
+            preview = self.full_visualization.preview(
+                view,
+                limit=1,
+                load_asset=lambda asset_id: self.get_asset(asset_id, principal),
+            )
+        except Exception:
+            view_directory = (
+                self.repository_root / "users" / principal.user_id / view.id
+            ).resolve()
+            owner_root = (
+                self.repository_root / "users" / principal.user_id
+            ).resolve()
+            if self._is_relative_to(view_directory, owner_root):
+                shutil.rmtree(view_directory, ignore_errors=True)
+            raise
         columns = [str(column["name"]) for column in preview["columns"]]
         inherited_roles = self._inherit_data_roles(source, columns)
         view.row_count = int(preview["row_count"])
@@ -282,12 +295,11 @@ class DatasetService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Deleted dataset cannot be queried",
             )
-        return self.query_engine.query(
+        return self.sql_query.execute(
             asset,
             lambda asset_id: self.get_asset(asset_id, principal),
             payload.sql,
             payload.limit,
-            dataset_id=dataset_id,
         )
 
     def visualize(

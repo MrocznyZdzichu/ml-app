@@ -15,7 +15,7 @@ from app.modules.datasets.domain import DataAsset, DataAssetStatus, SourceType
 from app.modules.datasets.repository import DatasetRepository, PostgresDatasetRepository
 from app.modules.datasets.sources import CsvFileDatasetSource
 from app.modules.pipelines.dag import PipelineDefinition, PipelineStep, topological_order
-from app.modules.pipelines.sql_security import bind_user_sql_to_inputs, validate_filter_sql
+from app.shared.sql_security import bind_user_sql_to_inputs, validate_filter_sql
 
 
 @dataclass(frozen=True)

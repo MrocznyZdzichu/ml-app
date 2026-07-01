@@ -260,6 +260,48 @@ def test_dataset_sql_query_supports_quoted_dataset_name() -> None:
     )
     assert rejected.status_code == 400
 
+    unsafe = client.post(
+        f"/api/v1/datasets/{dataset_id}/query",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"sql": "SELECT * FROM read_csv_auto('/etc/passwd')", "limit": 50},
+    )
+    assert unsafe.status_code == 400
+    assert "forbidden external function" in unsafe.json()["detail"]
+
+
+def test_dataset_sql_query_counts_full_result_while_returning_bounded_rows() -> None:
+    client = TestClient(create_app())
+    token = _register(client, "sql-owner")
+    rows = "\n".join(f"{index},{index * 10}" for index in range(1, 101))
+    upload = client.post(
+        "/api/v1/datasets/upload",
+        headers={"Authorization": f"Bearer {token}"},
+        data={"name": "bounded-query"},
+        files={
+            "file": (
+                "bounded-query.csv",
+                f"id,amount\n{rows}\n".encode(),
+                "text/csv",
+            )
+        },
+    )
+    assert upload.status_code == 201
+
+    response = client.post(
+        f"/api/v1/datasets/{upload.json()['id']}/query",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "sql": 'SELECT * FROM "bounded-query" ORDER BY id',
+            "limit": 7,
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["row_count"] == 100
+    assert result["returned_count"] == 7
+    assert result["limit"] == 7
+
 
 def test_deleted_dataset_metadata_survives_app_restart_and_relogin() -> None:
     client = TestClient(create_app())
@@ -456,3 +498,53 @@ def test_data_view_can_be_created_and_previewed_from_browser_definition() -> Non
     body = preview.json()
     assert [column["name"] for column in body["columns"]] == ["region", "plan_type", "records", "Sum amount"]
     assert body["records"] == [{"region": "north", "plan_type": "basic", "records": 2, "Sum amount": 30}]
+
+
+def test_sql_data_view_can_only_read_its_declared_source() -> None:
+    client = TestClient(create_app())
+    token = _register(client, "sql-view-owner")
+    headers = {"Authorization": f"Bearer {token}"}
+    upload = client.post(
+        "/api/v1/datasets/upload",
+        headers=headers,
+        data={"name": "orders"},
+        files={
+            "file": (
+                "orders.csv",
+                b"region,amount\nnorth,10\nsouth,20\n",
+                "text/csv",
+            )
+        },
+    )
+    assert upload.status_code == 201
+    dataset_id = upload.json()["id"]
+
+    created = client.post(
+        "/api/v1/datasets/views",
+        headers=headers,
+        json={
+            "name": "north-orders",
+            "source_dataset_id": dataset_id,
+            "definition": {
+                "kind": "sql",
+                "sql": 'SELECT * FROM orders WHERE region = \'north\'',
+            },
+        },
+    )
+    assert created.status_code == 201
+    assert created.json()["row_count"] == 1
+
+    unsafe = client.post(
+        "/api/v1/datasets/views",
+        headers=headers,
+        json={
+            "name": "unsafe-view",
+            "source_dataset_id": dataset_id,
+            "definition": {
+                "kind": "sql",
+                "sql": "SELECT * FROM read_csv_auto('/etc/passwd')",
+            },
+        },
+    )
+    assert unsafe.status_code == 400
+    assert "forbidden external function" in unsafe.json()["detail"]

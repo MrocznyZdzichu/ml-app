@@ -18,6 +18,12 @@ Use `.\rebuild-run.bat build` after dependency or Dockerfile changes.
 
 ## Backend Only
 
+`backend/requirements.txt` documents supported direct dependency ranges.
+Application images install the fully resolved `backend/requirements.lock`, so
+local, CI, and deployment builds use the same tested dependency graph. After a
+dependency change, regenerate the lock in Python 3.12 on Linux, rebuild the
+images, and run the complete backend test suite.
+
 ```powershell
 cd backend
 python -m venv .venv
@@ -39,13 +45,13 @@ npm run dev
 Backend tests:
 
 ```powershell
-docker exec ml-app-api-1 pytest tests
+docker exec --user app ml-app-api-1 pytest tests
 ```
 
 Run the focused full-dataset profiling tests:
 
 ```powershell
-docker exec ml-app-api-1 pytest tests/test_full_profile.py tests/test_profile_jobs.py tests/test_visualizations.py
+docker exec --user app ml-app-api-1 pytest tests/test_full_profile.py tests/test_profile_jobs.py tests/test_visualizations.py
 ```
 
 Frontend production build:
@@ -142,7 +148,7 @@ display branches back into the dashboard orchestration component.
 When changing this path, run:
 
 ```powershell
-docker exec ml-app-api-1 pytest tests/test_visualizations.py tests/test_datasets_upload.py tests/test_full_profile.py
+docker exec --user app ml-app-api-1 pytest tests/test_visualizations.py tests/test_datasets_upload.py tests/test_full_profile.py
 ```
 
 ## Local Runtime Data

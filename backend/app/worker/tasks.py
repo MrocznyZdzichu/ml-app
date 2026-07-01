@@ -34,6 +34,7 @@ def execute_pipeline_run(run_id: str) -> dict:
     run.status = PipelineRunStatus.RUNNING
     run.started_at = datetime.now(timezone.utc)
     repository.update_run(run)
+    failure: Exception | None = None
     try:
         workflow = WorkflowDefinition.model_validate(version.definition)
         step = data_engineering_step(workflow)
@@ -63,9 +64,12 @@ def execute_pipeline_run(run_id: str) -> dict:
     except Exception as exc:
         run.status = PipelineRunStatus.FAILED
         run.error_message = str(exc)[:4000]
+        failure = exc
     finally:
         run.finished_at = datetime.now(timezone.utc)
         repository.update_run(run)
+    if failure is not None:
+        raise failure
     return {
         "run_id": run.id,
         "status": run.status.value,

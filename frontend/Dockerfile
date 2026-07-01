@@ -2,11 +2,14 @@ FROM node:22-alpine
 
 WORKDIR /app
 
-COPY package.json ./
-RUN npm install
+RUN chown node:node /app
+USER node
 
-COPY index.html vite.config.ts tsconfig.json ./
-COPY src ./src
+COPY --chown=node:node package.json package-lock.json ./
+RUN npm ci
+
+COPY --chown=node:node index.html vite.config.ts tsconfig.json ./
+COPY --chown=node:node src ./src
 
 EXPOSE 5173
 

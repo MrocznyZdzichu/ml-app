@@ -457,10 +457,10 @@ Drill down opens a detail view for the selected group. The detail view:
 
 ### Custom SQL
 
-Custom SQL opens a modal editor. During interactive Data Browser execution, SQL
-runs against a bounded in-memory SQLite table named after the selected dataset.
-If the dataset name contains spaces or other special characters, quote it with
-double quotes:
+Custom SQL opens a modal editor. The query runs in DuckDB over the complete
+Parquet-backed dataset or Data View. The response contains a bounded preview and
+the exact number of rows produced by the full query. If the dataset name
+contains spaces or other special characters, quote it with double quotes:
 
 ```sql
 SELECT
@@ -472,7 +472,9 @@ GROUP BY region
 ORDER BY avg_churn DESC
 ```
 
-Only read-only `SELECT` and `WITH` queries are supported. The editor supports:
+Only one read-only `SELECT` or `WITH` query is supported. Queries may reference
+only the selected data asset; external file readers, network readers, extension
+loading, and system catalogs are blocked. The editor supports:
 
 - Tab and Shift+Tab indentation,
 - indentation carry-over on new lines,

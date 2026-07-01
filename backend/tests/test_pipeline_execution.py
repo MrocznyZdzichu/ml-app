@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import duckdb
 import pytest
@@ -14,7 +15,7 @@ from app.modules.pipelines.execution import (
     compile_condition,
 )
 from app.modules.pipelines.run_preview import PipelineRunOutputReader
-from app.modules.pipelines.sql_security import (
+from app.shared.sql_security import (
     bind_user_sql_to_inputs,
     validate_filter_sql,
     validate_user_sql,
@@ -23,6 +24,7 @@ from app.modules.pipelines.workflow import (
     normalize_workflow_definition,
     validate_workflow_definition,
 )
+from app.worker import tasks as worker_tasks
 
 
 def _asset(asset_id: str, owner_id: str, path: Path, row_count: int) -> DataAsset:
@@ -244,6 +246,40 @@ def test_csv_adapter_rejects_another_owners_dataset(tmp_path: Path) -> None:
 def test_user_written_sql_rejects_unsafe_queries(sql: str, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         validate_user_sql(sql)
+
+
+def test_failed_pipeline_run_is_persisted_and_fails_the_celery_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = SimpleNamespace(
+        id="run-1",
+        pipeline_version_id="version-1",
+        status=PipelineRunStatus.QUEUED,
+        started_at=None,
+        finished_at=None,
+        error_message="",
+    )
+    version = SimpleNamespace(definition={})
+
+    class Repository:
+        def get_run(self, run_id: str):
+            return run if run_id == run.id else None
+
+        def get_version(self, version_id: str):
+            return version if version_id == run.pipeline_version_id else None
+
+        @staticmethod
+        def update_run(updated):
+            return updated
+
+    monkeypatch.setattr(worker_tasks, "PostgresPipelineRepository", Repository)
+
+    with pytest.raises(Exception, match="validation error"):
+        worker_tasks.execute_pipeline_run.run(run.id)
+
+    assert run.status == PipelineRunStatus.FAILED
+    assert run.error_message
+    assert run.finished_at is not None
 
 
 def test_user_written_sql_binds_only_declared_input_relations() -> None:
