@@ -9,6 +9,8 @@ from pydantic import ValidationError
 
 from app.core.security import Principal
 from app.modules.business_cases.service import BusinessCaseService
+from app.modules.datasets.domain import DataAssetStatus
+from app.modules.datasets.repository import DatasetRepository, PostgresDatasetRepository
 from app.modules.pipelines.domain import (
     Pipeline,
     PipelineRun,
@@ -44,10 +46,12 @@ class PipelineService:
         repository: PipelineRepository | None = None,
         business_cases: BusinessCaseService | None = None,
         output_reader: PipelineRunOutputReader | None = None,
+        datasets: DatasetRepository | None = None,
     ) -> None:
         self.repository = repository or pipeline_repository
         self.business_cases = business_cases or BusinessCaseService()
         self.output_reader = output_reader or PipelineRunOutputReader()
+        self.datasets = datasets or PostgresDatasetRepository()
 
     def create_pipeline(self, payload: PipelineCreate, principal: Principal) -> Pipeline:
         business_case = self.business_cases.get_business_case(payload.business_case_id, principal)
@@ -193,6 +197,13 @@ class PipelineService:
                 detail="Pipeline workflow step not found",
             )
         now = datetime.now(timezone.utc)
+        resolved_inputs = self._resolve_input_versions(
+            workflow,
+            payload.input_versions,
+            principal,
+        )
+        runtime_parameters = dict(payload.runtime_parameters)
+        runtime_parameters["resolved_input_versions"] = resolved_inputs
         run = PipelineRun(
             id=str(uuid4()),
             owner_id=principal.user_id,
@@ -201,7 +212,7 @@ class PipelineService:
             business_case_id=pipeline.business_case_id,
             status=PipelineRunStatus.QUEUED,
             trigger_type=payload.trigger_type,
-            runtime_parameters=dict(payload.runtime_parameters),
+            runtime_parameters=runtime_parameters,
             is_dry_run=payload.is_dry_run,
             requested_step_id=payload.step_id or "",
             input_row_count=None,
@@ -228,6 +239,82 @@ class PipelineService:
                 detail={"message": "Pipeline execution queue is unavailable", "run_id": run.id},
             ) from exc
         return run
+
+    def _resolve_input_versions(
+        self,
+        workflow: WorkflowDefinition,
+        requested_versions: dict[str, str],
+        principal: Principal,
+    ) -> dict[str, dict[str, Any]]:
+        resolved: dict[str, dict[str, Any]] = {}
+        for step in workflow.steps:
+            definition = step.config.get("definition")
+            if not isinstance(definition, dict):
+                continue
+            inputs = definition.get("inputs")
+            if not isinstance(inputs, list):
+                continue
+            for raw_input in inputs:
+                if not isinstance(raw_input, dict):
+                    continue
+                logical_id = str(raw_input.get("dataset_id") or "")
+                if not logical_id:
+                    continue
+                existing_version = self.datasets.get(logical_id)
+                if existing_version is not None and existing_version.owner_id == principal.user_id:
+                    logical_id = existing_version.logical_id
+                input_id = str(raw_input.get("input_id") or "")
+                binding_key = f"{step.step_id}:{input_id}"
+                policy = str(raw_input.get("version_policy") or "latest")
+                if policy == "select_at_run":
+                    selected_id = requested_versions.get(binding_key) or requested_versions.get(input_id)
+                    if not selected_id:
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            detail={
+                                "message": "A dataset version must be selected before the run",
+                                "input_key": binding_key,
+                            },
+                        )
+                    asset = self.datasets.get(selected_id)
+                    if (
+                        asset is None
+                        or asset.owner_id != principal.user_id
+                        or asset.logical_id != logical_id
+                        or asset.status == DataAssetStatus.DELETED
+                    ):
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            detail={
+                                "message": "Selected dataset version is not available for this input",
+                                "input_key": binding_key,
+                            },
+                        )
+                elif policy == "latest":
+                    asset = self.datasets.get_latest_version(principal.user_id, logical_id)
+                    if asset is None:
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            detail={
+                                "message": "Logical dataset has no active version",
+                                "input_key": binding_key,
+                            },
+                        )
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        detail={"message": f"Unsupported dataset version policy '{policy}'"},
+                    )
+                resolved[binding_key] = {
+                    "input_id": input_id,
+                    "step_id": step.step_id,
+                    "logical_id": logical_id,
+                    "version_policy": policy,
+                    "dataset_id": asset.id,
+                    "version_number": asset.version_number,
+                    "dataset_name": asset.name,
+                }
+        return resolved
 
     def get_run(self, pipeline_id: str, run_id: str, principal: Principal) -> PipelineRun:
         pipeline = self.get_pipeline(pipeline_id, principal)
@@ -317,12 +404,12 @@ def validate_definition(definition: dict, executable: bool) -> dict:
     except ValidationError as exc:
         errors = workflow_validation_errors(exc)
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={"message": "Invalid pipeline workflow definition", "errors": errors},
         ) from exc
     except ValueError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={
                 "message": "Invalid pipeline workflow definition",
                 "errors": [{"path": "", "message": str(exc)}],

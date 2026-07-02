@@ -57,6 +57,9 @@ class DataAssetRead(BaseModel):
     name: str
     source_type: SourceType
     format: str
+    logical_id: str
+    version_number: int
+    version_stage: str
     description: str
     original_filename: str | None = None
     location_uri: str | None

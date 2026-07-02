@@ -7,20 +7,29 @@ from pydantic import ValidationError
 
 from app.modules.datasets.domain import DataAsset, DataAssetStatus, SourceType
 from app.modules.datasets.repository import InMemoryDatasetRepository
+from app.modules.business_cases.repository import InMemoryBusinessCaseRepository
 from app.modules.pipelines.dag import PipelineDefinition
-from app.modules.pipelines.domain import PipelineRun, PipelineRunStatus, PipelineRunTrigger
+from app.modules.pipelines.domain import (
+    PipelineRun,
+    PipelineRunStatus,
+    PipelineRunTrigger,
+    PipelineVersion,
+    PipelineVersionStatus,
+)
 from app.modules.pipelines.execution import (
     CsvDatasetInputAdapter,
     DuckDbPipelineExecutionEngine,
     compile_condition,
 )
 from app.modules.pipelines.run_preview import PipelineRunOutputReader
+from app.modules.pipelines.materialization import PipelineOutputMaterializer
 from app.shared.sql_security import (
     bind_user_sql_to_inputs,
     validate_filter_sql,
     validate_user_sql,
 )
 from app.modules.pipelines.workflow import (
+    WorkflowDefinition,
     normalize_workflow_definition,
     validate_workflow_definition,
 )
@@ -86,6 +95,94 @@ def test_dry_run_output_reader_paginates_and_profiles_full_parquet(tmp_path: Pat
         {"value": 0, "count": 60, "share": 0.5},
         {"value": 1, "count": 60, "share": 0.5},
     ]
+
+
+def test_materialized_pipeline_outputs_are_versions_of_one_logical_dataset(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    datasets = InMemoryDatasetRepository()
+    business_cases = InMemoryBusinessCaseRepository()
+    materializer = PipelineOutputMaterializer(
+        datasets=datasets,
+        business_cases=business_cases,
+        repository_root=repository_root,
+    )
+    workflow = WorkflowDefinition.model_validate({
+        "contract_version": "2.0",
+        "steps": [{
+            "step_id": "de_1",
+            "name": "Data Engineering",
+            "type": "data_engineering",
+            "output_port_id": "dataset",
+            "config": {"definition": {}},
+        }],
+        "outputs": [{
+            "output_id": "result",
+            "source": {"step_id": "de_1", "port_id": "dataset"},
+        }],
+    })
+    version = PipelineVersion(
+        id="pipeline-version-1",
+        owner_id="owner-1",
+        pipeline_id="pipeline-1",
+        business_case_id="bc-1",
+        version_number=1,
+        status=PipelineVersionStatus.PUBLISHED,
+        definition=workflow.model_dump(mode="json"),
+        definition_hash="definition-hash",
+        created_by="owner-1",
+    )
+
+    outputs = []
+    for run_number in (1, 2):
+        source = (
+            repository_root
+            / "users"
+            / "owner-1"
+            / "pipeline-runs"
+            / f"run-{run_number}"
+            / "result.parquet"
+        )
+        source.parent.mkdir(parents=True)
+        source.write_bytes(f"version-{run_number}".encode())
+        run = PipelineRun(
+            id=f"run-{run_number}",
+            owner_id="owner-1",
+            pipeline_id="pipeline-1",
+            pipeline_version_id=version.id,
+            business_case_id="bc-1",
+            status=PipelineRunStatus.RUNNING,
+            trigger_type=PipelineRunTrigger.MANUAL,
+            created_by="owner-1",
+        )
+        manifest, artifact_ids = materializer.materialize(
+            run=run,
+            version=version,
+            workflow=workflow,
+            output_manifest=[{
+                "output_id": "result",
+                "materialization": "dataset",
+                "dataset_name": "Prepared Iris",
+                "business_case_role": "training",
+                "location_uri": f"file://{source.as_posix()}",
+                "row_count": run_number,
+                "schema": [{"name": "id", "type": "BIGINT"}],
+            }],
+            step_id="de_1",
+            input_dataset_ids=[],
+            output_stage="final",
+        )
+        outputs.append(datasets.get(manifest[0]["dataset_id"]))
+        assert artifact_ids == [manifest[0]["artifact_id"]]
+        assert manifest[0]["logical_id"] == outputs[-1].logical_id
+        assert manifest[0]["version_number"] == run_number
+
+    assert outputs[0] is not None and outputs[1] is not None
+    assert outputs[0].logical_id == outputs[1].logical_id
+    assert [outputs[0].version_number, outputs[1].version_number] == [1, 2]
+    assert len(business_cases.list_data_attachments("bc-1")) == 1
+    assert business_cases.list_data_attachments("bc-1")[0].data_asset_id == outputs[1].id
 
 
 def test_dag_rejects_cycles_and_unknown_ports() -> None:

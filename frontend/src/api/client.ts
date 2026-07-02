@@ -87,6 +87,9 @@ export type DataAsset = {
   name: string;
   source_type: string;
   format: string;
+  logical_id: string;
+  version_number: number;
+  version_stage: "source" | "intermediate" | "final" | "view";
   description: string;
   original_filename: string | null;
   location_uri: string | null;
@@ -488,7 +491,11 @@ export type PipelineRun = {
     dataset_name?: string;
     business_case_role?: string;
     dataset_id?: string;
+    logical_id?: string;
+    version_number?: number;
     artifact_id?: string;
+    pipeline_step_id?: string;
+    output_stage?: "intermediate" | "final";
     file_size_bytes?: number;
     preview?: {
       records: Array<Record<string, unknown>>;
@@ -561,6 +568,8 @@ export const api = {
     }),
   me: () => request<UserProfile>("/auth/me"),
   listDatasets: () => request<DataAsset[]>("/datasets"),
+  listDatasetVersions: (logicalId: string) =>
+    request<DataAsset[]>(`/datasets/${datasetRouteId(logicalId)}/versions`),
   listBusinessCases: () => request<BusinessCase[]>("/business-cases"),
   createBusinessCase: (payload: Record<string, unknown>) =>
     request<BusinessCase>("/business-cases", {

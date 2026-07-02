@@ -6900,3 +6900,79 @@ textarea {
     grid-template-columns: repeat(2, minmax(120px, 1fr));
   }
 }
+.dataset-version-group + .dataset-version-group {
+  margin-top: 0.5rem;
+}
+
+.dataset-version-history {
+  margin: 0 0.75rem 0.75rem 2rem;
+  padding-left: 0.8rem;
+  border-left: 2px solid var(--border);
+}
+
+.dataset-version-history .version-row {
+  margin-top: 0.4rem;
+  background: color-mix(in srgb, var(--panel) 82%, var(--background));
+}
+
+.version-badge {
+  display: inline-flex;
+  margin-left: 0.35rem;
+  padding: 0.1rem 0.42rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--border));
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.catalog-run-monitor {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: color-mix(in srgb, var(--panel) 80%, var(--accent) 8%);
+}
+
+.catalog-run-monitor.succeeded {
+  border-color: color-mix(in srgb, #27c499 55%, var(--border));
+}
+
+.catalog-run-monitor.failed {
+  border-color: color-mix(in srgb, #ef755f 55%, var(--border));
+}
+
+.catalog-run-monitor div,
+.catalog-run-output span {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.catalog-run-monitor span,
+.catalog-run-output small {
+  color: var(--muted);
+}
+
+.catalog-run-outputs {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.catalog-run-output {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 0.6rem;
+}
+
+.catalog-run-output i {
+  color: var(--accent);
+  font-style: normal;
+  font-weight: 700;
+}

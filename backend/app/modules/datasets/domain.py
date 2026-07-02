@@ -25,6 +25,9 @@ class DataAsset:
     name: str
     source_type: SourceType
     format: str
+    logical_id: str = ""
+    version_number: int = 1
+    version_stage: str = "source"
     description: str = ""
     original_filename: str | None = None
     location_uri: str | None = None
@@ -40,3 +43,7 @@ class DataAsset:
     metadata: dict[str, object] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def __post_init__(self) -> None:
+        if not self.logical_id:
+            self.logical_id = self.id

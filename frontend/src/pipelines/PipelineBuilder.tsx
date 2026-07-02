@@ -138,7 +138,8 @@ export function PipelineBuilder({
     const nextInput: PipelineInputDefinition = {
       input_id: inputId,
       dataset_id: activeDatasets[0]?.id ?? "",
-      output_port_id: "out"
+      output_port_id: "out",
+      version_policy: "latest"
     };
     const inputs = [...definition.inputs, nextInput];
     const outputs = definition.outputs.length
@@ -307,6 +308,16 @@ export function PipelineBuilder({
                   const role = attachmentByDataset.get(item.id)?.role;
                   return <option key={item.id} value={item.id}>{role ? `★ ${role} · ` : ""}{item.name} · {item.row_count ?? "?"} rows</option>;
                 })}
+              </select></label>
+              <label>Version policy<select
+                value={input.version_policy ?? "latest"}
+                onChange={(event) => updateInput(selectedInputIndex, {
+                  version_policy: event.target.value as PipelineInputDefinition["version_policy"]
+                })}
+                disabled={disabled}
+              >
+                <option value="latest">Latest at run start</option>
+                <option value="select_at_run">Select at run</option>
               </select></label>
               <label>Stable source ID<input value={input.input_id} disabled /></label>
               {attachmentByDataset.get(input.dataset_id)?.role && (

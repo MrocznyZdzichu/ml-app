@@ -638,7 +638,16 @@ def test_group_and_time_splits_respect_boundaries(
         assert train_max < validation_min <= validation_max < test_min
 
 
-def test_de_to_fe_pipeline_run_creates_step_runs_dataset_and_fitted_artifact() -> None:
+def test_de_to_fe_pipeline_run_creates_step_runs_dataset_and_fitted_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.worker.tasks import execute_pipeline_run
+
+    monkeypatch.setattr(
+        execute_pipeline_run,
+        "delay",
+        lambda run_id: None,
+    )
     client = TestClient(create_app())
     email = f"alice-{uuid4()}@example.com"
     registered = client.post(
@@ -791,8 +800,9 @@ def test_de_to_fe_pipeline_run_creates_step_runs_dataset_and_fitted_artifact() -
         headers=headers,
         json={"trigger_type": "manual", "is_dry_run": False},
     )
-    assert queued.status_code == 201
+    assert queued.status_code == 201, queued.text
     run = queued.json()
+    execute_pipeline_run.run(run["id"])
     deadline = time.monotonic() + 20
     while run["status"] in {"queued", "running"} and time.monotonic() < deadline:
         time.sleep(0.1)
@@ -807,14 +817,24 @@ def test_de_to_fe_pipeline_run_creates_step_runs_dataset_and_fitted_artifact() -
     dataset_items = [
         item for item in run["output_manifest"] if item.get("artifact_type") == "dataset"
     ]
-    assert {item["business_case_role"] for item in dataset_items} == {
+    final_dataset_items = [
+        item for item in dataset_items if item["output_stage"] == "final"
+    ]
+    intermediate_dataset_items = [
+        item for item in dataset_items if item["output_stage"] == "intermediate"
+    ]
+    assert len(intermediate_dataset_items) == 1
+    assert intermediate_dataset_items[0]["pipeline_step_id"] == "de_1"
+    assert intermediate_dataset_items[0]["dataset_name"] == "Prepared churn"
+    assert intermediate_dataset_items[0]["row_count"] == 100
+    assert {item["business_case_role"] for item in final_dataset_items} == {
         "training",
         "validation",
         "test",
     }
-    assert sum(item["row_count"] for item in dataset_items) == 100
+    assert sum(item["row_count"] for item in final_dataset_items) == 100
     dataset_item = next(
-        item for item in dataset_items if item["business_case_role"] == "training"
+        item for item in final_dataset_items if item["business_case_role"] == "training"
     )
     state_item = next(
         item for item in run["output_manifest"] if item.get("artifact_type") == "feature_transform"
@@ -847,7 +867,7 @@ def test_de_to_fe_pipeline_run_creates_step_runs_dataset_and_fitted_artifact() -
         headers=headers,
     )
     assert attachments.status_code == 200
-    generated_dataset_ids = {item["dataset_id"] for item in dataset_items}
+    generated_dataset_ids = {item["dataset_id"] for item in final_dataset_items}
     assert {
         item["role"] for item in attachments.json()
         if item["data_asset_id"] in generated_dataset_ids

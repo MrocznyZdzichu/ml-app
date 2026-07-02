@@ -41,7 +41,6 @@ def test_business_case_can_exist_without_data_and_owns_data_mappings() -> None:
     client = TestClient(create_app())
     token = _register(client, "alice")
     business_case = _create_business_case(client, token)
-
     listed = client.get("/api/v1/business-cases", headers={"Authorization": f"Bearer {token}"})
     assert listed.status_code == 200
     assert business_case["id"] in {item["id"] for item in listed.json()}
@@ -199,6 +198,14 @@ def test_pipeline_version_and_run_contracts_are_auditable(monkeypatch) -> None:
     client = TestClient(create_app())
     token = _register(client, "alice")
     business_case = _create_business_case(client, token)
+    uploaded = client.post(
+        "/api/v1/datasets/upload",
+        headers={"Authorization": f"Bearer {token}"},
+        data={"name": "Contract input"},
+        files={"file": ("contract.csv", b"sepal_length,sepal_width,species\n5.1,3.5,setosa\n", "text/csv")},
+    )
+    assert uploaded.status_code == 201
+    dataset_id = uploaded.json()["logical_id"]
 
     created = client.post(
         "/api/v1/pipelines",
@@ -210,7 +217,7 @@ def test_pipeline_version_and_run_contracts_are_auditable(monkeypatch) -> None:
             "type": "feature_engineering",
             "definition": {
                 "contract_version": "1.0",
-                "inputs": [{"input_id": "training", "dataset_id": "dataset-1", "output_port_id": "out"}],
+                    "inputs": [{"input_id": "training", "dataset_id": dataset_id, "output_port_id": "out"}],
                 "steps": [
                     {
                         "step_id": "select-iris-columns",
@@ -300,6 +307,91 @@ def test_pipeline_version_and_run_contracts_are_auditable(monkeypatch) -> None:
     )
     assert run_status.status_code == 200
     assert run_status.json()["status"] == "queued"
+
+
+def test_select_at_run_requires_and_audits_a_concrete_dataset_version(monkeypatch) -> None:
+    from app.worker.tasks import execute_pipeline_run
+
+    monkeypatch.setattr(execute_pipeline_run, "delay", lambda run_id: None)
+    client = TestClient(create_app())
+    token = _register(client, "versioned-input")
+    headers = {"Authorization": f"Bearer {token}"}
+    business_case = _create_business_case(client, token)
+    first_response = client.post(
+        "/api/v1/datasets/upload",
+        headers=headers,
+        data={"name": "Iris"},
+        files={"file": ("iris-v1.csv", b"id,species\n1,setosa\n", "text/csv")},
+    )
+    assert first_response.status_code == 201
+    first = first_response.json()
+    second_response = client.post(
+        "/api/v1/datasets/upload",
+        headers=headers,
+        data={"logical_id": first["logical_id"]},
+        files={"file": ("iris-v2.csv", b"id,species\n1,setosa\n2,versicolor\n", "text/csv")},
+    )
+    assert second_response.status_code == 201
+    second = second_response.json()
+    definition = {
+        "contract_version": "1.0",
+        "inputs": [{
+            "input_id": "source",
+            "dataset_id": first["logical_id"],
+            "output_port_id": "out",
+            "version_policy": "select_at_run",
+        }],
+        "steps": [],
+        "outputs": [{
+            "output_id": "result",
+            "input": {"node_id": "source", "port_id": "out"},
+            "materialization": "dataset",
+            "write_mode": "replace",
+            "dataset_name": "Iris output",
+            "business_case_role": "source",
+        }],
+        "parameters": {},
+    }
+    pipeline_response = client.post(
+        "/api/v1/pipelines",
+        headers=headers,
+        json={
+            "business_case_id": business_case["id"],
+            "name": "Version-aware Iris",
+            "type": "data_preparation",
+            "definition": definition,
+        },
+    )
+    assert pipeline_response.status_code == 201
+    pipeline = pipeline_response.json()
+    published = client.post(
+        f"/api/v1/pipelines/{pipeline['id']}/versions/draft/publish",
+        headers=headers,
+    )
+    assert published.status_code == 200
+
+    missing = client.post(
+        f"/api/v1/pipelines/{pipeline['id']}/runs",
+        headers=headers,
+        json={"trigger_type": "manual", "is_dry_run": False},
+    )
+    assert missing.status_code == 422
+
+    selected = client.post(
+        f"/api/v1/pipelines/{pipeline['id']}/runs",
+        headers=headers,
+        json={
+            "trigger_type": "manual",
+            "is_dry_run": False,
+            "input_versions": {"de_1:source": first["id"]},
+        },
+    )
+    assert selected.status_code == 201
+    resolved = selected.json()["runtime_parameters"]["resolved_input_versions"]["de_1:source"]
+    assert resolved["logical_id"] == first["logical_id"]
+    assert resolved["dataset_id"] == first["id"]
+    assert resolved["version_number"] == 1
+    assert resolved["dataset_id"] != second["id"]
 
 
 def test_business_case_and_pipeline_are_owner_scoped() -> None:
@@ -427,7 +519,16 @@ def test_business_case_and_pipeline_survive_app_restart_and_relogin() -> None:
     assert versions.json()[0]["definition_hash"]
 
 
-def test_pipeline_dry_run_executes_through_worker_on_full_uploaded_csv() -> None:
+def test_pipeline_dry_run_executes_through_worker_on_full_uploaded_csv(
+    monkeypatch,
+) -> None:
+    from app.worker.tasks import execute_pipeline_run
+
+    monkeypatch.setattr(
+        execute_pipeline_run,
+        "delay",
+        lambda run_id: None,
+    )
     client = TestClient(create_app())
     token = _register(client, "alice")
     headers = {"Authorization": f"Bearer {token}"}
@@ -493,6 +594,7 @@ def test_pipeline_dry_run_executes_through_worker_on_full_uploaded_csv() -> None
     assert queued.status_code == 201
     assert queued.json()["status"] == "queued"
     run_id = queued.json()["id"]
+    execute_pipeline_run.run(run_id)
 
     deadline = time.monotonic() + 20
     run = queued.json()
@@ -576,8 +678,9 @@ def test_pipeline_dry_run_executes_through_worker_on_full_uploaded_csv() -> None
         headers=headers,
         json={"trigger_type": "manual", "is_dry_run": False},
     )
-    assert official.status_code == 201
+    assert official.status_code == 201, official.text
     official_run = official.json()
+    execute_pipeline_run.run(official_run["id"])
     deadline = time.monotonic() + 20
     while official_run["status"] in {"queued", "running"} and time.monotonic() < deadline:
         time.sleep(0.1)

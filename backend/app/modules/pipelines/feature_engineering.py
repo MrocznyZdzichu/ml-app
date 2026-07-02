@@ -45,6 +45,7 @@ class FeatureInput(BaseModel):
     input_id: str = Field(min_length=1, max_length=128)
     role: Literal["training", "validation", "test", "scoring_input"]
     dataset_id: str = Field(default="", max_length=128)
+    version_policy: Literal["latest", "select_at_run"] = "latest"
 
 
 class FeatureTransformation(BaseModel):

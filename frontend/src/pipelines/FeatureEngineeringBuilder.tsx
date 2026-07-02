@@ -161,11 +161,20 @@ export function FeatureEngineeringBuilder({
     });
   }
 
+  function updateInputVersionPolicy(index: number, versionPolicy: "latest" | "select_at_run") {
+    onChange({
+      ...definition,
+      inputs: definition.inputs.map((item, itemIndex) =>
+        itemIndex === index ? { ...item, version_policy: versionPolicy } : item
+      )
+    });
+  }
+
   function addInput(role: FeatureInputRole) {
     if (definition.inputs.some((item) => item.role === role)) return;
     onChange({
       ...definition,
-      inputs: [...definition.inputs, { input_id: role, role, dataset_id: "" }],
+      inputs: [...definition.inputs, { input_id: role, role, dataset_id: "", version_policy: "latest" }],
       outputs: [...definition.outputs, outputForRole(role)]
     });
   }
@@ -197,7 +206,7 @@ export function FeatureEngineeringBuilder({
       },
       inputs: generated
         ? [definition.inputs.find((item) => item.role === "training")
-          ?? { input_id: "training", role: "training", dataset_id: "" }]
+          ?? { input_id: "training", role: "training", dataset_id: "", version_policy: "latest" }]
         : definition.inputs,
       outputs: generated
         ? generatedOutputs(definition.evaluation.validation_size)
@@ -406,6 +415,7 @@ export function FeatureEngineeringBuilder({
               hasUpstream={hasUpstream}
               disabled={disabled}
               onDatasetChange={updateInput}
+              onVersionPolicyChange={updateInputVersionPolicy}
               onAdd={addInput}
               onRemove={removeInput}
             />
@@ -417,6 +427,7 @@ export function FeatureEngineeringBuilder({
               hasUpstream={hasUpstream}
               disabled={disabled}
               onDatasetChange={(datasetId) => updateInput(0, datasetId)}
+              onVersionPolicyChange={(policy) => updateInputVersionPolicy(0, policy)}
               onEvaluationChange={updateEvaluation}
             />
           )}
@@ -715,6 +726,7 @@ function PredefinedInputs({
   hasUpstream,
   disabled,
   onDatasetChange,
+  onVersionPolicyChange,
   onAdd,
   onRemove
 }: {
@@ -723,6 +735,7 @@ function PredefinedInputs({
   hasUpstream: boolean;
   disabled: boolean;
   onDatasetChange: (index: number, datasetId: string) => void;
+  onVersionPolicyChange: (index: number, policy: "latest" | "select_at_run") => void;
   onAdd: (role: FeatureInputRole) => void;
   onRemove: (inputId: string) => void;
 }) {
@@ -748,6 +761,7 @@ function PredefinedInputs({
             {input.role === "training" && hasUpstream ? (
               <div className="fe-upstream-badge"><GitBranch size={15} /> Connected from previous step</div>
             ) : (
+              <>
               <label className="fe-field"><span>Dataset</span>
                 <select value={input.dataset_id} disabled={disabled}
                   onChange={(event) => onDatasetChange(index, event.target.value)}>
@@ -759,6 +773,14 @@ function PredefinedInputs({
                   ))}
                 </select>
               </label>
+              <label className="fe-field"><span>Version policy</span>
+                <select value={input.version_policy ?? "latest"} disabled={disabled}
+                  onChange={(event) => onVersionPolicyChange(index, event.target.value as "latest" | "select_at_run")}>
+                  <option value="latest">Latest at run start</option>
+                  <option value="select_at_run">Select at run</option>
+                </select>
+              </label>
+              </>
             )}
             {input.role !== "training" && (
               <button className="fe-remove-link" type="button" disabled={disabled}
@@ -778,6 +800,7 @@ function GeneratedSplitControls({
   hasUpstream,
   disabled,
   onDatasetChange,
+  onVersionPolicyChange,
   onEvaluationChange
 }: {
   definition: FeatureEngineeringDefinition;
@@ -786,6 +809,7 @@ function GeneratedSplitControls({
   hasUpstream: boolean;
   disabled: boolean;
   onDatasetChange: (datasetId: string) => void;
+  onVersionPolicyChange: (policy: "latest" | "select_at_run") => void;
   onEvaluationChange: (patch: Partial<FeatureEvaluation>) => void;
 }) {
   const evaluation = definition.evaluation;
@@ -804,6 +828,15 @@ function GeneratedSplitControls({
               ))}
             </select>
           )}</div>
+        {!hasUpstream && (
+          <label className="fe-field"><span>Version policy</span>
+            <select value={definition.inputs[0]?.version_policy ?? "latest"} disabled={disabled}
+              onChange={(event) => onVersionPolicyChange(event.target.value as "latest" | "select_at_run")}>
+              <option value="latest">Latest at run start</option>
+              <option value="select_at_run">Select at run</option>
+            </select>
+          </label>
+        )}
       </div>
       <div className="fe-split-bars">
         <div className="train" style={{ flex: trainingShare }}><strong>{percent(trainingShare)}</strong><span>Train</span></div>

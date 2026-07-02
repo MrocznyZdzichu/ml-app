@@ -61,6 +61,7 @@ class DatasetService:
             name=payload.name,
             source_type=payload.source_type,
             format=payload.format,
+            logical_id=str(uuid4()),
             description=payload.description,
             location_uri=payload.location_uri,
             tags=list(payload.tags),
@@ -87,6 +88,7 @@ class DatasetService:
             name=payload.name.strip(),
             source_type=SourceType.VIEW,
             format="view",
+            logical_id=str(uuid4()),
             description=payload.description,
             location_uri=f"view://{source.id}",
             row_count=None,
@@ -180,7 +182,21 @@ class DatasetService:
         name: str | None = None,
         description: str = "",
         tags: list[str] | None = None,
+        logical_id: str | None = None,
     ) -> DataAsset:
+        logical_asset = None
+        if logical_id:
+            logical_asset = self.repository.get_latest_version(principal.user_id, logical_id)
+            if logical_asset is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Logical dataset was not found",
+                )
+            if logical_asset.source_type == SourceType.VIEW:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Data View versions cannot be uploaded",
+                )
         extension = Path(filename).suffix.lower()
         file_format = {".csv": "csv", ".parquet": "parquet"}.get(extension)
         if not file_format:
@@ -216,6 +232,9 @@ class DatasetService:
             name=name or Path(filename).stem,
             source_type=SourceType.FILE,
             format=file_format,
+            logical_id=logical_id or str(uuid4()),
+            version_number=1,
+            version_stage="source",
             description=description,
             original_filename=filename,
             location_uri=f"file://{storage_path.as_posix()}",
@@ -228,6 +247,16 @@ class DatasetService:
             tags=list(tags or []),
             metadata={"source_schema": source_schema},
         )
+        if logical_asset is not None:
+            asset.name = logical_asset.name
+            asset.description = description or logical_asset.description
+            asset.tags = list(tags if tags is not None else logical_asset.tags)
+            asset.metadata = {
+                **asset.metadata,
+                "version_of": logical_asset.logical_id,
+                "previous_version_id": logical_asset.id,
+            }
+            return self.repository.add_version(asset)
         return self.repository.add(asset)
 
     def list_assets(self, principal: Principal) -> list[DataAsset]:
@@ -237,9 +266,17 @@ class DatasetService:
         if self.temporary_outputs.recognizes(dataset_id):
             return self.temporary_outputs.resolve(dataset_id, principal.user_id)
         asset = self.repository.get(dataset_id)
+        if asset is None:
+            asset = self.repository.get_latest_version(principal.user_id, dataset_id)
         if not asset or asset.owner_id != principal.user_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found")
         return asset
+
+    def list_versions(self, logical_id: str, principal: Principal) -> list[DataAsset]:
+        versions = self.repository.list_versions(principal.user_id, logical_id)
+        if not versions:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Logical dataset not found")
+        return versions
 
     def profile(self, dataset_id: str, payload: DataAssetProfileRequest, principal: Principal) -> DataAssetProfileRead:
         asset = self.get_asset(dataset_id, principal)

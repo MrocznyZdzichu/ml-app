@@ -83,6 +83,7 @@ class PipelineRunCreate(BaseModel):
     pipeline_version_id: str | None = None
     trigger_type: PipelineRunTrigger = PipelineRunTrigger.MANUAL
     runtime_parameters: dict[str, Any] = Field(default_factory=dict)
+    input_versions: dict[str, str] = Field(default_factory=dict)
     is_dry_run: bool = False
     step_id: str | None = Field(default=None, min_length=1, max_length=128)
 

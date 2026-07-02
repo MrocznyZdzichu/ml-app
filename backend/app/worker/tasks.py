@@ -45,7 +45,10 @@ def execute_pipeline_run(run_id: str) -> dict:
     active_step_run: PipelineStepRun | None = None
     try:
         workflow = WorkflowDefinition.model_validate(
-            normalize_workflow_definition(version.definition)
+            _definition_with_resolved_inputs(
+                normalize_workflow_definition(version.definition),
+                getattr(run, "runtime_parameters", {}),
+            )
         )
         if not workflow.steps:
             raise ValueError(
@@ -60,7 +63,9 @@ def execute_pipeline_run(run_id: str) -> dict:
             else len(workflow.steps) - 1
         )
         relations: dict[tuple[str, str], SourceRelation] = {}
-        input_dataset_ids: list[str] = []
+        all_output_manifests: list[dict] = []
+        all_artifact_ids: list[str] = []
+        upstream_artifact_ids: dict[str, list[str]] = {}
         result = None
         executed_step = None
         for index, step in enumerate(workflow.steps):
@@ -79,20 +84,14 @@ def execute_pipeline_run(run_id: str) -> dict:
             repository.add_step_run(active_step_run)
             if step.type == "data_engineering":
                 definition = PipelineDefinition.model_validate(step.config["definition"])
-                input_dataset_ids.extend(item.dataset_id for item in definition.inputs)
                 de_result = DuckDbPipelineExecutionEngine().execute(
                     definition=definition,
                     run_id=run.id,
                     owner_id=run.owner_id,
-                    is_dry_run=(run.is_dry_run or requested_index > index),
+                    is_dry_run=run.is_dry_run,
                 )
                 if not de_result.output_manifest:
                     raise ValueError("Data Engineering produced no workflow output")
-                primary = de_result.output_manifest[0]
-                relations[(step.step_id, step.output_port_id)] = SourceRelation(
-                    sql=f"read_parquet({sql_literal(primary['location_uri'].removeprefix('file://'))})",
-                    row_count=int(primary["row_count"]),
-                )
                 result = de_result
             else:
                 definition = FeatureEngineeringDefinition.model_validate(step.config["definition"])
@@ -111,7 +110,6 @@ def execute_pipeline_run(run_id: str) -> dict:
                     is_dry_run=run.is_dry_run,
                     upstream_relations=bindings,
                 )
-                input_dataset_ids.extend(fe_result.input_dataset_ids)
                 result = fe_result
                 declared_ports = {
                     step.output_port_id,
@@ -134,11 +132,63 @@ def execute_pipeline_run(run_id: str) -> dict:
                         ),
                         row_count=int(dataset_manifest["row_count"]),
                     )
+            step_output_manifest = list(result.output_manifest)
+            step_input_artifact_ids = list(dict.fromkeys(
+                artifact_id
+                for port in step.inputs
+                for artifact_id in upstream_artifact_ids.get(port.source.step_id, [])
+            ))
+            if not run.is_dry_run:
+                materialized_manifest, materialized_artifact_ids = PipelineOutputMaterializer().materialize(
+                    run=run,
+                    version=version,
+                    workflow=workflow,
+                    output_manifest=step_output_manifest,
+                    step_id=step.step_id,
+                    input_dataset_ids=list(dict.fromkeys(
+                        item.dataset_id for item in (
+                            PipelineDefinition.model_validate(step.config["definition"]).inputs
+                            if step.type == "data_engineering"
+                            else FeatureEngineeringDefinition.model_validate(step.config["definition"]).inputs
+                        )
+                        if item.dataset_id
+                    )),
+                    input_artifact_ids=step_input_artifact_ids or None,
+                    step_type=step.type,
+                    output_stage=(
+                        "final"
+                        if any(output.source.step_id == step.step_id for output in workflow.outputs)
+                        else "intermediate"
+                    ),
+                )
+                step_output_manifest = materialized_manifest
+                upstream_artifact_ids[step.step_id] = materialized_artifact_ids
+                all_artifact_ids.extend(materialized_artifact_ids)
+            for manifest in step_output_manifest:
+                manifest["pipeline_step_id"] = step.step_id
+                manifest["output_stage"] = (
+                    "intermediate"
+                    if manifest.get("artifact_type") == "feature_transform"
+                    else (
+                        "final"
+                        if any(output.source.step_id == step.step_id for output in workflow.outputs)
+                        else "intermediate"
+                    )
+                )
+            all_output_manifests.extend(step_output_manifest)
+
+            if step.type == "data_engineering":
+                primary = step_output_manifest[0]
+                relations[(step.step_id, step.output_port_id)] = SourceRelation(
+                    sql=f"read_parquet({sql_literal(primary['location_uri'].removeprefix('file://'))})",
+                    row_count=int(primary["row_count"]),
+                )
+
             active_step_run.input_row_count = result.input_row_count
             active_step_run.processed_row_count = result.processed_row_count
             active_step_run.output_row_count = result.output_row_count
             active_step_run.warnings = result.warnings
-            active_step_run.output_manifest = result.output_manifest
+            active_step_run.output_manifest = step_output_manifest
             active_step_run.status = PipelineRunStatus.SUCCEEDED
             active_step_run.finished_at = datetime.now(timezone.utc)
             repository.update_step_run(active_step_run)
@@ -149,17 +199,8 @@ def execute_pipeline_run(run_id: str) -> dict:
         run.processed_row_count = result.processed_row_count
         run.output_row_count = result.output_row_count
         run.rejected_row_count = 0
-        run.output_manifest = result.output_manifest
-        if not run.is_dry_run:
-            run.output_manifest, run.output_artifact_ids = PipelineOutputMaterializer().materialize(
-                run=run,
-                version=version,
-                workflow=workflow,
-                output_manifest=result.output_manifest,
-                step_id=executed_step.step_id,
-                input_dataset_ids=list(dict.fromkeys(input_dataset_ids)),
-                step_type=executed_step.type,
-            )
+        run.output_manifest = all_output_manifests
+        run.output_artifact_ids = list(dict.fromkeys(all_artifact_ids))
         run.warnings = result.warnings
         run.status = PipelineRunStatus.SUCCEEDED
     except Exception as exc:
@@ -229,6 +270,45 @@ def _load_analysis_asset(dataset_id: str, owner_id: str, repository: PostgresDat
     if asset is None or asset.owner_id != owner_id:
         raise ValueError("Dataset not found")
     return asset
+
+
+def _definition_with_resolved_inputs(
+    definition: dict,
+    runtime_parameters: dict,
+) -> dict:
+    resolved = runtime_parameters.get("resolved_input_versions", {})
+    if not isinstance(resolved, dict):
+        return definition
+    copied = {
+        **definition,
+        "steps": [
+            {
+                **step,
+                "config": {
+                    **dict(step.get("config") or {}),
+                    "definition": {
+                        **dict(dict(step.get("config") or {}).get("definition") or {}),
+                        "inputs": [
+                            {
+                                **item,
+                                "dataset_id": str(
+                                    dict(resolved.get(
+                                        f"{step.get('step_id')}:{item.get('input_id')}",
+                                        {},
+                                    )).get("dataset_id") or item.get("dataset_id") or ""
+                                ),
+                            }
+                            for item in dict(
+                                dict(step.get("config") or {}).get("definition") or {}
+                            ).get("inputs", [])
+                        ],
+                    },
+                },
+            }
+            for step in definition.get("steps", [])
+        ],
+    }
+    return copied
 
 
 @celery_app.task(name="app.worker.tasks.train_model")

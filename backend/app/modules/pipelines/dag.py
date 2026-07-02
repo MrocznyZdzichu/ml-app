@@ -19,6 +19,7 @@ class PipelineInput(BaseModel):
     input_id: str = Field(min_length=1, max_length=128)
     dataset_id: str = Field(min_length=1, max_length=128)
     output_port_id: str = Field(default="out", min_length=1, max_length=128)
+    version_policy: Literal["latest", "select_at_run"] = "latest"
 
 
 class StepInputPort(BaseModel):

@@ -7,6 +7,7 @@ export type PipelineInputDefinition = {
   input_id: string;
   dataset_id: string;
   output_port_id: string;
+  version_policy: "latest" | "select_at_run";
 };
 
 export type PipelineStepDefinition = {
@@ -62,7 +63,14 @@ export function normalizePipelineDefinition(value: unknown): PipelineDefinition 
     : [];
   return rewireSequentialFlow({
     contract_version: "1.0",
-    inputs: Array.isArray(raw.inputs) ? raw.inputs as PipelineInputDefinition[] : [],
+    inputs: Array.isArray(raw.inputs)
+      ? (raw.inputs as Array<Partial<PipelineInputDefinition>>).map((input) => ({
+          input_id: String(input.input_id ?? "source"),
+          dataset_id: String(input.dataset_id ?? ""),
+          output_port_id: String(input.output_port_id ?? "out"),
+          version_policy: input.version_policy === "select_at_run" ? "select_at_run" : "latest"
+        }))
+      : [],
     steps,
     outputs: Array.isArray(raw.outputs)
       ? (raw.outputs as Array<Partial<PipelineOutputDefinition>>).map((output) => ({

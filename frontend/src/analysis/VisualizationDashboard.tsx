@@ -308,7 +308,7 @@ export function VisualizationDashboard({ datasets, datasetId, setDatasetId, setN
             Dataset
             <select value={datasetId} onChange={(event) => setDatasetId(event.target.value)}>
               <option value="">Choose a dataset…</option>
-              {datasets.map((dataset) => <option key={dataset.id} value={dataset.id}>{dataset.name}</option>)}
+              {datasets.map((dataset) => <option key={dataset.id} value={dataset.id}>{datasetVersionLabel(dataset, datasets)}</option>)}
             </select>
           </label>
           <button className="secondary-button" onClick={smartStart} disabled={!preview} type="button">
@@ -418,6 +418,16 @@ export function VisualizationDashboard({ datasets, datasetId, setDatasetId, setN
       )}
     </div>
   );
+}
+
+function datasetVersionLabel(dataset: DataAsset, datasets: DataAsset[]) {
+  const latest = Math.max(
+    ...datasets
+      .filter((item) => item.logical_id === dataset.logical_id && item.status !== "deleted")
+      .map((item) => item.version_number),
+    dataset.version_number
+  );
+  return `${dataset.name} · v${dataset.version_number}${dataset.version_number === latest ? " (latest)" : ""}`;
 }
 
 function ChartInspector({ chart, columns, datasetId, rows, onChange }: { chart: ChartConfig; columns: DatasetColumn[]; datasetId: string; rows: RecordRow[]; onChange: (patch: Partial<ChartConfig>) => void }) {

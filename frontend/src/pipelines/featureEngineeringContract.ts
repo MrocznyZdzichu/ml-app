@@ -13,6 +13,7 @@ export type FeatureInput = {
   input_id: string;
   role: FeatureInputRole;
   dataset_id: string;
+  version_policy: "latest" | "select_at_run";
 };
 
 export type FeatureTransformation = {
@@ -65,7 +66,7 @@ export function emptyFeatureEngineeringDefinition(): FeatureEngineeringDefinitio
   return {
     contract_version: "1.0",
     mode: "fit_transform",
-    inputs: [{ input_id: "training", role: "training", dataset_id: "" }],
+    inputs: [{ input_id: "training", role: "training", dataset_id: "", version_policy: "latest" }],
     feature_columns: [],
     target_column: "",
     row_id_column: "",
@@ -90,7 +91,12 @@ export function normalizeFeatureEngineeringDefinition(value: unknown): FeatureEn
   return {
     ...fallback,
     mode: raw.mode === "transform" ? "transform" : "fit_transform",
-    inputs: Array.isArray(raw.inputs) ? raw.inputs as FeatureInput[] : fallback.inputs,
+    inputs: Array.isArray(raw.inputs)
+      ? (raw.inputs as FeatureInput[]).map((input) => ({
+          ...input,
+          version_policy: input.version_policy === "select_at_run" ? "select_at_run" : "latest"
+        }))
+      : fallback.inputs,
     feature_columns: stringArray(raw.feature_columns),
     target_column: String(raw.target_column ?? ""),
     row_id_column: String(raw.row_id_column ?? ""),

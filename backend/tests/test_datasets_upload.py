@@ -74,6 +74,51 @@ def test_csv_upload_stores_metadata_and_is_private_by_default() -> None:
     assert persisted.has_header is True
 
 
+def test_upload_can_create_an_immutable_version_of_a_logical_dataset() -> None:
+    client = TestClient(create_app())
+    token = _register(client, "version-owner")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    first = client.post(
+        "/api/v1/datasets/upload",
+        headers=headers,
+        data={"name": "Iris"},
+        files={"file": ("iris-v1.csv", b"id,species\n1,setosa\n", "text/csv")},
+    )
+    assert first.status_code == 201
+    first_dataset = first.json()
+    assert first_dataset["logical_id"] != first_dataset["id"]
+    assert first_dataset["version_number"] == 1
+
+    second = client.post(
+        "/api/v1/datasets/upload",
+        headers=headers,
+        data={"name": "Ignored rename", "logical_id": first_dataset["logical_id"]},
+        files={"file": ("iris-v2.csv", b"id,species\n1,setosa\n2,versicolor\n", "text/csv")},
+    )
+    assert second.status_code == 201
+    second_dataset = second.json()
+    assert second_dataset["id"] != first_dataset["id"]
+    assert second_dataset["logical_id"] == first_dataset["logical_id"]
+    assert second_dataset["version_number"] == 2
+    assert second_dataset["name"] == "Iris"
+    assert second_dataset["row_count"] == 2
+
+    versions = client.get(
+        f"/api/v1/datasets/{first_dataset['logical_id']}/versions",
+        headers=headers,
+    )
+    assert versions.status_code == 200
+    assert [item["version_number"] for item in versions.json()] == [1, 2]
+
+    latest = client.get(
+        f"/api/v1/datasets/{first_dataset['logical_id']}",
+        headers=headers,
+    )
+    assert latest.status_code == 200
+    assert latest.json()["id"] == second_dataset["id"]
+
+
 def test_parquet_upload_is_native_and_available_to_dataset_tools(tmp_path: Path) -> None:
     parquet_path = tmp_path / "customers.parquet"
     connection = duckdb.connect()
