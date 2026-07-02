@@ -429,6 +429,14 @@ class PostgresPipelineRepository:
                 "ALTER TABLE mlapp.pipeline_runs "
                 "ADD COLUMN IF NOT EXISTS requested_step_id VARCHAR(128) NOT NULL DEFAULT ''"
             ))
+            connection.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_pipeline_runs_owner_created_at "
+                "ON mlapp.pipeline_runs (owner_id, created_at DESC)"
+            ))
+            connection.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_pipeline_runs_owner_pipeline_created_at "
+                "ON mlapp.pipeline_runs (owner_id, pipeline_id, created_at DESC)"
+            ))
         self._initialized = True
 
     def _pipeline_to_record(self, pipeline: Pipeline) -> dict[str, object]:

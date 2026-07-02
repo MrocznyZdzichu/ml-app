@@ -1,6 +1,12 @@
 import type { DataAsset, DatasetColumn } from "../api/client";
 import type { PipelineDefinition, PipelineStepDefinition } from "./pipelineContract";
 
+export type PipelineSchemaColumn = DatasetColumn & {
+  role?: string;
+};
+
+type ColumnRoleResolver = (dataset: DataAsset | undefined) => Record<string, string>;
+
 export function datasetColumns(
   dataset: DataAsset | undefined,
   cache: Record<string, DatasetColumn[]>
@@ -29,39 +35,71 @@ export function inferPipelineOutputColumns(
   if (!definition) return [];
   const output = definition.outputs[0];
   if (!output) return [];
-  return columnsForNode(definition, datasets, cache, output.input.node_id);
+  return inferPipelineNodeColumns(definition, datasets, cache, output.input.node_id);
 }
 
 export function inputDatasetIds(definition: PipelineDefinition | undefined): string[] {
   return definition?.inputs.map((input) => input.dataset_id).filter(Boolean) ?? [];
 }
 
-function columnsForNode(
+export function inferPipelineStepInputColumns(
+  definition: PipelineDefinition,
+  datasets: DataAsset[],
+  cache: Record<string, DatasetColumn[]>,
+  step: PipelineStepDefinition,
+  resolveRoles?: ColumnRoleResolver
+): PipelineSchemaColumn[] {
+  return mergeColumns(step.inputs.flatMap((input) =>
+    inferPipelineNodeColumns(
+      definition,
+      datasets,
+      cache,
+      input.source.node_id,
+      new Set<string>(),
+      resolveRoles
+    )
+  ));
+}
+
+export function inferPipelineNodeColumns(
   definition: PipelineDefinition,
   datasets: DataAsset[],
   cache: Record<string, DatasetColumn[]>,
   nodeId: string,
-  visited = new Set<string>()
-): DatasetColumn[] {
+  visited = new Set<string>(),
+  resolveRoles?: ColumnRoleResolver
+): PipelineSchemaColumn[] {
   if (visited.has(nodeId)) return [];
   visited.add(nodeId);
   const input = definition.inputs.find((item) => item.input_id === nodeId);
   if (input) {
-    return datasetColumns(datasets.find((item) => item.id === input.dataset_id), cache);
+    const dataset = datasets.find((item) => item.id === input.dataset_id);
+    const roles = resolveRoles?.(dataset) ?? {};
+    return datasetColumns(dataset, cache).map((column) => ({
+      ...column,
+      role: roles[column.name]
+    }));
   }
   const step = definition.steps.find((item) => item.step_id === nodeId);
   if (!step) return [];
   const inputColumns = step.inputs.map((item) =>
-    columnsForNode(definition, datasets, cache, item.source.node_id, new Set(visited))
+    inferPipelineNodeColumns(
+      definition,
+      datasets,
+      cache,
+      item.source.node_id,
+      new Set(visited),
+      resolveRoles
+    )
   );
   return transformColumns(step, mergeColumns(inputColumns.flat()), inputColumns);
 }
 
 function transformColumns(
   step: PipelineStepDefinition,
-  upstream: DatasetColumn[],
-  inputColumns: DatasetColumn[][]
-): DatasetColumn[] {
+  upstream: PipelineSchemaColumn[],
+  inputColumns: PipelineSchemaColumn[][]
+): PipelineSchemaColumn[] {
   if (step.type === "select_columns") {
     const selected = new Set(stringList(step.config.columns));
     return upstream.filter((column) => selected.has(column.name));
@@ -183,8 +221,8 @@ function frontendTypeForCast(type: string): DatasetColumn["type"] {
   return "text";
 }
 
-function mergeColumns(columns: DatasetColumn[]): DatasetColumn[] {
-  const result = new Map<string, DatasetColumn>();
+function mergeColumns(columns: PipelineSchemaColumn[]): PipelineSchemaColumn[] {
+  const result = new Map<string, PipelineSchemaColumn>();
   for (const column of columns) if (!result.has(column.name)) result.set(column.name, column);
   return [...result.values()];
 }

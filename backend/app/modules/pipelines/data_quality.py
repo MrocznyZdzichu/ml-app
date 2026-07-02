@@ -100,16 +100,28 @@ def evaluate_data_contract(
             )
 
     relation = identifier(relation_name)
-    if predicates:
-        selections = ", ".join(
+    reject_predicates = [
+        f"({predicate})"
+        for _, _, predicate, policy in predicates
+        if policy == "reject"
+    ]
+    selections = ["count(*) AS checked_row_count"]
+    selections.extend(
             f"count(*) FILTER (WHERE {predicate}) AS {identifier(f'check_{index}')}"
             for index, (_, _, predicate, _) in enumerate(predicates)
+    )
+    if reject_predicates:
+        selections.append(
+            "count(*) FILTER (WHERE "
+            + " OR ".join(reject_predicates)
+            + ") AS rejected_row_count"
         )
-        counts = connection.execute(f"SELECT {selections} FROM {relation}").fetchone()
-    else:
-        counts = ()
+    aggregate = connection.execute(
+        f"SELECT {', '.join(selections)} FROM {relation}"
+    ).fetchone()
+    row_count = int(aggregate[0])
+    counts = aggregate[1:1 + len(predicates)]
 
-    reject_predicates: list[str] = []
     reject_reasons: list[str] = []
     failed: list[str] = []
     for index, (column, check, predicate, policy) in enumerate(predicates):
@@ -130,24 +142,18 @@ def evaluate_data_contract(
         elif policy == "warn":
             warnings.append(f"Quality check {label} failed for {violations} row(s)")
         else:
-            reject_predicates.append(f"({predicate})")
             reject_reasons.append(f"CASE WHEN {predicate} THEN {sql_literal(label)} END")
 
     if failed:
         raise ValueError("Data contract validation failed: " + ", ".join(failed))
 
     reject_predicate = " OR ".join(reject_predicates) if reject_predicates else "FALSE"
-    rejected_row_count = (
-        int(connection.execute(f"SELECT count(*) FROM {relation} WHERE {reject_predicate}").fetchone()[0])
-        if reject_predicates
-        else 0
-    )
+    rejected_row_count = int(aggregate[-1]) if reject_predicates else 0
     reason_expression = (
         f"concat_ws('; ', {', '.join(reject_reasons)})"
         if reject_reasons
         else "''"
     )
-    row_count = int(connection.execute(f"SELECT count(*) FROM {relation}").fetchone()[0])
     status = "passed"
     if rejected_row_count or warnings or drift:
         status = "issues_detected"

@@ -18,7 +18,11 @@ import {
   rewireSequentialFlow,
   sanitizeCategoryMapping
 } from "./pipelineContract";
-import { inferPipelineOutputColumns } from "./pipelineSchema";
+import {
+  inferPipelineNodeColumns,
+  inferPipelineOutputColumns,
+  inferPipelineStepInputColumns
+} from "./pipelineSchema";
 
 export type {
   PipelineDefinition,
@@ -102,7 +106,8 @@ export function PipelineBuilder({
   useEffect(() => {
     let changed = false;
     const steps = definition.steps.map((step) => {
-      const columns = columnsForStepInputs(definition, datasets, schemaCache, step);
+      const columns = inferPipelineStepInputColumns(definition, datasets, schemaCache, step)
+        .map((column) => column.name);
       const serialized = JSON.stringify(step.config);
       if (
         columns.length
@@ -167,7 +172,8 @@ export function PipelineBuilder({
     const stepId = nextStableId("step", new Set(definition.steps.map((step) => step.step_id)));
     const source = available[available.length - 1].reference;
     const secondSource = available.length > 1 ? available[available.length - 2].reference : source;
-    const upstreamColumns = columnsForNode(definition, datasets, schemaCache, source.node_id);
+    const upstreamColumns = inferPipelineNodeColumns(definition, datasets, schemaCache, source.node_id)
+      .map((column) => column.name);
     const step: PipelineStepDefinition = {
       step_id: stepId,
       type,
@@ -192,7 +198,8 @@ export function PipelineBuilder({
     const first = step.inputs[0]?.source ?? sources.at(-1)?.reference;
     if (!first) return;
     const second = step.inputs[1]?.source ?? sources.at(-2)?.reference ?? first;
-    const upstreamColumns = columnsForNode(definition, datasets, schemaCache, first.node_id);
+    const upstreamColumns = inferPipelineNodeColumns(definition, datasets, schemaCache, first.node_id)
+      .map((column) => column.name);
     updateStep(index, {
       ...step,
       type,
@@ -349,9 +356,9 @@ export function PipelineBuilder({
             step={definition.steps[selectedStepIndex]}
             index={selectedStepIndex}
             sourceOptions={availableSources(definition, selectedStepIndex)}
-            availableColumns={columnMetadataForStepInputs(definition, datasets, schemaCache, definition.steps[selectedStepIndex])}
+            availableColumns={inferPipelineStepInputColumns(definition, datasets, schemaCache, definition.steps[selectedStepIndex], columnRoles)}
             inputColumns={definition.steps[selectedStepIndex].inputs.map((input) =>
-              columnMetadataForNode(definition, datasets, schemaCache, input.source.node_id)
+              inferPipelineNodeColumns(definition, datasets, schemaCache, input.source.node_id, new Set<string>(), columnRoles)
             )}
             sourceDatasetIds={datasetIdsForStepInputs(definition, definition.steps[selectedStepIndex])}
             disabled={disabled}
@@ -1133,81 +1140,6 @@ function normalizeColumnType(value: string): DatasetColumn["type"] {
     : "text";
 }
 
-function columnsForStepInputs(
-  definition: PipelineDefinition,
-  datasets: DataAsset[],
-  cache: Record<string, DatasetColumn[]>,
-  step: PipelineStepDefinition
-): string[] {
-  return Array.from(new Set(
-    step.inputs.flatMap((input) => columnsForNode(definition, datasets, cache, input.source.node_id))
-  ));
-}
-
-function columnMetadataForStepInputs(
-  definition: PipelineDefinition,
-  datasets: DataAsset[],
-  cache: Record<string, DatasetColumn[]>,
-  step: PipelineStepDefinition
-): PipelineColumn[] {
-  return mergeColumns(step.inputs.flatMap((input) => columnMetadataForNode(definition, datasets, cache, input.source.node_id)));
-}
-
-function columnMetadataForNode(
-  definition: PipelineDefinition,
-  datasets: DataAsset[],
-  cache: Record<string, DatasetColumn[]>,
-  nodeId: string,
-  visited = new Set<string>()
-): PipelineColumn[] {
-  if (visited.has(nodeId)) return [];
-  visited.add(nodeId);
-  const input = definition.inputs.find((item) => item.input_id === nodeId);
-  if (input) {
-    const dataset = datasets.find((item) => item.id === input.dataset_id);
-    const roles = columnRoles(dataset);
-    return columnsForDataset(dataset, cache).map((column) => ({ ...column, role: roles[column.name] }));
-  }
-  const step = definition.steps.find((item) => item.step_id === nodeId);
-  if (!step) return [];
-  const upstream = mergeColumns(step.inputs.flatMap((item) =>
-    columnMetadataForNode(definition, datasets, cache, item.source.node_id, new Set(visited))
-  ));
-  if (step.type === "select_columns") {
-    const selected = new Set(stringList(step.config.columns));
-    return upstream.filter((column) => selected.has(column.name));
-  }
-  if (step.type === "rename_columns") {
-    const renames = recordValue(step.config.renames);
-    return upstream.map((column) => ({ ...column, name: String(renames[column.name] ?? column.name) }));
-  }
-  if (step.type === "cast_columns") {
-    const casts = recordValue(step.config.casts);
-    return upstream.map((column) => casts[column.name] ? { ...column, type: frontendTypeForCast(String(casts[column.name])) } : column);
-  }
-  if (step.type === "derive_column") {
-    const expression = recordValue(step.config.expression);
-    const left = recordValue(expression.left);
-    const source = upstream.find((column) => column.name === left.column);
-    return mergeColumns([...upstream, { name: String(step.config.name ?? "new_column"), type: expression.operator === "concat" ? "text" : source?.type ?? "number" }]);
-  }
-  if (step.type === "add_identifier") {
-    return mergeColumns([...upstream, {
-      name: String(step.config.output_column ?? "row_id"),
-      type: step.config.mode === "sequence" ? "number" : "text"
-    }]);
-  }
-  if (step.type === "aggregate") {
-    const grouped = stringList(step.config.group_by).map((name) => upstream.find((column) => column.name === name) ?? { name, type: "text" as const });
-    const metrics: PipelineColumn[] = recordList(step.config.aggregations).map((item) => ({ name: String(item.alias ?? "metric"), type: "number" }));
-    return mergeColumns([...grouped, ...metrics]);
-  }
-  if (step.type === "map_categories" && step.config.output_column) {
-    return mergeColumns([...upstream, { name: String(step.config.output_column), type: "text" }]);
-  }
-  return upstream;
-}
-
 function datasetIdsForStepInputs(definition: PipelineDefinition, step: PipelineStepDefinition): string[] {
   return Array.from(new Set(step.inputs.flatMap((input) => datasetIdsForNode(definition, input.source.node_id))));
 }
@@ -1226,58 +1158,6 @@ function columnRoles(dataset: DataAsset | undefined): Record<string, string> {
   const dataRoles = recordValue(dataset.metadata.data_roles);
   const roles = recordValue(dataRoles.column_roles);
   return Object.fromEntries(Object.entries(roles).map(([name, role]) => [name, String(role)]));
-}
-
-function mergeColumns(columns: PipelineColumn[]): PipelineColumn[] {
-  const result = new Map<string, PipelineColumn>();
-  for (const column of columns) if (!result.has(column.name)) result.set(column.name, column);
-  return [...result.values()];
-}
-
-function columnsForNode(
-  definition: PipelineDefinition,
-  datasets: DataAsset[],
-  cache: Record<string, DatasetColumn[]>,
-  nodeId: string,
-  visited = new Set<string>()
-): string[] {
-  if (visited.has(nodeId)) return [];
-  visited.add(nodeId);
-  const input = definition.inputs.find((item) => item.input_id === nodeId);
-  if (input) {
-    return columnsForDataset(
-      datasets.find((dataset) => dataset.id === input.dataset_id),
-      cache
-    ).map((column) => column.name);
-  }
-  const step = definition.steps.find((item) => item.step_id === nodeId);
-  if (!step) return [];
-  const upstream = Array.from(new Set(
-    step.inputs.flatMap((item) =>
-      columnsForNode(definition, datasets, cache, item.source.node_id, new Set(visited))
-    )
-  ));
-  if (step.type === "select_columns") return stringList(step.config.columns);
-  if (step.type === "rename_columns") {
-    const renames = recordValue(step.config.renames);
-    return upstream.map((column) => String(renames[column] ?? column));
-  }
-  if (step.type === "derive_column") {
-    return Array.from(new Set([...upstream, String(step.config.name ?? "new_column")]));
-  }
-  if (step.type === "add_identifier") {
-    return Array.from(new Set([...upstream, String(step.config.output_column ?? "row_id")]));
-  }
-  if (step.type === "aggregate") {
-    return [
-      ...stringList(step.config.group_by),
-      ...recordList(step.config.aggregations).map((item) => String(item.alias ?? "metric")),
-    ];
-  }
-  if (step.type === "map_categories" && step.config.output_column) {
-    return Array.from(new Set([...upstream, String(step.config.output_column)]));
-  }
-  return upstream;
 }
 
 function datasetOutput(
@@ -1398,14 +1278,6 @@ function suggestedDuckDbType(type: DatasetColumn["type"]) {
 
 function defaultValueForType(type: DatasetColumn["type"]) {
   return type === "number" ? 0 : type === "boolean" ? false : "";
-}
-
-function frontendTypeForCast(type: string): DatasetColumn["type"] {
-  const upper = type.toUpperCase();
-  if (upper.includes("BOOL")) return "boolean";
-  if (upper.includes("DATE") || upper.includes("TIME")) return "date";
-  if (["INT", "DECIMAL", "DOUBLE", "FLOAT", "REAL"].some((token) => upper.includes(token))) return "number";
-  return "text";
 }
 
 function compatibleTypes(left: DatasetColumn["type"], right: DatasetColumn["type"]) {
