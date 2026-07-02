@@ -1,27 +1,27 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
-from datetime import date, datetime
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, Protocol
-from uuid import uuid4
-
 import duckdb
 
-from app.core.config import settings
 from app.modules.datasets.domain import DataAsset, DataAssetStatus, SourceType
 from app.modules.datasets.repository import DatasetRepository, PostgresDatasetRepository
 from app.modules.datasets.sources import CsvFileDatasetSource
 from app.modules.pipelines.dag import PipelineDefinition, PipelineStep, topological_order
-from app.shared.sql_security import bind_user_sql_to_inputs, validate_filter_sql
-
-
-@dataclass(frozen=True)
-class SourceRelation:
-    sql: str
-    row_count: int
+from app.modules.pipelines.runtime import (
+    SourceRelation,
+    json_safe,
+    relation_columns,
+    safe_filename,
+    sql_literal,
+)
+from app.shared.sql_security import (
+    bind_user_sql_to_inputs,
+    identifier,
+    validate_filter_sql,
+)
+from app.shared.duckdb_runtime import configured_duckdb_connection, write_parquet_atomic
 
 
 class PipelineInputAdapter(Protocol):
@@ -108,12 +108,7 @@ class DuckDbPipelineExecutionEngine:
     ) -> PipelineExecutionResult:
         run_directory = self._run_directory(owner_id, run_id)
         temp_directory = run_directory / ".duckdb-tmp"
-        temp_directory.mkdir(parents=True, exist_ok=True)
-        connection = duckdb.connect(database=":memory:")
-        connection.execute(f"SET temp_directory = {sql_literal(str(temp_directory))}")
-        connection.execute(f"SET threads = {settings.duckdb_threads}")
-        connection.execute(f"SET memory_limit = {sql_literal(settings.duckdb_memory_limit)}")
-        connection.execute("SET preserve_insertion_order = false")
+        connection = configured_duckdb_connection(temp_directory)
         relations: dict[tuple[str, str], str] = {}
         input_counts: list[int] = []
         manifests: list[dict[str, Any]] = []
@@ -141,23 +136,13 @@ class DuckDbPipelineExecutionEngine:
                     output = outputs[node_id]
                     upstream = relations[(output.input.node_id, output.input.port_id)]
                     destination = run_directory / f"{safe_filename(output.output_id)}.parquet"
-                    temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
-                    try:
-                        connection.execute(
-                            f"COPY (SELECT * FROM {identifier(upstream)}) TO {sql_literal(str(temporary))} "
-                            "(FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 122880)"
-                        )
-                        os.replace(temporary, destination)
-                    finally:
-                        temporary.unlink(missing_ok=True)
-                    row_count = int(
-                        connection.execute(
-                            f"SELECT count(*) FROM read_parquet({sql_literal(str(destination))})"
-                        ).fetchone()[0]
+                    write_stats = write_parquet_atomic(
+                        connection,
+                        f"SELECT * FROM {identifier(upstream)}",
+                        destination,
                     )
-                    schema_rows = connection.execute(
-                        f"DESCRIBE SELECT * FROM read_parquet({sql_literal(str(destination))})"
-                    ).fetchall()
+                    row_count = write_stats.row_count
+                    schema_rows = write_stats.schema_rows
                     effective_materialization = "temporary" if is_dry_run else output.materialization
                     preview_cursor = connection.execute(
                         f"SELECT * FROM read_parquet({sql_literal(str(destination))}) LIMIT 50"
@@ -502,29 +487,6 @@ def compile_expression(expression: dict[str, Any]) -> str:
     )
 
 
-def relation_columns(connection: duckdb.DuckDBPyConnection, view_name: str) -> list[str]:
-    return [
-        str(row[0])
-        for row in connection.execute(f"DESCRIBE SELECT * FROM {identifier(view_name)}").fetchall()
-    ]
-
-
-def identifier(value: str) -> str:
-    if not value or "\x00" in value:
-        raise ValueError("SQL identifier cannot be empty or contain NUL")
-    return '"' + value.replace('"', '""') + '"'
-
-
-def sql_literal(value: Any) -> str:
-    if value is None:
-        return "NULL"
-    if isinstance(value, bool):
-        return "TRUE" if value else "FALSE"
-    if isinstance(value, (int, float)):
-        return str(value)
-    return "'" + str(value).replace("'", "''") + "'"
-
-
 def validated_type(value: str) -> str:
     normalized = value.strip().upper()
     allowed = {
@@ -558,17 +520,3 @@ def require_string_list(value: Any, name: str, allow_empty: bool = False) -> lis
 
 def internal_name(kind: str, stable_id: str) -> str:
     return f"__mlapp_{kind}_{stable_id}"
-
-
-def safe_filename(value: str) -> str:
-    return "".join(character if character.isalnum() or character in "-_." else "_" for character in value)
-
-
-def json_safe(value: Any) -> Any:
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
-    if isinstance(value, bytes):
-        return value.hex()
-    return value

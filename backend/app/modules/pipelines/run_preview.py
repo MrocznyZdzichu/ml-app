@@ -9,7 +9,7 @@ from fastapi import HTTPException, status
 
 from app.core.config import settings
 from app.modules.pipelines.domain import PipelineRun, PipelineRunStatus
-from app.modules.pipelines.execution import json_safe, sql_literal
+from app.modules.pipelines.runtime import json_safe, sql_literal
 
 
 class PipelineRunOutputReader:

@@ -2,6 +2,8 @@ import os
 import hashlib
 import json
 import threading
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -9,19 +11,25 @@ from uuid import uuid4
 import duckdb
 from fastapi import HTTPException, status
 
-from app.core.config import settings
 from app.modules.datasets.domain import DataAsset, SourceType
 from app.shared.sql_security import bind_user_sql_to_inputs
+from app.shared.duckdb_runtime import configured_duckdb_connection
 
 
 AssetLoader = Callable[[str], DataAsset]
+
+
+@dataclass
+class _ConversionLock:
+    lock: threading.Lock
+    users: int = 0
 
 
 class ColumnarDatasetStore:
     """Provides a reusable Parquet representation for full-dataset analytics."""
 
     _locks_guard = threading.Lock()
-    _conversion_locks: dict[str, threading.Lock] = {}
+    _conversion_locks: dict[str, _ConversionLock] = {}
 
     def __init__(self, repository_root: Path | None = None) -> None:
         self.repository_root = (repository_root or Path("data/repository")).resolve()
@@ -37,13 +45,7 @@ class ColumnarDatasetStore:
     def connect(self, asset: DataAsset) -> duckdb.DuckDBPyConnection:
         dataset_dir = self.analytics_directory(asset)
         temporary_dir = dataset_dir / ".duckdb-tmp"
-        temporary_dir.mkdir(parents=True, exist_ok=True)
-        connection = duckdb.connect(database=":memory:")
-        connection.execute(f"SET temp_directory = {self.literal(str(temporary_dir))}")
-        connection.execute(f"SET threads = {settings.duckdb_threads}")
-        connection.execute(f"SET memory_limit = {self.literal(settings.duckdb_memory_limit)}")
-        connection.execute("SET preserve_insertion_order = false")
-        return connection
+        return configured_duckdb_connection(temporary_dir)
 
     def ensure_parquet(self, asset: DataAsset, load_asset: AssetLoader | None = None, depth: int = 0) -> Path:
         if asset.source_type == SourceType.VIEW:
@@ -58,9 +60,7 @@ class ColumnarDatasetStore:
             return parquet_path
 
         lock_key = str(parquet_path.resolve())
-        with self._locks_guard:
-            conversion_lock = self._conversion_locks.setdefault(lock_key, threading.Lock())
-        with conversion_lock:
+        with self._conversion_lock(lock_key):
             if parquet_path.exists() and parquet_path.stat().st_mtime_ns >= source_path.stat().st_mtime_ns:
                 return parquet_path
             return self._build_parquet(asset, source_path, parquet_path)
@@ -85,9 +85,7 @@ class ColumnarDatasetStore:
         # definition-specific filename would let two revisions concurrently
         # delete each other's freshly written cache during stale-file cleanup.
         lock_key = str((view_directory / "dataset.mlapp.view.lock").resolve())
-        with self._locks_guard:
-            conversion_lock = self._conversion_locks.setdefault(lock_key, threading.Lock())
-        with conversion_lock:
+        with self._conversion_lock(lock_key):
             if parquet_path.exists() and parquet_path.stat().st_mtime_ns >= source_parquet.stat().st_mtime_ns:
                 return parquet_path
             temporary_path = parquet_path.with_name(f".{parquet_path.name}.{uuid4().hex}.tmp")
@@ -122,6 +120,24 @@ class ColumnarDatasetStore:
                 connection.close()
                 temporary_path.unlink(missing_ok=True)
             return parquet_path
+
+    @classmethod
+    @contextmanager
+    def _conversion_lock(cls, lock_key: str):
+        with cls._locks_guard:
+            entry = cls._conversion_locks.get(lock_key)
+            if entry is None:
+                entry = _ConversionLock(threading.Lock())
+                cls._conversion_locks[lock_key] = entry
+            entry.users += 1
+        try:
+            with entry.lock:
+                yield
+        finally:
+            with cls._locks_guard:
+                entry.users -= 1
+                if entry.users == 0 and cls._conversion_locks.get(lock_key) is entry:
+                    cls._conversion_locks.pop(lock_key, None)
 
     def _view_query(
         self,

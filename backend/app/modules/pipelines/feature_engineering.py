@@ -15,7 +15,6 @@ import duckdb
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.core.config import settings
 from app.modules.business_cases.domain import ArtifactType
 from app.modules.business_cases.repository import (
     BusinessCaseRepository,
@@ -24,14 +23,20 @@ from app.modules.business_cases.repository import (
 from app.modules.pipelines.execution import (
     CsvDatasetInputAdapter,
     PipelineInputAdapter,
+)
+from app.modules.pipelines.runtime import (
     SourceRelation,
-    identifier,
     json_safe,
     relation_columns,
     safe_filename,
     sql_literal,
 )
-from app.shared.sql_security import validate_scalar_sql_expression
+from app.shared.sql_security import identifier, validate_scalar_sql_expression
+from app.shared.duckdb_runtime import (
+    ParquetWriteStats,
+    configured_duckdb_connection,
+    write_parquet_atomic,
+)
 
 
 class FeatureInput(BaseModel):
@@ -312,12 +317,7 @@ class DuckDbFeatureEngineeringEngine:
         definition.validate_executable()
         run_directory = self._run_directory(owner_id, run_id)
         temp_directory = run_directory / ".duckdb-fe-tmp"
-        temp_directory.mkdir(parents=True, exist_ok=True)
-        connection = duckdb.connect(database=":memory:")
-        connection.execute(f"SET temp_directory = {sql_literal(str(temp_directory))}")
-        connection.execute(f"SET threads = {settings.duckdb_threads}")
-        connection.execute(f"SET memory_limit = {sql_literal(settings.duckdb_memory_limit)}")
-        connection.execute("SET preserve_insertion_order = false")
+        connection = configured_duckdb_connection(temp_directory)
         relations: dict[str, str] = {}
         input_counts: dict[str, int] = {}
         input_dataset_ids: list[str] = []
@@ -375,10 +375,11 @@ class DuckDbFeatureEngineeringEngine:
             for output in definition.outputs:
                 source_view = transformed[output.input_id]
                 destination = run_directory / f"fe-{safe_filename(output.output_id)}.parquet"
-                self._write_parquet(connection, source_view, destination)
+                write_stats = self._write_parquet(connection, source_view, destination)
                 manifest = self._dataset_manifest(
                     connection,
                     destination,
+                    write_stats,
                     output,
                     is_dry_run,
                     definition,
@@ -681,14 +682,22 @@ class DuckDbFeatureEngineeringEngine:
         if transform.type == "impute":
             method = str(transform.config.get("method", "median"))
             values: dict[str, Any] = {}
-            for column in transform.columns:
-                if method == "constant":
+            if method == "constant":
+                for column in transform.columns:
                     values[column] = transform.config.get("value")
-                elif method == "mean":
-                    values[column] = _scalar(connection, source, f"avg({identifier(column)})")
-                elif method == "median":
-                    values[column] = _scalar(connection, source, f"median({identifier(column)})")
-                else:
+            elif method in {"mean", "median"}:
+                function = "avg" if method == "mean" else "median"
+                row = connection.execute(
+                    "SELECT "
+                    + ", ".join(
+                        f"{function}({identifier(column)})"
+                        for column in transform.columns
+                    )
+                    + f" FROM {identifier(source)}"
+                ).fetchone()
+                values.update(zip(transform.columns, row, strict=True))
+            else:
+                for column in transform.columns:
                     values[column] = connection.execute(
                         f"SELECT {identifier(column)} FROM {identifier(source)} "
                         f"WHERE {identifier(column)} IS NOT NULL GROUP BY {identifier(column)} "
@@ -699,31 +708,53 @@ class DuckDbFeatureEngineeringEngine:
         if transform.type == "scale_numeric":
             method = str(transform.config.get("method", "standard"))
             columns: dict[str, Any] = {}
+            functions = {
+                "standard": ("avg", "stddev_pop"),
+                "minmax": ("min", "max"),
+                "robust": ("median", "quantile_cont_25", "quantile_cont_75"),
+            }[method]
+            expressions: list[str] = []
             for column in transform.columns:
                 name = identifier(column)
+                for function in functions:
+                    if function == "quantile_cont_25":
+                        expressions.append(f"quantile_cont({name}, 0.25)")
+                    elif function == "quantile_cont_75":
+                        expressions.append(f"quantile_cont({name}, 0.75)")
+                    else:
+                        expressions.append(f"{function}({name})")
+            aggregate_row = connection.execute(
+                f"SELECT {', '.join(expressions)} FROM {identifier(source)}"
+            ).fetchone()
+            width = len(functions)
+            for index, column in enumerate(transform.columns):
+                values = aggregate_row[index * width:(index + 1) * width]
                 if method == "standard":
-                    row = connection.execute(
-                        f"SELECT avg({name}), stddev_pop({name}) FROM {identifier(source)}"
-                    ).fetchone()
-                    columns[column] = {"center": json_safe(row[0]), "scale": json_safe(row[1] or 1)}
+                    center, scale = values
                 elif method == "minmax":
-                    row = connection.execute(
-                        f"SELECT min({name}), max({name}) FROM {identifier(source)}"
-                    ).fetchone()
-                    scale = (row[1] - row[0]) if row[0] is not None and row[1] is not None else 1
-                    columns[column] = {"center": json_safe(row[0] or 0), "scale": json_safe(scale or 1)}
+                    minimum, maximum = values
+                    center = minimum or 0
+                    scale = (
+                        maximum - minimum
+                        if minimum is not None and maximum is not None
+                        else 1
+                    )
                 else:
-                    row = connection.execute(
-                        f"SELECT median({name}), quantile_cont({name}, 0.25), "
-                        f"quantile_cont({name}, 0.75) FROM {identifier(source)}"
-                    ).fetchone()
-                    scale = (row[2] - row[1]) if row[1] is not None and row[2] is not None else 1
-                    columns[column] = {"center": json_safe(row[0] or 0), "scale": json_safe(scale or 1)}
+                    center, lower, upper = values
+                    center = center or 0
+                    scale = upper - lower if lower is not None and upper is not None else 1
+                columns[column] = {
+                    "center": json_safe(center),
+                    "scale": json_safe(scale or 1),
+                }
             return {"type": transform.type, "method": method, "columns": columns}
         if transform.type == "encode_categorical":
             method = str(transform.config.get("method", "ordinal"))
             minimum = int(transform.config.get("min_frequency", 1))
             maximum = int(transform.config.get("max_categories", 50))
+            training_row_count = int(
+                connection.execute(f"SELECT count(*) FROM {identifier(source)}").fetchone()[0]
+            )
             columns: dict[str, Any] = {}
             for column in transform.columns:
                 rows = connection.execute(
@@ -736,9 +767,7 @@ class DuckDbFeatureEngineeringEngine:
                 columns[column] = {
                     "categories": [json_safe(row[0]) for row in rows],
                     "frequencies": {str(row[0]): int(row[1]) for row in rows},
-                    "training_row_count": int(
-                        connection.execute(f"SELECT count(*) FROM {identifier(source)}").fetchone()[0]
-                    ),
+                    "training_row_count": training_row_count,
                 }
             return {
                 "type": transform.type,
@@ -751,34 +780,35 @@ class DuckDbFeatureEngineeringEngine:
             null_predicate = " OR ".join(
                 f"{identifier(column)} IS NULL" for column in selected
             )
-            null_count = int(connection.execute(
-                f"SELECT count(*) FROM {identifier(source)} WHERE {null_predicate}"
-            ).fetchone()[0])
-            if null_count:
-                raise ValueError(
-                    f"PCA transform '{transform.transform_id}' found {null_count} rows with "
-                    "missing selected values; add imputation before PCA"
-                )
-            row_count = int(
-                connection.execute(f"SELECT count(*) FROM {identifier(source)}").fetchone()[0]
-            )
-            if row_count < 2:
-                raise ValueError("PCA requires at least two training rows")
-            means_row = connection.execute(
-                "SELECT " + ", ".join(
-                    f"avg(CAST({identifier(column)} AS DOUBLE))" for column in selected
-                ) + f" FROM {identifier(source)}"
-            ).fetchone()
             covariance_expressions = [
                 f"covar_pop(CAST({identifier(left)} AS DOUBLE), "
                 f"CAST({identifier(right)} AS DOUBLE))"
                 for left in selected
                 for right in selected
             ]
-            covariance_row = connection.execute(
-                f"SELECT {', '.join(covariance_expressions)} FROM {identifier(source)}"
+            aggregate_row = connection.execute(
+                "SELECT "
+                f"count(*), count(*) FILTER (WHERE {null_predicate}), "
+                + ", ".join(
+                    f"avg(CAST({identifier(column)} AS DOUBLE))"
+                    for column in selected
+                )
+                + ", "
+                + ", ".join(covariance_expressions)
+                + f" FROM {identifier(source)}"
             ).fetchone()
+            row_count = int(aggregate_row[0])
+            null_count = int(aggregate_row[1])
+            if null_count:
+                raise ValueError(
+                    f"PCA transform '{transform.transform_id}' found {null_count} rows with "
+                    "missing selected values; add imputation before PCA"
+                )
+            if row_count < 2:
+                raise ValueError("PCA requires at least two training rows")
             width = len(selected)
+            means_row = aggregate_row[2:2 + width]
+            covariance_row = aggregate_row[2 + width:]
             covariance = np.asarray(covariance_row, dtype=float).reshape((width, width))
             eigenvalues, eigenvectors = np.linalg.eigh(covariance)
             order = np.argsort(eigenvalues)[::-1]
@@ -1000,6 +1030,7 @@ class DuckDbFeatureEngineeringEngine:
         self,
         connection: duckdb.DuckDBPyConnection,
         path: Path,
+        write_stats: ParquetWriteStats,
         output: FeatureOutput,
         is_dry_run: bool,
         definition: FeatureEngineeringDefinition,
@@ -1007,8 +1038,8 @@ class DuckDbFeatureEngineeringEngine:
         evaluation_manifest: dict[str, Any],
     ) -> dict[str, Any]:
         relation = f"read_parquet({sql_literal(str(path))})"
-        row_count = int(connection.execute(f"SELECT count(*) FROM {relation}").fetchone()[0])
-        schema_rows = connection.execute(f"DESCRIBE SELECT * FROM {relation}").fetchall()
+        row_count = write_stats.row_count
+        schema_rows = write_stats.schema_rows
         preview_cursor = connection.execute(f"SELECT * FROM {relation} LIMIT 50")
         names = [str(item[0]) for item in preview_cursor.description or []]
         records = [
@@ -1042,16 +1073,16 @@ class DuckDbFeatureEngineeringEngine:
         }
 
     @staticmethod
-    def _write_parquet(connection: duckdb.DuckDBPyConnection, source: str, destination: Path) -> None:
-        temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
-        try:
-            connection.execute(
-                f"COPY (SELECT * FROM {identifier(source)}) TO {sql_literal(str(temporary))} "
-                "(FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 122880)"
-            )
-            os.replace(temporary, destination)
-        finally:
-            temporary.unlink(missing_ok=True)
+    def _write_parquet(
+        connection: duckdb.DuckDBPyConnection,
+        source: str,
+        destination: Path,
+    ) -> ParquetWriteStats:
+        return write_parquet_atomic(
+            connection,
+            f"SELECT * FROM {identifier(source)}",
+            destination,
+        )
 
     @staticmethod
     def _validate_columns(

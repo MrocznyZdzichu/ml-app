@@ -10,7 +10,7 @@ from app.modules.datasets.temporary import TemporaryPipelineOutputResolver
 from app.modules.pipelines.dag import PipelineDefinition
 from app.modules.pipelines.domain import PipelineRunStatus, PipelineStepRun
 from app.modules.pipelines.execution import DuckDbPipelineExecutionEngine
-from app.modules.pipelines.execution import SourceRelation, sql_literal
+from app.modules.pipelines.runtime import SourceRelation, sql_literal
 from app.modules.pipelines.feature_engineering import (
     DuckDbFeatureEngineeringEngine,
     FeatureEngineeringDefinition,
