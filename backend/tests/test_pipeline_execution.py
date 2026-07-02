@@ -522,6 +522,141 @@ def test_duckdb_engine_executes_user_written_sql_on_full_input(tmp_path: Path) -
     assert result.output_manifest[0]["data_scope"] == "full"
 
 
+@pytest.mark.parametrize(
+    ("mode_config", "expected_type"),
+    [
+        ({"mode": "record_hash", "output_column": "row_id"}, "VARCHAR"),
+        (
+            {
+                "mode": "columns_hash",
+                "output_column": "row_id",
+                "columns": ["customer", "event_time"],
+            },
+            "VARCHAR",
+        ),
+        (
+            {
+                "mode": "sequence",
+                "output_column": "row_id",
+                "order_by": [
+                    {"column": "event_time", "direction": "asc"},
+                    {"column": "customer", "direction": "asc"},
+                ],
+                "start": 100,
+            },
+            "BIGINT",
+        ),
+    ],
+)
+def test_add_identifier_supports_all_modes_deterministically(
+    tmp_path: Path,
+    mode_config: dict,
+    expected_type: str,
+) -> None:
+    repository_root = tmp_path / "repository"
+    owner_id = "owner-1"
+    path = repository_root / "users" / owner_id / "events.csv"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "customer,event_time,value\n"
+        "b,2025-01-02,10\n"
+        "a,2025-01-01,20\n"
+        "a,2025-01-03,\n",
+        encoding="utf-8",
+    )
+    repository = InMemoryDatasetRepository()
+    repository.add(_asset("events", owner_id, path, 3))
+    definition = PipelineDefinition.model_validate({
+        "contract_version": "1.0",
+        "inputs": [{"input_id": "events", "dataset_id": "events", "output_port_id": "out"}],
+        "steps": [{
+            "step_id": "identifier",
+            "type": "add_identifier",
+            "inputs": [{"port_id": "input", "source": {"node_id": "events", "port_id": "out"}}],
+            "output_port_id": "out",
+            "config": mode_config,
+        }],
+        "outputs": [{
+            "output_id": "result",
+            "input": {"node_id": "identifier", "port_id": "out"},
+            "materialization": "temporary",
+        }],
+        "parameters": {},
+    })
+    engine = DuckDbPipelineExecutionEngine(
+        input_adapter=CsvDatasetInputAdapter(
+            repository=repository,
+            repository_root=repository_root,
+        ),
+        repository_root=repository_root,
+    )
+
+    first = engine.execute(definition, f"{mode_config['mode']}-1", owner_id, is_dry_run=True)
+    second = engine.execute(definition, f"{mode_config['mode']}-2", owner_id, is_dry_run=True)
+    first_path = Path(first.output_manifest[0]["location_uri"].removeprefix("file://"))
+    second_path = Path(second.output_manifest[0]["location_uri"].removeprefix("file://"))
+    connection = duckdb.connect()
+    first_rows = connection.execute(
+        "SELECT customer, event_time, row_id FROM read_parquet(?) ORDER BY event_time, customer",
+        [str(first_path)],
+    ).fetchall()
+    second_rows = connection.execute(
+        "SELECT customer, event_time, row_id FROM read_parquet(?) ORDER BY event_time, customer",
+        [str(second_path)],
+    ).fetchall()
+    row_id_type = connection.execute(
+        "DESCRIBE SELECT row_id FROM read_parquet(?)",
+        [str(first_path)],
+    ).fetchone()[1]
+    connection.close()
+
+    assert first_rows == second_rows
+    assert row_id_type == expected_type
+    assert len({row[2] for row in first_rows}) == 3
+    if mode_config["mode"] == "sequence":
+        assert [row[2] for row in first_rows] == [100, 101, 102]
+    else:
+        assert all(len(row[2]) == 64 for row in first_rows)
+
+
+def test_add_identifier_validates_mode_specific_configuration() -> None:
+    base = {
+        "contract_version": "1.0",
+        "inputs": [{"input_id": "source", "dataset_id": "dataset", "output_port_id": "out"}],
+        "outputs": [{
+            "output_id": "result",
+            "input": {"node_id": "identifier", "port_id": "out"},
+            "materialization": "temporary",
+        }],
+        "parameters": {},
+    }
+
+    for config, message in [
+        ({"mode": "columns_hash", "output_column": "row_id", "columns": []}, "cannot be empty"),
+        ({"mode": "sequence", "output_column": "row_id", "order_by": []}, "list of objects"),
+        (
+            {
+                "mode": "sequence",
+                "output_column": "row_id",
+                "order_by": [{"column": "event_time", "direction": "sideways"}],
+            },
+            "direction",
+        ),
+    ]:
+        definition = {
+            **base,
+            "steps": [{
+                "step_id": "identifier",
+                "type": "add_identifier",
+                "inputs": [{"port_id": "input", "source": {"node_id": "source", "port_id": "out"}}],
+                "output_port_id": "out",
+                "config": config,
+            }],
+        }
+        with pytest.raises(ValidationError, match=message):
+            PipelineDefinition.model_validate(definition)
+
+
 def test_legacy_de_definition_is_migrated_to_one_high_level_workflow_step() -> None:
     legacy = {
         "contract_version": "1.0",

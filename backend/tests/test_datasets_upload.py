@@ -1,6 +1,7 @@
 from pathlib import Path
 from uuid import uuid4
 
+import duckdb
 from fastapi.testclient import TestClient
 
 from app.main import create_app
@@ -71,6 +72,93 @@ def test_csv_upload_stores_metadata_and_is_private_by_default() -> None:
     assert persisted.name == "iris-sample"
     assert persisted.row_count == 2
     assert persisted.has_header is True
+
+
+def test_parquet_upload_is_native_and_available_to_dataset_tools(tmp_path: Path) -> None:
+    parquet_path = tmp_path / "customers.parquet"
+    connection = duckdb.connect()
+    connection.execute(
+        "COPY ("
+        "SELECT 1::BIGINT AS customer_id, 'north'::VARCHAR AS region, "
+        "10.5::DOUBLE AS amount, true::BOOLEAN AS active, DATE '2026-01-02' AS joined "
+        "UNION ALL "
+        "SELECT 2, 'south', NULL, false, DATE '2026-02-03'"
+        ") TO ? (FORMAT PARQUET)",
+        [str(parquet_path)],
+    )
+    connection.close()
+    parquet_body = parquet_path.read_bytes()
+    client = TestClient(create_app())
+    token = _register(client, "alice")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    upload = client.post(
+        "/api/v1/datasets/upload",
+        headers=headers,
+        data={"name": "customers-native", "description": "Native Parquet"},
+        files={"file": ("customers.parquet", parquet_body, "application/vnd.apache.parquet")},
+    )
+
+    assert upload.status_code == 201, upload.text
+    dataset = upload.json()
+    assert dataset["format"] == "parquet"
+    assert dataset["row_count"] == 2
+    assert dataset["has_header"] is None
+    assert dataset["file_size_bytes"] == len(parquet_body)
+    assert dataset["location_uri"].endswith("/customers.parquet")
+    assert dataset["metadata"]["source_schema"] == [
+        {"name": "customer_id", "type": "number"},
+        {"name": "region", "type": "text"},
+        {"name": "amount", "type": "number"},
+        {"name": "active", "type": "boolean"},
+        {"name": "joined", "type": "date"},
+    ]
+
+    preview = client.get(
+        f"/api/v1/datasets/{dataset['id']}/preview",
+        headers=headers,
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["row_count"] == 2
+    assert preview.json()["records"][0] == {
+        "customer_id": 1,
+        "region": "north",
+        "amount": 10.5,
+        "active": True,
+        "joined": "2026-01-02",
+    }
+
+    query = client.post(
+        f"/api/v1/datasets/{dataset['id']}/query",
+        headers=headers,
+        json={"sql": 'SELECT region, amount FROM "customers-native" WHERE active = true', "limit": 50},
+    )
+    assert query.status_code == 200, query.text
+    assert query.json()["records"] == [{"region": "north", "amount": 10.5}]
+
+
+def test_dataset_upload_rejects_unsupported_and_invalid_files() -> None:
+    client = TestClient(create_app())
+    token = _register(client, "alice")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    unsupported = client.post(
+        "/api/v1/datasets/upload",
+        headers=headers,
+        data={"name": "spreadsheet"},
+        files={"file": ("dataset.xlsx", b"not-a-dataset", "application/octet-stream")},
+    )
+    assert unsupported.status_code == 400
+    assert "Only .csv and .parquet" in unsupported.json()["detail"]
+
+    invalid_parquet = client.post(
+        "/api/v1/datasets/upload",
+        headers=headers,
+        data={"name": "broken"},
+        files={"file": ("broken.parquet", b"not-parquet", "application/vnd.apache.parquet")},
+    )
+    assert invalid_parquet.status_code == 400
+    assert "invalid or unreadable" in invalid_parquet.json()["detail"]
 
 
 def test_dataset_delete_removes_file_and_keeps_deleted_metadata() -> None:

@@ -4,7 +4,13 @@ from sqlalchemy import JSON, Boolean, Column, DateTime, Integer, MetaData, Strin
 from sqlalchemy.engine import Engine
 
 from app.core.database import get_engine
-from app.modules.pipelines.domain import Pipeline, PipelineRun, PipelineVersion, PipelineVersionStatus
+from app.modules.pipelines.domain import (
+    Pipeline,
+    PipelineRun,
+    PipelineStepRun,
+    PipelineVersion,
+    PipelineVersionStatus,
+)
 from app.modules.pipelines.domain import (
     PipelineRunStatus,
     PipelineRunTrigger,
@@ -76,6 +82,25 @@ pipeline_runs_table = Table(
     Column("finished_at", DateTime(timezone=True), nullable=True),
 )
 
+pipeline_step_runs_table = Table(
+    "pipeline_step_runs",
+    metadata,
+    Column("id", String(64), primary_key=True),
+    Column("owner_id", String(64), nullable=False, index=True),
+    Column("pipeline_run_id", String(64), nullable=False, index=True),
+    Column("pipeline_step_id", String(128), nullable=False),
+    Column("step_type", String(64), nullable=False),
+    Column("status", String(32), nullable=False),
+    Column("input_row_count", Integer, nullable=True),
+    Column("processed_row_count", Integer, nullable=True),
+    Column("output_row_count", Integer, nullable=True),
+    Column("warnings", JSON, nullable=False, default=list),
+    Column("output_manifest", JSON, nullable=False, default=list),
+    Column("error_message", Text, nullable=False, default=""),
+    Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+)
+
 
 class PipelineRepository(Protocol):
     def add_pipeline(self, pipeline: Pipeline) -> Pipeline:
@@ -117,12 +142,22 @@ class PipelineRepository(Protocol):
     def list_runs(self, pipeline_id: str | None, owner_id: str) -> list[PipelineRun]:
         ...
 
+    def add_step_run(self, step_run: PipelineStepRun) -> PipelineStepRun:
+        ...
+
+    def update_step_run(self, step_run: PipelineStepRun) -> PipelineStepRun:
+        ...
+
+    def list_step_runs(self, pipeline_run_id: str, owner_id: str) -> list[PipelineStepRun]:
+        ...
+
 
 class InMemoryPipelineRepository:
     def __init__(self) -> None:
         self._pipelines: dict[str, Pipeline] = {}
         self._versions: dict[str, PipelineVersion] = {}
         self._runs: dict[str, PipelineRun] = {}
+        self._step_runs: dict[str, PipelineStepRun] = {}
 
     def add_pipeline(self, pipeline: Pipeline) -> Pipeline:
         self._pipelines[pipeline.id] = pipeline
@@ -181,6 +216,20 @@ class InMemoryPipelineRepository:
             item
             for item in self._runs.values()
             if item.owner_id == owner_id and (pipeline_id is None or item.pipeline_id == pipeline_id)
+        ]
+
+    def add_step_run(self, step_run: PipelineStepRun) -> PipelineStepRun:
+        self._step_runs[step_run.id] = step_run
+        return step_run
+
+    def update_step_run(self, step_run: PipelineStepRun) -> PipelineStepRun:
+        self._step_runs[step_run.id] = step_run
+        return step_run
+
+    def list_step_runs(self, pipeline_run_id: str, owner_id: str) -> list[PipelineStepRun]:
+        return [
+            item for item in self._step_runs.values()
+            if item.pipeline_run_id == pipeline_run_id and item.owner_id == owner_id
         ]
 
 
@@ -298,6 +347,41 @@ class PostgresPipelineRepository:
         statement = statement.order_by(pipeline_runs_table.c.created_at.desc())
         with self.engine.begin() as connection:
             return [self._run_from_record(row._mapping) for row in connection.execute(statement)]
+
+    def add_step_run(self, step_run: PipelineStepRun) -> PipelineStepRun:
+        self._ensure_initialized()
+        with self.engine.begin() as connection:
+            connection.execute(
+                pipeline_step_runs_table.insert().values(**self._step_run_to_record(step_run))
+            )
+        return step_run
+
+    def update_step_run(self, step_run: PipelineStepRun) -> PipelineStepRun:
+        self._ensure_initialized()
+        statement = (
+            pipeline_step_runs_table.update()
+            .where(pipeline_step_runs_table.c.id == step_run.id)
+            .values(**self._step_run_to_record(step_run))
+        )
+        with self.engine.begin() as connection:
+            connection.execute(statement)
+        return step_run
+
+    def list_step_runs(self, pipeline_run_id: str, owner_id: str) -> list[PipelineStepRun]:
+        self._ensure_initialized()
+        statement = (
+            select(pipeline_step_runs_table)
+            .where(
+                pipeline_step_runs_table.c.pipeline_run_id == pipeline_run_id,
+                pipeline_step_runs_table.c.owner_id == owner_id,
+            )
+            .order_by(pipeline_step_runs_table.c.started_at.asc())
+        )
+        with self.engine.begin() as connection:
+            return [
+                self._step_run_from_record(row._mapping)
+                for row in connection.execute(statement)
+            ]
 
     def _ensure_initialized(self) -> None:
         if self._initialized:
@@ -429,6 +513,44 @@ class PostgresPipelineRepository:
             error_message=record["error_message"] or "",
             created_by=record["created_by"],
             created_at=record["created_at"],
+            started_at=record["started_at"],
+            finished_at=record["finished_at"],
+        )
+
+    @staticmethod
+    def _step_run_to_record(step_run: PipelineStepRun) -> dict[str, object]:
+        return {
+            "id": step_run.id,
+            "owner_id": step_run.owner_id,
+            "pipeline_run_id": step_run.pipeline_run_id,
+            "pipeline_step_id": step_run.pipeline_step_id,
+            "step_type": step_run.step_type,
+            "status": step_run.status.value,
+            "input_row_count": step_run.input_row_count,
+            "processed_row_count": step_run.processed_row_count,
+            "output_row_count": step_run.output_row_count,
+            "warnings": step_run.warnings,
+            "output_manifest": step_run.output_manifest,
+            "error_message": step_run.error_message,
+            "started_at": step_run.started_at,
+            "finished_at": step_run.finished_at,
+        }
+
+    @staticmethod
+    def _step_run_from_record(record: object) -> PipelineStepRun:
+        return PipelineStepRun(
+            id=record["id"],
+            owner_id=record["owner_id"],
+            pipeline_run_id=record["pipeline_run_id"],
+            pipeline_step_id=record["pipeline_step_id"],
+            step_type=record["step_type"],
+            status=PipelineRunStatus(record["status"]),
+            input_row_count=record["input_row_count"],
+            processed_row_count=record["processed_row_count"],
+            output_row_count=record["output_row_count"],
+            warnings=list(record["warnings"] or []),
+            output_manifest=list(record["output_manifest"] or []),
+            error_message=record["error_message"] or "",
             started_at=record["started_at"],
             finished_at=record["finished_at"],
         )

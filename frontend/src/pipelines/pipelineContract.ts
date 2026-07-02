@@ -36,6 +36,7 @@ export type PipelineDefinition = {
 
 export type PipelineStepType =
   | "select_columns"
+  | "add_identifier"
   | "rename_columns"
   | "cast_columns"
   | "filter_rows"

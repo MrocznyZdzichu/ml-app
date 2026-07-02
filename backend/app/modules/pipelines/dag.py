@@ -34,6 +34,7 @@ class PipelineStep(BaseModel):
     step_id: str = Field(min_length=1, max_length=128)
     type: Literal[
         "select_columns",
+        "add_identifier",
         "rename_columns",
         "cast_columns",
         "filter_rows",
@@ -197,6 +198,7 @@ def validate_step_config(step: PipelineStep) -> None:
     config = step.config
     required: dict[str, tuple[str, ...]] = {
         "select_columns": ("columns",),
+        "add_identifier": ("mode", "output_column"),
         "rename_columns": ("renames",),
         "cast_columns": ("casts",),
         "filter_rows": (),
@@ -214,6 +216,7 @@ def validate_step_config(step: PipelineStep) -> None:
         raise ValueError(f"Step '{step.step_id}' is missing config fields: {', '.join(missing)}")
     allowed_fields: dict[str, set[str]] = {
         "select_columns": {"columns"},
+        "add_identifier": {"mode", "output_column", "columns", "order_by", "start"},
         "rename_columns": {"renames"},
         "cast_columns": {"casts"},
         "filter_rows": {"mode", "conditions", "combine", "sql"},
@@ -264,6 +267,34 @@ def validate_step_config(step: PipelineStep) -> None:
     if step.type == "derive_column":
         _non_empty_string(config.get("name"), step.step_id, "name")
         validate_expression(config.get("expression"), step.step_id)
+    if step.type == "add_identifier":
+        mode = config.get("mode")
+        if mode not in {"record_hash", "columns_hash", "sequence"}:
+            raise ValueError(
+                f"Step '{step.step_id}' identifier mode must be record_hash, columns_hash or sequence"
+            )
+        _non_empty_string(config.get("output_column"), step.step_id, "output_column")
+        if mode == "columns_hash":
+            _string_list(config.get("columns"), step.step_id, "columns", allow_empty=False)
+        if mode == "sequence":
+            order_by = _list_of_records(config.get("order_by"), step.step_id)
+            order_columns: list[str] = []
+            for rule in order_by:
+                _non_empty_string(rule.get("column"), step.step_id, "column")
+                order_columns.append(rule["column"])
+                if rule.get("direction", "asc") not in {"asc", "desc"}:
+                    raise ValueError(
+                        f"Step '{step.step_id}' identifier sequence direction must be asc or desc"
+                    )
+            if len(order_columns) != len(set(order_columns)):
+                raise ValueError(
+                    f"Step '{step.step_id}' identifier sequence order columns must be unique"
+                )
+            start = config.get("start", 1)
+            if isinstance(start, bool) or not isinstance(start, int) or start < 0:
+                raise ValueError(
+                    f"Step '{step.step_id}' identifier sequence start must be a non-negative integer"
+                )
     if step.type in {"select_columns", "deduplicate"}:
         _string_list(config.get("columns"), step.step_id, "columns", allow_empty=step.type == "deduplicate")
     if step.type in {"rename_columns", "cast_columns"}:

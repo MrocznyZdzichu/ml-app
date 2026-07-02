@@ -145,7 +145,7 @@ class DatasetService:
         description: str = "",
         tags: list[str] | None = None,
     ) -> DataAsset:
-        return self.upload_csv_stream(
+        return self.upload_file_stream(
             stream=BytesIO(content),
             filename=filename,
             principal=principal,
@@ -163,10 +163,30 @@ class DatasetService:
         description: str = "",
         tags: list[str] | None = None,
     ) -> DataAsset:
-        if not filename.lower().endswith(".csv"):
+        return self.upload_file_stream(
+            stream=stream,
+            filename=filename,
+            principal=principal,
+            name=name,
+            description=description,
+            tags=tags,
+        )
+
+    def upload_file_stream(
+        self,
+        stream: BinaryIO,
+        filename: str,
+        principal: Principal,
+        name: str | None = None,
+        description: str = "",
+        tags: list[str] | None = None,
+    ) -> DataAsset:
+        extension = Path(filename).suffix.lower()
+        file_format = {".csv": "csv", ".parquet": "parquet"}.get(extension)
+        if not file_format:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Only .csv files are supported",
+                detail="Only .csv and .parquet files are supported",
             )
         dataset_id = str(uuid4())
         safe_filename = self._safe_filename(filename)
@@ -180,10 +200,11 @@ class DatasetService:
             storage_path.unlink(missing_ok=True)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Uploaded CSV file is empty",
+                detail="Uploaded dataset file is empty",
             )
         try:
-            has_header, row_count, source_schema = self.sources.csv.inspect_path_with_schema(storage_path)
+            inspector = self.sources.csv if file_format == "csv" else self.sources.parquet
+            has_header, row_count, source_schema = inspector.inspect_path_with_schema(storage_path)
         except Exception:
             shutil.rmtree(storage_path.parent, ignore_errors=True)
             raise
@@ -194,7 +215,7 @@ class DatasetService:
             owner_id=principal.user_id,
             name=name or Path(filename).stem,
             source_type=SourceType.FILE,
-            format="csv",
+            format=file_format,
             description=description,
             original_filename=filename,
             location_uri=f"file://{storage_path.as_posix()}",

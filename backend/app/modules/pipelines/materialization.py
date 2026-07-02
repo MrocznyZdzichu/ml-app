@@ -42,28 +42,55 @@ class PipelineOutputMaterializer:
         version: PipelineVersion,
         workflow: WorkflowDefinition,
         output_manifest: list[dict[str, Any]],
+        step_id: str | None = None,
+        input_dataset_ids: list[str] | None = None,
+        step_type: str = "data_engineering",
     ) -> tuple[list[dict[str, Any]], list[str]]:
-        step = data_engineering_step(workflow)
-        de_definition = dict(step.config["definition"])
+        if step_id is None or input_dataset_ids is None:
+            step = data_engineering_step(workflow)
+            step_id = step.step_id
+            de_definition = dict(step.config["definition"])
+            input_dataset_ids = [
+                str(item["dataset_id"]) for item in de_definition.get("inputs", [])
+            ]
         input_artifact_ids = self._ensure_input_artifacts(
             owner_id=run.owner_id,
             business_case_id=run.business_case_id,
-            dataset_ids=[str(item["dataset_id"]) for item in de_definition.get("inputs", [])],
+            dataset_ids=input_dataset_ids,
             created_by=run.created_by,
         )
         artifact_ids: list[str] = []
         materialized_manifest: list[dict[str, Any]] = []
         for raw_item in output_manifest:
             item = dict(raw_item)
+            if item.get("artifact_type") == ArtifactType.FEATURE_TRANSFORM.value:
+                if item.get("materialization") != "artifact":
+                    materialized_manifest.append(item)
+                    continue
+                artifact = self._materialize_feature_transform(
+                    run=run,
+                    version=version,
+                    step_id=step_id,
+                    item=item,
+                    input_artifact_ids=input_artifact_ids,
+                )
+                item.update({
+                    "artifact_id": artifact.id,
+                    "location_uri": artifact.metadata["location_uri"],
+                })
+                artifact_ids.append(artifact.id)
+                materialized_manifest.append(item)
+                continue
             if item.get("materialization") != "dataset":
                 materialized_manifest.append(item)
                 continue
             dataset, artifact = self._materialize_dataset(
                 run=run,
                 version=version,
-                step_id=step.step_id,
+                step_id=step_id,
                 item=item,
                 input_artifact_ids=input_artifact_ids,
+                step_type=step_type,
             )
             item.update(
                 {
@@ -85,6 +112,7 @@ class PipelineOutputMaterializer:
         step_id: str,
         item: dict[str, Any],
         input_artifact_ids: list[str],
+        step_type: str,
     ) -> tuple[DataAsset, Artifact]:
         output_id = str(item["output_id"])
         dataset_id = str(uuid5(NAMESPACE_URL, f"mlapp:pipeline-output:{run.id}:{output_id}"))
@@ -122,11 +150,14 @@ class PipelineOutputMaterializer:
                 uploaded_by=run.created_by,
                 uploaded_at=now,
                 status=DataAssetStatus.READY,
-                tags=["pipeline-output", "data-engineering"],
+                tags=["pipeline-output", step_type.replace("_", "-")],
                 metadata={
                     "source_schema": list(item.get("schema") or []),
                     "origin": "platform_generated",
                     "lineage": lineage,
+                    "schema_hash": item.get("schema_hash", ""),
+                    "feature_manifest": list(item.get("feature_manifest") or []),
+                    "evaluation": dict(item.get("evaluation") or {}),
                 },
                 created_at=now,
                 updated_at=now,
@@ -170,6 +201,59 @@ class PipelineOutputMaterializer:
             )
         )
         return dataset, artifact
+
+    def _materialize_feature_transform(
+        self,
+        *,
+        run: PipelineRun,
+        version: PipelineVersion,
+        step_id: str,
+        item: dict[str, Any],
+        input_artifact_ids: list[str],
+    ) -> Artifact:
+        reference_id = str(uuid5(
+            NAMESPACE_URL,
+            f"mlapp:feature-transform:{run.id}:{item['output_id']}",
+        ))
+        existing = self.business_cases.find_artifact(
+            run.owner_id,
+            reference_id,
+            run.business_case_id,
+        )
+        if existing is not None:
+            return existing
+        source_path = self._path_from_uri(str(item["location_uri"]))
+        target_directory = self._safe_feature_transform_directory(run.owner_id, reference_id)
+        target_directory.mkdir(parents=True, exist_ok=True)
+        target_path = target_directory / "state.json"
+        os.replace(source_path, target_path)
+        lineage = {
+            "input_artifact_ids": input_artifact_ids,
+            "pipeline_version_id": version.id,
+            "pipeline_definition_hash": version.definition_hash,
+            "pipeline_run_id": run.id,
+            "pipeline_step_id": step_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_by": run.created_by,
+        }
+        artifact = Artifact(
+            id=str(uuid4()),
+            owner_id=run.owner_id,
+            type=ArtifactType.FEATURE_TRANSFORM,
+            reference_id=reference_id,
+            origin=ArtifactOrigin.PLATFORM_GENERATED,
+            business_case_id=run.business_case_id,
+            metadata={
+                "location_uri": f"file://{target_path.as_posix()}",
+                "state_hash": item.get("state_hash", ""),
+                "definition_hash": item.get("definition_hash", ""),
+                "feature_manifest": list(item.get("feature_manifest") or []),
+                "lineage": lineage,
+            },
+            created_by=run.created_by,
+        )
+        self.business_cases.add_artifact(artifact)
+        return artifact
 
     def _ensure_input_artifacts(
         self,
@@ -215,6 +299,13 @@ class PipelineOutputMaterializer:
 
     def _safe_dataset_directory(self, owner_id: str, dataset_id: str) -> Path:
         directory = (self.repository_root / "users" / owner_id / dataset_id).resolve()
+        self._assert_in_repository(directory)
+        return directory
+
+    def _safe_feature_transform_directory(self, owner_id: str, reference_id: str) -> Path:
+        directory = (
+            self.repository_root / "users" / owner_id / "feature-transforms" / reference_id
+        ).resolve()
         self._assert_in_repository(directory)
         return directory
 

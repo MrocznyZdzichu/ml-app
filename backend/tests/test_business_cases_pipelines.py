@@ -326,6 +326,52 @@ def test_business_case_and_pipeline_are_owner_scoped() -> None:
     assert other_user_pipeline.status_code == 404
 
 
+def test_pipeline_name_can_be_changed_without_creating_a_new_version() -> None:
+    client = TestClient(create_app())
+    token = _register(client, "alice")
+    headers = {"Authorization": f"Bearer {token}"}
+    business_case = _create_business_case(client, token)
+    created = client.post(
+        "/api/v1/pipelines",
+        headers=headers,
+        json={
+            "business_case_id": business_case["id"],
+            "name": "Iris-DE",
+            "type": "custom",
+        },
+    )
+    assert created.status_code == 201
+    pipeline_id = created.json()["id"]
+    versions_before = client.get(
+        f"/api/v1/pipelines/{pipeline_id}/versions",
+        headers=headers,
+    ).json()
+
+    renamed = client.patch(
+        f"/api/v1/pipelines/{pipeline_id}",
+        headers=headers,
+        json={"name": "  Iris training and operations  "},
+    )
+
+    assert renamed.status_code == 200
+    assert renamed.json()["name"] == "Iris training and operations"
+    assert renamed.json()["updated_by"] == created.json()["owner_id"]
+    versions_after = client.get(
+        f"/api/v1/pipelines/{pipeline_id}/versions",
+        headers=headers,
+    ).json()
+    assert [(item["id"], item["definition_hash"]) for item in versions_after] == [
+        (item["id"], item["definition_hash"]) for item in versions_before
+    ]
+
+    blank = client.patch(
+        f"/api/v1/pipelines/{pipeline_id}",
+        headers=headers,
+        json={"name": "   "},
+    )
+    assert blank.status_code == 422
+
+
 def test_business_case_and_pipeline_survive_app_restart_and_relogin() -> None:
     client = TestClient(create_app())
     email = f"alice-{uuid4()}@example.com"

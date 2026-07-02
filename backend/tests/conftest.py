@@ -19,6 +19,7 @@ from app.modules.datasets.repository import data_assets_table
 from app.modules.pipelines.repository import (
     metadata as pipeline_metadata,
     pipeline_runs_table,
+    pipeline_step_runs_table,
     pipeline_versions_table,
     pipelines_table,
 )
@@ -65,6 +66,9 @@ def _delete_test_accounts(user_ids: set[str]) -> None:
     with get_engine().begin() as connection:
         business_case_metadata.create_all(connection)
         pipeline_metadata.create_all(connection)
+        connection.execute(
+            delete(pipeline_step_runs_table).where(pipeline_step_runs_table.c.owner_id.in_(user_ids))
+        )
         connection.execute(delete(pipeline_runs_table).where(pipeline_runs_table.c.owner_id.in_(user_ids)))
         connection.execute(delete(pipeline_versions_table).where(pipeline_versions_table.c.owner_id.in_(user_ids)))
         connection.execute(delete(pipelines_table).where(pipelines_table.c.owner_id.in_(user_ids)))

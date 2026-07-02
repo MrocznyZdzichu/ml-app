@@ -40,6 +40,7 @@ class DataArtifactKind(str, Enum):
 class ArtifactType(str, Enum):
     DATASET = "dataset"
     DATA_VIEW = "data_view"
+    FEATURE_TRANSFORM = "feature_transform"
     MODEL_VERSION = "model_version"
     REPORT = "report"
     METRICS = "metrics"

@@ -1,4 +1,5 @@
 import csv
+import duckdb
 from dataclasses import dataclass
 from datetime import datetime
 from io import StringIO
@@ -24,6 +25,7 @@ class DatasetSource(Protocol):
 class DatasetSourceRegistry:
     def __init__(self, repository_root: Path) -> None:
         self.csv = CsvFileDatasetSource(repository_root)
+        self.parquet = ParquetFileDatasetSource(repository_root)
         self._sources: dict[tuple[SourceType, str], DatasetSource] = {
             (SourceType.FILE, "csv"): self.csv,
         }
@@ -36,6 +38,84 @@ class DatasetSourceRegistry:
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
             detail=f"Dataset source {asset.source_type.value}/{asset.format} cannot be {action} yet",
         )
+
+
+class ParquetFileDatasetSource:
+    """Inspects flat Parquet datasets without materializing their rows in Python."""
+
+    def __init__(self, repository_root: Path) -> None:
+        self.repository_root = repository_root.resolve()
+
+    def inspect_path_with_schema(self, path: Path) -> tuple[None, int, list[dict[str, str]]]:
+        resolved = path.resolve()
+        try:
+            resolved.relative_to(self.repository_root)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Dataset file location is outside the repository root",
+            ) from exc
+
+        connection = duckdb.connect(database=":memory:")
+        try:
+            described = connection.execute(
+                "DESCRIBE SELECT * FROM read_parquet(?)",
+                [str(resolved)],
+            ).fetchall()
+            if not described:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Parquet file does not contain any columns",
+                )
+            unsupported = [
+                f"{row[0]} ({row[1]})"
+                for row in described
+                if self._is_unsupported_type(str(row[1]))
+            ]
+            if unsupported:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "Parquet file contains unsupported nested or binary columns: "
+                        + ", ".join(unsupported)
+                    ),
+                )
+            row_count = int(
+                connection.execute(
+                    "SELECT count(*) FROM read_parquet(?)",
+                    [str(resolved)],
+                ).fetchone()[0]
+            )
+            schema = [
+                {"name": str(row[0]), "type": self._frontend_type(str(row[1]))}
+                for row in described
+            ]
+            return None, row_count, schema
+        except HTTPException:
+            raise
+        except duckdb.Error as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Parquet file is invalid or unreadable: {exc}",
+            ) from exc
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _is_unsupported_type(value: str) -> bool:
+        normalized = value.upper()
+        return any(token in normalized for token in ("STRUCT", "LIST", "MAP", "UNION", "[]", "BLOB"))
+
+    @staticmethod
+    def _frontend_type(value: str) -> str:
+        normalized = value.upper()
+        if any(token in normalized for token in ("INT", "DECIMAL", "DOUBLE", "FLOAT", "REAL", "HUGEINT")):
+            return "number"
+        if "BOOL" in normalized:
+            return "boolean"
+        if any(token in normalized for token in ("DATE", "TIME")):
+            return "date"
+        return "text"
 
 
 class CsvFileDatasetSource:

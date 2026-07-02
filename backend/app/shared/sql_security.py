@@ -105,6 +105,26 @@ def validate_filter_sql(expression: str) -> str:
     return predicate
 
 
+def validate_scalar_sql_expression(expression: str) -> str:
+    scalar = expression.strip()
+    if not scalar:
+        raise ValueError("SQL expression cannot be empty")
+    if len(scalar) > MAX_USER_SQL_LENGTH:
+        raise ValueError(f"SQL expression cannot exceed {MAX_USER_SQL_LENGTH} characters")
+    searchable = _strip_literals_and_comments(scalar).lower()
+    words = set(re.findall(r"\b[a-z_][a-z0-9_]*\b", searchable))
+    forbidden = words & {
+        "select", "with", "union", "from", "join", "order", "group",
+        "having", "limit", "offset", "qualify", "copy", "attach",
+    }
+    if forbidden:
+        raise ValueError(
+            f"SQL expression contains forbidden clause: {sorted(forbidden)[0]}"
+        )
+    validate_user_sql(f"SELECT ({scalar}) AS value FROM input")
+    return scalar
+
+
 def bind_user_sql_to_inputs(
     connection: duckdb.DuckDBPyConnection,
     sql: str,

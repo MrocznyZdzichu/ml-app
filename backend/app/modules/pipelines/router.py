@@ -9,6 +9,8 @@ from app.modules.pipelines.schemas import (
     PipelineRunOutputProfileRead,
     PipelineRunRead,
     PipelineStepTypeRead,
+    PipelineStepRunRead,
+    PipelineUpdate,
     PipelineVersionRead,
     PipelineVersionUpdate,
 )
@@ -48,6 +50,15 @@ def get_pipeline(
     principal: Principal = Depends(require_user),
 ) -> PipelineRead:
     return PipelineRead.model_validate(service.get_pipeline(pipeline_id, principal))
+
+
+@router.patch("/{pipeline_id}", response_model=PipelineRead)
+def update_pipeline(
+    pipeline_id: str,
+    payload: PipelineUpdate,
+    principal: Principal = Depends(require_user),
+) -> PipelineRead:
+    return PipelineRead.model_validate(service.update_pipeline(pipeline_id, payload, principal))
 
 
 @router.get("/{pipeline_id}/versions", response_model=list[PipelineVersionRead])
@@ -107,6 +118,18 @@ def get_pipeline_run(
     principal: Principal = Depends(require_user),
 ) -> PipelineRunRead:
     return PipelineRunRead.model_validate(service.get_run(pipeline_id, run_id, principal))
+
+
+@router.get("/{pipeline_id}/runs/{run_id}/steps", response_model=list[PipelineStepRunRead])
+def list_pipeline_step_runs(
+    pipeline_id: str,
+    run_id: str,
+    principal: Principal = Depends(require_user),
+) -> list[PipelineStepRunRead]:
+    return [
+        PipelineStepRunRead.model_validate(item)
+        for item in service.list_step_runs(pipeline_id, run_id, principal)
+    ]
 
 
 @router.get("/{pipeline_id}/runs/{run_id}/preview", response_model=PipelineRunOutputPreviewRead)

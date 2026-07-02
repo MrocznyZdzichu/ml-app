@@ -11,6 +11,7 @@ import {
   Filter,
   ListChecks,
   LogOut,
+  Pencil,
   Play,
   Plus,
   RotateCcw,
@@ -37,6 +38,7 @@ import type {
   ModelArtifact,
   Pipeline,
   PipelineRun,
+  PipelineStepRun,
   PipelineRunOutputPreview,
   PipelineRunOutputProfile,
   PipelineVersion,
@@ -119,6 +121,10 @@ function DeferredPanel({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
+  const [pipelineOpenRequest, setPipelineOpenRequest] = useState<{
+    pipelineId: string;
+    requestId: number;
+  } | null>(null);
   const [apiStatus, setApiStatus] = useState("checking");
   const [authStatus, setAuthStatus] = useState(getAccessToken() ? "checking" : "anonymous");
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
@@ -208,6 +214,11 @@ export default function App() {
     setNotice("Signed out");
   }
 
+  function openPipelineEditor(pipelineId: string) {
+    setPipelineOpenRequest({ pipelineId, requestId: Date.now() });
+    setActiveTab("pipelines");
+  }
+
   if (authStatus !== "authenticated" || !currentUser) {
     return (
       <AuthScreen
@@ -290,6 +301,7 @@ export default function App() {
             datasets={datasets}
             pipelines={pipelines}
             onRefresh={refreshWorkspace}
+            onEditPipeline={openPipelineEditor}
             setNotice={setNotice}
           />
         )}
@@ -309,6 +321,8 @@ export default function App() {
             businessCases={businessCases}
             datasets={datasets}
             pipelines={pipelines}
+            openRequest={pipelineOpenRequest}
+            onOpenRequestConsumed={() => setPipelineOpenRequest(null)}
             onRefresh={refreshWorkspace}
             setNotice={setNotice}
           />
@@ -353,12 +367,14 @@ function BusinessCasesPanel({
   datasets,
   pipelines,
   onRefresh,
+  onEditPipeline,
   setNotice
 }: {
   businessCases: BusinessCase[];
   datasets: DataAsset[];
   pipelines: Pipeline[];
   onRefresh: () => Promise<void>;
+  onEditPipeline: (pipelineId: string) => void;
   setNotice: (message: string) => void;
 }) {
   const [name, setName] = useState("");
@@ -891,7 +907,9 @@ function BusinessCasesPanel({
             id: item.id,
             name: item.name,
             meta: `${item.type} / ${businessCaseName(businessCases, item.business_case_id)}`,
-            status: item.status
+            status: item.status,
+            actionLabel: "Edit",
+            onAction: () => onEditPipeline(item.id)
           }))} />
         )}
       </div>
@@ -959,12 +977,16 @@ function PipelinesPanel({
   businessCases,
   datasets,
   pipelines,
+  openRequest,
+  onOpenRequestConsumed,
   onRefresh,
   setNotice
 }: {
   businessCases: BusinessCase[];
   datasets: DataAsset[];
   pipelines: Pipeline[];
+  openRequest: { pipelineId: string; requestId: number } | null;
+  onOpenRequestConsumed: () => void;
   onRefresh: () => Promise<void>;
   setNotice: (message: string) => void;
 }) {
@@ -975,6 +997,9 @@ function PipelinesPanel({
   const [selectedPipelineId, setSelectedPipelineId] = useState("");
   const [isCreatePipelineOpen, setIsCreatePipelineOpen] = useState(false);
   const [isPipelineEditorOpen, setIsPipelineEditorOpen] = useState(false);
+  const [isRenamingPipeline, setIsRenamingPipeline] = useState(false);
+  const [isSavingPipelineName, setIsSavingPipelineName] = useState(false);
+  const [pipelineNameDraft, setPipelineNameDraft] = useState("");
   const [runFeedback, setRunFeedback] = useState<{
     status: "queued" | "running" | "succeeded" | "failed";
     title: string;
@@ -987,6 +1012,7 @@ function PipelinesPanel({
   const [definitionText, setDefinitionText] = useState(JSON.stringify(emptyWorkflowDefinition(), null, 2));
   const [versions, setVersions] = useState<PipelineVersion[]>([]);
   const [runs, setRuns] = useState<PipelineRun[]>([]);
+  const [activeStepRuns, setActiveStepRuns] = useState<PipelineStepRun[]>([]);
   const [pipelineDataAttachments, setPipelineDataAttachments] = useState<BusinessCaseDataAttachment[]>([]);
   const selectedPipeline = pipelines.find((item) => item.id === selectedPipelineId) ?? pipelines[0];
   const selectedPipelineIdValue = selectedPipeline?.id ?? "";
@@ -1005,9 +1031,29 @@ function PipelinesPanel({
   }, [pipelines, selectedPipelineId]);
 
   useEffect(() => {
+    if (!openRequest) return;
+    const requestedPipeline = pipelines.find((item) => item.id === openRequest.pipelineId);
+    if (!requestedPipeline) {
+      setNotice("The requested pipeline is no longer available");
+      onOpenRequestConsumed();
+      return;
+    }
+    setSelectedPipelineId(requestedPipeline.id);
+    setRunFeedback(null);
+    setIsPipelineEditorOpen(true);
+    onOpenRequestConsumed();
+  }, [openRequest, onOpenRequestConsumed, pipelines, setNotice]);
+
+  useEffect(() => {
+    setPipelineNameDraft(selectedPipeline?.name ?? "");
+    setIsRenamingPipeline(false);
+  }, [selectedPipeline?.id, selectedPipeline?.name]);
+
+  useEffect(() => {
     if (!selectedPipelineIdValue) {
       setVersions([]);
       setRuns([]);
+      setActiveStepRuns([]);
       setPipelineDataAttachments([]);
       return;
     }
@@ -1066,6 +1112,31 @@ function PipelinesPanel({
     setName("");
     setDescription("");
     await onRefresh();
+  }
+
+  async function renamePipeline(event: FormEvent) {
+    event.preventDefault();
+    if (!selectedPipeline) return;
+    const nextName = pipelineNameDraft.trim();
+    if (!nextName) {
+      setNotice("Pipeline name cannot be empty");
+      return;
+    }
+    if (nextName === selectedPipeline.name) {
+      setIsRenamingPipeline(false);
+      return;
+    }
+    setIsSavingPipelineName(true);
+    try {
+      await api.updatePipeline(selectedPipeline.id, { name: nextName });
+      await onRefresh();
+      setIsRenamingPipeline(false);
+      setNotice(`Pipeline renamed to “${nextName}”`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not rename pipeline");
+    } finally {
+      setIsSavingPipelineName(false);
+    }
   }
 
   async function persistDraft(showNotice = true) {
@@ -1158,11 +1229,18 @@ function PipelinesPanel({
         run = await api.getPipelineRun(selectedPipeline.id, run.id);
       }
       setRuns(await api.listPipelineRuns(selectedPipeline.id));
+      setActiveStepRuns(await api.listPipelineStepRuns(selectedPipeline.id, run.id));
       const scope = run.output_manifest[0]?.data_scope ?? "unknown";
       const counts = `${run.input_row_count ?? 0} input rows → ${run.output_row_count ?? 0} output rows`;
       const failed = run.status === "failed";
       const title = failed ? `${action} failed` : `${action} completed`;
-      const detail = failed ? run.error_message : `${target} finished successfully · ${scope} scope · ${counts}`;
+      const fittedTransform = run.output_manifest.find((item) => item.artifact_type === "feature_transform");
+      const fittedDetail = fittedTransform?.artifact_id
+        ? ` · fitted transform ${fittedTransform.artifact_id}`
+        : "";
+      const detail = failed
+        ? run.error_message
+        : `${target} finished successfully · ${scope} scope · ${counts}${fittedDetail}`;
       setRunFeedback({ status: failed ? "failed" : "succeeded", title, detail });
       setNotice(`${title}: ${detail}`);
       if (!failed && isDryRun) setDryRunResult(run);
@@ -1282,7 +1360,55 @@ function PipelinesPanel({
         <button className="secondary-button" type="button" onClick={() => setIsPipelineEditorOpen(false)}>← Pipelines</button>
         <div className="pipeline-editor-title">
           <span className="builder-kicker">Pipeline editor</span>
-          <h2>{selectedPipeline?.name ?? "Pipeline"}</h2>
+          {isRenamingPipeline ? (
+            <form className="pipeline-name-editor" onSubmit={renamePipeline}>
+              <input
+                value={pipelineNameDraft}
+                onChange={(event) => setPipelineNameDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    setPipelineNameDraft(selectedPipeline?.name ?? "");
+                    setIsRenamingPipeline(false);
+                  }
+                }}
+                maxLength={200}
+                autoFocus
+                aria-label="Pipeline name"
+              />
+              <button className="primary-button compact-button" type="submit" disabled={isSavingPipelineName || !pipelineNameDraft.trim()}>
+                <Save size={14} /> {isSavingPipelineName ? "Saving…" : "Save"}
+              </button>
+              <button
+                className="secondary-button compact-button"
+                type="button"
+                onClick={() => {
+                  setPipelineNameDraft(selectedPipeline?.name ?? "");
+                  setIsRenamingPipeline(false);
+                }}
+                disabled={isSavingPipelineName}
+              >
+                Cancel
+              </button>
+            </form>
+          ) : (
+            <div className="pipeline-name-display">
+              <h2>{selectedPipeline?.name ?? "Pipeline"}</h2>
+              {selectedPipeline && (
+                <button
+                  className="icon-button"
+                  type="button"
+                  onClick={() => {
+                    setPipelineNameDraft(selectedPipeline.name);
+                    setIsRenamingPipeline(true);
+                  }}
+                  aria-label="Rename pipeline"
+                  title="Rename pipeline"
+                >
+                  <Pencil size={15} />
+                </button>
+              )}
+            </div>
+          )}
           <small>{selectedPipeline ? businessCaseName(businessCases, selectedPipeline.business_case_id) : ""}</small>
         </div>
         <div className="editor-toolbar-actions">
@@ -1301,6 +1427,15 @@ function PipelinesPanel({
           </span>
           <div><strong>{runFeedback.title}</strong><span>{runFeedback.detail}</span></div>
           {!isRunActive && <button className="icon-button" type="button" onClick={() => setRunFeedback(null)} aria-label="Dismiss"><X size={15} /></button>}
+        </div>
+      )}
+      {activeStepRuns.length > 0 && (
+        <div className="run-profile-summary" aria-label="Pipeline step run results">
+          {activeStepRuns.map((stepRun) => (
+            <span key={stepRun.id}>
+              {stepRun.pipeline_step_id} · {stepRun.status} · {stepRun.processed_row_count ?? 0} rows
+            </span>
+          ))}
         </div>
       )}
 
@@ -1363,11 +1498,22 @@ function PipelinesPanel({
         </details>
       </div>
 
-      {workflowDefinition.steps[0] && (
+      {workflowDefinition.steps.length > 0 && (
         <div className="step-run-dock">
-          <span><strong>{workflowDefinition.steps[0].name}</strong><small>Run only this selected workflow step</small></span>
-          <button className="secondary-button" onClick={() => runSelectedPipeline(true, workflowDefinition.steps[0].step_id)} type="button" disabled={isRunActive || (!hasDraft && !hasPublished)}><Play size={16} /> Dry-run step</button>
-          <button className="secondary-button" onClick={() => runSelectedPipeline(false, workflowDefinition.steps[0].step_id)} type="button" disabled={isRunActive || !canRunPublishedVersion}><Play size={16} /> Run step</button>
+          {workflowDefinition.steps.map((step) => (
+            <span key={step.step_id}>
+              <strong>{step.name}</strong>
+              <small>Runs required ancestors and stops after this step</small>
+              <button className="secondary-button" onClick={() => runSelectedPipeline(true, step.step_id)}
+                type="button" disabled={isRunActive || (!hasDraft && !hasPublished)}>
+                <Play size={16} /> Dry-run
+              </button>
+              <button className="secondary-button" onClick={() => runSelectedPipeline(false, step.step_id)}
+                type="button" disabled={isRunActive || !canRunPublishedVersion}>
+                <Play size={16} /> Run
+              </button>
+            </span>
+          ))}
         </div>
       )}
 
@@ -1705,14 +1851,31 @@ function DataPanel({
   const [tags, setTags] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const [isUploadingFile, setIsUploadingFile] = useState(false);
   const activeDatasets = datasets.filter((dataset) => dataset.status !== "deleted" && !isDataView(dataset));
   const dataViews = datasets.filter((dataset) => dataset.status !== "deleted" && isDataView(dataset));
   const deletedDatasets = datasets.filter((dataset) => dataset.status === "deleted");
 
+  function selectDatasetFile(nextFile: File | null) {
+    if (!nextFile) {
+      setFile(null);
+      return;
+    }
+    if (!/\.(csv|parquet)$/i.test(nextFile.name)) {
+      setNotice("Choose a .csv or .parquet dataset file");
+      return;
+    }
+    setFile(nextFile);
+    if (!name.trim()) {
+      setName(nextFile.name.replace(/\.(csv|parquet)$/i, ""));
+    }
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!file) {
-      setNotice("Choose a CSV file first");
+      setNotice("Choose a CSV or Parquet file first");
       return;
     }
     if (!name.trim()) {
@@ -1726,16 +1889,23 @@ function DataPanel({
     formData.set("description", description);
     formData.set("tags", tags);
 
-    const uploaded = await api.uploadDataset(formData);
-    setNotice(
-      `Uploaded ${uploaded.name}: ${uploaded.row_count ?? 0} rows, headers ${uploaded.has_header ? "detected" : "not detected"}`
-    );
-    setName("");
-    setDescription("");
-    setTags("");
-    setFile(null);
-    setFileInputKey((current) => current + 1);
-    await onRefresh();
+    setIsUploadingFile(true);
+    try {
+      const uploaded = await api.uploadDataset(formData);
+      setNotice(
+        `Uploaded ${uploaded.name}: ${uploaded.row_count ?? 0} rows · ${uploaded.format.toUpperCase()} · full dataset`
+      );
+      setName("");
+      setDescription("");
+      setTags("");
+      setFile(null);
+      setFileInputKey((current) => current + 1);
+      await onRefresh();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Dataset upload failed");
+    } finally {
+      setIsUploadingFile(false);
+    }
   }
 
   async function deleteDataset(dataset: DataAsset) {
@@ -1748,23 +1918,67 @@ function DataPanel({
     <section className="two-column">
       <form className="panel form-panel" onSubmit={submit}>
         <div className="panel-header">
-          <h2>Upload CSV</h2>
+          <div>
+            <h2>Upload dataset from file</h2>
+            <p className="dataset-upload-subtitle">Register a complete CSV or Parquet dataset.</p>
+          </div>
           <Upload size={18} />
         </div>
         <label>
-          Name
-          <input value={name} onChange={(event) => setName(event.target.value)} required />
-        </label>
-        <label>
-          CSV file
+          Dataset name
           <input
-            accept=".csv,text/csv"
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="Suggested from the selected filename"
+            required
+          />
+        </label>
+        <label
+          className={`dataset-file-picker ${isDraggingFile ? "dragging" : ""} ${file ? "selected" : ""}`}
+          onDragEnter={(event) => {
+            event.preventDefault();
+            setIsDraggingFile(true);
+          }}
+          onDragOver={(event) => event.preventDefault()}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+              setIsDraggingFile(false);
+            }
+          }}
+          onDrop={(event) => {
+            event.preventDefault();
+            setIsDraggingFile(false);
+            selectDatasetFile(event.dataTransfer.files?.[0] ?? null);
+          }}
+        >
+          <input
+            accept=".csv,.parquet,text/csv,application/vnd.apache.parquet"
+            className="dataset-file-input"
             key={fileInputKey}
-            onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+            onChange={(event) => selectDatasetFile(event.target.files?.[0] ?? null)}
             required
             type="file"
           />
+          <span className="dataset-file-picker-icon"><Upload size={22} /></span>
+          {file ? (
+            <span className="dataset-file-selection">
+              <strong>{file.name}</strong>
+              <small>
+                <em>{file.name.toLowerCase().endsWith(".parquet") ? "PARQUET" : "CSV"}</em>
+                {formatBytes(file.size)}
+              </small>
+            </span>
+          ) : (
+            <span className="dataset-file-selection">
+              <strong>Drop a dataset file here</strong>
+              <small>or click to browse · CSV and Parquet</small>
+            </span>
+          )}
         </label>
+        <div className="dataset-format-guidance">
+          <span><strong>CSV</strong><small>UTF-8 tabular data; converted to a reusable columnar cache for analytics.</small></span>
+          <span><strong>Parquet</strong><small>Used natively with schema and column types preserved.</small></span>
+        </div>
         <label>
           Description
           <textarea
@@ -1775,11 +1989,15 @@ function DataPanel({
         </label>
         <label>
           Tags
-          <input value={tags} onChange={(event) => setTags(event.target.value)} />
+          <input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="Comma-separated, optional" />
         </label>
-        <button className="primary-button" type="submit">
+        <div className="dataset-upload-scope">
+          <CheckCircle2 size={15} />
+          Full file will be registered. Upload does not silently sample rows.
+        </div>
+        <button className="primary-button" type="submit" disabled={isUploadingFile}>
           <Upload size={16} />
-          Upload
+          {isUploadingFile ? "Uploading and validating…" : "Upload dataset"}
         </button>
       </form>
 

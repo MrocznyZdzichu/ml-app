@@ -3,8 +3,13 @@ import {
   normalizePipelineDefinition
 } from "./pipelineContract";
 import type { PipelineDefinition } from "./pipelineContract";
+import {
+  emptyFeatureEngineeringDefinition,
+  normalizeFeatureEngineeringDefinition
+} from "./featureEngineeringContract";
+import type { FeatureEngineeringDefinition } from "./featureEngineeringContract";
 
-export type WorkflowStepDefinition = {
+export type DataEngineeringWorkflowStep = {
   step_id: string;
   name: string;
   type: "data_engineering";
@@ -13,10 +18,30 @@ export type WorkflowStepDefinition = {
     source: { step_id: string; port_id: string };
   }>;
   output_port_id: string;
+  additional_output_port_ids: string[];
   config: {
     definition: PipelineDefinition;
   };
 };
+
+export type FeatureEngineeringWorkflowStep = {
+  step_id: string;
+  name: string;
+  type: "feature_engineering";
+  inputs: Array<{
+    port_id: string;
+    source: { step_id: string; port_id: string };
+  }>;
+  output_port_id: string;
+  additional_output_port_ids: string[];
+  config: {
+    definition: FeatureEngineeringDefinition;
+  };
+};
+
+export type WorkflowStepDefinition =
+  | DataEngineeringWorkflowStep
+  | FeatureEngineeringWorkflowStep;
 
 export type WorkflowDefinition = {
   contract_version: "2.0";
@@ -54,19 +79,35 @@ export function normalizeWorkflowDefinition(value: unknown): WorkflowDefinition 
         type: "data_engineering",
         inputs: [],
         output_port_id: "dataset",
+        additional_output_port_ids: [],
         config: { definition: legacy }
       }],
       outputs: [{ output_id: "result", source: { step_id: "de_1", port_id: "dataset" } }],
       parameters: {}
     };
   }
-  const steps = Array.isArray(raw.steps)
-    ? raw.steps.flatMap((item) => {
+  const steps: WorkflowStepDefinition[] = Array.isArray(raw.steps)
+    ? raw.steps.flatMap<WorkflowStepDefinition>((item): WorkflowStepDefinition[] => {
         if (!item || typeof item !== "object") return [];
         const step = item as Record<string, unknown>;
         const config = step.config && typeof step.config === "object"
           ? step.config as Record<string, unknown>
           : {};
+        if (step.type === "feature_engineering") {
+          const featureDefinition = normalizeFeatureEngineeringDefinition(config.definition);
+          const ports = featureEngineeringOutputPorts(featureDefinition);
+          return [{
+            step_id: String(step.step_id ?? "fe_1"),
+            name: String(step.name ?? "Feature Engineering"),
+            type: "feature_engineering" as const,
+            inputs: Array.isArray(step.inputs)
+              ? step.inputs as WorkflowStepDefinition["inputs"]
+              : [],
+            output_port_id: ports.primary,
+            additional_output_port_ids: ports.additional,
+            config: { definition: featureDefinition }
+          }];
+        }
         return [{
           step_id: String(step.step_id ?? "de_1"),
           name: String(step.name ?? "Data Engineering"),
@@ -75,20 +116,58 @@ export function normalizeWorkflowDefinition(value: unknown): WorkflowDefinition 
             ? step.inputs as WorkflowStepDefinition["inputs"]
             : [],
           output_port_id: String(step.output_port_id ?? "dataset"),
+          additional_output_port_ids: Array.isArray(step.additional_output_port_ids)
+            ? step.additional_output_port_ids.map(String)
+            : [],
           config: { definition: normalizePipelineDefinition(config.definition) }
         }];
       })
     : [];
+  const rawOutputs = Array.isArray(raw.outputs)
+    ? raw.outputs as WorkflowDefinition["outputs"]
+    : [];
+  const lastStep = steps.at(-1);
   return {
     contract_version: "2.0",
     steps,
-    outputs: Array.isArray(raw.outputs)
-      ? raw.outputs as WorkflowDefinition["outputs"]
-      : [],
+    outputs: lastStep?.type === "feature_engineering"
+      ? workflowOutputsForStep(lastStep)
+      : rawOutputs,
     parameters: raw.parameters && typeof raw.parameters === "object"
       ? raw.parameters as Record<string, unknown>
       : {}
   };
 }
 
+export function featureEngineeringOutputPorts(definition: FeatureEngineeringDefinition) {
+  const roles = [...new Set(definition.outputs.map((output) => output.business_case_role))];
+  const primary = roles.includes("training") ? "training" : roles[0] ?? "training";
+  return {
+    primary,
+    additional: [
+      ...roles.filter((role) => role !== primary),
+      ...(definition.mode === "fit_transform" ? ["fitted_transform"] : [])
+    ]
+  };
+}
+
+export function workflowOutputsForStep(
+  step: WorkflowStepDefinition
+): WorkflowDefinition["outputs"] {
+  if (step.type !== "feature_engineering") {
+    return [{
+      output_id: "result",
+      source: { step_id: step.step_id, port_id: step.output_port_id }
+    }];
+  }
+  return step.config.definition.outputs.map((output) => ({
+    output_id: output.output_id,
+    source: {
+      step_id: step.step_id,
+      port_id: output.business_case_role
+    }
+  }));
+}
+
 export { emptyPipelineDefinition };
+export { emptyFeatureEngineeringDefinition };

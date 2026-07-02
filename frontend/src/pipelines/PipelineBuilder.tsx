@@ -34,6 +34,7 @@ type PipelineColumn = DatasetColumn & {
 
 const stepOptions: Array<{ type: PipelineStepType; label: string; description: string }> = [
   { type: "select_columns", label: "Select columns", description: "Keep an explicit column projection." },
+  { type: "add_identifier", label: "Add identifier", description: "Create a stable row identifier from a hash or ordered sequence." },
   { type: "filter_rows", label: "Filter rows", description: "Keep rows matching a structured predicate." },
   { type: "rename_columns", label: "Rename columns", description: "Rename one or more columns." },
   { type: "cast_columns", label: "Cast columns", description: "Convert columns to validated DuckDB types." },
@@ -469,6 +470,14 @@ function StepConfigEditor({ type, config, availableColumns, inputColumns, source
   if (type === "select_columns" || type === "deduplicate") {
     return <ColumnMultiSelect label={type === "select_columns" ? "Columns to keep" : "Duplicate key columns"} hint={type === "deduplicate" ? "No selection compares complete rows." : undefined} columns={columnNames} selected={stringList(config.columns)} onChange={(columns) => onChange({ columns })} disabled={disabled} />;
   }
+  if (type === "add_identifier") {
+    return <IdentifierEditor
+      config={config}
+      columns={columnNames}
+      disabled={disabled}
+      onChange={onChange}
+    />;
+  }
   if (type === "rename_columns") {
     const renames = recordValue(config.renames);
     const complete = Object.fromEntries(columnNames.map((column) => [column, renames[column] ?? column]));
@@ -700,6 +709,103 @@ function SortEditor({ rules, columns, disabled, onChange }: { rules: Array<Recor
   return <div className="row-editor"><div className="config-table-head"><span>Column</span><span>Direction</span></div>{rules.map((rule, index) => <div className="condition-row compact" key={index}><ColumnSelect value={String(rule.column ?? "")} columns={columns} onChange={(column) => onChange(rules.map((item, itemIndex) => itemIndex === index ? { ...item, column } : item))} disabled={disabled} /><select value={String(rule.direction ?? "asc")} onChange={(event) => onChange(rules.map((item, itemIndex) => itemIndex === index ? { ...item, direction: event.target.value } : item))} disabled={disabled}><option value="asc">Ascending</option><option value="desc">Descending</option></select><button className="icon-button" type="button" onClick={() => onChange(rules.filter((_, itemIndex) => itemIndex !== index))} disabled={disabled || rules.length === 1}><Trash2 size={14} /></button></div>)}<button className="secondary-button compact-button" type="button" onClick={() => onChange([...rules, { column: columns[0] ?? "", direction: "asc" }])} disabled={disabled}><Plus size={14} /> Add sort level</button></div>;
 }
 
+function IdentifierEditor({ config, columns, disabled, onChange }: {
+  config: Record<string, unknown>;
+  columns: string[];
+  disabled: boolean;
+  onChange: (config: Record<string, unknown>) => void;
+}) {
+  const mode = String(config.mode ?? "record_hash");
+  const modes = [
+    {
+      id: "record_hash",
+      label: "Hash entire record",
+      description: "SHA-256 over every upstream column. Identical records receive the same identifier."
+    },
+    {
+      id: "columns_hash",
+      label: "Hash selected columns",
+      description: "SHA-256 over a chosen business key or a stable combination of columns."
+    },
+    {
+      id: "sequence",
+      label: "Ordered sequence",
+      description: "Consecutive BIGINT values assigned using an explicit, reproducible sort order."
+    }
+  ];
+  const setMode = (nextMode: string) => {
+    const common = { mode: nextMode, output_column: String(config.output_column ?? "row_id") };
+    if (nextMode === "columns_hash") {
+      onChange({ ...common, columns: stringList(config.columns).length ? stringList(config.columns) : columns.slice(0, 1) });
+    } else if (nextMode === "sequence") {
+      onChange({
+        ...common,
+        order_by: recordList(config.order_by).length
+          ? recordList(config.order_by)
+          : [{ column: columns[0] ?? "", direction: "asc" }],
+        start: Number.isInteger(config.start) ? config.start : 1
+      });
+    } else {
+      onChange(common);
+    }
+  };
+
+  return <div className="identifier-editor">
+    <div className="identifier-mode-grid">
+      {modes.map((item) => <label className={`identifier-mode-card ${mode === item.id ? "selected" : ""}`} key={item.id}>
+        <input
+          type="radio"
+          name="identifier-mode"
+          value={item.id}
+          checked={mode === item.id}
+          onChange={() => setMode(item.id)}
+          disabled={disabled}
+        />
+        <span><strong>{item.label}</strong><small>{item.description}</small></span>
+      </label>)}
+    </div>
+    <TextField
+      label="Identifier column name"
+      value={String(config.output_column ?? "row_id")}
+      onChange={(output_column) => onChange({ ...config, output_column })}
+      disabled={disabled}
+    />
+    {mode === "columns_hash" && <ColumnMultiSelect
+      label="Columns forming the identifier"
+      hint="Column order is part of the definition. NULL values and field boundaries are encoded unambiguously."
+      columns={columns}
+      selected={stringList(config.columns)}
+      onChange={(selected) => onChange({ ...config, columns: selected })}
+      disabled={disabled}
+    />}
+    {mode === "sequence" && <div className="identifier-sequence">
+      <label>
+        First number
+        <input
+          type="number"
+          min={0}
+          step={1}
+          value={Number(config.start ?? 1)}
+          onChange={(event) => onChange({ ...config, start: Math.max(0, Math.trunc(Number(event.target.value) || 0)) })}
+          disabled={disabled}
+        />
+      </label>
+      <SortEditor
+        rules={recordList(config.order_by)}
+        columns={columns}
+        onChange={(order_by) => onChange({ ...config, order_by })}
+        disabled={disabled}
+      />
+      <small className="identifier-warning">
+        The sort columns must uniquely order rows. Ties can make sequence identifiers unstable between runs.
+      </small>
+    </div>}
+    {mode === "record_hash" && <small className="identifier-warning">
+      Exact duplicate records intentionally receive the same identifier.
+    </small>}
+  </div>;
+}
+
 function AggregateEditor({ config, columns, disabled, onChange }: { config: Record<string, unknown>; columns: PipelineColumn[]; disabled: boolean; onChange: (config: Record<string, unknown>) => void; }) {
   const aggregations = recordList(config.aggregations);
   const names = columns.map((column) => column.name);
@@ -846,6 +952,7 @@ function defaultConfig(type: PipelineStepType, columns: string[] = []): Record<s
   const first = columns[0] ?? "column_name";
   const configs: Record<PipelineStepType, Record<string, unknown>> = {
     select_columns: { columns: columns.length ? columns : [first] },
+    add_identifier: { mode: "record_hash", output_column: "row_id" },
     rename_columns: { renames: Object.fromEntries((columns.length ? columns : [first]).map((column) => [column, column])) },
     cast_columns: { casts: { [first]: "VARCHAR" } },
     filter_rows: { mode: "visual", conditions: [{ column: first, operator: "eq", value: "" }], combine: "and" },
@@ -950,6 +1057,12 @@ function columnMetadataForNode(
     const source = upstream.find((column) => column.name === left.column);
     return mergeColumns([...upstream, { name: String(step.config.name ?? "new_column"), type: expression.operator === "concat" ? "text" : source?.type ?? "number" }]);
   }
+  if (step.type === "add_identifier") {
+    return mergeColumns([...upstream, {
+      name: String(step.config.output_column ?? "row_id"),
+      type: step.config.mode === "sequence" ? "number" : "text"
+    }]);
+  }
   if (step.type === "aggregate") {
     const grouped = stringList(step.config.group_by).map((name) => upstream.find((column) => column.name === name) ?? { name, type: "text" as const });
     const metrics: PipelineColumn[] = recordList(step.config.aggregations).map((item) => ({ name: String(item.alias ?? "metric"), type: "number" }));
@@ -1017,6 +1130,9 @@ function columnsForNode(
   }
   if (step.type === "derive_column") {
     return Array.from(new Set([...upstream, String(step.config.name ?? "new_column")]));
+  }
+  if (step.type === "add_identifier") {
+    return Array.from(new Set([...upstream, String(step.config.output_column ?? "row_id")]));
   }
   if (step.type === "aggregate") {
     return [

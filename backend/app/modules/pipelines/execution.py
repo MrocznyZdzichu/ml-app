@@ -228,6 +228,8 @@ def compile_step(
     if step.type == "select_columns":
         columns = require_string_list(config["columns"], "columns")
         return f"SELECT {', '.join(identifier(column) for column in columns)} FROM {source}"
+    if step.type == "add_identifier":
+        return compile_add_identifier(connection, source_names[0], config)
     if step.type == "rename_columns":
         renames = require_mapping(config["renames"], "renames")
         columns = relation_columns(connection, source_names[0])
@@ -324,6 +326,55 @@ def compile_step(
     if step.type == "custom_sql":
         return bind_user_sql_to_inputs(connection, str(config["sql"]), sources)
     raise ValueError(f"Unsupported pipeline step type '{step.type}'")
+
+
+def compile_add_identifier(
+    connection: duckdb.DuckDBPyConnection,
+    source_name: str,
+    config: dict[str, Any],
+) -> str:
+    available = relation_columns(connection, source_name)
+    output_column = str(config["output_column"])
+    if output_column in available:
+        raise ValueError(f"Identifier output column '{output_column}' already exists")
+
+    mode = str(config["mode"])
+    source = identifier(source_name)
+    if mode in {"record_hash", "columns_hash"}:
+        columns = (
+            available
+            if mode == "record_hash"
+            else require_string_list(config.get("columns"), "columns")
+        )
+        missing = sorted(set(columns) - set(available))
+        if missing:
+            raise ValueError(f"Identifier references unknown columns: {', '.join(missing)}")
+        encoded = [
+            (
+                f"CASE WHEN {identifier(column)} IS NULL THEN 'N;' "
+                f"ELSE 'V' || length(CAST({identifier(column)} AS VARCHAR))::VARCHAR "
+                f"|| ':' || CAST({identifier(column)} AS VARCHAR) || ';' END"
+            )
+            for column in columns
+        ]
+        digest = f"sha256(concat({', '.join(encoded)}))"
+        return f"SELECT *, {digest} AS {identifier(output_column)} FROM {source}"
+
+    if mode == "sequence":
+        order_by = require_record_list(config.get("order_by"), "order_by")
+        order_columns = [str(rule["column"]) for rule in order_by]
+        missing = sorted(set(order_columns) - set(available))
+        if missing:
+            raise ValueError(f"Identifier ordering references unknown columns: {', '.join(missing)}")
+        order_sql = ", ".join(
+            f"{identifier(str(rule['column']))} {str(rule.get('direction', 'asc')).upper()}"
+            for rule in order_by
+        )
+        start = int(config.get("start", 1))
+        sequence = f"row_number() OVER (ORDER BY {order_sql}) + {start - 1}"
+        return f"SELECT *, {sequence} AS {identifier(output_column)} FROM {source}"
+
+    raise ValueError(f"Unsupported identifier mode '{mode}'")
 
 
 def compile_join(

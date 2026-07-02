@@ -30,6 +30,18 @@ class PipelineCreate(BaseModel):
     definition: dict[str, Any] = Field(default_factory=default_pipeline_definition)
 
 
+class PipelineUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Pipeline name cannot be blank")
+        return stripped
+
+
 class PipelineRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -105,6 +117,25 @@ class PipelineRunRead(BaseModel):
     error_message: str
     created_by: str
     created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class PipelineStepRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    owner_id: str
+    pipeline_run_id: str
+    pipeline_step_id: str
+    step_type: str
+    status: PipelineRunStatus
+    input_row_count: int | None
+    processed_row_count: int | None
+    output_row_count: int | None
+    warnings: list[str]
+    output_manifest: list[dict[str, Any]]
+    error_message: str
     started_at: datetime | None
     finished_at: datetime | None
 

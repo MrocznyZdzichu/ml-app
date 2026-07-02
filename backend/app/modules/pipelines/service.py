@@ -20,7 +20,12 @@ from app.modules.pipelines.domain import (
 )
 from app.modules.pipelines.repository import PipelineRepository, PostgresPipelineRepository
 from app.modules.pipelines.run_preview import PipelineRunOutputReader
-from app.modules.pipelines.schemas import PipelineCreate, PipelineRunCreate, PipelineVersionUpdate
+from app.modules.pipelines.schemas import (
+    PipelineCreate,
+    PipelineRunCreate,
+    PipelineUpdate,
+    PipelineVersionUpdate,
+)
 from app.modules.pipelines.workflow import (
     WorkflowDefinition,
     empty_workflow_definition,
@@ -87,6 +92,18 @@ class PipelineService:
         if not pipeline or pipeline.owner_id != principal.user_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pipeline not found")
         return pipeline
+
+    def update_pipeline(
+        self,
+        pipeline_id: str,
+        payload: PipelineUpdate,
+        principal: Principal,
+    ) -> Pipeline:
+        pipeline = self.get_pipeline(pipeline_id, principal)
+        pipeline.name = payload.name
+        pipeline.updated_by = principal.user_id
+        pipeline.updated_at = datetime.now(timezone.utc)
+        return self.repository.update_pipeline(pipeline)
 
     def list_versions(self, pipeline_id: str, principal: Principal) -> list[PipelineVersion]:
         pipeline = self.get_pipeline(pipeline_id, principal)
@@ -225,6 +242,15 @@ class PipelineService:
             pipeline_id = pipeline.id
         return self.repository.list_runs(pipeline_id, principal.user_id)
 
+    def list_step_runs(
+        self,
+        pipeline_id: str,
+        run_id: str,
+        principal: Principal,
+    ) -> list:
+        run = self.get_run(pipeline_id, run_id, principal)
+        return self.repository.list_step_runs(run.id, principal.user_id)
+
     def preview_run_output(
         self,
         pipeline_id: str,
@@ -253,7 +279,7 @@ class PipelineService:
 
     def list_step_types(self) -> list[dict[str, str]]:
         executable = {
-            "select_columns", "rename_columns", "cast_columns", "filter_rows", "sort_rows",
+            "select_columns", "add_identifier", "rename_columns", "cast_columns", "filter_rows", "sort_rows",
             "deduplicate", "impute_missing", "derive_column", "aggregate", "join", "union",
             "map_categories",
             "custom_sql",

@@ -475,14 +475,18 @@ export type PipelineRun = {
   output_artifact_ids: string[];
   output_manifest: Array<{
     output_id: string;
-    materialization: "temporary";
+    artifact_type?: "dataset" | "feature_transform";
+    materialization: "temporary" | "dataset" | "artifact";
     location_uri: string;
-    row_count: number;
-    schema: Array<{ name: string; type: string }>;
+    row_count?: number;
+    schema?: Array<{ name: string; type: string }>;
+    schema_hash?: string;
+    state_hash?: string;
+    feature_manifest?: Array<Record<string, unknown>>;
     data_scope: "full";
     is_dry_run: boolean;
-    dataset_name: string;
-    business_case_role: string;
+    dataset_name?: string;
+    business_case_role?: string;
     dataset_id?: string;
     artifact_id?: string;
     file_size_bytes?: number;
@@ -496,6 +500,23 @@ export type PipelineRun = {
   error_message: string;
   created_by: string;
   created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
+export type PipelineStepRun = {
+  id: string;
+  owner_id: string;
+  pipeline_run_id: string;
+  pipeline_step_id: string;
+  step_type: string;
+  status: string;
+  input_row_count: number | null;
+  processed_row_count: number | null;
+  output_row_count: number | null;
+  warnings: string[];
+  output_manifest: PipelineRun["output_manifest"];
+  error_message: string;
   started_at: string | null;
   finished_at: string | null;
 };
@@ -574,6 +595,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload)
     }),
+  updatePipeline: (pipelineId: string, payload: { name: string }) =>
+    request<Pipeline>(`/pipelines/${pipelineId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
   listPipelineVersions: (pipelineId: string) =>
     request<PipelineVersion[]>(`/pipelines/${pipelineId}/versions`),
   updateDraftPipelineVersion: (pipelineId: string, definition: Record<string, unknown>) =>
@@ -598,6 +624,8 @@ export const api = {
     request<PipelineRun[]>(`/pipelines/${pipelineId}/runs`),
   getPipelineRun: (pipelineId: string, runId: string) =>
     request<PipelineRun>(`/pipelines/${pipelineId}/runs/${runId}`),
+  listPipelineStepRuns: (pipelineId: string, runId: string) =>
+    request<PipelineStepRun[]>(`/pipelines/${pipelineId}/runs/${runId}/steps`),
   previewPipelineRunOutput: (pipelineId: string, runId: string, outputId: string, limit: number, offset: number) =>
     request<PipelineRunOutputPreview>(
       `/pipelines/${pipelineId}/runs/${runId}/preview?output_id=${encodeURIComponent(outputId)}&limit=${limit}&offset=${offset}`

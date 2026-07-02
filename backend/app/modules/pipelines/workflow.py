@@ -27,9 +27,10 @@ class WorkflowStep(BaseModel):
 
     step_id: str = Field(min_length=1, max_length=128)
     name: str = Field(min_length=1, max_length=200)
-    type: Literal["data_engineering"]
+    type: Literal["data_engineering", "feature_engineering"]
     inputs: list[WorkflowStepInput] = Field(default_factory=list)
     output_port_id: str = Field(default="dataset", min_length=1, max_length=128)
+    additional_output_port_ids: list[str] = Field(default_factory=list)
     config: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -59,7 +60,10 @@ class WorkflowDefinition(BaseModel):
         if len(output_ids) != len(set(output_ids)):
             raise ValueError("Workflow output_id values must be unique")
 
-        ports = {step.step_id: {step.output_port_id} for step in self.steps}
+        ports = {
+            step.step_id: {step.output_port_id, *step.additional_output_port_ids}
+            for step in self.steps
+        }
         dependencies: dict[str, set[str]] = defaultdict(set)
         for step in self.steps:
             input_ids = [item.port_id for item in step.inputs]
@@ -68,10 +72,14 @@ class WorkflowDefinition(BaseModel):
             for item in step.inputs:
                 _validate_reference(step.step_id, item.source, ports)
                 dependencies[step.step_id].add(item.source.step_id)
+            if len(step.additional_output_port_ids) != len(set(step.additional_output_port_ids)):
+                raise ValueError(f"Workflow step '{step.step_id}' has duplicate output port IDs")
+            if step.output_port_id in step.additional_output_port_ids:
+                raise ValueError(f"Workflow step '{step.step_id}' has duplicate output port IDs")
             if set(step.config) - {"definition"}:
                 raise ValueError(f"Workflow step '{step.step_id}' contains unsupported config fields")
             if not isinstance(step.config.get("definition"), dict):
-                raise ValueError(f"Workflow step '{step.step_id}' requires a DE definition")
+                raise ValueError(f"Workflow step '{step.step_id}' requires a nested definition")
 
         for output in self.outputs:
             _validate_reference(output.output_id, output.source, ports)
@@ -94,6 +102,32 @@ def normalize_workflow_definition(definition: dict[str, Any]) -> dict[str, Any]:
         normalized.setdefault("steps", [])
         normalized.setdefault("outputs", [])
         normalized.setdefault("parameters", {})
+        steps = [dict(step) for step in normalized["steps"]]
+        legacy_primary_ports: dict[str, str] = {}
+        for step in steps:
+            if step.get("type") != "feature_engineering":
+                continue
+            previous_primary = str(step.get("output_port_id") or "dataset")
+            primary, additional = feature_engineering_output_ports(step)
+            step["output_port_id"] = primary
+            step["additional_output_port_ids"] = additional
+            legacy_primary_ports[str(step.get("step_id") or "")] = previous_primary
+        normalized["steps"] = steps
+
+        outputs = [dict(output) for output in normalized["outputs"]]
+        for output in outputs:
+            source = dict(output.get("source") or {})
+            step_id = str(source.get("step_id") or "")
+            if (
+                step_id in legacy_primary_ports
+                and source.get("port_id") == legacy_primary_ports[step_id]
+            ):
+                step = next(item for item in steps if str(item.get("step_id")) == step_id)
+                source["port_id"] = step["output_port_id"]
+                output["source"] = source
+        if steps and steps[-1].get("type") == "feature_engineering":
+            outputs = feature_engineering_workflow_outputs(steps[-1])
+        normalized["outputs"] = outputs
         return normalized
 
     legacy = dict(definition)
@@ -131,18 +165,43 @@ def validate_workflow_definition(definition: dict[str, Any], executable: bool) -
     workflow = WorkflowDefinition.model_validate(normalized)
     if executable and not workflow.steps:
         raise ValueError("An executable pipeline requires at least one workflow step")
-    if len(workflow.steps) > 1:
-        raise ValueError("The current functional prototype supports one Data Engineering step")
-    for step in workflow.steps:
-        de_definition = dict(step.config["definition"])
-        de_is_empty = (
-            not de_definition.get("inputs")
-            and not de_definition.get("steps")
-            and not de_definition.get("outputs")
-        )
-        if executable or not de_is_empty:
-            validated = PipelineDefinition.model_validate(de_definition)
+    if len(workflow.steps) > 2:
+        raise ValueError("The current workflow supports at most Data Engineering and Feature Engineering")
+    if workflow.steps:
+        allowed_sequence = ["data_engineering", "feature_engineering"]
+        actual_sequence = [step.type for step in workflow.steps]
+        if actual_sequence not in (["data_engineering"], ["feature_engineering"], allowed_sequence):
+            raise ValueError("Workflow steps must be Data Engineering followed by Feature Engineering")
+    for index, step in enumerate(workflow.steps):
+        nested_definition = dict(step.config["definition"])
+        if step.type == "data_engineering":
+            nested_is_empty = (
+                not nested_definition.get("inputs")
+                and not nested_definition.get("steps")
+                and not nested_definition.get("outputs")
+            )
+            if executable or not nested_is_empty:
+                validated = PipelineDefinition.model_validate(nested_definition)
+                step.config["definition"] = validated.model_dump(mode="json")
+        else:
+            from app.modules.pipelines.feature_engineering import FeatureEngineeringDefinition
+
+            validated = FeatureEngineeringDefinition.model_validate(nested_definition)
+            if executable:
+                validated.validate_executable()
             step.config["definition"] = validated.model_dump(mode="json")
+            expected_primary, expected_additional = feature_engineering_output_ports(
+                step.model_dump(mode="json")
+            )
+            if (
+                step.output_port_id != expected_primary
+                or step.additional_output_port_ids != expected_additional
+            ):
+                raise ValueError(
+                    "Feature Engineering workflow ports must match its declared dataset outputs"
+                )
+            if index > 0 and not step.inputs:
+                raise ValueError("Feature Engineering after Data Engineering requires an upstream input")
     if executable and not workflow.outputs:
         raise ValueError("An executable pipeline requires a workflow output")
     return workflow.model_dump(mode="json")
@@ -162,6 +221,45 @@ def data_engineering_step(workflow: WorkflowDefinition) -> WorkflowStep:
     if len(workflow.steps) != 1 or workflow.steps[0].type != "data_engineering":
         raise ValueError("The current functional prototype requires exactly one Data Engineering step")
     return workflow.steps[0]
+
+
+def feature_engineering_step(workflow: WorkflowDefinition) -> WorkflowStep:
+    matches = [step for step in workflow.steps if step.type == "feature_engineering"]
+    if len(matches) != 1:
+        raise ValueError("Workflow requires exactly one Feature Engineering step")
+    return matches[0]
+
+
+def feature_engineering_output_ports(step: dict[str, Any]) -> tuple[str, list[str]]:
+    config = step.get("config") if isinstance(step.get("config"), dict) else {}
+    definition = config.get("definition") if isinstance(config.get("definition"), dict) else {}
+    outputs = definition.get("outputs") if isinstance(definition.get("outputs"), list) else []
+    roles = list(dict.fromkeys(
+        str(output.get("business_case_role") or "training")
+        for output in outputs
+        if isinstance(output, dict)
+    ))
+    primary = "training" if "training" in roles else (roles[0] if roles else "training")
+    additional = [role for role in roles if role != primary]
+    if str(definition.get("mode") or "fit_transform") == "fit_transform":
+        additional.append("fitted_transform")
+    return primary, additional
+
+
+def feature_engineering_workflow_outputs(step: dict[str, Any]) -> list[dict[str, Any]]:
+    config = step.get("config") if isinstance(step.get("config"), dict) else {}
+    definition = config.get("definition") if isinstance(config.get("definition"), dict) else {}
+    outputs = definition.get("outputs") if isinstance(definition.get("outputs"), list) else []
+    step_id = str(step.get("step_id") or "fe_1")
+    return [
+        {
+            "output_id": str(output.get("output_id") or f"{role}_features"),
+            "source": {"step_id": step_id, "port_id": role},
+        }
+        for output in outputs
+        if isinstance(output, dict)
+        for role in [str(output.get("business_case_role") or "training")]
+    ]
 
 
 def _validate_reference(

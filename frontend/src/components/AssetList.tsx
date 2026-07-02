@@ -1,4 +1,4 @@
-import { Trash2 } from "lucide-react";
+import { Pencil, Trash2 } from "lucide-react";
 
 export type AssetListItem = {
   id: string;
@@ -7,6 +7,8 @@ export type AssetListItem = {
   status: string;
   canDelete?: boolean;
   onDelete?: () => void;
+  actionLabel?: string;
+  onAction?: () => void;
 };
 
 export function AssetList({
@@ -30,6 +32,16 @@ export function AssetList({
             </div>
             <div className="asset-actions">
               <em>{asset.status}</em>
+              {asset.actionLabel && asset.onAction && (
+                <button
+                  className="secondary-button compact-button"
+                  onClick={asset.onAction}
+                  type="button"
+                >
+                  <Pencil size={14} />
+                  {asset.actionLabel}
+                </button>
+              )}
               {asset.canDelete && asset.onDelete && (
                 <button
                   aria-label={`Delete ${asset.name}`}

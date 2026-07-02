@@ -89,11 +89,19 @@ an explicit upstream node and port. Validation rejects missing references,
 cycles, duplicate IDs and ports, incorrect operation arity, unsupported config,
 and non-temporary Stage 1 outputs.
 
-Supported operations are `select_columns`, `rename_columns`, `cast_columns`,
+Supported operations are `select_columns`, `add_identifier`, `rename_columns`, `cast_columns`,
 `filter_rows`, `sort_rows`, `deduplicate`, `impute_missing`, `derive_column`,
 `aggregate`, `join`, `union`, and `map_categories`. Join inputs must use ports
 `left` and `right`. Expressions and predicates are structured; raw SQL is not
 accepted by standard blocks.
+
+`add_identifier` creates a protected row-key candidate before feature
+engineering. It supports SHA-256 of the complete record, SHA-256 of an ordered
+column selection, and a `BIGINT` sequence starting at a configured value.
+Hashes use a canonical null- and boundary-aware encoding. Sequence mode
+requires an explicit sort definition; those columns should uniquely order the
+rows, otherwise tied rows cannot be assigned reproducibly. Existing columns
+are never overwritten.
 
 The `custom_sql` block is the controlled **User Written SQL** escape hatch. Its
 input port IDs become the only relation names available to one read-only

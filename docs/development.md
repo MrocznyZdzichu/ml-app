@@ -75,11 +75,10 @@ docker compose config
 
 ## Descriptive Profiling Runtime
 
-Uploaded CSV datasets are profiled asynchronously by the Celery worker. The
-first full profile creates a reusable Zstandard-compressed Parquet sidecar next
-to the source file under `data/repository`; later profiles reuse it while the
-source file is unchanged. DuckDB scans all rows and may spill intermediate work
-to the dataset-local temporary directory.
+Uploaded CSV and Parquet datasets are profiled asynchronously by the Celery
+worker. CSV creates a reusable Zstandard-compressed Parquet sidecar on its first
+full columnar analysis; uploaded Parquet is scanned natively. DuckDB scans all
+rows and may spill intermediate work to the dataset-local temporary directory.
 
 The main local tuning variables are documented in `.env.example`:
 
@@ -185,7 +184,7 @@ git add --dry-run .
 
 - Add Alembic migrations and SQLAlchemy repositories.
 - Add database connection testing and external source adapters.
-- Add parquet and xlsx source adapters.
+- Add an xlsx source adapter.
 - Move the live Data Browser preview and Custom SQL execution to paged DuckDB
   query pushdown instead of bounded frontend/Python records.
 - Add query cancellation, quotas, and persisted observability for long-running analytics.

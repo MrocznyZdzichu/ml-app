@@ -44,6 +44,7 @@ class PipelineRunTrigger(str, Enum):
 
 class PipelineStepType(str, Enum):
     SELECT_COLUMNS = "select_columns"
+    ADD_IDENTIFIER = "add_identifier"
     RENAME_COLUMNS = "rename_columns"
     CAST_COLUMNS = "cast_columns"
     FILTER_ROWS = "filter_rows"
@@ -118,5 +119,23 @@ class PipelineRun:
     error_message: str = ""
     created_by: str = ""
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+@dataclass
+class PipelineStepRun:
+    id: str
+    owner_id: str
+    pipeline_run_id: str
+    pipeline_step_id: str
+    step_type: str
+    status: PipelineRunStatus
+    input_row_count: int | None = None
+    processed_row_count: int | None = None
+    output_row_count: int | None = None
+    warnings: list[str] = field(default_factory=list)
+    output_manifest: list[dict[str, Any]] = field(default_factory=list)
+    error_message: str = ""
     started_at: datetime | None = None
     finished_at: datetime | None = None

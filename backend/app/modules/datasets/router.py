@@ -45,9 +45,9 @@ def upload_dataset(
 ) -> DataAssetRead:
     tag_values = [tag.strip() for tag in tags.split(",") if tag.strip()]
     return DataAssetRead.model_validate(
-        service.upload_csv_stream(
+        service.upload_file_stream(
             stream=file.file,
-            filename=file.filename or "dataset.csv",
+            filename=file.filename or "dataset",
             principal=principal,
             name=name,
             description=description,

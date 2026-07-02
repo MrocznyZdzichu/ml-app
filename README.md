@@ -18,6 +18,7 @@ The current product slice focuses on a practical analyst workflow:
 - profile datasets with descriptive, target-aware, and comparison summaries,
 - run read-only Custom SQL,
 - save reusable Data Views,
+- execute versioned Data Engineering → Feature Engineering workflows,
 - continue from saved views into browsing, visualization, and descriptive analysis,
 - compose reusable interactive dashboards over full datasets and Data Views,
 - exercise placeholder model registry, deployment, sharing, and export contracts.
@@ -220,6 +221,19 @@ must not be interpreted as a full-view profile.
 When possible, data roles are inherited from the source dataset for columns that
 survive in the view.
 
+### Pipelines: Data and Feature Engineering
+
+Versioned high-level workflows can execute Data Engineering followed by Feature
+Engineering. DE performs full-row DuckDB transformations and passes its Parquet
+result directly to FE. FE fits imputation, scaling, bounded category encoding,
+date extraction, and numeric interactions only on the declared training input,
+then applies the fitted state to validation, test, or scoring inputs.
+
+Official runs create feature datasets with schema hashes and feature manifests,
+plus a separate engine-neutral `feature_transform` artifact. Every high-level
+step has its own auditable StepRun. See
+[`docs/feature-engineering-stage-1.md`](docs/feature-engineering-stage-1.md).
+
 Deleted datasets and views remain visible in the Data workspace deletion history
 but are excluded from Overview metrics, Recent assets, and Analysis selectors.
 
@@ -241,13 +255,13 @@ records created in the main API.
 
 ## Current Implementation Boundaries
 
-- Local ingestion supports UTF-8 CSV files only. Parquet, XLSX, remote databases,
-  and object-storage ingestion are not implemented.
+- Local file ingestion supports UTF-8 CSV and flat tabular Parquet datasets.
+  XLSX, remote databases, and object-storage ingestion are not implemented.
 - Users and dataset metadata are durable in PostgreSQL. Uploaded files and
   generated Parquet sidecars are stored in `data/repository`; MinIO is started
   for future object-storage work but is not the active dataset store.
-- Full-dataset descriptive profiling is implemented for uploaded CSV datasets
-  and materialized SQL/Browser Data Views.
+- Full-dataset descriptive profiling is implemented for uploaded CSV and
+  Parquet datasets and materialized SQL/Browser Data Views.
 - Visualization, chart drill-down, and Data View materialization use DuckDB over
   the complete physical or transformed relation and return bounded results.
 - Scatter trend output is capped at 80 render points per curve and 100 selected
@@ -330,6 +344,7 @@ separate from the placeholder deployment records in the application UI.
 - [Development notes](docs/development.md)
 - [Analysis and Data Browser reference](docs/analysis-data-browser-reference.md)
 - [Descriptive profiling performance](docs/descriptive-profiling-performance.md)
+- [Feature Engineering Stage 1](docs/feature-engineering-stage-1.md)
 
 ## Git Notes
 
