@@ -5,6 +5,7 @@ import { api } from "../api/client";
 import type { BusinessCaseDataAttachment, DataAsset, DatasetColumn } from "../api/client";
 import type {
   PipelineDefinition,
+  DataContractDefinition,
   PipelineInputDefinition,
   PipelineOutputDefinition,
   PipelinePortReference,
@@ -17,6 +18,7 @@ import {
   rewireSequentialFlow,
   sanitizeCategoryMapping
 } from "./pipelineContract";
+import { inferPipelineOutputColumns } from "./pipelineSchema";
 
 export type {
   PipelineDefinition,
@@ -230,6 +232,20 @@ export function PipelineBuilder({
 
   const outputSources = availableSources(definition);
   const selectedOutput = definition.outputs[0]?.input;
+  const outputColumns = useMemo(
+    () => inferPipelineOutputColumns(definition, datasets, schemaCache),
+    [datasets, definition, schemaCache]
+  );
+  useEffect(() => {
+    const output = definition.outputs[0];
+    if (!output || !outputColumns.length) return;
+    const dataContract = synchronizeDataContract(output.data_contract, outputColumns);
+    if (JSON.stringify(output.data_contract) === JSON.stringify(dataContract)) return;
+    onChange({
+      ...definition,
+      outputs: [{ ...output, data_contract: dataContract }, ...definition.outputs.slice(1)]
+    });
+  }, [definition, onChange, outputColumns]);
   const isExecutable = definition.inputs.length > 0 && definition.outputs.length > 0;
   const selectedInputIndex = definition.inputs.findIndex((input) => input.input_id === selectedNodeId);
   const selectedStepIndex = definition.steps.findIndex((step) => step.step_id === selectedNodeId);
@@ -357,6 +373,17 @@ export function PipelineBuilder({
             <label>Business Case role<select value={definition.outputs[0]?.business_case_role ?? "source"} onChange={(event) => update({ outputs: [{ ...datasetOutput(selectedOutput, definition.outputs[0]?.output_id, definition.outputs[0], outputNameSuggestion), business_case_role: event.target.value as PipelineOutputDefinition["business_case_role"] }] })} disabled={disabled || !isExecutable}>
               {["source", "training", "validation", "test", "scoring_input", "scoring_output", "monitoring_actuals", "reference"].map((role) => <option key={role} value={role}>{role.replaceAll("_", " ")}</option>)}
             </select></label>
+            <DataContractEditor
+              contract={definition.outputs[0]?.data_contract}
+              columns={outputColumns}
+              disabled={disabled || !isExecutable}
+              onChange={(data_contract) => update({
+                outputs: [{
+                  ...datasetOutput(selectedOutput, definition.outputs[0]?.output_id, definition.outputs[0], outputNameSuggestion),
+                  data_contract
+                }]
+              })}
+            />
             <div className="scope-badge">Run: persistent Parquet · Dry-run: temporary preview</div>
           </div>
         )}
@@ -827,6 +854,102 @@ function AggregateEditor({ config, columns, disabled, onChange }: { config: Reco
   })}<button className="secondary-button compact-button" type="button" onClick={() => onChange({ ...config, aggregations: [...aggregations, { column: "*", function: "count", alias: `metric_${aggregations.length + 1}` }] })}><Plus size={14} /> Add metric</button></div>;
 }
 
+function DataContractEditor({
+  contract,
+  columns,
+  disabled,
+  onChange
+}: {
+  contract?: DataContractDefinition;
+  columns: PipelineColumn[];
+  disabled: boolean;
+  onChange: (contract: DataContractDefinition | undefined) => void;
+}) {
+  if (!contract) {
+    return (
+      <div className="data-contract-editor">
+        <div><strong>Data contract</strong><small>{columns.length ? "Synchronizing the contract with the DAG output schema…" : "Output schema is not available yet. Configure the DAG source and operations first."}</small></div>
+      </div>
+    );
+  }
+
+  const updateColumn = (index: number, patch: Partial<DataContractDefinition["columns"][number]>) => {
+    onChange({
+      ...contract,
+      columns: contract.columns.map((column, itemIndex) =>
+        itemIndex === index ? { ...column, ...patch } : column
+      )
+    });
+  };
+  return (
+    <div className="data-contract-editor">
+      <div className="data-contract-heading">
+        <div><strong>Data contract</strong><small>{contract.columns.length} columns inferred from the DAG. Names and types follow the output automatically.</small></div>
+        <span className="scope-badge">DAG synchronized</span>
+      </div>
+      <div className="data-contract-options">
+        <label>Schema drift<select value={contract.schema_drift_policy} disabled={disabled} onChange={(event) => onChange({ ...contract, schema_drift_policy: event.target.value as "fail" | "warn" })}><option value="fail">Fail run</option><option value="warn">Warn</option></select></label>
+        <label className="checkbox-label"><input type="checkbox" checked={contract.allow_unexpected_columns} disabled={disabled} onChange={(event) => onChange({ ...contract, allow_unexpected_columns: event.target.checked })} /> Allow extra columns</label>
+      </div>
+      <div className="contract-rule-list">
+        {contract.columns.map((column, index) => (
+          <div className="contract-rule" key={`${column.name}-${index}`}>
+            <div className="contract-rule-primary">
+              <div className="contract-inferred-field"><span>Column from DAG</span><strong>{column.name}</strong></div>
+              <div className="contract-inferred-field"><span>Inferred type</span><code>{column.type}</code></div>
+              <label><span>On violation</span><select value={column.policy} disabled={disabled} onChange={(event) => updateColumn(index, { policy: event.target.value as "fail" | "warn" | "reject" })}><option value="fail">Fail run</option><option value="warn">Warn</option><option value="reject">Reject row</option></select></label>
+            </div>
+            <div className="contract-rule-constraints">
+              <label className="checkbox-label"><input type="checkbox" checked={column.nullable} disabled={disabled} onChange={(event) => updateColumn(index, { nullable: event.target.checked })} /> Nullable</label>
+              <label className="checkbox-label"><input type="checkbox" checked={column.unique} disabled={disabled} onChange={(event) => updateColumn(index, { unique: event.target.checked })} /> Unique</label>
+              <label><span>Minimum</span><input type="number" placeholder={contractTypeSupportsRange(column.type) ? "No minimum" : "Numeric only"} value={column.minimum ?? ""} disabled={disabled || !contractTypeSupportsRange(column.type)} onChange={(event) => updateColumn(index, { minimum: event.target.value === "" ? undefined : Number(event.target.value) })} /></label>
+              <label><span>Maximum</span><input type="number" placeholder={contractTypeSupportsRange(column.type) ? "No maximum" : "Numeric only"} value={column.maximum ?? ""} disabled={disabled || !contractTypeSupportsRange(column.type)} onChange={(event) => updateColumn(index, { maximum: event.target.value === "" ? undefined : Number(event.target.value) })} /></label>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function synchronizeDataContract(
+  current: DataContractDefinition | undefined,
+  columns: DatasetColumn[]
+): DataContractDefinition {
+  const existing = new Map(current?.columns.map((column) => [column.name, column]) ?? []);
+  return {
+    schema_drift_policy: current?.schema_drift_policy ?? "fail",
+    allow_unexpected_columns: current?.allow_unexpected_columns ?? false,
+    columns: columns.map((column) => {
+      const previous = existing.get(column.name);
+      const type = column.storage_type || contractColumnType(column.type);
+      const supportsRange = column.type === "number";
+      return {
+        name: column.name,
+        type,
+        nullable: previous?.nullable ?? true,
+        unique: previous?.unique ?? false,
+        policy: previous?.policy ?? "fail",
+        ...(supportsRange && previous?.minimum !== undefined ? { minimum: previous.minimum } : {}),
+        ...(supportsRange && previous?.maximum !== undefined ? { maximum: previous.maximum } : {}),
+        ...(previous?.allowed_values ? { allowed_values: previous.allowed_values } : {})
+      };
+    })
+  };
+}
+
+function contractColumnType(type: DatasetColumn["type"]) {
+  if (type === "number") return "DOUBLE";
+  if (type === "date") return "TIMESTAMP";
+  if (type === "boolean") return "BOOLEAN";
+  return "VARCHAR";
+}
+
+function contractTypeSupportsRange(type: string) {
+  return ["TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "FLOAT", "DOUBLE", "DECIMAL", "NUMERIC", "REAL"]
+    .some((token) => type.toUpperCase().includes(token));
+}
+
 function JoinEditor({ config, leftColumns, rightColumns, disabled, onChange }: { config: Record<string, unknown>; leftColumns: PipelineColumn[]; rightColumns: PipelineColumn[]; disabled: boolean; onChange: (config: Record<string, unknown>) => void; }) {
   const keys = recordList(config.keys);
   const leftNames = leftColumns.map((column) => column.name);
@@ -1169,7 +1292,8 @@ function datasetOutput(
     materialization: "dataset",
     write_mode: "replace",
     dataset_name: existing?.dataset_name || outputNameSuggestion || outputId || "result",
-    business_case_role: existing?.business_case_role ?? "source"
+    business_case_role: existing?.business_case_role ?? "source",
+    data_contract: existing?.data_contract
   };
 }
 

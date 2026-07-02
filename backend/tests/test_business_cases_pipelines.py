@@ -307,6 +307,35 @@ def test_pipeline_version_and_run_contracts_are_auditable(monkeypatch) -> None:
     )
     assert run_status.status_code == 200
     assert run_status.json()["status"] == "queued"
+    details = client.get(
+        f"/api/v1/pipelines/{pipeline['id']}/runs/{official_run.json()['id']}/details",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert details.status_code == 200
+    assert details.json()["pipeline_version"]["definition_hash"] == published.json()["definition_hash"]
+    assert details.json()["resolved_inputs"][0]["dataset_id"] == uploaded.json()["id"]
+    assert details.json()["steps"] == []
+
+    cancelled = client.post(
+        f"/api/v1/pipelines/{pipeline['id']}/runs/{official_run.json()['id']}/cancel",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+    retried = client.post(
+        f"/api/v1/pipelines/{pipeline['id']}/runs/{official_run.json()['id']}/retry",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert retried.status_code == 201
+    assert retried.json()["id"] != official_run.json()["id"]
+    assert retried.json()["pipeline_version_id"] == official_run.json()["pipeline_version_id"]
+    assert retried.json()["runtime_parameters"]["retry_of_run_id"] == official_run.json()["id"]
+    history = client.get(
+        "/api/v1/pipelines/runs/history?limit=1",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert history.status_code == 200
+    assert [item["id"] for item in history.json()] == [retried.json()["id"]]
 
 
 def test_select_at_run_requires_and_audits_a_concrete_dataset_version(monkeypatch) -> None:

@@ -9,6 +9,7 @@ from app.modules.datasets.domain import DataAsset, DataAssetStatus, SourceType
 from app.modules.datasets.repository import DatasetRepository, PostgresDatasetRepository
 from app.modules.datasets.sources import CsvFileDatasetSource
 from app.modules.pipelines.dag import PipelineDefinition, PipelineStep, topological_order
+from app.modules.pipelines.data_quality import evaluate_data_contract
 from app.modules.pipelines.runtime import (
     SourceRelation,
     json_safe,
@@ -77,6 +78,7 @@ class PipelineExecutionResult:
     output_row_count: int
     output_manifest: list[dict[str, Any]]
     warnings: list[str]
+    rejected_row_count: int = 0
 
 
 class PipelineExecutionEngine(Protocol):
@@ -112,6 +114,8 @@ class DuckDbPipelineExecutionEngine:
         relations: dict[tuple[str, str], str] = {}
         input_counts: list[int] = []
         manifests: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        rejected_row_count = 0
         try:
             for pipeline_input in definition.inputs:
                 source = self.input_adapter.relation(pipeline_input.dataset_id, owner_id)
@@ -135,10 +139,16 @@ class DuckDbPipelineExecutionEngine:
                 elif node_id in outputs:
                     output = outputs[node_id]
                     upstream = relations[(output.input.node_id, output.input.port_id)]
+                    quality = evaluate_data_contract(connection, upstream, output.data_contract)
+                    warnings.extend(quality.warnings)
+                    rejected_row_count += quality.rejected_row_count
                     destination = run_directory / f"{safe_filename(output.output_id)}.parquet"
                     write_stats = write_parquet_atomic(
                         connection,
-                        f"SELECT * FROM {identifier(upstream)}",
+                        (
+                            f"SELECT * FROM {identifier(upstream)} "
+                            f"WHERE NOT ({quality.reject_predicate})"
+                        ),
                         destination,
                     )
                     row_count = write_stats.row_count
@@ -167,6 +177,7 @@ class DuckDbPipelineExecutionEngine:
                             "is_dry_run": is_dry_run,
                             "dataset_name": output.dataset_name or output.output_id,
                             "business_case_role": output.business_case_role,
+                            "quality": quality.report,
                             "preview": {
                                 "records": preview_records,
                                 "returned_count": len(preview_records),
@@ -175,15 +186,57 @@ class DuckDbPipelineExecutionEngine:
                             },
                         }
                     )
+                    if quality.rejected_row_count:
+                        rejected_output_id = f"{output.output_id}__rejected"
+                        rejected_destination = run_directory / f"{safe_filename(rejected_output_id)}.parquet"
+                        rejected_stats = write_parquet_atomic(
+                            connection,
+                            (
+                                "SELECT row_number() OVER () AS _quality_source_row_number, *, "
+                                f"{quality.reject_reason_expression} AS _quality_rejection_reason "
+                                f"FROM {identifier(upstream)} WHERE {quality.reject_predicate}"
+                            ),
+                            rejected_destination,
+                        )
+                        manifests.append(
+                            {
+                                "output_id": rejected_output_id,
+                                "materialization": "temporary" if is_dry_run else "dataset",
+                                "write_mode": "replace",
+                                "location_uri": f"file://{rejected_destination.as_posix()}",
+                                "row_count": rejected_stats.row_count,
+                                "schema": [
+                                    {"name": str(row[0]), "type": str(row[1])}
+                                    for row in rejected_stats.schema_rows
+                                ],
+                                "data_scope": "full",
+                                "is_dry_run": is_dry_run,
+                                "dataset_name": f"{output.dataset_name or output.output_id} rejected records",
+                                "business_case_role": "reference",
+                                "quality_output_kind": "rejected_records",
+                                "source_output_id": output.output_id,
+                                "preview": {
+                                    "records": [],
+                                    "returned_count": 0,
+                                    "limit": 0,
+                                    "sampled": True,
+                                },
+                            }
+                        )
         finally:
             connection.close()
 
         return PipelineExecutionResult(
             input_row_count=sum(input_counts),
             processed_row_count=sum(input_counts),
-            output_row_count=sum(int(item["row_count"]) for item in manifests),
+            output_row_count=sum(
+                int(item["row_count"])
+                for item in manifests
+                if item.get("quality_output_kind") != "rejected_records"
+            ),
             output_manifest=manifests,
-            warnings=[],
+            warnings=warnings,
+            rejected_row_count=rejected_row_count,
         )
 
     def _run_directory(self, owner_id: str, run_id: str) -> Path:

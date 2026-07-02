@@ -139,7 +139,14 @@ class PipelineRepository(Protocol):
     def update_run(self, run: PipelineRun) -> PipelineRun:
         ...
 
-    def list_runs(self, pipeline_id: str | None, owner_id: str) -> list[PipelineRun]:
+    def list_runs(
+        self,
+        pipeline_id: str | None,
+        owner_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[PipelineRun]:
         ...
 
     def add_step_run(self, step_run: PipelineStepRun) -> PipelineStepRun:
@@ -211,12 +218,21 @@ class InMemoryPipelineRepository:
         self._runs[run.id] = run
         return run
 
-    def list_runs(self, pipeline_id: str | None, owner_id: str) -> list[PipelineRun]:
-        return [
+    def list_runs(
+        self,
+        pipeline_id: str | None,
+        owner_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[PipelineRun]:
+        matching = [
             item
             for item in self._runs.values()
             if item.owner_id == owner_id and (pipeline_id is None or item.pipeline_id == pipeline_id)
         ]
+        matching.sort(key=lambda item: item.created_at, reverse=True)
+        return matching[offset:offset + limit]
 
     def add_step_run(self, step_run: PipelineStepRun) -> PipelineStepRun:
         self._step_runs[step_run.id] = step_run
@@ -339,12 +355,24 @@ class PostgresPipelineRepository:
             connection.execute(statement)
         return run
 
-    def list_runs(self, pipeline_id: str | None, owner_id: str) -> list[PipelineRun]:
+    def list_runs(
+        self,
+        pipeline_id: str | None,
+        owner_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[PipelineRun]:
         self._ensure_initialized()
         statement = select(pipeline_runs_table).where(pipeline_runs_table.c.owner_id == owner_id)
         if pipeline_id is not None:
             statement = statement.where(pipeline_runs_table.c.pipeline_id == pipeline_id)
-        statement = statement.order_by(pipeline_runs_table.c.created_at.desc())
+        statement = (
+            statement
+            .order_by(pipeline_runs_table.c.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
         with self.engine.begin() as connection:
             return [self._run_from_record(row._mapping) for row in connection.execute(statement)]
 

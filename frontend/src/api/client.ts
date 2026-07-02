@@ -118,6 +118,7 @@ function datasetRouteId(datasetId: string) {
 export type DatasetColumn = {
   name: string;
   type: "text" | "number" | "date" | "boolean" | "empty" | "mixed" | "unsupported";
+  storage_type?: string;
 };
 
 export type DatasetPreview = {
@@ -496,6 +497,22 @@ export type PipelineRun = {
     artifact_id?: string;
     pipeline_step_id?: string;
     output_stage?: "intermediate" | "final";
+    quality_output_kind?: "rejected_records";
+    source_output_id?: string;
+    quality?: {
+      status: "not_configured" | "passed" | "issues_detected";
+      data_scope: "full";
+      checked_row_count?: number;
+      rejected_row_count?: number;
+      checks: Array<{
+        column: string;
+        check: string;
+        policy: "fail" | "warn" | "reject";
+        violation_count: number;
+        passed: boolean;
+      }>;
+      schema_drift: Array<Record<string, unknown>>;
+    };
     file_size_bytes?: number;
     preview?: {
       records: Array<Record<string, unknown>>;
@@ -526,6 +543,34 @@ export type PipelineStepRun = {
   error_message: string;
   started_at: string | null;
   finished_at: string | null;
+};
+
+export type PipelineRunDetails = {
+  run: PipelineRun;
+  pipeline_version: {
+    id: string;
+    version_number: number;
+    definition_hash: string;
+    status: string;
+  };
+  resolved_inputs: Array<{
+    input_id: string;
+    step_id: string;
+    logical_id: string;
+    version_policy: string;
+    dataset_id: string;
+    version_number: number;
+    dataset_name: string;
+  }>;
+  steps: PipelineStepRun[];
+  outputs: PipelineRun["output_manifest"];
+  lineage: Array<{
+    artifact_id: string;
+    artifact_type: string;
+    reference_id: string;
+    origin: string;
+    lineage: Record<string, unknown>;
+  }>;
 };
 
 export type PipelineRunOutputPreview = {
@@ -631,8 +676,16 @@ export const api = {
     }),
   listPipelineRuns: (pipelineId: string) =>
     request<PipelineRun[]>(`/pipelines/${pipelineId}/runs`),
+  listPipelineRunHistory: (limit = 200) =>
+    request<PipelineRun[]>(`/pipelines/runs/history?limit=${limit}`),
   getPipelineRun: (pipelineId: string, runId: string) =>
     request<PipelineRun>(`/pipelines/${pipelineId}/runs/${runId}`),
+  getPipelineRunDetails: (pipelineId: string, runId: string) =>
+    request<PipelineRunDetails>(`/pipelines/${pipelineId}/runs/${runId}/details`),
+  cancelPipelineRun: (pipelineId: string, runId: string) =>
+    request<PipelineRun>(`/pipelines/${pipelineId}/runs/${runId}/cancel`, { method: "POST" }),
+  retryPipelineRun: (pipelineId: string, runId: string) =>
+    request<PipelineRun>(`/pipelines/${pipelineId}/runs/${runId}/retry`, { method: "POST" }),
   listPipelineStepRuns: (pipelineId: string, runId: string) =>
     request<PipelineStepRun[]>(`/pipelines/${pipelineId}/runs/${runId}/steps`),
   previewPipelineRunOutput: (pipelineId: string, runId: string, outputId: string, limit: number, offset: number) =>

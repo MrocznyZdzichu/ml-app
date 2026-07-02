@@ -12,9 +12,11 @@ export function datasetColumns(
   return stored.flatMap((column) => {
     if (!column || typeof column !== "object" || !("name" in column)) return [];
     const value = column as Record<string, unknown>;
+    const storageType = String(value.type ?? "VARCHAR");
     return [{
       name: String(value.name),
-      type: normalizeColumnType(String(value.type ?? "text"))
+      type: normalizeColumnType(storageType),
+      storage_type: concreteStorageType(storageType)
     }];
   });
 }
@@ -49,13 +51,17 @@ function columnsForNode(
   }
   const step = definition.steps.find((item) => item.step_id === nodeId);
   if (!step) return [];
-  const upstream = mergeColumns(step.inputs.flatMap((item) =>
+  const inputColumns = step.inputs.map((item) =>
     columnsForNode(definition, datasets, cache, item.source.node_id, new Set(visited))
-  ));
-  return transformColumns(step, upstream);
+  );
+  return transformColumns(step, mergeColumns(inputColumns.flat()), inputColumns);
 }
 
-function transformColumns(step: PipelineStepDefinition, upstream: DatasetColumn[]): DatasetColumn[] {
+function transformColumns(
+  step: PipelineStepDefinition,
+  upstream: DatasetColumn[],
+  inputColumns: DatasetColumn[][]
+): DatasetColumn[] {
   if (step.type === "select_columns") {
     const selected = new Set(stringList(step.config.columns));
     return upstream.filter((column) => selected.has(column.name));
@@ -67,19 +73,30 @@ function transformColumns(step: PipelineStepDefinition, upstream: DatasetColumn[
   if (step.type === "cast_columns") {
     const casts = recordValue(step.config.casts);
     return upstream.map((column) => casts[column.name]
-      ? { ...column, type: frontendTypeForCast(String(casts[column.name])) }
+      ? {
+          ...column,
+          type: frontendTypeForCast(String(casts[column.name])),
+          storage_type: String(casts[column.name]).toUpperCase()
+        }
       : column);
   }
   if (step.type === "derive_column") {
+    const expression = recordValue(step.config.expression);
+    const left = recordValue(expression.left);
+    const source = upstream.find((column) => column.name === left.column);
     return mergeColumns([...upstream, {
       name: String(step.config.name ?? "new_column"),
-      type: "number"
+      type: expression.operator === "concat" ? "text" : source?.type ?? "number",
+      storage_type: expression.operator === "concat"
+        ? "VARCHAR"
+        : source?.storage_type ?? "DOUBLE"
     }]);
   }
   if (step.type === "add_identifier") {
     return mergeColumns([...upstream, {
       name: String(step.config.output_column ?? "row_id"),
-      type: step.config.mode === "sequence" ? "number" : "text"
+      type: step.config.mode === "sequence" ? "number" : "text",
+      storage_type: step.config.mode === "sequence" ? "BIGINT" : "VARCHAR"
     }]);
   }
   if (step.type === "aggregate") {
@@ -88,19 +105,53 @@ function transformColumns(step: PipelineStepDefinition, upstream: DatasetColumn[
     );
     const aggregations = recordList(step.config.aggregations).map((item) => ({
       name: String(item.alias ?? "metric"),
-      type: "number" as const
+      type: "number" as const,
+      storage_type: "DOUBLE"
     }));
     return mergeColumns([...groups, ...aggregations]);
   }
   if (step.type === "map_categories" && step.config.output_column) {
     return mergeColumns([...upstream, {
       name: String(step.config.output_column),
-      type: "text"
+      type: "text",
+      storage_type: "VARCHAR"
     }]);
   }
-  if (step.type === "join") {
-    return mergeColumns(upstream);
+  if (step.type === "map_categories") {
+    const sourceColumn = String(step.config.column ?? "");
+    return upstream.map((column) =>
+      column.name === sourceColumn
+        ? { ...column, type: "text", storage_type: "VARCHAR" }
+        : column
+    );
   }
+  if (step.type === "impute_missing") {
+    const indicators = recordList(step.config.rules)
+      .filter((rule) => rule.add_indicator === true)
+      .map((rule) => ({
+        name: `${String(rule.column)}__was_missing`,
+        type: "boolean" as const,
+        storage_type: "BOOLEAN"
+      }));
+    return mergeColumns([...upstream, ...indicators]);
+  }
+  if (step.type === "join") {
+    const left = inputColumns[0] ?? [];
+    const right = inputColumns[1] ?? [];
+    const rightKeys = new Set(recordList(step.config.keys).map((key) => String(key.right)));
+    const leftNames = new Set(left.map((column) => column.name));
+    const suffix = String(step.config.right_suffix ?? "_right");
+    return [
+      ...left,
+      ...right
+        .filter((column) => !rightKeys.has(column.name))
+        .map((column) => ({
+          ...column,
+          name: leftNames.has(column.name) ? `${column.name}${suffix}` : column.name
+        }))
+    ];
+  }
+  if (step.type === "custom_sql") return [];
   return upstream;
 }
 
@@ -112,6 +163,14 @@ function normalizeColumnType(value: string): DatasetColumn["type"] {
   if (normalized.includes("date") || normalized.includes("time")) return "date";
   if (["text", "varchar", "string"].some((item) => normalized.includes(item))) return "text";
   return "text";
+}
+
+function concreteStorageType(value: string): string | undefined {
+  const normalized = value.trim().toLowerCase();
+  if (["number", "text", "date", "boolean", "empty", "mixed", "unsupported"].includes(normalized)) {
+    return undefined;
+  }
+  return value.trim().toUpperCase() || undefined;
 }
 
 function frontendTypeForCast(type: string): DatasetColumn["type"] {

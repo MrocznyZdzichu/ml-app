@@ -25,6 +25,22 @@ export type PipelineOutputDefinition = {
   write_mode: "replace";
   dataset_name: string;
   business_case_role: "source" | "training" | "validation" | "test" | "scoring_input" | "scoring_output" | "monitoring_actuals" | "reference";
+  data_contract?: DataContractDefinition;
+};
+
+export type DataContractDefinition = {
+  columns: Array<{
+    name: string;
+    type: string;
+    nullable: boolean;
+    unique: boolean;
+    minimum?: number;
+    maximum?: number;
+    allowed_values?: Array<string | number | boolean>;
+    policy: "fail" | "warn" | "reject";
+  }>;
+  schema_drift_policy: "fail" | "warn";
+  allow_unexpected_columns: boolean;
 };
 
 export type PipelineDefinition = {
@@ -79,7 +95,8 @@ export function normalizePipelineDefinition(value: unknown): PipelineDefinition 
           materialization: output.materialization === "temporary" ? "temporary" : "dataset",
           write_mode: "replace",
           dataset_name: String(output.dataset_name ?? output.output_id ?? "result"),
-          business_case_role: output.business_case_role ?? "source"
+          business_case_role: output.business_case_role ?? "source",
+          data_contract: output.data_contract
         }))
       : [],
     parameters: raw.parameters && typeof raw.parameters === "object"

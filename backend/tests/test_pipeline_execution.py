@@ -502,6 +502,79 @@ def test_duckdb_engine_executes_rich_imputation_rules(tmp_path: Path) -> None:
     ]
 
 
+def test_data_contract_rejects_invalid_rows_and_reports_full_scope_quality(tmp_path: Path) -> None:
+    repository_root = tmp_path / "repository"
+    owner_id = "owner-1"
+    path = repository_root / "users" / owner_id / "quality.csv"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "id,amount,segment\n"
+        "1,10,retail\n"
+        "2,-5,retail\n"
+        "2,20,unknown\n"
+        "4,,business\n",
+        encoding="utf-8",
+    )
+    repository = InMemoryDatasetRepository()
+    repository.add(_asset("quality", owner_id, path, 4))
+    definition = PipelineDefinition.model_validate(
+        {
+            "contract_version": "1.0",
+            "inputs": [{"input_id": "source", "dataset_id": "quality", "output_port_id": "out"}],
+            "steps": [],
+            "outputs": [{
+                "output_id": "result",
+                "input": {"node_id": "source", "port_id": "out"},
+                "materialization": "temporary",
+                "data_contract": {
+                    "schema_drift_policy": "fail",
+                    "allow_unexpected_columns": True,
+                    "columns": [
+                        {"name": "id", "type": "BIGINT", "unique": True, "policy": "warn"},
+                        {
+                            "name": "amount",
+                            "type": "BIGINT",
+                            "nullable": False,
+                            "minimum": 0,
+                            "policy": "reject",
+                        },
+                        {
+                            "name": "segment",
+                            "type": "VARCHAR",
+                            "allowed_values": ["retail", "business"],
+                            "policy": "reject",
+                        },
+                    ],
+                },
+            }],
+            "parameters": {},
+        }
+    )
+    engine = DuckDbPipelineExecutionEngine(
+        input_adapter=CsvDatasetInputAdapter(repository=repository, repository_root=repository_root),
+        repository_root=repository_root,
+    )
+
+    result = engine.execute(definition, "quality-run", owner_id, is_dry_run=True)
+
+    assert result.output_row_count == 1
+    assert result.rejected_row_count == 3
+    assert len(result.output_manifest) == 2
+    assert result.output_manifest[0]["quality"]["checked_row_count"] == 4
+    assert result.output_manifest[0]["quality"]["status"] == "issues_detected"
+    assert result.output_manifest[1]["quality_output_kind"] == "rejected_records"
+    rejected_path = Path(result.output_manifest[1]["location_uri"].removeprefix("file://"))
+    rejected = duckdb.connect().execute(
+        "SELECT id, _quality_rejection_reason FROM read_parquet(?) ORDER BY id",
+        [str(rejected_path)],
+    ).fetchall()
+    assert rejected == [
+        (2, "amount.minimum"),
+        (2, "segment.allowed_values"),
+        (4, "amount.nullable"),
+    ]
+
+
 def test_map_categories_can_feed_integer_cast(tmp_path: Path) -> None:
     repository_root = tmp_path / "repository"
     owner_id = "owner-1"

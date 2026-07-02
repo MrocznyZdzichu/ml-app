@@ -21,6 +21,10 @@ from app.modules.pipelines.workflow import WorkflowDefinition, normalize_workflo
 from uuid import uuid4
 
 
+class PipelineRunCancelled(Exception):
+    pass
+
+
 @celery_app.task(name="app.worker.tasks.profile_dataset")
 def profile_dataset(dataset_id: str) -> dict[str, str]:
     return {"dataset_id": dataset_id, "status": "queued"}
@@ -65,12 +69,16 @@ def execute_pipeline_run(run_id: str) -> dict:
         relations: dict[tuple[str, str], SourceRelation] = {}
         all_output_manifests: list[dict] = []
         all_artifact_ids: list[str] = []
+        all_warnings: list[str] = []
         upstream_artifact_ids: dict[str, list[str]] = {}
         result = None
         executed_step = None
         for index, step in enumerate(workflow.steps):
             if index > requested_index:
                 break
+            current = repository.get_run(run.id)
+            if current is not None and current.status == PipelineRunStatus.CANCELLED:
+                raise PipelineRunCancelled("Pipeline run was cancelled")
             executed_step = step
             active_step_run = PipelineStepRun(
                 id=str(uuid4()),
@@ -132,6 +140,13 @@ def execute_pipeline_run(run_id: str) -> dict:
                         ),
                         row_count=int(dataset_manifest["row_count"]),
                     )
+            current = repository.get_run(run.id)
+            if current is not None and current.status == PipelineRunStatus.CANCELLED:
+                active_step_run.status = PipelineRunStatus.CANCELLED
+                active_step_run.finished_at = datetime.now(timezone.utc)
+                repository.update_step_run(active_step_run)
+                active_step_run = None
+                raise PipelineRunCancelled("Pipeline run was cancelled")
             step_output_manifest = list(result.output_manifest)
             step_input_artifact_ids = list(dict.fromkeys(
                 artifact_id
@@ -188,6 +203,7 @@ def execute_pipeline_run(run_id: str) -> dict:
             active_step_run.processed_row_count = result.processed_row_count
             active_step_run.output_row_count = result.output_row_count
             active_step_run.warnings = result.warnings
+            all_warnings.extend(result.warnings)
             active_step_run.output_manifest = step_output_manifest
             active_step_run.status = PipelineRunStatus.SUCCEEDED
             active_step_run.finished_at = datetime.now(timezone.utc)
@@ -198,11 +214,26 @@ def execute_pipeline_run(run_id: str) -> dict:
         run.input_row_count = result.input_row_count
         run.processed_row_count = result.processed_row_count
         run.output_row_count = result.output_row_count
-        run.rejected_row_count = 0
+        run.rejected_row_count = sum(
+            int(item.get("row_count") or 0)
+            for item in all_output_manifests
+            if item.get("quality_output_kind") == "rejected_records"
+        )
         run.output_manifest = all_output_manifests
         run.output_artifact_ids = list(dict.fromkeys(all_artifact_ids))
-        run.warnings = result.warnings
+        run.warnings = list(dict.fromkeys(all_warnings))
         run.status = PipelineRunStatus.SUCCEEDED
+    except PipelineRunCancelled:
+        if active_step_run is not None:
+            active_step_run.status = PipelineRunStatus.CANCELLED
+            active_step_run.finished_at = datetime.now(timezone.utc)
+            repository.update_step_run(active_step_run)
+        run.status = PipelineRunStatus.CANCELLED
+        run.error_message = ""
+        run.warnings = list(dict.fromkeys([
+            *run.warnings,
+            "Pipeline run cancelled at a workflow step boundary",
+        ]))
     except Exception as exc:
         if active_step_run is not None:
             active_step_run.status = PipelineRunStatus.FAILED

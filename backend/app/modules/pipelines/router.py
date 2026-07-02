@@ -8,6 +8,7 @@ from app.modules.pipelines.schemas import (
     PipelineRunOutputPreviewRead,
     PipelineRunOutputProfileRead,
     PipelineRunRead,
+    PipelineRunDetailsRead,
     PipelineStepTypeRead,
     PipelineStepRunRead,
     PipelineUpdate,
@@ -106,9 +107,26 @@ def create_run(
 @router.get("/{pipeline_id}/runs", response_model=list[PipelineRunRead])
 def list_pipeline_runs(
     pipeline_id: str,
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     principal: Principal = Depends(require_user),
 ) -> list[PipelineRunRead]:
-    return [PipelineRunRead.model_validate(item) for item in service.list_runs(principal, pipeline_id)]
+    return [
+        PipelineRunRead.model_validate(item)
+        for item in service.list_runs(principal, pipeline_id, limit=limit, offset=offset)
+    ]
+
+
+@router.get("/runs/history", response_model=list[PipelineRunRead])
+def list_run_history(
+    limit: int = Query(default=200, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    principal: Principal = Depends(require_user),
+) -> list[PipelineRunRead]:
+    return [
+        PipelineRunRead.model_validate(item)
+        for item in service.list_runs(principal, limit=limit, offset=offset)
+    ]
 
 
 @router.get("/{pipeline_id}/runs/{run_id}", response_model=PipelineRunRead)
@@ -118,6 +136,35 @@ def get_pipeline_run(
     principal: Principal = Depends(require_user),
 ) -> PipelineRunRead:
     return PipelineRunRead.model_validate(service.get_run(pipeline_id, run_id, principal))
+
+
+@router.get("/{pipeline_id}/runs/{run_id}/details", response_model=PipelineRunDetailsRead)
+def get_pipeline_run_details(
+    pipeline_id: str,
+    run_id: str,
+    principal: Principal = Depends(require_user),
+) -> PipelineRunDetailsRead:
+    return PipelineRunDetailsRead.model_validate(
+        service.get_run_details(pipeline_id, run_id, principal)
+    )
+
+
+@router.post("/{pipeline_id}/runs/{run_id}/cancel", response_model=PipelineRunRead)
+def cancel_pipeline_run(
+    pipeline_id: str,
+    run_id: str,
+    principal: Principal = Depends(require_user),
+) -> PipelineRunRead:
+    return PipelineRunRead.model_validate(service.cancel_run(pipeline_id, run_id, principal))
+
+
+@router.post("/{pipeline_id}/runs/{run_id}/retry", response_model=PipelineRunRead, status_code=201)
+def retry_pipeline_run(
+    pipeline_id: str,
+    run_id: str,
+    principal: Principal = Depends(require_user),
+) -> PipelineRunRead:
+    return PipelineRunRead.model_validate(service.retry_run(pipeline_id, run_id, principal))
 
 
 @router.get("/{pipeline_id}/runs/{run_id}/steps", response_model=list[PipelineStepRunRead])

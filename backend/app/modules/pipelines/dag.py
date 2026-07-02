@@ -72,6 +72,43 @@ class PipelineOutput(BaseModel):
         "monitoring_actuals",
         "reference",
     ] = "source"
+    data_contract: "DataContract | None" = None
+
+
+class DataContractColumn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=255)
+    type: str = Field(min_length=1, max_length=128)
+    nullable: bool = True
+    unique: bool = False
+    minimum: int | float | None = None
+    maximum: int | float | None = None
+    allowed_values: list[Any] | None = None
+    policy: Literal["fail", "warn", "reject"] = "fail"
+
+    @model_validator(mode="after")
+    def validate_range(self) -> "DataContractColumn":
+        if self.minimum is not None and self.maximum is not None and self.minimum > self.maximum:
+            raise ValueError(f"Data contract column '{self.name}' has minimum greater than maximum")
+        if self.allowed_values is not None and not self.allowed_values:
+            raise ValueError(f"Data contract column '{self.name}' allowed_values cannot be empty")
+        return self
+
+
+class DataContract(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    columns: list[DataContractColumn] = Field(min_length=1)
+    schema_drift_policy: Literal["fail", "warn"] = "fail"
+    allow_unexpected_columns: bool = True
+
+    @model_validator(mode="after")
+    def validate_columns(self) -> "DataContract":
+        names = [column.name for column in self.columns]
+        if len(names) != len(set(names)):
+            raise ValueError("Data contract column names must be unique")
+        return self
 
 
 class PipelineDefinition(BaseModel):

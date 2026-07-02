@@ -122,6 +122,15 @@ class PipelineRunRead(BaseModel):
     finished_at: datetime | None
 
 
+class PipelineRunDetailsRead(BaseModel):
+    run: PipelineRunRead
+    pipeline_version: dict[str, Any]
+    resolved_inputs: list[dict[str, Any]]
+    steps: list["PipelineStepRunRead"]
+    outputs: list[dict[str, Any]]
+    lineage: list[dict[str, Any]]
+
+
 class PipelineStepRunRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
