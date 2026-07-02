@@ -1,3 +1,4 @@
+import type { DataAsset } from "../api/client";
 import {
   emptyPipelineDefinition,
   normalizePipelineDefinition
@@ -52,6 +53,33 @@ export type WorkflowDefinition = {
   }>;
   parameters: Record<string, unknown>;
 };
+
+export function canonicalizeWorkflowDatasetIds(
+  definition: WorkflowDefinition,
+  datasets: DataAsset[]
+): WorkflowDefinition {
+  return normalizeWorkflowDefinition({
+    ...definition,
+    steps: definition.steps.map((step) => {
+      const nested = recordValue(step.config.definition);
+      const inputs = Array.isArray(nested.inputs) ? nested.inputs : [];
+      return {
+        ...step,
+        config: {
+          ...step.config,
+          definition: {
+            ...nested,
+            inputs: inputs.map((value) => {
+              const input = recordValue(value);
+              const referenced = datasets.find((dataset) => dataset.id === input.dataset_id);
+              return referenced ? { ...input, dataset_id: referenced.logical_id } : input;
+            })
+          }
+        }
+      };
+    })
+  });
+}
 
 export function emptyWorkflowDefinition(): WorkflowDefinition {
   return {
@@ -167,6 +195,12 @@ export function workflowOutputsForStep(
       port_id: output.business_case_role
     }
   }));
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
 }
 
 export { emptyPipelineDefinition };
