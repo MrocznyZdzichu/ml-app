@@ -1,5 +1,7 @@
 import {
   ArrowRight,
+  Brain,
+  Calculator,
   DatabaseZap,
   Plus,
   Settings2,
@@ -38,7 +40,11 @@ export function WorkflowDiagram({
       ) : definition.steps.map((step, index) => {
         const count = step.type === "data_engineering"
           ? step.config.definition.steps.length
-          : step.config.definition.transformations.length;
+          : step.type === "feature_engineering"
+            ? step.config.definition.transformations.length
+            : step.type === "training"
+              ? step.config.definition.feature_columns.length
+              : 1;
         return (
           <Fragment key={step.step_id}>
             {index > 0 && <ArrowRight className="workflow-arrow" size={28} />}
@@ -49,13 +55,15 @@ export function WorkflowDiagram({
               type="button"
               onClick={() => onSelectStep(step.step_id)}
             >
-              {step.type === "data_engineering"
-                ? <DatabaseZap size={22} />
-                : <Sparkles size={22} />}
+              {step.type === "data_engineering" ? <DatabaseZap size={22} />
+                : step.type === "feature_engineering" ? <Sparkles size={22} />
+                  : step.type === "training" ? <Brain size={22} /> : <Calculator size={22} />}
               <span>
                 <small>STEP {index + 1}</small>
                 <strong>{step.name}</strong>
-                <em>{count} transformations</em>
+                <em>{step.type === "training" ? `${count} features`
+                  : step.type === "scoring" ? "batch prediction"
+                    : `${count} transformations`}</em>
               </span>
               <Settings2 size={16} />
             </button>

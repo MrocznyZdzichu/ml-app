@@ -90,6 +90,9 @@ class BusinessCaseRepository(Protocol):
     def get_artifact(self, artifact_id: str) -> Artifact | None:
         ...
 
+    def list_artifacts(self, owner_id: str, artifact_type: ArtifactType | None = None) -> list[Artifact]:
+        ...
+
     def find_artifact(self, owner_id: str, reference_id: str, business_case_id: str | None) -> Artifact | None:
         ...
 
@@ -135,6 +138,12 @@ class InMemoryBusinessCaseRepository:
 
     def get_artifact(self, artifact_id: str) -> Artifact | None:
         return self._artifacts.get(artifact_id)
+
+    def list_artifacts(self, owner_id: str, artifact_type: ArtifactType | None = None) -> list[Artifact]:
+        return [
+            item for item in self._artifacts.values()
+            if item.owner_id == owner_id and (artifact_type is None or item.type == artifact_type)
+        ]
 
     def find_artifact(self, owner_id: str, reference_id: str, business_case_id: str | None) -> Artifact | None:
         for artifact in self._artifacts.values():
@@ -219,6 +228,15 @@ class PostgresBusinessCaseRepository:
         with self.engine.begin() as connection:
             row = connection.execute(statement).first()
         return self._artifact_from_record(row._mapping) if row else None
+
+    def list_artifacts(self, owner_id: str, artifact_type: ArtifactType | None = None) -> list[Artifact]:
+        self._ensure_initialized()
+        statement = select(artifacts_table).where(artifacts_table.c.owner_id == owner_id)
+        if artifact_type is not None:
+            statement = statement.where(artifacts_table.c.type == artifact_type.value)
+        statement = statement.order_by(artifacts_table.c.created_at.desc())
+        with self.engine.begin() as connection:
+            return [self._artifact_from_record(row._mapping) for row in connection.execute(statement)]
 
     def find_artifact(self, owner_id: str, reference_id: str, business_case_id: str | None) -> Artifact | None:
         self._ensure_initialized()

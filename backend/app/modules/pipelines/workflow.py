@@ -27,7 +27,7 @@ class WorkflowStep(BaseModel):
 
     step_id: str = Field(min_length=1, max_length=128)
     name: str = Field(min_length=1, max_length=200)
-    type: Literal["data_engineering", "feature_engineering"]
+    type: Literal["data_engineering", "feature_engineering", "training", "scoring"]
     inputs: list[WorkflowStepInput] = Field(default_factory=list)
     output_port_id: str = Field(default="dataset", min_length=1, max_length=128)
     additional_output_port_ids: list[str] = Field(default_factory=list)
@@ -165,13 +165,15 @@ def validate_workflow_definition(definition: dict[str, Any], executable: bool) -
     workflow = WorkflowDefinition.model_validate(normalized)
     if executable and not workflow.steps:
         raise ValueError("An executable pipeline requires at least one workflow step")
-    if len(workflow.steps) > 2:
-        raise ValueError("The current workflow supports at most Data Engineering and Feature Engineering")
+    if len(workflow.steps) > 4:
+        raise ValueError("The current workflow supports at most four lifecycle steps")
     if workflow.steps:
-        allowed_sequence = ["data_engineering", "feature_engineering"]
         actual_sequence = [step.type for step in workflow.steps]
-        if actual_sequence not in (["data_engineering"], ["feature_engineering"], allowed_sequence):
-            raise ValueError("Workflow steps must be Data Engineering followed by Feature Engineering")
+        order = {"data_engineering": 0, "feature_engineering": 1, "training": 2, "scoring": 3}
+        if actual_sequence != sorted(actual_sequence, key=order.__getitem__):
+            raise ValueError("Workflow steps must follow DE, FE, Training, Scoring lifecycle order")
+        if len(actual_sequence) != len(set(actual_sequence)):
+            raise ValueError("The current workflow supports one step of each lifecycle type")
     for index, step in enumerate(workflow.steps):
         nested_definition = dict(step.config["definition"])
         if step.type == "data_engineering":
@@ -183,7 +185,7 @@ def validate_workflow_definition(definition: dict[str, Any], executable: bool) -
             if executable or not nested_is_empty:
                 validated = PipelineDefinition.model_validate(nested_definition)
                 step.config["definition"] = validated.model_dump(mode="json")
-        else:
+        elif step.type == "feature_engineering":
             from app.modules.pipelines.feature_engineering import FeatureEngineeringDefinition
 
             validated = FeatureEngineeringDefinition.model_validate(nested_definition)
@@ -202,6 +204,29 @@ def validate_workflow_definition(definition: dict[str, Any], executable: bool) -
                 )
             if index > 0 and not step.inputs:
                 raise ValueError("Feature Engineering after Data Engineering requires an upstream input")
+        elif step.type == "training":
+            from app.modules.pipelines.modeling import TrainingDefinition
+
+            validated = TrainingDefinition.model_validate(nested_definition)
+            step.config["definition"] = validated.model_dump(mode="json")
+            ports = {item.port_id for item in step.inputs}
+            if "training" not in ports:
+                raise ValueError("Training requires an explicit 'training' input port")
+            if ports - {"training", "validation"}:
+                raise ValueError("Training accepts only 'training' and optional 'validation' input ports")
+            if validated.early_stopping and "validation" not in ports:
+                raise ValueError("Training early stopping requires an explicit 'validation' input port")
+            if step.output_port_id != "model":
+                raise ValueError("Training primary output port must be 'model'")
+        else:
+            from app.modules.pipelines.modeling import ScoringDefinition
+
+            validated = ScoringDefinition.model_validate(nested_definition)
+            step.config["definition"] = validated.model_dump(mode="json")
+            if {item.port_id for item in step.inputs} != {"data", "model"}:
+                raise ValueError("Scoring requires exactly 'data' and 'model' input ports")
+            if step.output_port_id != "predictions":
+                raise ValueError("Scoring primary output port must be 'predictions'")
     if executable and not workflow.outputs:
         raise ValueError("An executable pipeline requires a workflow output")
     return workflow.model_dump(mode="json")

@@ -1,14 +1,24 @@
-import { Braces, DatabaseZap, Plus, Sparkles, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { Braces, Brain, Calculator, DatabaseZap, Plus, Sparkles, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { BusinessCaseDataAttachment, DataAsset } from "../api/client";
-import { FeatureEngineeringBuilder } from "./FeatureEngineeringBuilder";
+import { api } from "../api/client";
+import type { BusinessCase, BusinessCaseDataAttachment, DataAsset, DatasetColumn } from "../api/client";
+import { FeatureEngineeringBuilder, inferFeatureRecipeColumns } from "./FeatureEngineeringBuilder";
 import { emptyFeatureEngineeringDefinition } from "./featureEngineeringContract";
 import { PipelineBuilder } from "./PipelineBuilder";
 import { emptyPipelineDefinition } from "./pipelineContract";
 import type { PipelineDefinition } from "./pipelineContract";
+import { datasetColumns, inferPipelineOutputColumns, inputDatasetIds } from "./pipelineSchema";
 import type { WorkflowDefinition, WorkflowStepDefinition } from "./workflowContract";
 import { WorkflowDiagram } from "./WorkflowDiagram";
+import { ScoringBuilder, TrainingBuilder } from "./ModelingBuilders";
+import {
+  deriveModelingDefaults,
+  emptyScoringDefinition,
+  emptyTrainingDefinition,
+  scoringWithDefaults,
+  trainingWithDefaults
+} from "./modelingContract";
 import {
   featureEngineeringOutputPorts,
   workflowOutputsForStep
@@ -19,6 +29,7 @@ export { emptyWorkflowDefinition, normalizeWorkflowDefinition } from "./workflow
 
 export function WorkflowEditor({
   definition,
+  businessCase,
   datasets,
   dataAttachments,
   outputNameSuggestion,
@@ -26,6 +37,7 @@ export function WorkflowEditor({
   onChange
 }: {
   definition: WorkflowDefinition;
+  businessCase?: BusinessCase;
   datasets: DataAsset[];
   dataAttachments: BusinessCaseDataAttachment[];
   outputNameSuggestion?: string;
@@ -33,6 +45,98 @@ export function WorkflowEditor({
   onChange: (definition: WorkflowDefinition) => void;
 }) {
   const [expandedStepId, setExpandedStepId] = useState(definition.steps[0]?.step_id ?? "");
+  const [schemaCache, setSchemaCache] = useState<Record<string, DatasetColumn[]>>({});
+  const initializedModelingSteps = useRef(new Set<string>());
+  const featureStep = definition.steps.find(
+    (step) => step.type === "feature_engineering"
+  );
+  const featureDefinition = featureStep?.config.definition;
+  const hasValidation = Boolean(
+    featureStep
+    && (
+      featureStep.output_port_id === "validation"
+      || featureStep.additional_output_port_ids.includes("validation")
+    )
+  );
+  const dataEngineeringDefinition = previousDataEngineeringDefinition(
+    definition.steps,
+    definition.steps.length
+  );
+  const schemaDatasetIds = useMemo(() => Array.from(new Set([
+    ...inputDatasetIds(dataEngineeringDefinition),
+    ...(featureDefinition?.inputs.map((input) => input.dataset_id).filter(Boolean) ?? [])
+  ])), [dataEngineeringDefinition, featureDefinition]);
+  useEffect(() => {
+    for (const datasetId of schemaDatasetIds) {
+      const dataset = datasets.find((item) => item.id === datasetId);
+      if (
+        !dataset
+        || schemaCache[datasetId]
+        || (Array.isArray(dataset.metadata.source_schema) && dataset.metadata.source_schema.length > 0)
+      ) continue;
+      void api.previewDataset(datasetId, 1)
+        .then((preview) => setSchemaCache((current) => ({
+          ...current,
+          [datasetId]: preview.columns
+        })))
+        .catch(() => setSchemaCache((current) => ({ ...current, [datasetId]: [] })));
+    }
+  }, [datasets, schemaCache, schemaDatasetIds]);
+  const dagColumns = useMemo(() => {
+    const upstream = inferPipelineOutputColumns(dataEngineeringDefinition, datasets, schemaCache);
+    const direct = (featureDefinition?.inputs ?? []).flatMap((input) =>
+      datasetColumns(datasets.find((dataset) => dataset.id === input.dataset_id), schemaCache)
+    );
+    const source = [...new Map([...upstream, ...direct].map((column) => [column.name, column])).values()];
+    return inferFeatureRecipeColumns(source, featureDefinition?.transformations ?? []);
+  }, [dataEngineeringDefinition, datasets, featureDefinition, schemaCache]);
+  const modelingDefaults = useMemo(() => deriveModelingDefaults({
+    businessCase,
+    attachments: dataAttachments,
+    featureDefinition,
+    dagColumns,
+    hasValidation,
+    pipelineName: outputNameSuggestion ?? "Trained model"
+  }), [businessCase, dagColumns, dataAttachments, featureDefinition, hasValidation, outputNameSuggestion]);
+
+  useEffect(() => {
+    let changed = false;
+    const steps = definition.steps.map((step) => {
+      if (step.type === "training") {
+        const initialize = !initializedModelingSteps.current.has(step.step_id);
+        initializedModelingSteps.current.add(step.step_id);
+        const defaulted = initialize
+          ? trainingWithDefaults(modelingDefaults, step.config.definition)
+          : step.config.definition;
+        const next = hasValidation || !defaulted.early_stopping
+          ? defaulted
+          : { ...defaulted, early_stopping: false };
+        const inputsWithoutValidation = step.inputs.filter((item) => item.port_id !== "validation");
+        const inputs = hasValidation && featureStep
+          ? [
+              ...inputsWithoutValidation,
+              {
+                port_id: "validation",
+                source: { step_id: featureStep.step_id, port_id: "validation" }
+              }
+            ]
+          : inputsWithoutValidation;
+        changed = changed
+          || JSON.stringify(next) !== JSON.stringify(step.config.definition)
+          || JSON.stringify(inputs) !== JSON.stringify(step.inputs);
+        return { ...step, inputs, config: { definition: next } };
+      }
+      if (step.type === "scoring") {
+        if (initializedModelingSteps.current.has(step.step_id)) return step;
+        initializedModelingSteps.current.add(step.step_id);
+        const next = scoringWithDefaults(modelingDefaults, step.config.definition);
+        changed = changed || JSON.stringify(next) !== JSON.stringify(step.config.definition);
+        return { ...step, config: { definition: next } };
+      }
+      return step;
+    });
+    if (changed) onChange({ ...definition, steps });
+  }, [definition, modelingDefaults, onChange]);
 
   function addDataEngineeringStep() {
     if (definition.steps.length) return;
@@ -74,6 +178,53 @@ export function WorkflowEditor({
       steps: [...definition.steps, step],
       outputs: workflowOutputsForStep(step)
     });
+  }
+
+  function addTrainingStep() {
+    if (definition.steps.some((step) => step.type === "training")) return;
+    const feature = [...definition.steps].reverse().find((step) => step.type === "feature_engineering");
+    if (!feature) return;
+    const step: WorkflowStepDefinition = {
+      step_id: "training_1",
+      name: "Model Training",
+      type: "training",
+      inputs: [
+        { port_id: "training", source: { step_id: feature.step_id, port_id: "training" } },
+        ...(feature.additional_output_port_ids.includes("validation")
+          ? [{
+              port_id: "validation",
+              source: { step_id: feature.step_id, port_id: "validation" }
+            }]
+          : [])
+      ],
+      output_port_id: "model",
+      additional_output_port_ids: ["metrics"],
+      config: { definition: trainingWithDefaults(modelingDefaults, emptyTrainingDefinition()) }
+    };
+    setExpandedStepId(step.step_id);
+    onChange({ ...definition, steps: [...definition.steps, step], outputs: workflowOutputsForStep(step) });
+  }
+
+  function addScoringStep() {
+    if (definition.steps.some((step) => step.type === "scoring")) return;
+    const feature = definition.steps.find((step) => step.type === "feature_engineering");
+    const training = definition.steps.find((step) => step.type === "training");
+    if (!feature || !training) return;
+    const dataPort = feature.additional_output_port_ids.includes("test") ? "test" : feature.output_port_id;
+    const step: WorkflowStepDefinition = {
+      step_id: "scoring_1",
+      name: "Test Scoring",
+      type: "scoring",
+      inputs: [
+        { port_id: "data", source: { step_id: feature.step_id, port_id: dataPort } },
+        { port_id: "model", source: { step_id: training.step_id, port_id: "model" } }
+      ],
+      output_port_id: "predictions",
+      additional_output_port_ids: [],
+      config: { definition: scoringWithDefaults(modelingDefaults, emptyScoringDefinition()) }
+    };
+    setExpandedStepId(step.step_id);
+    onChange({ ...definition, steps: [...definition.steps, step], outputs: workflowOutputsForStep(step) });
   }
 
   function updateStep(index: number, step: WorkflowStepDefinition) {
@@ -135,6 +286,16 @@ export function WorkflowEditor({
             disabled={disabled || definition.steps.some((step) => step.type === "feature_engineering")}>
             <Plus size={15} /> Add Feature Engineering
           </button>
+          <button className="secondary-button" type="button" onClick={addTrainingStep}
+            disabled={disabled || !definition.steps.some((step) => step.type === "feature_engineering")
+              || definition.steps.some((step) => step.type === "training")}>
+            <Plus size={15} /> Add Training
+          </button>
+          <button className="secondary-button" type="button" onClick={addScoringStep}
+            disabled={disabled || !definition.steps.some((step) => step.type === "training")
+              || definition.steps.some((step) => step.type === "scoring")}>
+            <Plus size={15} /> Add Test Scoring
+          </button>
         </div>
       </div>
 
@@ -151,7 +312,9 @@ export function WorkflowEditor({
           <article className="workflow-step selected" key={step.step_id}>
             <div className="workflow-step-summary">
               <div className="workflow-step-icon">
-                {step.type === "data_engineering" ? <DatabaseZap size={20} /> : <Sparkles size={20} />}
+                {step.type === "data_engineering" ? <DatabaseZap size={20} />
+                  : step.type === "feature_engineering" ? <Sparkles size={20} />
+                    : step.type === "training" ? <Brain size={20} /> : <Calculator size={20} />}
               </div>
               <div className="workflow-step-copy">
                 <span>SELECTED STEP · {step.step_id}</span>
@@ -160,14 +323,18 @@ export function WorkflowEditor({
                 })} disabled={disabled} />
                 <small>{step.type === "data_engineering"
                   ? `${step.config.definition.inputs.length} sources · ${step.config.definition.steps.length} blocks · ${step.config.definition.outputs.length} outputs`
-                  : `${step.config.definition.inputs.length} splits · ${step.config.definition.transformations.length} transforms · ${step.config.definition.outputs.length} outputs`}
+                  : step.type === "feature_engineering"
+                    ? `${step.config.definition.inputs.length} splits · ${step.config.definition.transformations.length} transforms · ${step.config.definition.outputs.length} outputs`
+                    : step.type === "training"
+                      ? `${step.config.definition.feature_columns.length} features · max ${step.config.definition.epochs} epochs${step.config.definition.early_stopping ? " · early stopping" : ""}`
+                      : `model + data · ${step.config.definition.dataset_name}`}
                 </small>
               </div>
               <button className="secondary-button" type="button" onClick={() => setExpandedStepId("")}>
                 <Braces size={15} /> Close configuration
               </button>
               <button className="icon-button" type="button" onClick={() => removeStep(index)}
-                disabled={disabled || (step.type === "data_engineering" && definition.steps.length > 1)}
+                disabled={disabled || index < definition.steps.length - 1}
                 aria-label={`Remove ${step.name} step`}>
                 <Trash2 size={16} />
               </button>
@@ -184,7 +351,7 @@ export function WorkflowEditor({
                     ...step, config: { definition: nextDefinition }
                   })}
                 />
-              ) : (
+              ) : step.type === "feature_engineering" ? (
                 <FeatureEngineeringBuilder
                   definition={step.config.definition}
                   datasets={datasets}
@@ -193,6 +360,24 @@ export function WorkflowEditor({
                   hasUpstream={step.inputs.length > 0}
                   disabled={disabled}
                   onChange={(nextDefinition) => updateFeatureStep(index, step, nextDefinition)}
+                />
+              ) : step.type === "training" ? (
+                <TrainingBuilder
+                  definition={step.config.definition}
+                  defaults={modelingDefaults}
+                  disabled={disabled}
+                  onChange={(nextDefinition) => updateStep(index, {
+                    ...step, config: { definition: nextDefinition }
+                  })}
+                />
+              ) : (
+                <ScoringBuilder
+                  definition={step.config.definition}
+                  defaults={modelingDefaults}
+                  disabled={disabled}
+                  onChange={(nextDefinition) => updateStep(index, {
+                    ...step, config: { definition: nextDefinition }
+                  })}
                 />
               )}
             </div>

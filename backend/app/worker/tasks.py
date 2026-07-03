@@ -65,6 +65,7 @@ def execute_pipeline_run(run_id: str) -> dict:
             else len(workflow.steps) - 1
         )
         relations: dict[tuple[str, str], SourceRelation] = {}
+        artifacts: dict[tuple[str, str], dict] = {}
         all_output_manifests: list[dict] = []
         all_artifact_ids: list[str] = []
         all_warnings: list[str] = []
@@ -96,6 +97,7 @@ def execute_pipeline_run(run_id: str) -> dict:
                     owner_id=run.owner_id,
                     is_dry_run=run.is_dry_run,
                     upstream_relations=relations,
+                    upstream_artifacts=artifacts,
                 ),
             )
             current = repository.get_run(run.id)
@@ -161,6 +163,13 @@ def execute_pipeline_run(run_id: str) -> dict:
                     ),
                     row_count=int(output["row_count"]),
                 )
+            for port_id, output_id in result.artifact_output_ids.items():
+                output = manifests_by_output_id.get(output_id)
+                if output is None:
+                    raise ValueError(
+                        f"Step '{step.step_id}' did not produce bound artifact '{output_id}'"
+                    )
+                artifacts[(step.step_id, port_id)] = output
 
             active_step_run.input_row_count = result.input_row_count
             active_step_run.processed_row_count = result.processed_row_count
@@ -273,36 +282,28 @@ def _definition_with_resolved_inputs(
     resolved = runtime_parameters.get("resolved_input_versions", {})
     if not isinstance(resolved, dict):
         return definition
-    copied = {
-        **definition,
-        "steps": [
-            {
-                **step,
-                "config": {
-                    **dict(step.get("config") or {}),
-                    "definition": {
-                        **dict(dict(step.get("config") or {}).get("definition") or {}),
-                        "inputs": [
-                            {
-                                **item,
-                                "dataset_id": str(
-                                    dict(resolved.get(
-                                        f"{step.get('step_id')}:{item.get('input_id')}",
-                                        {},
-                                    )).get("dataset_id") or item.get("dataset_id") or ""
-                                ),
-                            }
-                            for item in dict(
-                                dict(step.get("config") or {}).get("definition") or {}
-                            ).get("inputs", [])
-                        ],
-                    },
-                },
-            }
-            for step in definition.get("steps", [])
-        ],
-    }
-    return copied
+    steps: list[dict] = []
+    for raw_step in definition.get("steps", []):
+        step = dict(raw_step)
+        config = dict(step.get("config") or {})
+        nested = dict(config.get("definition") or {})
+        if "inputs" in nested:
+            nested["inputs"] = [
+                {
+                    **item,
+                    "dataset_id": str(
+                        dict(resolved.get(
+                            f"{step.get('step_id')}:{item.get('input_id')}",
+                            {},
+                        )).get("dataset_id") or item.get("dataset_id") or ""
+                    ),
+                }
+                for item in nested.get("inputs", [])
+            ]
+        config["definition"] = nested
+        step["config"] = config
+        steps.append(step)
+    return {**definition, "steps": steps}
 
 
 @celery_app.task(name="app.worker.tasks.train_model")

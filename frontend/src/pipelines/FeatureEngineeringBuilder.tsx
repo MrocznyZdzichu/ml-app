@@ -1253,7 +1253,7 @@ function defaultMathSuffix(operation: string) {
   }[operation] ?? "__transformed";
 }
 
-function inferFeatureRecipeColumns(
+export function inferFeatureRecipeColumns(
   sourceColumns: DatasetColumn[],
   transformations: FeatureTransformation[]
 ): DatasetColumn[] {

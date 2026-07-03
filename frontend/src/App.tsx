@@ -134,6 +134,10 @@ export default function App() {
     pipelineId: string;
     requestId: number;
   } | null>(null);
+  const [analysisOpenRequest, setAnalysisOpenRequest] = useState<{
+    datasetId: string;
+    requestId: number;
+  } | null>(null);
   const [apiStatus, setApiStatus] = useState("checking");
   const [authStatus, setAuthStatus] = useState(getAccessToken() ? "checking" : "anonymous");
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
@@ -228,6 +232,11 @@ export default function App() {
     setActiveTab("pipelines");
   }
 
+  function openDatasetAnalysis(datasetId: string) {
+    setAnalysisOpenRequest({ datasetId, requestId: Date.now() });
+    setActiveTab("analysis");
+  }
+
   if (authStatus !== "authenticated" || !currentUser) {
     return (
       <AuthScreen
@@ -315,12 +324,20 @@ export default function App() {
           />
         )}
         {activeTab === "data" && (
-          <DataPanel datasets={datasets} onRefresh={refreshWorkspace} setNotice={setNotice} />
+          <DataPanel
+            datasets={datasets}
+            onAnalyze={openDatasetAnalysis}
+            onRefresh={refreshWorkspace}
+            setNotice={setNotice}
+          />
         )}
         {activeTab === "analysis" && (
           <AnalysisPanel
             datasets={datasets}
             descriptiveProfileCache={descriptiveProfileCache.current}
+            initialDatasetId={analysisOpenRequest?.datasetId}
+            initialTab={analysisOpenRequest ? "browse" : "roles"}
+            onInitialDatasetConsumed={() => setAnalysisOpenRequest(null)}
             onRefresh={refreshWorkspace}
             setNotice={setNotice}
           />
@@ -1100,9 +1117,16 @@ function PipelinesPanel({
         setVersions(versionItems);
         setRuns(runItems);
         setPipelineDataAttachments(attachmentItems);
-        const selectedVersion = versionItems.find((item) => item.status === "draft") ?? versionItems.at(-1);
+        const draftVersion = versionItems.find((item) => item.status === "draft");
+        const selectedVersion = draftVersion ?? versionItems.at(-1);
         if (selectedVersion) {
-          const workingDraft = readPipelineWorkingDraft(selectedPipelineIdValue);
+          // A cached definition is only valid while its editable server-side
+          // draft exists. Otherwise stale browser state makes a published
+          // version look dirty and points dry-run at a draft that is gone.
+          const workingDraft = draftVersion
+            ? readPipelineWorkingDraft(selectedPipelineIdValue)
+            : null;
+          if (!draftVersion) clearPipelineWorkingDraft(selectedPipelineIdValue);
           const normalized = canonicalizeWorkflowDatasetIds(
             normalizeWorkflowDefinition(workingDraft ?? selectedVersion.definition),
             datasets
@@ -1237,6 +1261,12 @@ function PipelinesPanel({
     }
     const target = stepId ? "DE step" : "pipeline";
     const action = isDryRun ? "Dry-run" : "Run";
+    if (isDryRun && !hasDraft) {
+      const detail = "Create a draft before running a dry-run. The published version remains available through Run.";
+      setRunFeedback({ status: "failed", title: `${action} blocked`, detail });
+      setNotice(detail);
+      return;
+    }
     setRunFeedback({ status: "queued", title: `${action} queued`, detail: `Preparing ${target} execution…` });
     if (isDryRun) setDryRunResult(null);
     try {
@@ -1393,7 +1423,7 @@ function PipelinesPanel({
   const hasDraft = versions.some((item) => item.status === "draft");
   const hasPublished = versions.some((item) => item.status === "published");
   const isRunActive = runFeedback?.status === "queued" || runFeedback?.status === "running";
-  const canRunPublishedVersion = hasPublished && !hasDraft && !isDefinitionDirty;
+  const canRunPublishedVersion = hasPublished && !hasDraft;
 
   if (!isPipelineEditorOpen) {
     return (
@@ -1653,7 +1683,7 @@ function PipelinesPanel({
           <button className="secondary-button" onClick={saveDraft} type="button" disabled={!hasDraft}><Save size={16} /> Save{isDefinitionDirty ? " *" : ""}</button>
           <button className="secondary-button" onClick={publishDraft} type="button" disabled={!hasDraft}><CheckCircle2 size={16} /> Publish</button>
           <button className="secondary-button" onClick={createNextDraft} type="button" disabled={hasDraft}><Plus size={16} /> New draft</button>
-          <button className="secondary-button" onClick={() => runSelectedPipeline(true)} type="button" disabled={isRunActive || (!hasDraft && !hasPublished)}><Play size={16} /> Dry-run</button>
+          <button className="secondary-button" onClick={() => runSelectedPipeline(true)} type="button" disabled={isRunActive || !hasDraft}><Play size={16} /> Dry-run</button>
           <button className="primary-button" onClick={() => selectedPipeline && openCatalogRunDialog(selectedPipeline)} type="button" disabled={isRunActive || !canRunPublishedVersion}><Play size={16} /> Run</button>
         </div>
       </div>
@@ -1677,7 +1707,7 @@ function PipelinesPanel({
         </div>
       )}
 
-      {(hasDraft || isDefinitionDirty) && hasPublished && (
+      {hasDraft && hasPublished && (
         <div className="inline-run-feedback queued" role="note">
           <span className="run-result-icon">i</span>
           <div>
@@ -1716,6 +1746,7 @@ function PipelinesPanel({
         <DeferredPanel>
           <WorkflowEditor
             definition={workflowDefinition}
+            businessCase={businessCases.find((item) => item.id === selectedBusinessCaseIdValue)}
             datasets={latestLogicalDatasetAliases(datasets)}
             dataAttachments={pipelineDataAttachments.map((attachment) => {
               const dataset = datasets.find((item) => item.id === attachment.data_asset_id);
@@ -1758,7 +1789,7 @@ function PipelinesPanel({
               <strong>{step.name}</strong>
               <small>Runs required ancestors and stops after this step</small>
               <button className="secondary-button" onClick={() => runSelectedPipeline(true, step.step_id)}
-                type="button" disabled={isRunActive || (!hasDraft && !hasPublished)}>
+                type="button" disabled={isRunActive || !hasDraft}>
                 <Play size={16} /> Dry-run
               </button>
               <button className="secondary-button" onClick={() => runSelectedPipeline(false, step.step_id)}
@@ -1950,10 +1981,12 @@ function businessCaseName(businessCases: BusinessCase[], businessCaseId: string)
 
 function DataPanel({
   datasets,
+  onAnalyze,
   onRefresh,
   setNotice
 }: {
   datasets: DataAsset[];
+  onAnalyze: (datasetId: string) => void;
   onRefresh: () => Promise<void>;
   setNotice: (message: string) => void;
 }) {
@@ -2144,6 +2177,7 @@ function DataPanel({
         <VersionedDatasetList
           datasets={activeDatasets}
           onAddVersion={addDatasetVersion}
+          onAnalyze={onAnalyze}
           onDelete={deleteDataset}
         />
         <AssetList
@@ -2190,10 +2224,12 @@ function datasetMeta(item: DataAsset) {
 function VersionedDatasetList({
   datasets,
   onAddVersion,
+  onAnalyze,
   onDelete
 }: {
   datasets: DataAsset[];
   onAddVersion: (dataset: DataAsset) => void;
+  onAnalyze: (datasetId: string) => void;
   onDelete: (dataset: DataAsset) => void;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -2213,6 +2249,10 @@ function VersionedDatasetList({
                 </div>
                 <div className="asset-actions">
                   <em>{latest.status}</em>
+                  <button className="secondary-button compact-button" type="button"
+                    onClick={() => onAnalyze(latest.id)}>
+                    <BarChart3 size={14} /> Analyze latest
+                  </button>
                   <button className="secondary-button compact-button" type="button" onClick={() => {
                     setExpanded((current) => {
                       const next = new Set(current);
@@ -2237,6 +2277,10 @@ function VersionedDatasetList({
                       </div>
                       <div className="asset-actions">
                         <em>{version.version_stage}</em>
+                        <button className="secondary-button compact-button" type="button"
+                          onClick={() => onAnalyze(version.id)}>
+                          <BarChart3 size={14} /> Analyze
+                        </button>
                         <button
                           aria-label={`Delete ${version.name} v${version.version_number}`}
                           className="icon-button danger-icon"
@@ -2352,7 +2396,9 @@ function AnalysisPanel({
   descriptiveProfileCache,
   onRefresh,
   setNotice,
+  initialDatasetId = "",
   initialTab = "roles",
+  onInitialDatasetConsumed,
   showDataRoles = true,
   allowPersistence = true
 }: {
@@ -2360,12 +2406,14 @@ function AnalysisPanel({
   descriptiveProfileCache: Map<string, DescriptiveProfileCacheEntry>;
   onRefresh: () => Promise<void>;
   setNotice: (message: string) => void;
+  initialDatasetId?: string;
   initialTab?: "roles" | "browse" | "descriptive" | "visualization";
+  onInitialDatasetConsumed?: () => void;
   showDataRoles?: boolean;
   allowPersistence?: boolean;
 }) {
   const [activeAnalysisTab, setActiveAnalysisTab] = useState<"roles" | "browse" | "descriptive" | "visualization">(initialTab);
-  const [datasetId, setDatasetId] = useState("");
+  const [datasetId, setDatasetId] = useState(initialDatasetId);
   const [visualizationDrill, setVisualizationDrill] = useState<VisualizationDrillRequest | null>(null);
   const availableDatasets = useMemo(
     () => datasets.filter((dataset) => dataset.status !== "deleted"),
@@ -2380,6 +2428,17 @@ function AnalysisPanel({
       setDatasetId(nextDatasetId);
     }
   }, [availableDatasets, datasetId]);
+
+  useEffect(() => {
+    if (!initialDatasetId || !availableDatasets.some((dataset) => dataset.id === initialDatasetId)) {
+      return;
+    }
+    if (initialDatasetId !== datasetId) {
+      setDatasetId(initialDatasetId);
+      setVisualizationDrill(null);
+    }
+    onInitialDatasetConsumed?.();
+  }, [availableDatasets, datasetId, initialDatasetId, onInitialDatasetConsumed]);
 
   return (
     <section className="analysis-workspace">

@@ -1997,6 +1997,88 @@ textarea {
   gap: 10px;
 }
 
+.modeling-action-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+}
+
+.modeling-config-button {
+  align-items: center;
+  background: #f4f8f9;
+  border: 1px solid #d4e1e6;
+  border-radius: 8px;
+  color: #294653;
+  cursor: pointer;
+  display: flex;
+  gap: 11px;
+  min-height: 64px;
+  padding: 11px 13px;
+  text-align: left;
+}
+
+.modeling-config-button:hover:not(:disabled) {
+  background: #eaf5f3;
+  border-color: #75a9a4;
+}
+
+.modeling-config-button > svg {
+  color: #1e756d;
+  flex: 0 0 auto;
+}
+
+.modeling-config-button strong,
+.modeling-config-button small {
+  display: block;
+}
+
+.modeling-config-button small {
+  color: #71818d;
+  font-size: 10px;
+  margin-top: 3px;
+}
+
+.modeling-modal {
+  align-self: center;
+  display: grid;
+  gap: 16px;
+  justify-self: center;
+  max-height: min(760px, calc(100vh - 48px));
+  max-width: 760px;
+  overflow: auto;
+}
+
+.modal-backdrop.modeling-modal-backdrop {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+  z-index: 130;
+}
+
+.modeling-modal .modal-header {
+  margin: -20px -20px 0;
+}
+
+.modeling-modal .modal-header h2,
+.modeling-modal .modal-header p {
+  margin: 0;
+}
+
+.modeling-modal .modal-header p {
+  color: #71818d;
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.modeling-modal-content {
+  display: grid;
+  gap: 14px;
+}
+
+.modeling-modal .fe-column-options {
+  max-height: min(430px, 55vh);
+}
+
 .identifier-editor,
 .identifier-sequence {
   display: grid;

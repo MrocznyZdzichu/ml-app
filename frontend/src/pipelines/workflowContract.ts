@@ -9,6 +9,11 @@ import {
   normalizeFeatureEngineeringDefinition
 } from "./featureEngineeringContract";
 import type { FeatureEngineeringDefinition } from "./featureEngineeringContract";
+import {
+  normalizeScoringDefinition,
+  normalizeTrainingDefinition
+} from "./modelingContract";
+import type { ScoringDefinition, TrainingDefinition } from "./modelingContract";
 
 export type DataEngineeringWorkflowStep = {
   step_id: string;
@@ -42,7 +47,25 @@ export type FeatureEngineeringWorkflowStep = {
 
 export type WorkflowStepDefinition =
   | DataEngineeringWorkflowStep
-  | FeatureEngineeringWorkflowStep;
+  | FeatureEngineeringWorkflowStep
+  | {
+      step_id: string;
+      name: string;
+      type: "training";
+      inputs: Array<{ port_id: string; source: { step_id: string; port_id: string } }>;
+      output_port_id: "model";
+      additional_output_port_ids: string[];
+      config: { definition: TrainingDefinition };
+    }
+  | {
+      step_id: string;
+      name: string;
+      type: "scoring";
+      inputs: Array<{ port_id: string; source: { step_id: string; port_id: string } }>;
+      output_port_id: "predictions";
+      additional_output_port_ids: string[];
+      config: { definition: ScoringDefinition };
+    };
 
 export type WorkflowDefinition = {
   contract_version: "2.0";
@@ -61,6 +84,7 @@ export function canonicalizeWorkflowDatasetIds(
   return normalizeWorkflowDefinition({
     ...definition,
     steps: definition.steps.map((step) => {
+      if (step.type === "training" || step.type === "scoring") return step;
       const nested = recordValue(step.config.definition);
       const inputs = Array.isArray(nested.inputs) ? nested.inputs : [];
       return {
@@ -134,6 +158,32 @@ export function normalizeWorkflowDefinition(value: unknown): WorkflowDefinition 
             output_port_id: ports.primary,
             additional_output_port_ids: ports.additional,
             config: { definition: featureDefinition }
+          }];
+        }
+        if (step.type === "training") {
+          return [{
+            step_id: String(step.step_id ?? "training_1"),
+            name: String(step.name ?? "Model Training"),
+            type: "training",
+            inputs: Array.isArray(step.inputs)
+              ? step.inputs as Extract<WorkflowStepDefinition, { type: "training" }>["inputs"]
+              : [],
+            output_port_id: "model",
+            additional_output_port_ids: ["metrics"],
+            config: { definition: normalizeTrainingDefinition(config.definition) }
+          }];
+        }
+        if (step.type === "scoring") {
+          return [{
+            step_id: String(step.step_id ?? "scoring_1"),
+            name: String(step.name ?? "Test Scoring"),
+            type: "scoring",
+            inputs: Array.isArray(step.inputs)
+              ? step.inputs as Extract<WorkflowStepDefinition, { type: "scoring" }>["inputs"]
+              : [],
+            output_port_id: "predictions",
+            additional_output_port_ids: [],
+            config: { definition: normalizeScoringDefinition(config.definition) }
           }];
         }
         return [{
