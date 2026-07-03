@@ -438,9 +438,6 @@ export type BusinessCase = {
   updated_by: string;
   created_at: string;
   updated_at: string;
-  latest_published_version_number: number | null;
-  published_version_count: number;
-  draft_version_number: number | null;
 };
 
 export type BusinessCaseDataAttachment = {
@@ -470,6 +467,9 @@ export type Pipeline = {
   updated_by: string;
   created_at: string;
   updated_at: string;
+  latest_published_version_number: number | null;
+  published_version_count: number;
+  draft_version_number: number | null;
 };
 
 export type PipelineVersion = {

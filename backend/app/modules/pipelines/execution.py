@@ -5,9 +5,9 @@ from pathlib import Path
 from typing import Any, Protocol
 import duckdb
 
+from app.modules.datasets.columnar import ColumnarDatasetStore
 from app.modules.datasets.domain import DataAsset, DataAssetStatus, SourceType
 from app.modules.datasets.repository import DatasetRepository, PostgresDatasetRepository
-from app.modules.datasets.sources import CsvFileDatasetSource
 from app.modules.pipelines.dag import PipelineDefinition, PipelineStep, topological_order
 from app.modules.pipelines.data_quality import evaluate_data_contract
 from app.modules.pipelines.runtime import (
@@ -40,14 +40,14 @@ class CsvDatasetInputAdapter:
     ) -> None:
         self.repository = repository or PostgresDatasetRepository()
         self.repository_root = (repository_root or Path("data/repository")).resolve()
-        self.source = CsvFileDatasetSource(self.repository_root)
+        self.store = ColumnarDatasetStore(self.repository_root)
 
     def relation(self, dataset_id: str, owner_id: str) -> SourceRelation:
         asset = self.repository.get(dataset_id)
         if not asset or asset.owner_id != owner_id or asset.status == DataAssetStatus.DELETED:
             raise ValueError(f"Input dataset '{dataset_id}' was not found")
         self._validate_asset(asset)
-        path = self.source._resolve_path(asset.location_uri.removeprefix("file://"))
+        path = self.store.source_path(asset)
         if not path.is_file():
             raise ValueError(f"Input dataset file for '{dataset_id}' was not found")
         if asset.format.lower() == "parquet":
@@ -68,7 +68,7 @@ class CsvDatasetInputAdapter:
         if asset.source_type != SourceType.FILE or asset.format.lower() not in {"csv", "parquet"}:
             raise ValueError(f"Input dataset '{asset.id}' is not a supported CSV/Parquet dataset")
         if not asset.location_uri or not asset.location_uri.startswith("file://"):
-            raise ValueError(f"Input dataset '{asset.id}' has no local CSV location")
+            raise ValueError(f"Input dataset '{asset.id}' has no local file location")
 
 
 @dataclass(frozen=True)

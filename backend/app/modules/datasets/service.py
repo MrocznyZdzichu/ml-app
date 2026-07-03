@@ -11,7 +11,6 @@ from app.modules.analysis.full_profile import FullDatasetProfiler
 from app.modules.analysis.profile_jobs import DescriptiveProfileJobs
 from app.modules.analysis.time_series_jobs import TimeSeriesAnalysisJobs
 from app.modules.datasets.domain import DataAsset, DataAssetStatus, SourceType
-from app.modules.datasets.query_engine import DatasetQueryEngine
 from app.modules.datasets.repository import DatasetRepository, PostgresDatasetRepository
 from app.modules.datasets.schemas import (
     DataAssetCreate,
@@ -35,7 +34,7 @@ from app.modules.datasets.temporary import TemporaryPipelineOutputResolver
 
 
 class DatasetService:
-    """Coordinates dataset lifecycle and delegates tabular execution to DatasetQueryEngine."""
+    """Coordinates dataset lifecycle and delegates analytics to columnar engines."""
 
     def __init__(
         self,
@@ -45,7 +44,6 @@ class DatasetService:
         self.repository = repository or PostgresDatasetRepository()
         self.repository_root = Path("data/repository")
         self.sources = DatasetSourceRegistry(self.repository_root)
-        self.query_engine = DatasetQueryEngine(self.sources)
         self.sql_query = FullDatasetSqlQuery()
         self.full_profiler = FullDatasetProfiler()
         self.full_visualization = FullDatasetVisualization()
@@ -328,11 +326,12 @@ class DatasetService:
             return DataAssetPreviewRead.model_validate(
                 self.full_visualization.preview(asset, limit, lambda asset_id: self.get_asset(asset_id, principal))
             )
-        return self.query_engine.preview(
-            asset,
-            lambda asset_id: self.get_asset(asset_id, principal),
-            limit,
-            dataset_id=dataset_id,
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=(
+                f"Dataset source {asset.source_type.value}/{asset.format} "
+                "does not have a columnar preview adapter yet"
+            ),
         )
 
     def start_descriptive_profile(

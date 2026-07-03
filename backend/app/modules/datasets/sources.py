@@ -1,43 +1,16 @@
 import csv
 import duckdb
-from dataclasses import dataclass
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
-from typing import Protocol
 
 from fastapi import HTTPException, status
-
-from app.modules.datasets.domain import DataAsset, SourceType
-
-
-@dataclass(frozen=True)
-class TabularDataset:
-    columns: list[str]
-    rows: list[list[str]]
-
-
-class DatasetSource(Protocol):
-    def read(self, asset: DataAsset, action: str = "read") -> TabularDataset:
-        ...
 
 
 class DatasetSourceRegistry:
     def __init__(self, repository_root: Path) -> None:
         self.csv = CsvFileDatasetSource(repository_root)
         self.parquet = ParquetFileDatasetSource(repository_root)
-        self._sources: dict[tuple[SourceType, str], DatasetSource] = {
-            (SourceType.FILE, "csv"): self.csv,
-        }
-
-    def read(self, asset: DataAsset, action: str = "read") -> TabularDataset:
-        source = self._sources.get((asset.source_type, asset.format.lower()))
-        if source:
-            return source.read(asset, action)
-        raise HTTPException(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"Dataset source {asset.source_type.value}/{asset.format} cannot be {action} yet",
-        )
 
 
 class ParquetFileDatasetSource:
@@ -191,47 +164,6 @@ class CsvFileDatasetSource:
             for index, header in enumerate(headers)
         ]
         return has_header, row_count, columns
-
-    def read(self, asset: DataAsset, action: str = "read") -> TabularDataset:
-        if asset.source_type != SourceType.FILE or asset.format.lower() != "csv":
-            raise HTTPException(
-                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-                detail=f"Only uploaded CSV datasets can be {action}",
-            )
-        if not asset.location_uri or not asset.location_uri.startswith("file://"):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Dataset file location is not available",
-            )
-
-        path = self._resolve_path(asset.location_uri.removeprefix("file://"))
-        if not path.exists():
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dataset file not found")
-
-        rows = self._read_rows(self.decode(path.read_bytes()))
-        if not rows:
-            return TabularDataset(columns=[], rows=[])
-
-        if asset.has_header:
-            headers = [self._column_name(value, index) for index, value in enumerate(rows[0])]
-            data_rows = rows[1:]
-        else:
-            width = max(len(row) for row in rows)
-            headers = [f"column_{index + 1}" for index in range(width)]
-            data_rows = rows
-
-        return TabularDataset(columns=self._unique_column_names(headers), rows=data_rows)
-
-    def _resolve_path(self, location_path: str) -> Path:
-        path = Path(location_path).resolve()
-        try:
-            path.relative_to(self.repository_root)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Dataset file location is outside the repository root",
-            ) from exc
-        return path
 
     def _read_rows(self, text: str) -> list[list[str]]:
         dialect = self._dialect(text[:4096])

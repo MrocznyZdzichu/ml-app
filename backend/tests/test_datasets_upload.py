@@ -553,6 +553,34 @@ def test_dataset_preview_infers_column_types_beyond_returned_limit() -> None:
     assert {column["name"]: column["type"] for column in body["columns"]}["score"] == "mixed"
 
 
+def test_registered_source_without_columnar_adapter_is_not_materialized_for_preview() -> None:
+    client = TestClient(create_app())
+    token = _register(client, "external-preview-owner")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    registered = client.post(
+        "/api/v1/datasets",
+        headers=headers,
+        json={
+            "name": "warehouse-orders",
+            "source_type": "database",
+            "format": "postgresql",
+            "location_uri": "postgresql://registered-externally",
+        },
+    )
+    assert registered.status_code == 201
+
+    preview = client.get(
+        f"/api/v1/datasets/{registered.json()['id']}/preview",
+        headers=headers,
+    )
+
+    assert preview.status_code == 415
+    assert preview.json()["detail"] == (
+        "Dataset source database/postgresql does not have a columnar preview adapter yet"
+    )
+
+
 def test_data_view_can_be_created_and_previewed_from_browser_definition() -> None:
     client = TestClient(create_app())
     token = _register(client, "view-owner")

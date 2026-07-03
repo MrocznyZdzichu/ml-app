@@ -550,9 +550,8 @@ drill compatibility while using snake-case model attributes in Python.
 
 - UI role helpers live in `frontend/src/analysis/dataRoles.ts`.
 - Dataset use cases live in `backend/app/modules/datasets/service.py`.
-- Interactive query execution lives in
-  `backend/app/modules/datasets/query_engine.py`; columnar relations, saved view
-  pushdown, and cache materialization live in
+- Bounded SQL execution lives in `backend/app/modules/datasets/sql_query.py`;
+  columnar relations, saved view pushdown, and cache materialization live in
   `backend/app/modules/datasets/columnar.py`.
 - Full-dataset chart queries live in
   `backend/app/modules/datasets/visualizations.py`.

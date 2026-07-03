@@ -48,6 +48,14 @@ The high-level workflow diagram is an isolated component. New lifecycle nodes
 and multi-output rendering can evolve without further growing the step
 configuration controller.
 
+### Removed in-memory dataset fallback
+
+Supported CSV, Parquet, and Data View previews use the columnar DuckDB path.
+The unused Python/SQLite fallback has been removed, including its full-file
+decode, per-cell conversion, row duplication, and unbounded SQLite copy.
+Registered source types without a columnar adapter now fail explicitly with
+HTTP 415 instead of creating an accidental in-process materialization path.
+
 ## Ranked follow-up work
 
 ### P1 — split the frontend application shell
@@ -65,25 +73,12 @@ TypeScript. Generate TypeScript DTOs from OpenAPI/JSON Schema and keep only
 UI-specific editor state handwritten. This prevents silent drift in roles,
 ports, enum values, and required fields.
 
-### P1 — decompose worker orchestration
-
-`execute_pipeline_run` still switches on step type. Introduce a step-executor
-registry with a common result/port contract before adding Training. This will
-keep the worker responsible for orchestration, status, and audit rather than
-domain execution.
-
 ### P1 — cross-process materialization locks
 
 Current conversion locking protects threads within one process. Horizontal
 workers require a database advisory lock, Redis lease, or object-store
 conditional write. Select the mechanism together with the deployment topology;
 do not introduce distributed locking before that topology is known.
-
-### P2 — remove the legacy in-memory query path
-
-`datasets/query_engine.py` still materializes fallback assets into Python and
-SQLite. CSV, Parquet, and DataView paths already use DuckDB. Replace or tightly
-limit the fallback before adding large external connectors.
 
 ### P2 — frontend test and lint baseline
 
