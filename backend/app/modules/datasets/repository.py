@@ -6,6 +6,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Index,
     Integer,
     MetaData,
     String,
@@ -51,6 +52,13 @@ data_assets_table = Table(
     Column("metadata", JSON, nullable=False, default=dict),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+Index(
+    "uq_data_assets_logical_version",
+    data_assets_table.c.owner_id,
+    data_assets_table.c.logical_id,
+    data_assets_table.c.version_number,
+    unique=True,
 )
 
 
@@ -210,30 +218,6 @@ class PostgresDatasetRepository:
         with self.engine.begin() as connection:
             connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {DATASET_SCHEMA}"))
             metadata.create_all(connection)
-            connection.execute(text("ALTER TABLE mlapp.data_assets ADD COLUMN IF NOT EXISTS deleted_by VARCHAR(64)"))
-            connection.execute(text("ALTER TABLE mlapp.data_assets ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ"))
-            connection.execute(text("ALTER TABLE mlapp.data_assets ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb"))
-            connection.execute(text("ALTER TABLE mlapp.data_assets ADD COLUMN IF NOT EXISTS logical_id VARCHAR(64)"))
-            connection.execute(text("ALTER TABLE mlapp.data_assets ADD COLUMN IF NOT EXISTS version_number INTEGER"))
-            connection.execute(text("ALTER TABLE mlapp.data_assets ADD COLUMN IF NOT EXISTS version_stage VARCHAR(32)"))
-            connection.execute(text("UPDATE mlapp.data_assets SET logical_id = id WHERE logical_id IS NULL"))
-            connection.execute(text(
-                "UPDATE mlapp.data_assets SET logical_id = 'logical-' || id "
-                "WHERE logical_id = id"
-            ))
-            connection.execute(text("UPDATE mlapp.data_assets SET version_number = 1 WHERE version_number IS NULL"))
-            connection.execute(text(
-                "UPDATE mlapp.data_assets SET version_stage = "
-                "CASE WHEN source_type = 'view' THEN 'view' ELSE 'source' END "
-                "WHERE version_stage IS NULL"
-            ))
-            connection.execute(text("ALTER TABLE mlapp.data_assets ALTER COLUMN logical_id SET NOT NULL"))
-            connection.execute(text("ALTER TABLE mlapp.data_assets ALTER COLUMN version_number SET NOT NULL"))
-            connection.execute(text("ALTER TABLE mlapp.data_assets ALTER COLUMN version_stage SET NOT NULL"))
-            connection.execute(text(
-                "CREATE UNIQUE INDEX IF NOT EXISTS uq_data_assets_logical_version "
-                "ON mlapp.data_assets(owner_id, logical_id, version_number)"
-            ))
         self._initialized = True
 
     def _to_record(self, asset: DataAsset) -> dict[str, object]:

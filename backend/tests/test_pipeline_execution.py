@@ -22,6 +22,11 @@ from app.modules.pipelines.execution import (
     compile_condition,
 )
 from app.modules.pipelines.run_preview import PipelineRunOutputReader
+from app.modules.pipelines.step_handlers import (
+    HandledStepResult,
+    PipelineStepHandlerRegistry,
+    StepExecutionContext,
+)
 from app.modules.pipelines.materialization import PipelineOutputMaterializer
 from app.shared.sql_security import (
     bind_user_sql_to_inputs,
@@ -573,6 +578,37 @@ def test_data_contract_rejects_invalid_rows_and_reports_full_scope_quality(tmp_p
         (2, "segment.allowed_values"),
         (4, "amount.nullable"),
     ]
+
+
+def test_pipeline_step_handler_registry_dispatches_by_step_type() -> None:
+    expected = HandledStepResult(
+        input_row_count=3,
+        processed_row_count=3,
+        output_row_count=2,
+        warnings=[],
+        output_manifest=[],
+        input_dataset_ids=["dataset-1"],
+        relation_output_ids={},
+    )
+
+    class TrainingHandler:
+        step_type = "training"
+
+        def execute(self, step, context):
+            assert step.type == "training"
+            assert context.run_id == "run-1"
+            return expected
+
+    registry = PipelineStepHandlerRegistry([TrainingHandler()])
+    step = SimpleNamespace(type="training")
+    context = StepExecutionContext(
+        run_id="run-1",
+        owner_id="owner-1",
+        is_dry_run=False,
+        upstream_relations={},
+    )
+
+    assert registry.execute(step, context) is expected
 
 
 def test_map_categories_can_feed_integer_cast(tmp_path: Path) -> None:

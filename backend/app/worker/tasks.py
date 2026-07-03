@@ -7,16 +7,14 @@ from app.modules.datasets.columnar import ColumnarDatasetStore
 from app.modules.datasets.schemas import TimeSeriesAnalysisRequest
 from app.modules.datasets.time_series import FullDatasetTimeSeriesAnalyzer
 from app.modules.datasets.temporary import TemporaryPipelineOutputResolver
-from app.modules.pipelines.dag import PipelineDefinition
 from app.modules.pipelines.domain import PipelineRunStatus, PipelineStepRun
-from app.modules.pipelines.execution import DuckDbPipelineExecutionEngine
 from app.modules.pipelines.runtime import SourceRelation, sql_literal
-from app.modules.pipelines.feature_engineering import (
-    DuckDbFeatureEngineeringEngine,
-    FeatureEngineeringDefinition,
-)
 from app.modules.pipelines.materialization import PipelineOutputMaterializer
 from app.modules.pipelines.repository import PostgresPipelineRepository
+from app.modules.pipelines.step_handlers import (
+    PipelineStepHandlerRegistry,
+    StepExecutionContext,
+)
 from app.modules.pipelines.workflow import WorkflowDefinition, normalize_workflow_definition
 from uuid import uuid4
 
@@ -71,6 +69,7 @@ def execute_pipeline_run(run_id: str) -> dict:
         all_artifact_ids: list[str] = []
         all_warnings: list[str] = []
         upstream_artifact_ids: dict[str, list[str]] = {}
+        handler_registry = PipelineStepHandlerRegistry()
         result = None
         executed_step = None
         for index, step in enumerate(workflow.steps):
@@ -90,56 +89,15 @@ def execute_pipeline_run(run_id: str) -> dict:
                 started_at=datetime.now(timezone.utc),
             )
             repository.add_step_run(active_step_run)
-            if step.type == "data_engineering":
-                definition = PipelineDefinition.model_validate(step.config["definition"])
-                de_result = DuckDbPipelineExecutionEngine().execute(
-                    definition=definition,
+            result = handler_registry.execute(
+                step,
+                StepExecutionContext(
                     run_id=run.id,
                     owner_id=run.owner_id,
                     is_dry_run=run.is_dry_run,
-                )
-                if not de_result.output_manifest:
-                    raise ValueError("Data Engineering produced no workflow output")
-                result = de_result
-            else:
-                definition = FeatureEngineeringDefinition.model_validate(step.config["definition"])
-                bindings: dict[str, SourceRelation] = {}
-                for port in step.inputs:
-                    source = relations.get((port.source.step_id, port.source.port_id))
-                    if source is None:
-                        raise ValueError(
-                            f"Feature Engineering input '{port.port_id}' has no executable upstream output"
-                        )
-                    bindings[port.port_id] = source
-                fe_result = DuckDbFeatureEngineeringEngine().execute(
-                    definition=definition,
-                    run_id=run.id,
-                    owner_id=run.owner_id,
-                    is_dry_run=run.is_dry_run,
-                    upstream_relations=bindings,
-                )
-                result = fe_result
-                declared_ports = {
-                    step.output_port_id,
-                    *step.additional_output_port_ids,
-                }
-                for dataset_manifest in (
-                    item for item in fe_result.output_manifest
-                    if item.get("artifact_type", "dataset") == "dataset"
-                ):
-                    role = str(dataset_manifest.get("business_case_role") or "training")
-                    if role not in declared_ports:
-                        raise ValueError(
-                            f"Feature Engineering produced undeclared output role '{role}'"
-                        )
-                    relations[(step.step_id, role)] = SourceRelation(
-                        sql=(
-                            "read_parquet("
-                            f"{sql_literal(dataset_manifest['location_uri'].removeprefix('file://'))}"
-                            ")"
-                        ),
-                        row_count=int(dataset_manifest["row_count"]),
-                    )
+                    upstream_relations=relations,
+                ),
+            )
             current = repository.get_run(run.id)
             if current is not None and current.status == PipelineRunStatus.CANCELLED:
                 active_step_run.status = PipelineRunStatus.CANCELLED
@@ -160,14 +118,7 @@ def execute_pipeline_run(run_id: str) -> dict:
                     workflow=workflow,
                     output_manifest=step_output_manifest,
                     step_id=step.step_id,
-                    input_dataset_ids=list(dict.fromkeys(
-                        item.dataset_id for item in (
-                            PipelineDefinition.model_validate(step.config["definition"]).inputs
-                            if step.type == "data_engineering"
-                            else FeatureEngineeringDefinition.model_validate(step.config["definition"]).inputs
-                        )
-                        if item.dataset_id
-                    )),
+                    input_dataset_ids=result.input_dataset_ids,
                     input_artifact_ids=step_input_artifact_ids or None,
                     step_type=step.type,
                     output_stage=(
@@ -192,11 +143,23 @@ def execute_pipeline_run(run_id: str) -> dict:
                 )
             all_output_manifests.extend(step_output_manifest)
 
-            if step.type == "data_engineering":
-                primary = step_output_manifest[0]
-                relations[(step.step_id, step.output_port_id)] = SourceRelation(
-                    sql=f"read_parquet({sql_literal(primary['location_uri'].removeprefix('file://'))})",
-                    row_count=int(primary["row_count"]),
+            manifests_by_output_id = {
+                str(item.get("output_id")): item
+                for item in step_output_manifest
+            }
+            for port_id, output_id in result.relation_output_ids.items():
+                output = manifests_by_output_id.get(output_id)
+                if output is None:
+                    raise ValueError(
+                        f"Step '{step.step_id}' did not produce bound output '{output_id}'"
+                    )
+                relations[(step.step_id, port_id)] = SourceRelation(
+                    sql=(
+                        "read_parquet("
+                        f"{sql_literal(output['location_uri'].removeprefix('file://'))}"
+                        ")"
+                    ),
+                    row_count=int(output["row_count"]),
                 )
 
             active_step_run.input_row_count = result.input_row_count

@@ -1,6 +1,8 @@
 from celery import Celery
+from celery.signals import worker_ready
 
 from app.core.config import settings
+from app.core.migrations import run_migrations
 
 celery_app = Celery(
     "ml_app",
@@ -24,3 +26,8 @@ celery_app.conf.update(
 )
 
 celery_app.autodiscover_tasks(["app.worker"])
+
+
+@worker_ready.connect
+def migrate_worker_database(**_: object) -> None:
+    run_migrations()

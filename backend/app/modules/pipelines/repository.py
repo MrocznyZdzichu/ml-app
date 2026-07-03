@@ -1,6 +1,6 @@
 from typing import Protocol
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, Integer, MetaData, String, Table, Text, select, text
+from sqlalchemy import JSON, Boolean, Column, DateTime, Index, Integer, MetaData, String, Table, Text, select, text
 from sqlalchemy.engine import Engine
 
 from app.core.database import get_engine
@@ -80,6 +80,17 @@ pipeline_runs_table = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("started_at", DateTime(timezone=True), nullable=True),
     Column("finished_at", DateTime(timezone=True), nullable=True),
+)
+Index(
+    "ix_pipeline_runs_owner_created_at",
+    pipeline_runs_table.c.owner_id,
+    pipeline_runs_table.c.created_at.desc(),
+)
+Index(
+    "ix_pipeline_runs_owner_pipeline_created_at",
+    pipeline_runs_table.c.owner_id,
+    pipeline_runs_table.c.pipeline_id,
+    pipeline_runs_table.c.created_at.desc(),
 )
 
 pipeline_step_runs_table = Table(
@@ -417,26 +428,6 @@ class PostgresPipelineRepository:
         with self.engine.begin() as connection:
             connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {PIPELINE_SCHEMA}"))
             metadata.create_all(connection)
-            connection.execute(text(
-                "ALTER TABLE mlapp.pipeline_runs "
-                "ADD COLUMN IF NOT EXISTS output_manifest JSONB NOT NULL DEFAULT '[]'::jsonb"
-            ))
-            connection.execute(text(
-                "ALTER TABLE mlapp.pipeline_runs "
-                "ADD COLUMN IF NOT EXISTS error_message TEXT NOT NULL DEFAULT ''"
-            ))
-            connection.execute(text(
-                "ALTER TABLE mlapp.pipeline_runs "
-                "ADD COLUMN IF NOT EXISTS requested_step_id VARCHAR(128) NOT NULL DEFAULT ''"
-            ))
-            connection.execute(text(
-                "CREATE INDEX IF NOT EXISTS ix_pipeline_runs_owner_created_at "
-                "ON mlapp.pipeline_runs (owner_id, created_at DESC)"
-            ))
-            connection.execute(text(
-                "CREATE INDEX IF NOT EXISTS ix_pipeline_runs_owner_pipeline_created_at "
-                "ON mlapp.pipeline_runs (owner_id, pipeline_id, created_at DESC)"
-            ))
         self._initialized = True
 
     def _pipeline_to_record(self, pipeline: Pipeline) -> dict[str, object]:
