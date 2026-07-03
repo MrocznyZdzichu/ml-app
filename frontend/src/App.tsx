@@ -7,11 +7,11 @@ import {
   CheckCircle2,
   Database,
   Drill,
-  Download,
   Filter,
+  History,
   ListChecks,
-  LogIn,
   LogOut,
+  Pencil,
   Play,
   Plus,
   RotateCcw,
@@ -22,22 +22,29 @@ import {
   Table2,
   Trash2,
   Upload,
-  UserPlus,
   X
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { ChangeEvent, FormEvent, KeyboardEvent } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 
-import { api, getAccessToken, setAccessToken } from "./api/client";
+import { api, getAccessToken, setAccessToken, temporaryPipelineOutputId } from "./api/client";
 import type {
+  BusinessCase,
+  BusinessCaseDataAttachment,
   DataAsset,
   DatasetPreview,
   Deployment,
   ModelArtifact,
-  ScoreResponse,
+  Pipeline,
+  PipelineRun,
+  PipelineStepRun,
+  PipelineVersion,
   UserProfile
 } from "./api/client";
+import { AssetList } from "./components/AssetList";
+import { AuthScreen } from "./workspace/AuthScreen";
+import { Metric, Overview } from "./workspace/Overview";
 import {
   columnRoleOptions,
   datasetRoleOptions,
@@ -52,10 +59,25 @@ import {
   type BrowserFilterConfig,
   type VisualizationDrillRequest,
 } from "./analysis/drillContext";
-import { VisualizationDashboard } from "./analysis/VisualizationDashboard";
-import { TimeSeriesWorkbench } from "./analysis/TimeSeriesWorkbench";
+import {
+  canonicalizeWorkflowDatasetIds,
+  emptyWorkflowDefinition,
+  normalizeWorkflowDefinition
+} from "./pipelines/workflowContract";
+import type { WorkflowDefinition } from "./pipelines/workflowContract";
+import {
+  DryRunPreview,
+  PipelineVersionHistoryDialog,
+  PipelineRunDetailsDialog,
+  PipelineRunHistoryDialog
+} from "./pipelines/PipelineRunDialogs";
+import {
+  clearPipelineWorkingDraft,
+  readPipelineWorkingDraft,
+  writePipelineWorkingDraft
+} from "./pipelines/pipelineDraftStorage";
 
-type TabId = "overview" | "data" | "analysis" | "models" | "serving" | "share";
+type TabId = "overview" | "business-cases" | "data" | "analysis" | "pipelines" | "models" | "serving" | "share";
 
 type NavItem = {
   id: TabId;
@@ -65,19 +87,65 @@ type NavItem = {
 
 const navItems: NavItem[] = [
   { id: "overview", label: "Overview", icon: Activity },
+  { id: "business-cases", label: "Business Cases", icon: ListChecks },
   { id: "data", label: "Data", icon: Database },
   { id: "analysis", label: "Analysis", icon: BarChart3 },
+  { id: "pipelines", label: "Pipelines", icon: Drill },
   { id: "models", label: "Models", icon: Brain },
   { id: "serving", label: "Serving", icon: Rocket },
   { id: "share", label: "Share", icon: Share2 }
 ];
 
+const ModelsPanel = lazy(() =>
+  import("./operational/LifecyclePanels").then((module) => ({ default: module.ModelsPanel }))
+);
+const ServingPanel = lazy(() =>
+  import("./operational/LifecyclePanels").then((module) => ({ default: module.ServingPanel }))
+);
+const SharePanel = lazy(() =>
+  import("./operational/LifecyclePanels").then((module) => ({ default: module.SharePanel }))
+);
+const VisualizationDashboard = lazy(() =>
+  import("./analysis/VisualizationDashboard").then((module) => ({
+    default: module.VisualizationDashboard
+  }))
+);
+const TimeSeriesWorkbench = lazy(() =>
+  import("./analysis/TimeSeriesWorkbench").then((module) => ({
+    default: module.TimeSeriesWorkbench
+  }))
+);
+const WorkflowEditor = lazy(() =>
+  import("./pipelines/WorkflowEditor").then((module) => ({
+    default: module.WorkflowEditor
+  }))
+);
+
+function DeferredPanel({ children }: { children: React.ReactNode }) {
+  return (
+    <Suspense fallback={<div className="panel"><div className="empty-state">Loading workspace</div></div>}>
+      {children}
+    </Suspense>
+  );
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
+  const [pipelineOpenRequest, setPipelineOpenRequest] = useState<{
+    pipelineId: string;
+    requestId: number;
+  } | null>(null);
+  const [analysisOpenRequest, setAnalysisOpenRequest] = useState<{
+    datasetId: string;
+    requestId: number;
+  } | null>(null);
+  const [modelBusinessCaseFilter, setModelBusinessCaseFilter] = useState("");
   const [apiStatus, setApiStatus] = useState("checking");
   const [authStatus, setAuthStatus] = useState(getAccessToken() ? "checking" : "anonymous");
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
+  const [businessCases, setBusinessCases] = useState<BusinessCase[]>([]);
   const [datasets, setDatasets] = useState<DataAsset[]>([]);
+  const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [models, setModels] = useState<ModelArtifact[]>([]);
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [notice, setNotice] = useState("Workspace ready");
@@ -90,12 +158,16 @@ export default function App() {
 
   async function refreshWorkspace() {
     try {
-      const [datasetItems, modelItems, deploymentItems] = await Promise.all([
+      const [businessCaseItems, datasetItems, pipelineItems, modelItems, deploymentItems] = await Promise.all([
+        api.listBusinessCases(),
         api.listDatasets(),
+        api.listPipelines(),
         api.listModels(),
         api.listDeployments()
       ]);
+      setBusinessCases(businessCaseItems);
       setDatasets(datasetItems);
+      setPipelines(pipelineItems);
       setModels(modelItems);
       setDeployments(deploymentItems);
     } catch (error) {
@@ -148,11 +220,28 @@ export default function App() {
     descriptiveProfileCache.current.clear();
     setAccessToken(null);
     setCurrentUser(null);
+    setBusinessCases([]);
     setDatasets([]);
+    setPipelines([]);
     setModels([]);
     setDeployments([]);
     setAuthStatus("anonymous");
     setNotice("Signed out");
+  }
+
+  function openPipelineEditor(pipelineId: string) {
+    setPipelineOpenRequest({ pipelineId, requestId: Date.now() });
+    setActiveTab("pipelines");
+  }
+
+  function openDatasetAnalysis(datasetId: string) {
+    setAnalysisOpenRequest({ datasetId, requestId: Date.now() });
+    setActiveTab("analysis");
+  }
+
+  function openBusinessCaseModels(businessCaseId: string) {
+    setModelBusinessCaseFilter(businessCaseId);
+    setActiveTab("models");
   }
 
   if (authStatus !== "authenticated" || !currentUser) {
@@ -223,261 +312,1726 @@ export default function App() {
         <div className="notice">{notice}</div>
 
         {activeTab === "overview" && (
-          <Overview datasets={datasets} models={models} deployments={deployments} />
+          <Overview
+            businessCases={businessCases}
+            datasets={datasets}
+            pipelines={pipelines}
+            models={models}
+            deployments={deployments}
+          />
+        )}
+        {activeTab === "business-cases" && (
+          <BusinessCasesPanel
+            businessCases={businessCases}
+            datasets={datasets}
+            pipelines={pipelines}
+            onRefresh={refreshWorkspace}
+            onEditPipeline={openPipelineEditor}
+            onOpenModels={openBusinessCaseModels}
+            setNotice={setNotice}
+          />
         )}
         {activeTab === "data" && (
-          <DataPanel datasets={datasets} onRefresh={refreshWorkspace} setNotice={setNotice} />
+          <DataPanel
+            datasets={datasets}
+            onAnalyze={openDatasetAnalysis}
+            onRefresh={refreshWorkspace}
+            setNotice={setNotice}
+          />
         )}
         {activeTab === "analysis" && (
           <AnalysisPanel
             datasets={datasets}
             descriptiveProfileCache={descriptiveProfileCache.current}
+            initialDatasetId={analysisOpenRequest?.datasetId}
+            initialTab={analysisOpenRequest ? "browse" : "roles"}
+            onInitialDatasetConsumed={() => setAnalysisOpenRequest(null)}
             onRefresh={refreshWorkspace}
+            setNotice={setNotice}
+          />
+        )}
+        {activeTab === "pipelines" && (
+          <PipelinesPanel
+            businessCases={businessCases}
+            datasets={datasets}
+            pipelines={pipelines}
+            openRequest={pipelineOpenRequest}
+            onOpenRequestConsumed={() => setPipelineOpenRequest(null)}
+            onRefresh={refreshWorkspace}
+            onExamineDataset={openDatasetAnalysis}
             setNotice={setNotice}
           />
         )}
         {activeTab === "models" && (
-          <ModelsPanel
-            datasets={datasets}
-            models={models}
-            onRefresh={refreshWorkspace}
-            setNotice={setNotice}
-          />
+          <DeferredPanel>
+            <ModelsPanel
+              models={models}
+              businessCases={businessCases}
+              pipelines={pipelines}
+              initialBusinessCaseId={modelBusinessCaseFilter}
+            />
+          </DeferredPanel>
         )}
         {activeTab === "serving" && (
-          <ServingPanel
-            deployments={deployments}
-            models={models}
-            onRefresh={refreshWorkspace}
-            setNotice={setNotice}
-          />
+          <DeferredPanel>
+            <ServingPanel
+              deployments={deployments}
+              models={models}
+              onRefresh={refreshWorkspace}
+              setNotice={setNotice}
+            />
+          </DeferredPanel>
         )}
         {activeTab === "share" && (
-          <SharePanel
-            datasets={datasets}
-            models={models}
-            deployments={deployments}
-            setNotice={setNotice}
-          />
+          <DeferredPanel>
+            <SharePanel
+              datasets={datasets}
+              models={models}
+              deployments={deployments}
+              setNotice={setNotice}
+            />
+          </DeferredPanel>
         )}
       </main>
     </div>
   );
 }
 
-function AuthScreen({
-  apiStatus,
-  isChecking,
-  onAuthenticated
+function BusinessCasesPanel({
+  businessCases,
+  datasets,
+  pipelines,
+  onRefresh,
+  onEditPipeline,
+  onOpenModels,
+  setNotice
 }: {
-  apiStatus: string;
-  isChecking: boolean;
-  onAuthenticated: (token: string) => Promise<void>;
+  businessCases: BusinessCase[];
+  datasets: DataAsset[];
+  pipelines: Pipeline[];
+  onRefresh: () => Promise<void>;
+  onEditPipeline: (pipelineId: string) => void;
+  onOpenModels: (businessCaseId: string) => void;
+  setNotice: (message: string) => void;
 }) {
-  const [mode, setMode] = useState<"login" | "register">("login");
-  const [email, setEmail] = useState("demo@example.com");
-  const [displayName, setDisplayName] = useState("Demo Analyst");
-  const [password, setPassword] = useState("password123");
-  const [message, setMessage] = useState(isChecking ? "Checking session" : "Sign in to continue");
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [problemType, setProblemType] = useState("binary_classification");
+  const [targetColumn, setTargetColumn] = useState("");
+  const [primaryMetric, setPrimaryMetric] = useState("f1");
+  const [businessGoal, setBusinessGoal] = useState("");
+  const [successCriteria, setSuccessCriteria] = useState("");
+  const [editName, setEditName] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [editProblemType, setEditProblemType] = useState("custom");
+  const [editStatus, setEditStatus] = useState("draft");
+  const [editBusinessOwner, setEditBusinessOwner] = useState("");
+  const [editTargetColumn, setEditTargetColumn] = useState("");
+  const [editPrimaryMetric, setEditPrimaryMetric] = useState("");
+  const [editBusinessGoal, setEditBusinessGoal] = useState("");
+  const [editSuccessCriteria, setEditSuccessCriteria] = useState("");
+  const [selectedBusinessCaseId, setSelectedBusinessCaseId] = useState("");
+  const [selectedDataAssetId, setSelectedDataAssetId] = useState("");
+  const [selectedRole, setSelectedRole] = useState("training");
+  const [contextNote, setContextNote] = useState("");
+  const [primaryKeyColumn, setPrimaryKeyColumn] = useState("");
+  const [mappingTargetColumn, setMappingTargetColumn] = useState("");
+  const [attachments, setAttachments] = useState<BusinessCaseDataAttachment[]>([]);
+  const [businessCaseSearch, setBusinessCaseSearch] = useState("");
+  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [isMappingFormOpen, setIsMappingFormOpen] = useState(false);
+  const [editingAttachmentId, setEditingAttachmentId] = useState("");
+  const [activeWorkspace, setActiveWorkspace] = useState<"details" | "data" | "pipelines" | null>(null);
+
+  const selectedBusinessCase = businessCases.find((item) => item.id === selectedBusinessCaseId);
+  const datasetById = new Map(datasets.map((dataset) => [dataset.id, dataset]));
+  const availableDataAssets = datasetVersionGroups(
+    datasets.filter((dataset) => dataset.status !== "deleted")
+  ).map((group) => group.latest);
+  const attachedDataset = (dataAssetId: string) => {
+    const attachedVersion = datasetById.get(dataAssetId);
+    if (!attachedVersion) return undefined;
+    return datasetVersionGroups(
+      datasets.filter(
+        (dataset) => dataset.logical_id === attachedVersion.logical_id && dataset.status !== "deleted"
+      )
+    )[0]?.latest ?? attachedVersion;
+  };
+  const activeAttachments = attachments.filter((attachment) => attachedDataset(attachment.data_asset_id)?.status !== "deleted");
+  const deletedAttachments = attachments.filter((attachment) => attachedDataset(attachment.data_asset_id)?.status === "deleted");
+  const selectedBusinessCasePipelines = selectedBusinessCase
+    ? pipelines.filter((pipeline) => pipeline.business_case_id === selectedBusinessCase.id)
+    : [];
+  const filteredBusinessCases = useMemo(() => {
+    const query = businessCaseSearch.trim().toLowerCase();
+    if (!query) {
+      return businessCases;
+    }
+    return businessCases.filter((item) => [
+      item.name,
+      item.description,
+      item.problem_type,
+      item.status,
+      item.primary_metric,
+      item.target_column
+    ].some((value) => String(value ?? "").toLowerCase().includes(query)));
+  }, [businessCases, businessCaseSearch]);
 
   useEffect(() => {
-    if (!isChecking && message === "Checking session") {
-      setMessage("Sign in to continue");
+    if (!selectedBusinessCase) {
+      setAttachments([]);
+      return;
     }
-  }, [isChecking, message]);
+    resetBusinessCaseEditForm(selectedBusinessCase);
+    resetDataMappingForm();
+    api
+      .listBusinessCaseDataAttachments(selectedBusinessCase.id)
+      .then(setAttachments)
+      .catch((error) => setNotice(error instanceof Error ? error.message : "Could not load BC data attachments"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedBusinessCase, setNotice]);
 
-  async function submit(event: FormEvent) {
+  async function submitBusinessCase(event: FormEvent) {
     event.preventDefault();
-    setIsSubmitting(true);
-    setMessage(mode === "login" ? "Signing in" : "Creating account");
-    try {
-      const response =
-        mode === "login"
-          ? await api.login({ email, password })
-          : await api.register({ email, password, display_name: displayName });
-      await onAuthenticated(response.access_token);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Authentication failed");
-    } finally {
-      setIsSubmitting(false);
+    const created = await api.createBusinessCase({
+      name,
+      description,
+      problem_type: problemType,
+      target_column: targetColumn,
+      primary_metric: primaryMetric,
+      business_goal: businessGoal,
+      success_criteria: successCriteria
+    });
+    setNotice(`Business case created: ${created.name}`);
+    setSelectedBusinessCaseId(created.id);
+    setName("");
+    setDescription("");
+    setTargetColumn("");
+    setBusinessGoal("");
+    setSuccessCriteria("");
+    setIsCreateOpen(false);
+    setActiveWorkspace("details");
+    await onRefresh();
+  }
+
+  async function submitBusinessCaseUpdate(event: FormEvent) {
+    event.preventDefault();
+    if (!selectedBusinessCase) {
+      setNotice("Select a business case first");
+      return;
     }
+    const updated = await api.updateBusinessCase(selectedBusinessCase.id, {
+      name: editName,
+      description: editDescription,
+      problem_type: editProblemType,
+      status: editStatus,
+      business_owner: editBusinessOwner,
+      target_column: editTargetColumn,
+      primary_metric: editPrimaryMetric,
+      business_goal: editBusinessGoal,
+      success_criteria: editSuccessCriteria
+    });
+    setNotice(`Business case updated: ${updated.name}`);
+    await onRefresh();
+  }
+
+  async function attachData(event: FormEvent) {
+    event.preventDefault();
+    if (!selectedBusinessCase) {
+      setNotice("Create or select a business case first");
+      return;
+    }
+    if (editingAttachmentId) {
+      const updated = await api.updateBusinessCaseDataAttachment(selectedBusinessCase.id, editingAttachmentId, {
+        role: selectedRole,
+        context_note: contextNote,
+        primary_key_column: primaryKeyColumn,
+        target_column: mappingTargetColumn
+      });
+      setNotice(`Updated mapping for ${attachedDataset(updated.data_asset_id)?.name ?? updated.data_asset_id}`);
+      resetDataMappingForm();
+      setAttachments(await api.listBusinessCaseDataAttachments(selectedBusinessCase.id));
+      return;
+    }
+    const dataAsset = availableDataAssets.find((item) => item.id === selectedDataAssetId) ?? availableDataAssets[0];
+    if (!dataAsset) {
+      setNotice("Upload or create a dataset first");
+      return;
+    }
+    await api.attachBusinessCaseData(selectedBusinessCase.id, {
+      data_asset_id: dataAsset.id,
+      data_asset_kind: isDataView(dataAsset) ? "data_view" : "dataset",
+      role: selectedRole,
+      context_note: contextNote,
+      primary_key_column: primaryKeyColumn,
+      target_column: mappingTargetColumn,
+      origin: "uploaded",
+      metadata: {
+        source_name: dataAsset.name,
+        row_count: dataAsset.row_count
+      }
+    });
+    setNotice(`Attached ${dataAsset.name} as ${selectedRole}`);
+    resetDataMappingForm();
+    setAttachments(await api.listBusinessCaseDataAttachments(selectedBusinessCase.id));
+  }
+
+  function startAddingAttachment() {
+    resetDataMappingForm();
+    setIsMappingFormOpen(true);
+  }
+
+  function startEditingAttachment(attachment: BusinessCaseDataAttachment) {
+    setSelectedDataAssetId(attachment.data_asset_id);
+    setSelectedRole(attachment.role);
+    setPrimaryKeyColumn(attachment.primary_key_column);
+    setContextNote(attachment.context_note);
+    setMappingTargetColumn(attachment.target_column);
+    setEditingAttachmentId(attachment.id);
+    setIsMappingFormOpen(true);
+    setActiveWorkspace("data");
+  }
+
+  function resetDataMappingForm() {
+    setSelectedDataAssetId("");
+    setSelectedRole("training");
+    setPrimaryKeyColumn("");
+    setContextNote("");
+    setMappingTargetColumn("");
+    setEditingAttachmentId("");
+    setIsMappingFormOpen(false);
+  }
+
+  function resetBusinessCaseEditForm(businessCase: BusinessCase) {
+    setEditName(businessCase.name);
+    setEditDescription(businessCase.description);
+    setEditProblemType(businessCase.problem_type);
+    setEditStatus(businessCase.status);
+    setEditBusinessOwner(businessCase.business_owner);
+    setEditTargetColumn(businessCase.target_column);
+    setEditPrimaryMetric(businessCase.primary_metric);
+    setEditBusinessGoal(businessCase.business_goal);
+    setEditSuccessCriteria(businessCase.success_criteria);
+  }
+
+  async function deleteAttachment(attachment: BusinessCaseDataAttachment) {
+    if (!selectedBusinessCase) {
+      return;
+    }
+    const label = attachedDataset(attachment.data_asset_id)?.name ?? attachment.data_asset_id;
+    const confirmed = window.confirm(`Delete mapping for ${label}? The dataset itself will not be deleted.`);
+    if (!confirmed) {
+      return;
+    }
+    await api.deleteBusinessCaseDataAttachment(selectedBusinessCase.id, attachment.id);
+    if (editingAttachmentId === attachment.id) {
+      resetDataMappingForm();
+    }
+    setNotice(`Deleted mapping for ${label}`);
+    setAttachments(await api.listBusinessCaseDataAttachments(selectedBusinessCase.id));
   }
 
   return (
-    <main className="auth-layout">
-      <section className="auth-panel">
-        <div className="brand auth-brand">
-          <div className="brand-mark">ML</div>
+    <section className="business-case-screen">
+      <div className="panel business-case-catalog">
+        <div className="catalog-toolbar">
           <div>
-            <strong>ML App</strong>
-            <span>Private analytics workspace</span>
+            <h2>Business cases</h2>
+            <p>{filteredBusinessCases.length} of {businessCases.length} cases shown</p>
           </div>
-        </div>
-
-        <div className="auth-tabs" role="tablist" aria-label="Authentication mode">
-          <button
-            className={mode === "login" ? "active" : ""}
-            onClick={() => setMode("login")}
-            type="button"
-          >
-            <LogIn size={16} />
-            Login
-          </button>
-          <button
-            className={mode === "register" ? "active" : ""}
-            onClick={() => setMode("register")}
-            type="button"
-          >
-            <UserPlus size={16} />
-            Register
+          <button className="primary-button" type="button" onClick={() => setIsCreateOpen(true)}>
+            <Plus size={16} />
+            Create BC
           </button>
         </div>
 
-        <form className="auth-form" onSubmit={submit}>
-          <label>
-            Email
-            <input
-              autoComplete="email"
-              type="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              required
-            />
-          </label>
-          {mode === "register" && (
-            <label>
-              Display name
-              <input
-                autoComplete="name"
-                value={displayName}
-                onChange={(event) => setDisplayName(event.target.value)}
-              />
-            </label>
-          )}
-          <label>
-            Password
-            <input
-              autoComplete={mode === "login" ? "current-password" : "new-password"}
-              minLength={6}
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              required
-            />
-          </label>
-          <button className="primary-button" disabled={isSubmitting || isChecking} type="submit">
-            {mode === "login" ? <LogIn size={16} /> : <UserPlus size={16} />}
-            {mode === "login" ? "Login" : "Create account"}
-          </button>
-        </form>
+        <label className="search-field">
+          <Search size={16} />
+          <input
+            aria-label="Search business cases"
+            placeholder="Search by name, problem, target, metric or status"
+            value={businessCaseSearch}
+            onChange={(event) => setBusinessCaseSearch(event.target.value)}
+          />
+        </label>
 
-        <div className="auth-footer">
-          <span>{message}</span>
-          <span>API {apiStatus}</span>
-        </div>
-      </section>
-    </main>
-  );
-}
-
-function Overview({
-  datasets,
-  models,
-  deployments
-}: {
-  datasets: DataAsset[];
-  models: ModelArtifact[];
-  deployments: Deployment[];
-}) {
-  const activeDataAssets = datasets.filter((dataset) => dataset.status !== "deleted");
-  const dataViews = activeDataAssets.filter(isDataView);
-  const sourceDatasets = activeDataAssets.filter((dataset) => !isDataView(dataset));
-  const recentAssets = [
-    ...sourceDatasets.map((item) => ({
-      id: item.id,
-      name: item.name,
-      kind: "dataset",
-      status: item.status
-    })),
-    ...dataViews.map((item) => ({
-      id: item.id,
-      name: item.name,
-      kind: "view",
-      status: item.status
-    })),
-    ...models.map((item) => ({
-      id: item.id,
-      name: item.name,
-      kind: "model",
-      status: item.stage
-    })),
-    ...deployments.map((item) => ({
-      id: item.id,
-      name: item.name,
-      kind: "deployment",
-      status: item.status
-    }))
-  ];
-
-  return (
-    <section className="overview-grid">
-      <Metric icon={Database} label="Datasets" value={sourceDatasets.length} tone="teal" />
-      <Metric icon={Table2} label="Data Views" value={dataViews.length} tone="blue" />
-      <Metric icon={Brain} label="Models" value={models.length} tone="blue" />
-      <Metric icon={Rocket} label="Deployments" value={deployments.length} tone="amber" />
-      <div className="panel wide">
-        <div className="panel-header">
-          <h2>Recent assets</h2>
-        </div>
-        <div className="table">
-          <div className="table-row table-head">
-            <span>Name</span>
-            <span>Kind</span>
+        <div className="bc-table">
+          <div className="bc-table-row head">
+            <span>Business case</span>
+            <span>Problem</span>
+            <span>Target</span>
+            <span>Metric</span>
             <span>Status</span>
+            <span>Actions</span>
           </div>
-          {recentAssets.slice(0, 8).map((item) => (
-            <div className="table-row" key={item.id}>
-              <span>{item.name}</span>
-              <span>{item.kind}</span>
-              <span>{item.status}</span>
+          {filteredBusinessCases.map((item) => (
+            <div className={`bc-table-row${selectedBusinessCase?.id === item.id ? " selected" : ""}`} key={item.id}>
+              <div>
+                <strong>{item.name}</strong>
+                <small>{item.description || "No description"}</small>
+              </div>
+              <span>{item.problem_type}</span>
+              <span>{item.target_column || "not set"}</span>
+              <span>{item.primary_metric || "not set"}</span>
+              <em>{item.status}</em>
+              <div className="bc-row-actions">
+                <button
+                  className="secondary-button compact-button"
+                  type="button"
+                  onClick={() => {
+                    setSelectedBusinessCaseId(item.id);
+                    setActiveWorkspace("details");
+                  }}
+                >
+                  <ListChecks size={14} />
+                  Details
+                </button>
+                <button
+                  className="secondary-button compact-button"
+                  type="button"
+                  onClick={() => {
+                    setSelectedBusinessCaseId(item.id);
+                    setActiveWorkspace("data");
+                  }}
+                >
+                  <Database size={14} />
+                  Data
+                </button>
+                <button
+                  className="secondary-button compact-button"
+                  type="button"
+                  onClick={() => {
+                    setSelectedBusinessCaseId(item.id);
+                    setActiveWorkspace("pipelines");
+                  }}
+                >
+                  <Share2 size={14} />
+                  Pipelines
+                </button>
+                <button
+                  className="secondary-button compact-button"
+                  type="button"
+                  onClick={() => onOpenModels(item.id)}
+                >
+                  <Brain size={14} />
+                  Models
+                </button>
+              </div>
             </div>
           ))}
-          {recentAssets.length === 0 && (
-            <div className="empty-state">No assets yet</div>
-          )}
+          {filteredBusinessCases.length === 0 && <div className="catalog-empty">No business cases match this search.</div>}
         </div>
       </div>
+
+      {selectedBusinessCase && activeWorkspace && (
+      <div className="bc-workspace">
+        <div className="panel">
+          <div className="bc-workspace-header">
+            <div>
+              <span className="eyebrow">Selected business case</span>
+              <h2>{selectedBusinessCase?.name ?? "No business case selected"}</h2>
+              {selectedBusinessCase && (
+                <p>{selectedBusinessCase.problem_type} / target: {selectedBusinessCase.target_column || "not set"} / metric: {selectedBusinessCase.primary_metric || "not set"}</p>
+              )}
+            </div>
+            <div className="button-row">
+              <button className={`secondary-button compact-button${activeWorkspace === "details" ? " active" : ""}`} type="button" onClick={() => setActiveWorkspace("details")}>
+                <ListChecks size={14} />
+                Details
+              </button>
+              <button className={`secondary-button compact-button${activeWorkspace === "data" ? " active" : ""}`} type="button" onClick={() => setActiveWorkspace("data")}>
+                <Database size={14} />
+                Data
+              </button>
+              <button className={`secondary-button compact-button${activeWorkspace === "pipelines" ? " active" : ""}`} type="button" onClick={() => setActiveWorkspace("pipelines")}>
+                <Share2 size={14} />
+                Pipelines
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {selectedBusinessCase && activeWorkspace === "details" && (
+          <form className="panel form-panel bc-detail-panel" onSubmit={submitBusinessCaseUpdate}>
+            <div className="panel-header">
+              <h2>Edit business case</h2>
+              <ListChecks size={18} />
+            </div>
+            <div className="bc-edit-grid">
+              <label>
+                Name
+                <input value={editName} onChange={(event) => setEditName(event.target.value)} required />
+              </label>
+              <label>
+                Problem type
+                <select value={editProblemType} onChange={(event) => setEditProblemType(event.target.value)}>
+                  <option value="binary_classification">Binary classification</option>
+                  <option value="multiclass_classification">Multiclass classification</option>
+                  <option value="regression">Regression</option>
+                  <option value="forecasting">Forecasting</option>
+                  <option value="clustering">Clustering</option>
+                  <option value="anomaly_detection">Anomaly detection</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </label>
+              <label>
+                Status
+                <select value={editStatus} onChange={(event) => setEditStatus(event.target.value)}>
+                  <option value="draft">Draft</option>
+                  <option value="active">Active</option>
+                  <option value="production">Production</option>
+                  <option value="archived">Archived</option>
+                </select>
+              </label>
+              <label>
+                Business owner
+                <input value={editBusinessOwner} onChange={(event) => setEditBusinessOwner(event.target.value)} />
+              </label>
+              <label>
+                Target column
+                <input value={editTargetColumn} onChange={(event) => setEditTargetColumn(event.target.value)} />
+              </label>
+              <label>
+                Primary metric
+                <input value={editPrimaryMetric} onChange={(event) => setEditPrimaryMetric(event.target.value)} />
+              </label>
+              <label className="wide-field">
+                Description
+                <textarea className="compact-textarea" value={editDescription} onChange={(event) => setEditDescription(event.target.value)} />
+              </label>
+              <label className="wide-field">
+                Business goal
+                <input value={editBusinessGoal} onChange={(event) => setEditBusinessGoal(event.target.value)} />
+              </label>
+              <label className="wide-field">
+                Success criteria
+                <input value={editSuccessCriteria} onChange={(event) => setEditSuccessCriteria(event.target.value)} />
+              </label>
+            </div>
+            <div className="button-row">
+              <button className="primary-button" type="submit">
+                <Save size={16} />
+                Save BC
+              </button>
+              <button className="secondary-button" type="button" onClick={() => resetBusinessCaseEditForm(selectedBusinessCase)}>
+                <RotateCcw size={16} />
+                Reset
+              </button>
+            </div>
+          </form>
+        )}
+
+        {selectedBusinessCase && activeWorkspace === "data" && (
+          <>
+            <div className="panel bc-mapped-data-panel">
+              <div className="panel-header bc-mapped-data-header">
+                <div>
+                  <h2>Mapped data</h2>
+                  <p>{activeAttachments.length} active mapping{activeAttachments.length === 1 ? "" : "s"}</p>
+                </div>
+                <button
+                  className="primary-button"
+                  type="button"
+                  onClick={startAddingAttachment}
+                  disabled={availableDataAssets.length === 0}
+                >
+                  <Plus size={16} />
+                  Add mapping
+                </button>
+              </div>
+              <div className="asset-list">
+                {activeAttachments.map((item) => {
+                  const assetName = attachedDataset(item.data_asset_id)?.name ?? item.data_asset_id;
+                  return (
+                    <div className={`asset-row${editingAttachmentId === item.id ? " selected" : ""}`} key={item.id}>
+                      <div>
+                        <strong>{assetName}</strong>
+                        <span>{item.data_asset_kind} / key: {item.primary_key_column || "not set"} / target: {item.target_column || "not set"} / {item.context_note || "no note"}</span>
+                      </div>
+                      <div className="asset-actions">
+                        <em>{item.role}</em>
+                        <button
+                          className="secondary-button compact-button"
+                          type="button"
+                          onClick={() => startEditingAttachment(item)}
+                        >
+                          <ListChecks size={14} />
+                          Edit
+                        </button>
+                        <button
+                          aria-label={`Delete mapping for ${assetName}`}
+                          className="icon-button danger-icon"
+                          type="button"
+                          onClick={() => void deleteAttachment(item)}
+                          title="Delete mapping"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+                {activeAttachments.length === 0 && <div className="empty-state">No data mapped to this business case yet</div>}
+              </div>
+            </div>
+
+            {isMappingFormOpen && (
+              <form className="panel form-panel bc-mapping-form" onSubmit={attachData}>
+                <div className="panel-header">
+                  <div>
+                    <h2>{editingAttachmentId ? "Edit data mapping" : "Add data mapping"}</h2>
+                    <p>
+                      {editingAttachmentId
+                        ? "Update the role and context of this mapping."
+                        : "Connect a dataset or Data View to this business case."}
+                    </p>
+                  </div>
+                  <Database size={18} />
+                </div>
+                <label>
+                  Dataset/Data View
+                  <select
+                    value={selectedDataAssetId}
+                    onChange={(event) => setSelectedDataAssetId(event.target.value)}
+                    disabled={Boolean(editingAttachmentId)}
+                  >
+                    <option value="">First available</option>
+                    {availableDataAssets.map((item) => (
+                      <option key={item.id} value={item.id}>{item.name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Role
+                  <select value={selectedRole} onChange={(event) => setSelectedRole(event.target.value)}>
+                    <option value="source">Source</option>
+                    <option value="training">Training</option>
+                    <option value="validation">Validation</option>
+                    <option value="test">Test</option>
+                    <option value="scoring_input">Scoring input</option>
+                    <option value="scoring_output">Scoring output</option>
+                    <option value="monitoring_actuals">Monitoring actuals</option>
+                    <option value="reference">Reference</option>
+                  </select>
+                </label>
+                <label>
+                  Primary key column
+                  <input value={primaryKeyColumn} onChange={(event) => setPrimaryKeyColumn(event.target.value)} />
+                </label>
+                <label>
+                  Target column
+                  <input value={mappingTargetColumn} onChange={(event) => setMappingTargetColumn(event.target.value)} />
+                </label>
+                <label>
+                  Context note
+                  <input value={contextNote} onChange={(event) => setContextNote(event.target.value)} />
+                </label>
+                <div className="button-row">
+                  <button className="primary-button" type="submit">
+                    <Save size={16} />
+                    {editingAttachmentId ? "Save mapping" : "Add mapping"}
+                  </button>
+                  <button className="secondary-button" type="button" onClick={resetDataMappingForm}>
+                    <X size={16} />
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {deletedAttachments.length > 0 && (
+              <details className="panel editor-details deleted-assets-panel">
+                <summary>Deleted BC mappings <span>{deletedAttachments.length}</span></summary>
+                <AssetList title="" assets={deletedAttachments.map((item) => ({
+                  id: item.id,
+                  name: attachedDataset(item.data_asset_id)?.name ?? item.data_asset_id,
+                  meta: `${item.data_asset_kind} / key: ${item.primary_key_column || "not set"} / ${item.context_note || "no note"}`,
+                  status: item.role
+                }))} />
+              </details>
+            )}
+          </>
+        )}
+
+        {selectedBusinessCase && activeWorkspace === "pipelines" && (
+          <AssetList title="Mapped pipelines" assets={selectedBusinessCasePipelines.map((item) => ({
+            id: item.id,
+            name: item.name,
+            meta: `${item.type} / ${businessCaseName(businessCases, item.business_case_id)}`,
+            status: item.status,
+            actionLabel: "Edit",
+            onAction: () => onEditPipeline(item.id)
+          }))} />
+        )}
+      </div>
+      )}
+
+      {isCreateOpen && (
+        <div className="modal-backdrop">
+          <form className="modal-dialog form-panel" onSubmit={submitBusinessCase}>
+            <div className="modal-header">
+              <h2>New business case</h2>
+              <button className="icon-button" type="button" aria-label="Close" onClick={() => setIsCreateOpen(false)}>
+                <X size={16} />
+              </button>
+            </div>
+            <label>
+              Name
+              <input value={name} onChange={(event) => setName(event.target.value)} required />
+            </label>
+            <label>
+              Problem type
+              <select value={problemType} onChange={(event) => setProblemType(event.target.value)}>
+                <option value="binary_classification">Binary classification</option>
+                <option value="multiclass_classification">Multiclass classification</option>
+                <option value="regression">Regression</option>
+                <option value="forecasting">Forecasting</option>
+                <option value="clustering">Clustering</option>
+                <option value="anomaly_detection">Anomaly detection</option>
+                <option value="custom">Custom</option>
+              </select>
+            </label>
+            <label>
+              Description
+              <textarea className="compact-textarea" value={description} onChange={(event) => setDescription(event.target.value)} />
+            </label>
+            <label>
+              Target column
+              <input value={targetColumn} onChange={(event) => setTargetColumn(event.target.value)} />
+            </label>
+            <label>
+              Primary metric
+              <input value={primaryMetric} onChange={(event) => setPrimaryMetric(event.target.value)} />
+            </label>
+            <label>
+              Business goal
+              <input value={businessGoal} onChange={(event) => setBusinessGoal(event.target.value)} />
+            </label>
+            <label>
+              Success criteria
+              <input value={successCriteria} onChange={(event) => setSuccessCriteria(event.target.value)} />
+            </label>
+            <div className="modal-actions">
+              <button className="secondary-button" type="button" onClick={() => setIsCreateOpen(false)}>Cancel</button>
+              <button className="primary-button" type="submit">
+                <Plus size={16} />
+                Create BC
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
     </section>
   );
 }
 
-function Metric({
-  icon: Icon,
-  label,
-  value,
-  tone
+function PipelinesPanel({
+  businessCases,
+  datasets,
+  pipelines,
+  openRequest,
+  onOpenRequestConsumed,
+  onRefresh,
+  onExamineDataset,
+  setNotice
 }: {
-  icon: LucideIcon;
-  label: string;
-  value: number;
-  tone: string;
+  businessCases: BusinessCase[];
+  datasets: DataAsset[];
+  pipelines: Pipeline[];
+  openRequest: { pipelineId: string; requestId: number } | null;
+  onOpenRequestConsumed: () => void;
+  onRefresh: () => Promise<void>;
+  onExamineDataset: (datasetId: string) => void;
+  setNotice: (message: string) => void;
 }) {
+  const [businessCaseId, setBusinessCaseId] = useState("");
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [pipelineType, setPipelineType] = useState("custom");
+  const [selectedPipelineId, setSelectedPipelineId] = useState("");
+  const [isCreatePipelineOpen, setIsCreatePipelineOpen] = useState(false);
+  const [isPipelineEditorOpen, setIsPipelineEditorOpen] = useState(false);
+  const [catalogRunDialog, setCatalogRunDialog] = useState<{
+    pipeline: Pipeline;
+    version: PipelineVersion;
+    inputs: Array<{
+      key: string;
+      name: string;
+      logicalId: string;
+      policy: "latest" | "select_at_run";
+    }>;
+  } | null>(null);
+  const [catalogRunSelections, setCatalogRunSelections] = useState<Record<string, string>>({});
+  const [isCatalogRunSubmitting, setIsCatalogRunSubmitting] = useState(false);
+  const [catalogRunResult, setCatalogRunResult] = useState<PipelineRun | null>(null);
+  const [isRenamingPipeline, setIsRenamingPipeline] = useState(false);
+  const [isSavingPipelineName, setIsSavingPipelineName] = useState(false);
+  const [pipelineNameDraft, setPipelineNameDraft] = useState("");
+  const [runFeedback, setRunFeedback] = useState<{
+    status: "queued" | "running" | "succeeded" | "failed";
+    title: string;
+    detail: string;
+  } | null>(null);
+  const [dryRunResult, setDryRunResult] = useState<PipelineRun | null>(null);
+  const [examinedDryRun, setExaminedDryRun] = useState<PipelineRun | null>(null);
+  const [isDefinitionDirty, setIsDefinitionDirty] = useState(false);
+  const [workflowDefinition, setWorkflowDefinition] = useState<WorkflowDefinition>(emptyWorkflowDefinition());
+  const [definitionText, setDefinitionText] = useState(JSON.stringify(emptyWorkflowDefinition(), null, 2));
+  const [versions, setVersions] = useState<PipelineVersion[]>([]);
+  const [runs, setRuns] = useState<PipelineRun[]>([]);
+  const [activeStepRuns, setActiveStepRuns] = useState<PipelineStepRun[]>([]);
+  const [selectedRunDetails, setSelectedRunDetails] = useState<PipelineRun | null>(null);
+  const [isRunHistoryOpen, setIsRunHistoryOpen] = useState(false);
+  const [versionHistoryPipeline, setVersionHistoryPipeline] = useState<Pipeline | null>(null);
+  const [runHistoryRefreshKey, setRunHistoryRefreshKey] = useState(0);
+  const [pipelineDataAttachments, setPipelineDataAttachments] = useState<BusinessCaseDataAttachment[]>([]);
+  const selectedPipeline = pipelines.find((item) => item.id === selectedPipelineId) ?? pipelines[0];
+  const selectedPipelineIdValue = selectedPipeline?.id ?? "";
+  const selectedBusinessCaseIdValue = selectedPipeline?.business_case_id ?? "";
+
+  useEffect(() => {
+    if (!businessCaseId && businessCases[0]) {
+      setBusinessCaseId(businessCases[0].id);
+    }
+  }, [businessCaseId, businessCases]);
+
+  useEffect(() => {
+    if (!selectedPipelineId && pipelines[0]) {
+      setSelectedPipelineId(pipelines[0].id);
+    }
+  }, [pipelines, selectedPipelineId]);
+
+  useEffect(() => {
+    if (!openRequest) return;
+    const requestedPipeline = pipelines.find((item) => item.id === openRequest.pipelineId);
+    if (!requestedPipeline) {
+      setNotice("The requested pipeline is no longer available");
+      onOpenRequestConsumed();
+      return;
+    }
+    setSelectedPipelineId(requestedPipeline.id);
+    setRunFeedback(null);
+    setIsPipelineEditorOpen(true);
+    onOpenRequestConsumed();
+  }, [openRequest, onOpenRequestConsumed, pipelines, setNotice]);
+
+  useEffect(() => {
+    setPipelineNameDraft(selectedPipeline?.name ?? "");
+    setIsRenamingPipeline(false);
+  }, [selectedPipeline?.id, selectedPipeline?.name]);
+
+  useEffect(() => {
+    if (!selectedPipelineIdValue) {
+      setVersions([]);
+      setRuns([]);
+      setActiveStepRuns([]);
+      setPipelineDataAttachments([]);
+      return;
+    }
+    let active = true;
+    Promise.all([
+      api.listPipelineVersions(selectedPipelineIdValue),
+      api.listPipelineRuns(selectedPipelineIdValue),
+      api.listBusinessCaseDataAttachments(selectedBusinessCaseIdValue)
+    ])
+      .then(([versionItems, runItems, attachmentItems]) => {
+        if (!active) return;
+        setVersions(versionItems);
+        setRuns(runItems);
+        setPipelineDataAttachments(attachmentItems);
+        const draftVersion = versionItems.find((item) => item.status === "draft");
+        const selectedVersion = draftVersion ?? versionItems.at(-1);
+        if (selectedVersion) {
+          // A cached definition is only valid while its editable server-side
+          // draft exists. Otherwise stale browser state makes a published
+          // version look dirty and points dry-run at a draft that is gone.
+          const workingDraft = draftVersion
+            ? readPipelineWorkingDraft(selectedPipelineIdValue)
+            : null;
+          if (!draftVersion) clearPipelineWorkingDraft(selectedPipelineIdValue);
+          const normalized = canonicalizeWorkflowDatasetIds(
+            normalizeWorkflowDefinition(workingDraft ?? selectedVersion.definition),
+            datasets
+          );
+          setWorkflowDefinition(normalized);
+          setDefinitionText(JSON.stringify(normalized, null, 2));
+          setIsDefinitionDirty(Boolean(workingDraft));
+          if (workingDraft) setNotice("Recovered unsaved pipeline changes from this browser tab");
+        }
+      })
+      .catch((error) => setNotice(error instanceof Error ? error.message : "Could not load pipeline details"));
+    return () => { active = false; };
+  }, [selectedBusinessCaseIdValue, selectedPipelineIdValue, setNotice]);
+
+  useEffect(() => {
+    if (!isDefinitionDirty) return;
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [isDefinitionDirty]);
+
+  async function createPipeline(event: FormEvent) {
+    event.preventDefault();
+    if (!businessCaseId) {
+      setNotice("Create or select a business case first");
+      return;
+    }
+    const created = await api.createPipeline({
+      business_case_id: businessCaseId,
+      name,
+      description,
+      type: pipelineType,
+      definition: emptyWorkflowDefinition()
+    });
+    setNotice(`Pipeline created: ${created.name}`);
+    setSelectedPipelineId(created.id);
+    setIsCreatePipelineOpen(false);
+    setIsPipelineEditorOpen(true);
+    setName("");
+    setDescription("");
+    await onRefresh();
+  }
+
+  async function renamePipeline(event: FormEvent) {
+    event.preventDefault();
+    if (!selectedPipeline) return;
+    const nextName = pipelineNameDraft.trim();
+    if (!nextName) {
+      setNotice("Pipeline name cannot be empty");
+      return;
+    }
+    if (nextName === selectedPipeline.name) {
+      setIsRenamingPipeline(false);
+      return;
+    }
+    setIsSavingPipelineName(true);
+    try {
+      await api.updatePipeline(selectedPipeline.id, { name: nextName });
+      await onRefresh();
+      setIsRenamingPipeline(false);
+      setNotice(`Pipeline renamed to “${nextName}”`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not rename pipeline");
+    } finally {
+      setIsSavingPipelineName(false);
+    }
+  }
+
+  async function persistDraft(showNotice = true) {
+    if (!selectedPipeline) {
+      setNotice("Select a pipeline first");
+      return null;
+    }
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(definitionText) as Record<string, unknown>;
+    } catch {
+      setNotice("Pipeline definition is not valid JSON");
+      return null;
+    }
+    const saved = await api.updateDraftPipelineVersion(selectedPipeline.id, parsed);
+    clearPipelineWorkingDraft(selectedPipeline.id);
+    setIsDefinitionDirty(false);
+    if (showNotice) setNotice("Draft version saved");
+    setVersions(await api.listPipelineVersions(selectedPipeline.id));
+    await onRefresh();
+    return saved;
+  }
+
+  async function saveDraft() {
+    await persistDraft();
+  }
+
+  async function publishDraft() {
+    if (!selectedPipeline) {
+      setNotice("Select a pipeline first");
+      return;
+    }
+    if (isDefinitionDirty && !await persistDraft(false)) return;
+    await api.publishDraftPipelineVersion(selectedPipeline.id);
+    setNotice("Draft version published");
+    setVersions(await api.listPipelineVersions(selectedPipeline.id));
+    await onRefresh();
+  }
+
+  async function createNextDraft() {
+    if (!selectedPipeline) {
+      setNotice("Select a pipeline first");
+      return;
+    }
+    const draft = await api.createNextDraftPipelineVersion(selectedPipeline.id);
+    const normalized = canonicalizeWorkflowDatasetIds(
+      normalizeWorkflowDefinition(draft.definition),
+      datasets
+    );
+    setWorkflowDefinition(normalized);
+    setDefinitionText(JSON.stringify(normalized, null, 2));
+    clearPipelineWorkingDraft(selectedPipeline.id);
+    setIsDefinitionDirty(false);
+    setVersions(await api.listPipelineVersions(selectedPipeline.id));
+    setNotice(`Draft v${draft.version_number} created`);
+    await onRefresh();
+  }
+
+  async function runSelectedPipeline(isDryRun: boolean, stepId?: string) {
+    if (!selectedPipeline) {
+      setNotice("Select a pipeline first");
+      return;
+    }
+    const target = stepId ? "DE step" : "pipeline";
+    const action = isDryRun ? "Dry-run" : "Run";
+    if (isDryRun && !hasDraft) {
+      const detail = "Create a draft before running a dry-run. The published version remains available through Run.";
+      setRunFeedback({ status: "failed", title: `${action} blocked`, detail });
+      setNotice(detail);
+      return;
+    }
+    setRunFeedback({ status: "queued", title: `${action} queued`, detail: `Preparing ${target} execution…` });
+    if (isDryRun) setDryRunResult(null);
+    try {
+      if (!isDryRun && (isDefinitionDirty || hasDraft)) {
+        const detail = "Publish the current draft before a full run. Full runs use immutable published versions; dry-run is available for drafts.";
+        setRunFeedback({ status: "failed", title: `${action} blocked`, detail });
+        setNotice(detail);
+        return;
+      }
+      const wasDirty = isDefinitionDirty;
+      const savedDraft = isDryRun && wasDirty ? await persistDraft(false) : null;
+      if (isDryRun && wasDirty && !savedDraft) {
+        setRunFeedback({ status: "failed", title: `${action} failed`, detail: "Save a valid draft definition before execution." });
+        return;
+      }
+      let run = await api.runPipeline(selectedPipeline.id, {
+        pipeline_version_id: isDryRun
+          ? savedDraft?.id ?? versions.find((item) => item.status === "draft")?.id
+          : undefined,
+        step_id: stepId,
+        trigger_type: "manual",
+        is_dry_run: isDryRun,
+        runtime_parameters: {}
+      });
+      setRunFeedback({ status: "running", title: `${action} in progress`, detail: `Worker accepted ${target} run ${shortId(run.id)}.` });
+      while (run.status === "queued" || run.status === "running") {
+        await new Promise((resolve) => window.setTimeout(resolve, 750));
+        run = await api.getPipelineRun(selectedPipeline.id, run.id);
+      }
+      setRuns(await api.listPipelineRuns(selectedPipeline.id));
+      setActiveStepRuns(await api.listPipelineStepRuns(selectedPipeline.id, run.id));
+      const scope = run.output_manifest[0]?.data_scope ?? "unknown";
+      const counts = `${run.input_row_count ?? 0} input rows → ${run.output_row_count ?? 0} output rows`;
+      const failed = run.status === "failed";
+      const title = failed ? `${action} failed` : `${action} completed`;
+      const fittedTransform = run.output_manifest.find((item) => item.artifact_type === "feature_transform");
+      const fittedDetail = fittedTransform?.artifact_id
+        ? ` · fitted transform ${fittedTransform.artifact_id}`
+        : "";
+      const detail = failed
+        ? run.error_message
+        : `${target} finished successfully · ${scope} scope · ${counts}${fittedDetail}`;
+      setRunFeedback({ status: failed ? "failed" : "succeeded", title, detail });
+      setNotice(`${title}: ${detail}`);
+      if (!failed && isDryRun) setDryRunResult(run);
+      if (!failed && !isDryRun) {
+        await onRefresh();
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Pipeline execution could not be started";
+      setRunFeedback({ status: "failed", title: `${action} failed`, detail });
+    }
+  }
+
+  async function openCatalogRunDialog(pipeline: Pipeline) {
+    try {
+      const versionItems = await api.listPipelineVersions(pipeline.id);
+      const published = versionItems.filter((item) => item.status === "published").at(-1);
+      if (!published) {
+        setNotice("This pipeline has no published version");
+        return;
+      }
+      const normalized = canonicalizeWorkflowDatasetIds(
+        normalizeWorkflowDefinition(published.definition),
+        datasets
+      );
+      const inputs = normalized.steps.flatMap((step) => {
+        const nested = asRecord(asRecord(step.config).definition);
+        const rawInputs = Array.isArray(nested.inputs) ? nested.inputs : [];
+        return rawInputs.flatMap((value) => {
+          const input = asRecord(value);
+          const logicalId = asString(input.dataset_id);
+          if (!logicalId) return [];
+          const dataset = datasets.find((item) => item.logical_id === logicalId || item.id === logicalId);
+          return [{
+            key: `${step.step_id}:${asString(input.input_id)}`,
+            name: dataset?.name ?? (asString(input.input_id) || "Dataset input"),
+            logicalId,
+            policy: input.version_policy === "select_at_run" ? "select_at_run" as const : "latest" as const
+          }];
+        });
+      });
+      setCatalogRunSelections({});
+      setCatalogRunResult(null);
+      setCatalogRunDialog({ pipeline, version: published, inputs });
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not prepare pipeline run");
+    }
+  }
+
+  async function submitCatalogRun(event: FormEvent) {
+    event.preventDefault();
+    if (!catalogRunDialog) return;
+    const missing = catalogRunDialog.inputs.find(
+      (input) => input.policy === "select_at_run" && !catalogRunSelections[input.key]
+    );
+    if (missing) {
+      setNotice(`Select a version for ${missing.name}`);
+      return;
+    }
+    setIsCatalogRunSubmitting(true);
+    try {
+      let run = await api.runPipeline(catalogRunDialog.pipeline.id, {
+        pipeline_version_id: catalogRunDialog.version.id,
+        trigger_type: "manual",
+        is_dry_run: false,
+        runtime_parameters: {},
+        input_versions: catalogRunSelections
+      });
+      setNotice(`Pipeline run ${shortId(run.id)} queued`);
+      setCatalogRunResult(run);
+      setSelectedPipelineId(catalogRunDialog.pipeline.id);
+      while (run.status === "queued" || run.status === "running") {
+        await new Promise((resolve) => window.setTimeout(resolve, 750));
+        run = await api.getPipelineRun(catalogRunDialog.pipeline.id, run.id);
+        setCatalogRunResult(run);
+      }
+      await onRefresh();
+      if (run.status === "succeeded") {
+        const datasetsCreated = run.output_manifest.filter((item) => item.dataset_id).length;
+        setNotice(`Pipeline run ${shortId(run.id)} completed · ${datasetsCreated} datasets created`);
+      } else {
+        setNotice(`Pipeline run ${shortId(run.id)} failed: ${run.error_message || "unknown error"}`);
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not start pipeline run");
+    } finally {
+      setIsCatalogRunSubmitting(false);
+    }
+  }
+
+  function updateWorkflowDefinition(definition: WorkflowDefinition) {
+    setWorkflowDefinition(definition);
+    setDefinitionText(JSON.stringify(definition, null, 2));
+    setIsDefinitionDirty(true);
+    if (selectedPipeline) writePipelineWorkingDraft(selectedPipeline.id, definition);
+  }
+
+  function updateDefinitionText(value: string) {
+    setDefinitionText(value);
+    setIsDefinitionDirty(true);
+    try {
+      const parsed = JSON.parse(value);
+      setWorkflowDefinition(canonicalizeWorkflowDatasetIds(
+        normalizeWorkflowDefinition(parsed),
+        datasets
+      ));
+      if (selectedPipeline) writePipelineWorkingDraft(selectedPipeline.id, parsed);
+    } catch {
+      // Keep the last valid visual definition while the advanced JSON is incomplete.
+    }
+  }
+
+  const hasDraft = versions.some((item) => item.status === "draft");
+  const hasPublished = versions.some((item) => item.status === "published");
+  const isRunActive = runFeedback?.status === "queued" || runFeedback?.status === "running";
+  const canRunPublishedVersion = hasPublished && !hasDraft;
+
+  if (!isPipelineEditorOpen) {
+    return (
+      <>
+        <section className="panel pipeline-catalog">
+          <div className="catalog-toolbar">
+            <div>
+              <span className="builder-kicker">Pipeline registry</span>
+              <h2>Pipeline workflows</h2>
+              <p>Create, inspect and open versioned workflows assigned to your Business Cases.</p>
+            </div>
+            <div className="catalog-toolbar-actions">
+              <button className="secondary-button" type="button" onClick={() => setIsRunHistoryOpen(true)}>
+                <History size={16} /> Runs history
+              </button>
+              <button className="primary-button" type="button" onClick={() => setIsCreatePipelineOpen(true)}>
+                <Plus size={16} /> New pipeline
+              </button>
+            </div>
+          </div>
+          <div className="pipeline-table" role="table" aria-label="Pipelines">
+            <div className="pipeline-table-row head" role="row">
+              <span>Name</span><span>Business case</span><span>Purpose</span><span>Version</span><span>Status</span><span>Updated</span><span />
+            </div>
+            {pipelines.map((item) => (
+              <div className="pipeline-table-row" role="row" key={item.id}>
+                <span><strong>{item.name}</strong><small>{item.description || "No description"}</small></span>
+                <span>{businessCaseName(businessCases, item.business_case_id)}</span>
+                <span>{item.type.replaceAll("_", " ")}</span>
+                <span>
+                  <strong>{item.latest_published_version_number ? `v${item.latest_published_version_number}` : "—"}</strong>
+                  <small>
+                    {item.published_version_count} published
+                    {item.draft_version_number ? ` · v${item.draft_version_number} draft` : ""}
+                  </small>
+                </span>
+                <span><i className={`pipeline-status ${item.status}`}>{item.status}</i></span>
+                <span>{formatDateTime(item.updated_at)}</span>
+                <span>
+                  <button
+                    className="secondary-button compact-button"
+                    type="button"
+                    disabled={item.published_version_count === 0}
+                    onClick={() => setVersionHistoryPipeline(item)}
+                  >
+                    <History size={14} /> Versions
+                  </button>
+                  <button
+                    className="primary-button compact-button"
+                    type="button"
+                    disabled={item.status !== "published"}
+                    onClick={() => openCatalogRunDialog(item)}
+                  >
+                    <Play size={14} /> Run
+                  </button>
+                  <button
+                    className="secondary-button compact-button"
+                    type="button"
+                    onClick={() => {
+                      setSelectedPipelineId(item.id);
+                      setRunFeedback(null);
+                      setIsPipelineEditorOpen(true);
+                    }}
+                  >
+                    Edit
+                  </button>
+                </span>
+              </div>
+            ))}
+            {!pipelines.length && <div className="catalog-empty">No pipelines yet. Create the first workflow for a Business Case.</div>}
+          </div>
+        </section>
+        {isCreatePipelineOpen && (
+          <div className="modal-backdrop" role="presentation" onMouseDown={() => setIsCreatePipelineOpen(false)}>
+            <form className="modal-dialog form-panel" onSubmit={createPipeline} onMouseDown={(event) => event.stopPropagation()}>
+              <div className="modal-header">
+                <div><span className="builder-kicker">Create workflow</span><h2>New pipeline</h2></div>
+                <button className="icon-button" type="button" onClick={() => setIsCreatePipelineOpen(false)} aria-label="Close"><X size={17} /></button>
+              </div>
+              <label>Business case
+                <select value={businessCaseId} onChange={(event) => setBusinessCaseId(event.target.value)} required>
+                  <option value="">Choose BC</option>
+                  {businessCases.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+                </select>
+              </label>
+              <label>Name<input value={name} onChange={(event) => setName(event.target.value)} autoFocus required /></label>
+              <label>Purpose
+                <select value={pipelineType} onChange={(event) => setPipelineType(event.target.value)}>
+                  <option value="custom">Custom workflow</option>
+                  <option value="training">Training workflow</option>
+                  <option value="batch_scoring">Scoring workflow</option>
+                  <option value="monitoring">Monitoring workflow</option>
+                </select>
+              </label>
+              <label>Description<textarea className="compact-textarea" value={description} onChange={(event) => setDescription(event.target.value)} /></label>
+              <div className="modal-actions">
+                <button className="secondary-button" type="button" onClick={() => setIsCreatePipelineOpen(false)}>Cancel</button>
+                <button className="primary-button" type="submit"><Plus size={16} /> Create pipeline</button>
+              </div>
+            </form>
+          </div>
+        )}
+        {isRunHistoryOpen && (
+          <PipelineRunHistoryDialog
+            pipelines={pipelines}
+            businessCases={businessCases}
+            refreshKey={runHistoryRefreshKey}
+            onClose={() => setIsRunHistoryOpen(false)}
+            onDetails={setSelectedRunDetails}
+            onExamineDataset={onExamineDataset}
+          />
+        )}
+        {versionHistoryPipeline && (
+          <PipelineVersionHistoryDialog
+            pipeline={versionHistoryPipeline}
+            businessCaseName={businessCaseName(businessCases, versionHistoryPipeline.business_case_id)}
+            onClose={() => setVersionHistoryPipeline(null)}
+          />
+        )}
+        {selectedRunDetails && (
+          <PipelineRunDetailsDialog
+            run={selectedRunDetails}
+            onClose={() => setSelectedRunDetails(null)}
+            onChanged={async () => {
+              setRunHistoryRefreshKey((current) => current + 1);
+            }}
+          />
+        )}
+        {catalogRunDialog && (
+          <div className="modal-backdrop" role="presentation" onMouseDown={() => {
+            setCatalogRunDialog(null);
+            if (!isCatalogRunSubmitting) setCatalogRunResult(null);
+          }}>
+            <form className="modal-dialog form-panel" onSubmit={submitCatalogRun} onMouseDown={(event) => event.stopPropagation()}>
+              <div className="modal-header">
+                <div>
+                  <span className="builder-kicker">Run published pipeline</span>
+                  <h2>{catalogRunDialog.pipeline.name}</h2>
+                </div>
+                <button className="icon-button" type="button"
+                  onClick={() => { setCatalogRunDialog(null); if (!isCatalogRunSubmitting) setCatalogRunResult(null); }} aria-label="Close"><X size={17} /></button>
+              </div>
+              {catalogRunResult && (
+                <div className={`catalog-run-monitor ${catalogRunResult.status}`}>
+                  <span className={["queued", "running"].includes(catalogRunResult.status) ? "run-spinner" : "run-result-icon"}>
+                    {catalogRunResult.status === "succeeded" ? "✓" : catalogRunResult.status === "failed" ? "!" : ""}
+                  </span>
+                  <div>
+                    <strong>
+                      {catalogRunResult.status === "queued" ? "Run queued" :
+                        catalogRunResult.status === "running" ? "Pipeline is running" :
+                          catalogRunResult.status === "succeeded" ? "Pipeline completed" : "Pipeline failed"}
+                    </strong>
+                    <span>Run {shortId(catalogRunResult.id)} · {catalogRunResult.processed_row_count ?? 0} processed rows</span>
+                  </div>
+                </div>
+              )}
+              {!catalogRunResult && catalogRunDialog.inputs.map((input) => {
+                const versionsForInput = datasets
+                  .filter((dataset) => dataset.logical_id === input.logicalId && dataset.status !== "deleted")
+                  .sort((left, right) => right.version_number - left.version_number);
+                const latest = versionsForInput[0];
+                return (
+                  <label key={input.key}>{input.name}
+                    {input.policy === "latest" ? (
+                      <input value={latest ? `Latest → v${latest.version_number}` : "No active version"} readOnly />
+                    ) : (
+                      <select
+                        value={catalogRunSelections[input.key] ?? ""}
+                        onChange={(event) => setCatalogRunSelections((current) => ({
+                          ...current,
+                          [input.key]: event.target.value
+                        }))}
+                        required
+                      >
+                        <option value="">Select version…</option>
+                        {versionsForInput.map((dataset) => (
+                          <option key={dataset.id} value={dataset.id}>
+                            v{dataset.version_number} · {dataset.row_count ?? "?"} rows · {formatDateTime(dataset.created_at)}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                    <small>{input.policy === "latest" ? "Resolved and recorded when the run is created." : "This run requires an explicit immutable version."}</small>
+                  </label>
+                );
+              })}
+              {!catalogRunResult && !catalogRunDialog.inputs.length && <p>This pipeline has no external dataset inputs.</p>}
+              {catalogRunResult && !["queued", "running"].includes(catalogRunResult.status) && (
+                <div className="catalog-run-outputs">
+                  <strong>Created datasets</strong>
+                  {catalogRunResult.output_manifest.filter((item) => item.dataset_id).map((item) => (
+                    <div className="catalog-run-output" key={`${item.pipeline_step_id}:${item.output_id}`}>
+                      <span>
+                        <strong>{item.dataset_name || item.output_id}</strong>
+                        <small>{item.pipeline_step_id} · {item.output_stage} · {item.row_count ?? 0} rows</small>
+                      </span>
+                      <i>v{item.version_number ?? 1}</i>
+                    </div>
+                  ))}
+                  {catalogRunResult.status === "failed" && <p>{catalogRunResult.error_message}</p>}
+                </div>
+              )}
+              <div className="modal-actions">
+                <button className="secondary-button" type="button"
+                  onClick={() => { setCatalogRunDialog(null); if (!isCatalogRunSubmitting) setCatalogRunResult(null); }}>
+                  {isCatalogRunSubmitting ? "Run in background" : catalogRunResult ? "Close" : "Cancel"}
+                </button>
+                {!catalogRunResult && (
+                  <button className="primary-button" type="submit" disabled={isCatalogRunSubmitting}>
+                    <Play size={16} /> {isCatalogRunSubmitting ? "Starting…" : "Run pipeline"}
+                  </button>
+                )}
+              </div>
+            </form>
+          </div>
+        )}
+      </>
+    );
+  }
+
   return (
-    <div className={`metric ${tone}`}>
-      <Icon size={20} />
-      <span>{label}</span>
-      <strong>{value}</strong>
+    <section className="pipeline-editor-screen">
+      <div className="pipeline-editor-toolbar">
+        <button className="secondary-button" type="button" onClick={() => setIsPipelineEditorOpen(false)}>← Pipelines</button>
+        <div className="pipeline-editor-title">
+          <span className="builder-kicker">Pipeline editor</span>
+          {isRenamingPipeline ? (
+            <form className="pipeline-name-editor" onSubmit={renamePipeline}>
+              <input
+                value={pipelineNameDraft}
+                onChange={(event) => setPipelineNameDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    setPipelineNameDraft(selectedPipeline?.name ?? "");
+                    setIsRenamingPipeline(false);
+                  }
+                }}
+                maxLength={200}
+                autoFocus
+                aria-label="Pipeline name"
+              />
+              <button className="primary-button compact-button" type="submit" disabled={isSavingPipelineName || !pipelineNameDraft.trim()}>
+                <Save size={14} /> {isSavingPipelineName ? "Saving…" : "Save"}
+              </button>
+              <button
+                className="secondary-button compact-button"
+                type="button"
+                onClick={() => {
+                  setPipelineNameDraft(selectedPipeline?.name ?? "");
+                  setIsRenamingPipeline(false);
+                }}
+                disabled={isSavingPipelineName}
+              >
+                Cancel
+              </button>
+            </form>
+          ) : (
+            <div className="pipeline-name-display">
+              <h2>{selectedPipeline?.name ?? "Pipeline"}</h2>
+              {selectedPipeline && (
+                <button
+                  className="icon-button"
+                  type="button"
+                  onClick={() => {
+                    setPipelineNameDraft(selectedPipeline.name);
+                    setIsRenamingPipeline(true);
+                  }}
+                  aria-label="Rename pipeline"
+                  title="Rename pipeline"
+                >
+                  <Pencil size={15} />
+                </button>
+              )}
+            </div>
+          )}
+          <small>{selectedPipeline ? businessCaseName(businessCases, selectedPipeline.business_case_id) : ""}</small>
+        </div>
+        <div className="editor-toolbar-actions">
+          <button className="secondary-button" onClick={saveDraft} type="button" disabled={!hasDraft}><Save size={16} /> Save{isDefinitionDirty ? " *" : ""}</button>
+          <button className="secondary-button" onClick={publishDraft} type="button" disabled={!hasDraft}><CheckCircle2 size={16} /> Publish</button>
+          <button className="secondary-button" onClick={createNextDraft} type="button" disabled={hasDraft}><Plus size={16} /> New draft</button>
+          <button className="secondary-button" onClick={() => runSelectedPipeline(true)} type="button" disabled={isRunActive || !hasDraft}><Play size={16} /> Dry-run</button>
+          <button className="primary-button" onClick={() => selectedPipeline && openCatalogRunDialog(selectedPipeline)} type="button" disabled={isRunActive || !canRunPublishedVersion}><Play size={16} /> Run</button>
+        </div>
+      </div>
+
+      {runFeedback && (
+        <div className={`inline-run-feedback ${runFeedback.status}`} role="status" aria-live="polite">
+          <span className={isRunActive ? "run-spinner" : "run-result-icon"}>
+            {runFeedback.status === "succeeded" ? "✓" : runFeedback.status === "failed" ? "!" : ""}
+          </span>
+          <div><strong>{runFeedback.title}</strong><span>{runFeedback.detail}</span></div>
+          {!isRunActive && <button className="icon-button" type="button" onClick={() => setRunFeedback(null)} aria-label="Dismiss"><X size={15} /></button>}
+        </div>
+      )}
+      {activeStepRuns.length > 0 && (
+        <div className="run-profile-summary" aria-label="Pipeline step run results">
+          {activeStepRuns.map((stepRun) => (
+            <span key={stepRun.id}>
+              {stepRun.pipeline_step_id} · {stepRun.status} · {stepRun.processed_row_count ?? 0} rows
+            </span>
+          ))}
+        </div>
+      )}
+
+      {hasDraft && hasPublished && (
+        <div className="inline-run-feedback queued" role="note">
+          <span className="run-result-icon">i</span>
+          <div>
+            <strong>Draft differs from the runnable published version</strong>
+            <span>Use Dry-run for draft validation, then Publish before a full Run creates a persistent dataset.</span>
+          </div>
+        </div>
+      )}
+
+      {dryRunResult && (
+        <DryRunPreview
+          run={dryRunResult}
+          onClose={() => setDryRunResult(null)}
+          onExamine={() => setExaminedDryRun(dryRunResult)}
+        />
+      )}
+      {examinedDryRun && (
+        <DryRunExamination
+          run={examinedDryRun}
+          onClose={() => setExaminedDryRun(null)}
+          setNotice={setNotice}
+        />
+      )}
+      {selectedRunDetails && selectedPipeline && (
+        <PipelineRunDetailsDialog
+          run={selectedRunDetails}
+          onClose={() => setSelectedRunDetails(null)}
+          onChanged={async () => {
+            setRuns(await api.listPipelineRuns(selectedPipeline.id));
+            setRunHistoryRefreshKey((current) => current + 1);
+          }}
+        />
+      )}
+
+      <div className="panel pipeline-canvas-panel">
+        <DeferredPanel>
+          <WorkflowEditor
+            definition={workflowDefinition}
+            businessCase={businessCases.find((item) => item.id === selectedBusinessCaseIdValue)}
+            datasets={latestLogicalDatasetAliases(datasets)}
+            dataAttachments={pipelineDataAttachments.map((attachment) => {
+              const dataset = datasets.find((item) => item.id === attachment.data_asset_id);
+              return dataset ? { ...attachment, data_asset_id: dataset.logical_id } : attachment;
+            })}
+            outputNameSuggestion={selectedPipeline?.name ?? "result"}
+            onChange={updateWorkflowDefinition}
+            disabled={!hasDraft}
+          />
+        </DeferredPanel>
+      </div>
+
+      <div className="editor-lower-grid">
+        <details className="panel editor-details">
+          <summary>Versions <span>{versions.length}</span></summary>
+          <AssetList title="" assets={versions.map((item) => ({
+            id: item.id,
+            name: `v${item.version_number}`,
+            meta: `hash ${item.definition_hash.slice(0, 12)} · ${item.published_at ? formatDateTime(item.published_at) : "not published"}`,
+            status: item.status
+          }))} />
+        </details>
+        <details className="panel editor-details" open>
+          <summary>Recent runs <span>{runs.length}</span></summary>
+          <AssetList title="" assets={runs.slice(0, 8).map((item) => ({
+            id: item.id,
+            name: `${item.is_dry_run ? "dry-run" : "run"} ${item.requested_step_id ? `step ${item.requested_step_id}` : "pipeline"} ${shortId(item.id)}`,
+            meta: `${item.processed_row_count ?? 0} processed · ${item.output_row_count ?? 0} output rows`,
+            status: item.status,
+            actionLabel: "Details",
+            onAction: () => setSelectedRunDetails(item)
+          }))} />
+        </details>
+      </div>
+
+      {workflowDefinition.steps.length > 0 && (
+        <div className="step-run-dock">
+          {workflowDefinition.steps.map((step) => (
+            <span key={step.step_id}>
+              <strong>{step.name}</strong>
+              <small>Runs required ancestors and stops after this step</small>
+              <button className="secondary-button" onClick={() => runSelectedPipeline(true, step.step_id)}
+                type="button" disabled={isRunActive || !hasDraft}>
+                <Play size={16} /> Dry-run
+              </button>
+              <button className="secondary-button" onClick={() => runSelectedPipeline(false, step.step_id)}
+                type="button" disabled={isRunActive || !canRunPublishedVersion}>
+                <Play size={16} /> Run
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      <details className="advanced-json editor-json">
+        <summary>Advanced JSON definition</summary>
+        <p>The diagram and JSON use the same DAG contract.</p>
+        <textarea className="json-input" value={definitionText} onChange={(event) => updateDefinitionText(event.target.value)} disabled={!hasDraft} />
+      </details>
+      {catalogRunDialog && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => {
+          setCatalogRunDialog(null);
+          if (!isCatalogRunSubmitting) setCatalogRunResult(null);
+        }}>
+          <form className="modal-dialog form-panel" onSubmit={submitCatalogRun} onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-header">
+              <div><span className="builder-kicker">Run published pipeline</span><h2>{catalogRunDialog.pipeline.name}</h2></div>
+              <button className="icon-button" type="button"
+                onClick={() => { setCatalogRunDialog(null); if (!isCatalogRunSubmitting) setCatalogRunResult(null); }} aria-label="Close"><X size={17} /></button>
+            </div>
+            {catalogRunResult && (
+              <div className={`catalog-run-monitor ${catalogRunResult.status}`}>
+                <span className={["queued", "running"].includes(catalogRunResult.status) ? "run-spinner" : "run-result-icon"}>
+                  {catalogRunResult.status === "succeeded" ? "✓" : catalogRunResult.status === "failed" ? "!" : ""}
+                </span>
+                <div>
+                  <strong>
+                    {catalogRunResult.status === "queued" ? "Run queued" :
+                      catalogRunResult.status === "running" ? "Pipeline is running" :
+                        catalogRunResult.status === "succeeded" ? "Pipeline completed" : "Pipeline failed"}
+                  </strong>
+                  <span>Run {shortId(catalogRunResult.id)} · {catalogRunResult.processed_row_count ?? 0} processed rows</span>
+                </div>
+              </div>
+            )}
+            {!catalogRunResult && catalogRunDialog.inputs.map((input) => {
+              const versionsForInput = datasets
+                .filter((dataset) => dataset.logical_id === input.logicalId && dataset.status !== "deleted")
+                .sort((left, right) => right.version_number - left.version_number);
+              const latest = versionsForInput[0];
+              return (
+                <label key={input.key}>{input.name}
+                  {input.policy === "latest" ? (
+                    <input value={latest ? `Latest → v${latest.version_number}` : "No active version"} readOnly />
+                  ) : (
+                    <select value={catalogRunSelections[input.key] ?? ""}
+                      onChange={(event) => setCatalogRunSelections((current) => ({ ...current, [input.key]: event.target.value }))}
+                      required>
+                      <option value="">Select version…</option>
+                      {versionsForInput.map((dataset) => (
+                        <option key={dataset.id} value={dataset.id}>
+                          v{dataset.version_number} · {dataset.row_count ?? "?"} rows · {formatDateTime(dataset.created_at)}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <small>{input.policy === "latest" ? "Resolved and recorded when the run is created." : "This run requires an explicit immutable version."}</small>
+                </label>
+              );
+            })}
+            {catalogRunResult && !["queued", "running"].includes(catalogRunResult.status) && (
+              <div className="catalog-run-outputs">
+                <strong>Created datasets</strong>
+                {catalogRunResult.output_manifest.filter((item) => item.dataset_id).map((item) => (
+                  <div className="catalog-run-output" key={`${item.pipeline_step_id}:${item.output_id}`}>
+                    <span><strong>{item.dataset_name || item.output_id}</strong>
+                      <small>{item.pipeline_step_id} · {item.output_stage} · {item.row_count ?? 0} rows</small></span>
+                    <i>v{item.version_number ?? 1}</i>
+                  </div>
+                ))}
+                {catalogRunResult.status === "failed" && <p>{catalogRunResult.error_message}</p>}
+              </div>
+            )}
+            <div className="modal-actions">
+              <button className="secondary-button" type="button"
+                onClick={() => { setCatalogRunDialog(null); if (!isCatalogRunSubmitting) setCatalogRunResult(null); }}>
+                {isCatalogRunSubmitting ? "Run in background" : catalogRunResult ? "Close" : "Cancel"}
+              </button>
+              {!catalogRunResult && (
+                <button className="primary-button" type="submit" disabled={isCatalogRunSubmitting}>
+                  <Play size={16} /> {isCatalogRunSubmitting ? "Starting…" : "Run pipeline"}
+                </button>
+              )}
+            </div>
+          </form>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function DryRunExamination({
+  run,
+  onClose,
+  setNotice
+}: {
+  run: PipelineRun;
+  onClose: () => void;
+  setNotice: (message: string) => void;
+}) {
+  const output = run.output_manifest[0];
+  const outputId = output?.output_id ?? "";
+  const timestamp = run.finished_at ?? run.created_at;
+  const profileCache = useRef(new Map<string, DescriptiveProfileCacheEntry>());
+  const temporaryAsset = useMemo<DataAsset>(() => ({
+    id: temporaryPipelineOutputId(run.id, outputId),
+    owner_id: "",
+    name: `Dry-run output · ${outputId}`,
+    source_type: "file",
+    format: "parquet",
+    logical_id: temporaryPipelineOutputId(run.id, outputId),
+    version_number: 1,
+    version_stage: "intermediate",
+    description: "Read-only temporary pipeline output",
+    original_filename: null,
+    location_uri: null,
+    file_size_bytes: null,
+    row_count: output?.row_count ?? run.output_row_count,
+    has_header: null,
+    uploaded_by: null,
+    uploaded_at: timestamp,
+    deleted_by: null,
+    deleted_at: null,
+    status: "ready",
+    tags: ["temporary", "dry-run"],
+    metadata: {
+      temporary: true,
+      pipeline_id: run.pipeline_id,
+      pipeline_run_id: run.id,
+      output_id: outputId,
+      scope: "full"
+    },
+    created_at: run.created_at,
+    updated_at: timestamp
+  }), [
+    output?.row_count,
+    outputId,
+    run.created_at,
+    run.id,
+    run.output_row_count,
+    run.pipeline_id,
+    timestamp
+  ]);
+  const temporaryDatasets = useMemo(() => [temporaryAsset], [temporaryAsset]);
+
+  return (
+    <div className="modal-backdrop dry-run-examine-backdrop" role="presentation">
+      <section className="dry-run-examine-dialog" role="dialog" aria-modal="true" aria-label="Examine dry-run output">
+        <header className="modal-header dry-run-examine-header">
+          <div>
+            <p className="eyebrow">Temporary result · full scope · {temporaryAsset.row_count ?? 0} rows</p>
+            <h2>Examine dry-run output</h2>
+            <p>Browse, profile, and visualize this Parquet without creating an official dataset or artifact.</p>
+          </div>
+          <button className="icon-button" onClick={onClose} type="button" aria-label="Close examination">
+            <X size={18} />
+          </button>
+        </header>
+        <div className="dry-run-examine-content">
+          <AnalysisPanel
+            datasets={temporaryDatasets}
+            descriptiveProfileCache={profileCache.current}
+            onRefresh={async () => undefined}
+            setNotice={setNotice}
+            initialTab="browse"
+            showDataRoles={false}
+            allowPersistence={false}
+          />
+        </div>
+        <footer className="dry-run-examine-footer">
+          Temporary Parquet · access follows the pipeline run · no official dataset or artifact was created. Drag the bottom-right corner to resize.
+        </footer>
+        <span className="dry-run-examine-resize-hint" aria-hidden="true" title="Drag to resize" />
+      </section>
     </div>
   );
 }
 
+function businessCaseName(businessCases: BusinessCase[], businessCaseId: string) {
+  return businessCases.find((item) => item.id === businessCaseId)?.name ?? "unknown BC";
+}
+
 function DataPanel({
   datasets,
+  onAnalyze,
   onRefresh,
   setNotice
 }: {
   datasets: DataAsset[];
+  onAnalyze: (datasetId: string) => void;
   onRefresh: () => Promise<void>;
   setNotice: (message: string) => void;
 }) {
@@ -486,14 +2040,32 @@ function DataPanel({
   const [tags, setTags] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [fileInputKey, setFileInputKey] = useState(0);
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const [isUploadingFile, setIsUploadingFile] = useState(false);
+  const [uploadLogicalId, setUploadLogicalId] = useState("");
   const activeDatasets = datasets.filter((dataset) => dataset.status !== "deleted" && !isDataView(dataset));
   const dataViews = datasets.filter((dataset) => dataset.status !== "deleted" && isDataView(dataset));
   const deletedDatasets = datasets.filter((dataset) => dataset.status === "deleted");
 
+  function selectDatasetFile(nextFile: File | null) {
+    if (!nextFile) {
+      setFile(null);
+      return;
+    }
+    if (!/\.(csv|parquet)$/i.test(nextFile.name)) {
+      setNotice("Choose a .csv or .parquet dataset file");
+      return;
+    }
+    setFile(nextFile);
+    if (!name.trim()) {
+      setName(nextFile.name.replace(/\.(csv|parquet)$/i, ""));
+    }
+  }
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!file) {
-      setNotice("Choose a CSV file first");
+      setNotice("Choose a CSV or Parquet file first");
       return;
     }
     if (!name.trim()) {
@@ -506,17 +2078,26 @@ function DataPanel({
     formData.set("name", name.trim());
     formData.set("description", description);
     formData.set("tags", tags);
+    if (uploadLogicalId) formData.set("logical_id", uploadLogicalId);
 
-    const uploaded = await api.uploadDataset(formData);
-    setNotice(
-      `Uploaded ${uploaded.name}: ${uploaded.row_count ?? 0} rows, headers ${uploaded.has_header ? "detected" : "not detected"}`
-    );
-    setName("");
-    setDescription("");
-    setTags("");
-    setFile(null);
-    setFileInputKey((current) => current + 1);
-    await onRefresh();
+    setIsUploadingFile(true);
+    try {
+      const uploaded = await api.uploadDataset(formData);
+      setNotice(
+        `Uploaded ${uploaded.name} v${uploaded.version_number}: ${uploaded.row_count ?? 0} rows · ${uploaded.format.toUpperCase()} · full dataset`
+      );
+      setName("");
+      setDescription("");
+      setTags("");
+      setFile(null);
+      setUploadLogicalId("");
+      setFileInputKey((current) => current + 1);
+      await onRefresh();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Dataset upload failed");
+    } finally {
+      setIsUploadingFile(false);
+    }
   }
 
   async function deleteDataset(dataset: DataAsset) {
@@ -525,27 +2106,84 @@ function DataPanel({
     await onRefresh();
   }
 
+  function addDatasetVersion(dataset: DataAsset) {
+    setUploadLogicalId(dataset.logical_id);
+    setName(dataset.name);
+    setDescription(dataset.description);
+    setTags(dataset.tags.join(", "));
+    setFile(null);
+    setFileInputKey((current) => current + 1);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
   return (
     <section className="two-column">
       <form className="panel form-panel" onSubmit={submit}>
         <div className="panel-header">
-          <h2>Upload CSV</h2>
+          <div>
+            <h2>{uploadLogicalId ? `Add version of ${name}` : "Upload dataset from file"}</h2>
+            <p className="dataset-upload-subtitle">
+              {uploadLogicalId ? "Register a new immutable version of this logical dataset." : "Register a complete CSV or Parquet dataset."}
+            </p>
+          </div>
           <Upload size={18} />
         </div>
         <label>
-          Name
-          <input value={name} onChange={(event) => setName(event.target.value)} required />
-        </label>
-        <label>
-          CSV file
+          Dataset name
           <input
-            accept=".csv,text/csv"
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="Suggested from the selected filename"
+            required
+            disabled={Boolean(uploadLogicalId)}
+          />
+        </label>
+        <label
+          className={`dataset-file-picker ${isDraggingFile ? "dragging" : ""} ${file ? "selected" : ""}`}
+          onDragEnter={(event) => {
+            event.preventDefault();
+            setIsDraggingFile(true);
+          }}
+          onDragOver={(event) => event.preventDefault()}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+              setIsDraggingFile(false);
+            }
+          }}
+          onDrop={(event) => {
+            event.preventDefault();
+            setIsDraggingFile(false);
+            selectDatasetFile(event.dataTransfer.files?.[0] ?? null);
+          }}
+        >
+          <input
+            accept=".csv,.parquet,text/csv,application/vnd.apache.parquet"
+            className="dataset-file-input"
             key={fileInputKey}
-            onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+            onChange={(event) => selectDatasetFile(event.target.files?.[0] ?? null)}
             required
             type="file"
           />
+          <span className="dataset-file-picker-icon"><Upload size={22} /></span>
+          {file ? (
+            <span className="dataset-file-selection">
+              <strong>{file.name}</strong>
+              <small>
+                <em>{file.name.toLowerCase().endsWith(".parquet") ? "PARQUET" : "CSV"}</em>
+                {formatBytes(file.size)}
+              </small>
+            </span>
+          ) : (
+            <span className="dataset-file-selection">
+              <strong>Drop a dataset file here</strong>
+              <small>or click to browse · CSV and Parquet</small>
+            </span>
+          )}
         </label>
+        <div className="dataset-format-guidance">
+          <span><strong>CSV</strong><small>UTF-8 tabular data; converted to a reusable columnar cache for analytics.</small></span>
+          <span><strong>Parquet</strong><small>Used natively with schema and column types preserved.</small></span>
+        </div>
         <label>
           Description
           <textarea
@@ -556,25 +2194,36 @@ function DataPanel({
         </label>
         <label>
           Tags
-          <input value={tags} onChange={(event) => setTags(event.target.value)} />
+          <input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="Comma-separated, optional" />
         </label>
-        <button className="primary-button" type="submit">
+        <div className="dataset-upload-scope">
+          <CheckCircle2 size={15} />
+          Full file will be registered. Upload does not silently sample rows.
+        </div>
+        <button className="primary-button" type="submit" disabled={isUploadingFile}>
           <Upload size={16} />
-          Upload
+          {isUploadingFile ? "Uploading and validating…" : "Upload dataset"}
         </button>
+        {uploadLogicalId && (
+          <button className="secondary-button" type="button" onClick={() => {
+            setUploadLogicalId("");
+            setName("");
+            setDescription("");
+            setTags("");
+            setFile(null);
+            setFileInputKey((current) => current + 1);
+          }}>
+            Cancel new version
+          </button>
+        )}
       </form>
 
       <div className="repository-column">
-        <AssetList
-          title="Active datasets"
-          assets={activeDatasets.map((item) => ({
-            id: item.id,
-            name: item.name,
-            meta: datasetMeta(item),
-            status: item.status,
-            canDelete: true,
-            onDelete: () => deleteDataset(item)
-          }))}
+        <VersionedDatasetList
+          datasets={activeDatasets}
+          onAddVersion={addDatasetVersion}
+          onAnalyze={onAnalyze}
+          onDelete={deleteDataset}
         />
         <AssetList
           title="Data views"
@@ -587,15 +2236,20 @@ function DataPanel({
             onDelete: () => deleteDataset(item)
           }))}
         />
-        <AssetList
-          title="Deleted datasets"
-          assets={deletedDatasets.map((item) => ({
-            id: item.id,
-            name: item.name,
-            meta: datasetMeta(item),
-            status: item.status
-          }))}
-        />
+        {deletedDatasets.length > 0 && (
+          <details className="panel editor-details deleted-assets-panel">
+            <summary>Deleted datasets <span>{deletedDatasets.length}</span></summary>
+            <AssetList
+              title=""
+              assets={deletedDatasets.map((item) => ({
+                id: item.id,
+                name: item.name,
+                meta: datasetMeta(item),
+                status: item.status
+              }))}
+            />
+          </details>
+        )}
       </div>
     </section>
   );
@@ -610,6 +2264,118 @@ function datasetMeta(item: DataAsset) {
     item.deleted_at ? `deleted ${formatDateTime(item.deleted_at)}` : null,
     item.deleted_by ? `by ${shortId(item.deleted_by)}` : null
   ].filter(Boolean).join(" / ");
+}
+
+function VersionedDatasetList({
+  datasets,
+  onAddVersion,
+  onAnalyze,
+  onDelete
+}: {
+  datasets: DataAsset[];
+  onAddVersion: (dataset: DataAsset) => void;
+  onAnalyze: (datasetId: string) => void;
+  onDelete: (dataset: DataAsset) => void;
+}) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const groups = datasetVersionGroups(datasets);
+  return (
+    <div className="panel">
+      <div className="panel-header"><h2>Active datasets</h2></div>
+      <div className="asset-list">
+        {groups.map(({ logicalId, latest, versions }) => {
+          const isExpanded = expanded.has(logicalId);
+          return (
+            <div className="dataset-version-group" key={logicalId}>
+              <div className="asset-row">
+                <div>
+                  <strong>{latest.name} <i className="version-badge">v{latest.version_number}</i></strong>
+                  <span>{datasetMeta(latest)} / {versions.length} version{versions.length === 1 ? "" : "s"} / {latest.version_stage}</span>
+                </div>
+                <div className="asset-actions">
+                  <em>{latest.status}</em>
+                  <button className="secondary-button compact-button" type="button"
+                    onClick={() => onAnalyze(latest.id)}>
+                    <BarChart3 size={14} /> Analyze latest
+                  </button>
+                  <button className="secondary-button compact-button" type="button" onClick={() => {
+                    setExpanded((current) => {
+                      const next = new Set(current);
+                      if (next.has(logicalId)) next.delete(logicalId); else next.add(logicalId);
+                      return next;
+                    });
+                  }}>
+                    Versions ({versions.length})
+                  </button>
+                  <button className="secondary-button compact-button" type="button" onClick={() => onAddVersion(latest)}>
+                    <Plus size={14} /> Add version
+                  </button>
+                </div>
+              </div>
+              {isExpanded && (
+                <div className="dataset-version-history">
+                  {[...versions].sort((a, b) => b.version_number - a.version_number).map((version) => (
+                    <div className="asset-row version-row" key={version.id}>
+                      <div>
+                        <strong>v{version.version_number} {version.id === latest.id ? "· latest" : ""}</strong>
+                        <span>{datasetMeta(version)} / created {formatDateTime(version.created_at)}</span>
+                      </div>
+                      <div className="asset-actions">
+                        <em>{version.version_stage}</em>
+                        <button className="secondary-button compact-button" type="button"
+                          onClick={() => onAnalyze(version.id)}>
+                          <BarChart3 size={14} /> Analyze
+                        </button>
+                        <button
+                          aria-label={`Delete ${version.name} v${version.version_number}`}
+                          className="icon-button danger-icon"
+                          onClick={() => onDelete(version)}
+                          title="Delete this dataset version"
+                          type="button"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+        {!groups.length && <div className="empty-state">Nothing registered yet</div>}
+      </div>
+    </div>
+  );
+}
+
+function datasetVersionGroups(datasets: DataAsset[]) {
+  const grouped = new Map<string, DataAsset[]>();
+  for (const dataset of datasets) {
+    const logicalId = dataset.logical_id || dataset.id;
+    grouped.set(logicalId, [...(grouped.get(logicalId) ?? []), dataset]);
+  }
+  return [...grouped.entries()]
+    .map(([logicalId, versions]) => ({
+      logicalId,
+      versions,
+      latest: [...versions].sort((a, b) => b.version_number - a.version_number)[0]
+    }))
+    .sort((left, right) => right.latest.created_at.localeCompare(left.latest.created_at));
+}
+
+function latestLogicalDatasetAliases(datasets: DataAsset[]) {
+  return datasetVersionGroups(
+    datasets.filter((dataset) => dataset.status !== "deleted")
+  ).map(({ logicalId, latest }) => ({ ...latest, id: logicalId }));
+}
+
+function datasetVersionLabel(dataset: DataAsset, datasets: DataAsset[]) {
+  const versions = datasets.filter(
+    (item) => item.logical_id === dataset.logical_id && item.status !== "deleted"
+  );
+  const latest = Math.max(...versions.map((item) => item.version_number), dataset.version_number);
+  return `${dataset.name} · v${dataset.version_number}${dataset.version_number === latest ? " (latest)" : ""}`;
 }
 
 function isDataView(item: DataAsset) {
@@ -656,6 +2422,16 @@ function formatDateTime(value: string) {
   }).format(new Date(value));
 }
 
+function durationLabel(startedAt: string | null | undefined, finishedAt: string | null | undefined) {
+  if (!startedAt) return "not started";
+  const start = new Date(startedAt).getTime();
+  const end = finishedAt ? new Date(finishedAt).getTime() : Date.now();
+  const seconds = Math.max(0, Math.round((end - start) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${seconds % 60}s`;
+}
+
 function shortId(value: string) {
   return value.slice(0, 8);
 }
@@ -664,15 +2440,25 @@ function AnalysisPanel({
   datasets,
   descriptiveProfileCache,
   onRefresh,
-  setNotice
+  setNotice,
+  initialDatasetId = "",
+  initialTab = "roles",
+  onInitialDatasetConsumed,
+  showDataRoles = true,
+  allowPersistence = true
 }: {
   datasets: DataAsset[];
   descriptiveProfileCache: Map<string, DescriptiveProfileCacheEntry>;
   onRefresh: () => Promise<void>;
   setNotice: (message: string) => void;
+  initialDatasetId?: string;
+  initialTab?: "roles" | "browse" | "descriptive" | "visualization";
+  onInitialDatasetConsumed?: () => void;
+  showDataRoles?: boolean;
+  allowPersistence?: boolean;
 }) {
-  const [activeAnalysisTab, setActiveAnalysisTab] = useState<"roles" | "browse" | "descriptive" | "visualization">("roles");
-  const [datasetId, setDatasetId] = useState("");
+  const [activeAnalysisTab, setActiveAnalysisTab] = useState<"roles" | "browse" | "descriptive" | "visualization">(initialTab);
+  const [datasetId, setDatasetId] = useState(initialDatasetId);
   const [visualizationDrill, setVisualizationDrill] = useState<VisualizationDrillRequest | null>(null);
   const availableDatasets = useMemo(
     () => datasets.filter((dataset) => dataset.status !== "deleted"),
@@ -688,17 +2474,30 @@ function AnalysisPanel({
     }
   }, [availableDatasets, datasetId]);
 
+  useEffect(() => {
+    if (!initialDatasetId || !availableDatasets.some((dataset) => dataset.id === initialDatasetId)) {
+      return;
+    }
+    if (initialDatasetId !== datasetId) {
+      setDatasetId(initialDatasetId);
+      setVisualizationDrill(null);
+    }
+    onInitialDatasetConsumed?.();
+  }, [availableDatasets, datasetId, initialDatasetId, onInitialDatasetConsumed]);
+
   return (
     <section className="analysis-workspace">
       <div className="analysis-tabs" role="tablist" aria-label="Analysis sections">
-        <button
-          className={activeAnalysisTab === "roles" ? "active" : ""}
-          onClick={() => setActiveAnalysisTab("roles")}
-          type="button"
-        >
-          <ListChecks size={16} />
-          Data Roles
-        </button>
+        {showDataRoles && (
+          <button
+            className={activeAnalysisTab === "roles" ? "active" : ""}
+            onClick={() => setActiveAnalysisTab("roles")}
+            type="button"
+          >
+            <ListChecks size={16} />
+            Data Roles
+          </button>
+        )}
         <button
           className={activeAnalysisTab === "browse" ? "active" : ""}
           onClick={() => setActiveAnalysisTab("browse")}
@@ -745,6 +2544,7 @@ function AnalysisPanel({
           onVisualizationDrillConsumed={(requestId) => {
             setVisualizationDrill((current) => current?.id === requestId ? null : current);
           }}
+          allowPersistence={allowPersistence}
         />
       )}
       {activeAnalysisTab === "descriptive" && (
@@ -757,17 +2557,19 @@ function AnalysisPanel({
         />
       )}
       {activeAnalysisTab === "visualization" && (
-        <VisualizationDashboard
-          datasets={availableDatasets}
-          datasetId={datasetId}
-          setDatasetId={setDatasetId}
-          setNotice={setNotice}
-          onDrill={(request) => {
-            setDatasetId(request.datasetId);
-            setVisualizationDrill(request);
-            setActiveAnalysisTab("browse");
-          }}
-        />
+        <DeferredPanel>
+          <VisualizationDashboard
+            datasets={availableDatasets}
+            datasetId={datasetId}
+            setDatasetId={setDatasetId}
+            setNotice={setNotice}
+            onDrill={(request) => {
+              setDatasetId(request.datasetId);
+              setVisualizationDrill(request);
+              setActiveAnalysisTab("browse");
+            }}
+          />
+        </DeferredPanel>
       )}
     </section>
   );
@@ -890,7 +2692,7 @@ function DataRolesPanel({
           <select value={datasetId} onChange={(event) => setDatasetId(event.target.value)}>
             {datasets.map((dataset) => (
               <option key={dataset.id} value={dataset.id}>
-                {dataset.name}
+                {datasetVersionLabel(dataset, datasets)}
               </option>
             ))}
           </select>
@@ -1833,7 +3635,7 @@ function DescriptiveAnalysisPanel({
                 <select value={datasetId} onChange={(event) => updateDataset(event.target.value)}>
                   {datasets.map((dataset) => (
                     <option key={dataset.id} value={dataset.id}>
-                      {dataset.name}
+                      {datasetVersionLabel(dataset, datasets)}
                     </option>
                   ))}
                 </select>
@@ -1974,13 +3776,15 @@ function DescriptiveAnalysisPanel({
       </section>
 
       {datasetId && columns.length > 0 && (
-        <TimeSeriesWorkbench
-          columns={columns}
-          datasetId={datasetId}
-          defaultTimeColumn={rolesMetadata.timestamp_column}
-          defaultValueColumn={effectiveTargetColumn || rolesMetadata.target_column}
-          mode="descriptive"
-        />
+        <DeferredPanel>
+          <TimeSeriesWorkbench
+            columns={columns}
+            datasetId={datasetId}
+            defaultTimeColumn={rolesMetadata.timestamp_column}
+            defaultValueColumn={effectiveTargetColumn || rolesMetadata.target_column}
+            mode="descriptive"
+          />
+        </DeferredPanel>
       )}
 
       {!isLoading && !error && activeProfilePreview && activeProfilePreview.row_count > 0 && (
@@ -2986,7 +4790,8 @@ function DataBrowsingPanel({
   onRefresh,
   setNotice,
   visualizationDrill,
-  onVisualizationDrillConsumed
+  onVisualizationDrillConsumed,
+  allowPersistence = true
 }: {
   datasets: DataAsset[];
   datasetId: string;
@@ -2995,6 +4800,7 @@ function DataBrowsingPanel({
   setNotice: (message: string) => void;
   visualizationDrill: VisualizationDrillRequest | null;
   onVisualizationDrillConsumed: (requestId: string) => void;
+  allowPersistence?: boolean;
 }) {
   const [preview, setPreview] = useState<DatasetPreview | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -3526,18 +5332,20 @@ function DataBrowsingPanel({
 
   return (
     <div className="data-browser-layout">
-      <TimeSeriesWorkbench
-        columns={columns}
-        datasetId={datasetId}
-        defaultTimeColumn={rolesMetadata.timestamp_column}
-        defaultValueColumn={rolesMetadata.target_column}
-        mode="browser"
-        onChronologicalSort={(column) => {
-          setSortRules([{ column, direction: "asc" }]);
-          setSortingCollapsed(false);
-          setPage(1);
-        }}
-      />
+      <DeferredPanel>
+        <TimeSeriesWorkbench
+          columns={columns}
+          datasetId={datasetId}
+          defaultTimeColumn={rolesMetadata.timestamp_column}
+          defaultValueColumn={rolesMetadata.target_column}
+          mode="browser"
+          onChronologicalSort={(column) => {
+            setSortRules([{ column, direction: "asc" }]);
+            setSortingCollapsed(false);
+            setPage(1);
+          }}
+        />
+      </DeferredPanel>
       <main className="panel data-browser-main">
         {isLoading && <div className="empty-state">Loading dataset</div>}
         {!isLoading && error && <div className="empty-state error-state">{error}</div>}
@@ -3638,7 +5446,7 @@ function DataBrowsingPanel({
             <select value={datasetId} onChange={(event) => setDatasetId(event.target.value)}>
               {datasets.map((dataset) => (
                 <option key={dataset.id} value={dataset.id}>
-                  {dataset.name}
+                  {datasetVersionLabel(dataset, datasets)}
                 </option>
               ))}
             </select>
@@ -3666,15 +5474,17 @@ function DataBrowsingPanel({
             <Database size={16} />
             Custom SQL
           </button>
-          <button
-            className="primary-button toolbar-button"
-            disabled={!preview || isSavingView}
-            onClick={() => setIsSaveViewOpen(true)}
-            type="button"
-          >
-            <Save size={16} />
-            Save View
-          </button>
+          {allowPersistence && (
+            <button
+              className="primary-button toolbar-button"
+              disabled={!preview || isSavingView}
+              onClick={() => setIsSaveViewOpen(true)}
+              type="button"
+            >
+              <Save size={16} />
+              Save View
+            </button>
+          )}
         </div>
 
         {columns.length > 0 && (
@@ -6352,283 +8162,4 @@ function compareValues(left: unknown, right: unknown) {
     numeric: true,
     sensitivity: "base"
   });
-}
-
-function ModelsPanel({
-  datasets,
-  models,
-  onRefresh,
-  setNotice
-}: {
-  datasets: DataAsset[];
-  models: ModelArtifact[];
-  onRefresh: () => Promise<void>;
-  setNotice: (message: string) => void;
-}) {
-  const [datasetId, setDatasetId] = useState("");
-  const [target, setTarget] = useState("churn");
-  const [algorithm, setAlgorithm] = useState("random_forest");
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    await api.trainModel({
-      dataset_id: datasetId || datasets[0]?.id || "demo-dataset",
-      target_column: target,
-      algorithm,
-      feature_columns: []
-    });
-    setNotice("Training job queued");
-    await onRefresh();
-  }
-
-  return (
-    <section className="two-column">
-      <form className="panel form-panel" onSubmit={submit}>
-        <div className="panel-header">
-          <h2>Train model</h2>
-          <Brain size={18} />
-        </div>
-        <label>
-          Dataset
-          <select value={datasetId} onChange={(event) => setDatasetId(event.target.value)}>
-            <option value="">Demo dataset</option>
-            {datasets.map((dataset) => (
-              <option key={dataset.id} value={dataset.id}>
-                {dataset.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Target
-          <input value={target} onChange={(event) => setTarget(event.target.value)} />
-        </label>
-        <label>
-          Algorithm
-          <select value={algorithm} onChange={(event) => setAlgorithm(event.target.value)}>
-            <option value="random_forest">Random forest</option>
-            <option value="xgboost">XGBoost</option>
-            <option value="logistic_regression">Logistic regression</option>
-          </select>
-        </label>
-        <button className="primary-button" type="submit">
-          <Play size={16} />
-          Train
-        </button>
-      </form>
-
-      <AssetList title="Model registry" assets={models.map((item) => ({
-        id: item.id,
-        name: item.name,
-        meta: `${item.algorithm} / ${item.version}`,
-        status: item.stage
-      }))} />
-    </section>
-  );
-}
-
-function ServingPanel({
-  deployments,
-  models,
-  onRefresh,
-  setNotice
-}: {
-  deployments: Deployment[];
-  models: ModelArtifact[];
-  onRefresh: () => Promise<void>;
-  setNotice: (message: string) => void;
-}) {
-  const [modelId, setModelId] = useState("");
-  const [deploymentId, setDeploymentId] = useState("");
-  const [scoreResult, setScoreResult] = useState<ScoreResponse | null>(null);
-
-  async function createDeployment() {
-    const selectedModel = modelId || models[0]?.id || "demo-model";
-    await api.createDeployment({
-      model_id: selectedModel,
-      name: "online-scorer"
-    });
-    setNotice("Deployment requested");
-    await onRefresh();
-  }
-
-  async function score() {
-    const selectedDeployment = deploymentId || deployments[0]?.id;
-    if (!selectedDeployment) {
-      setNotice("Create a deployment first");
-      return;
-    }
-    const result = await api.score(selectedDeployment, [{ age: 39, income: 65000 }]);
-    setScoreResult(result);
-    setNotice("Online scoring completed");
-  }
-
-  return (
-    <section className="two-column">
-      <div className="panel form-panel">
-        <div className="panel-header">
-          <h2>Deploy and score</h2>
-          <Rocket size={18} />
-        </div>
-        <label>
-          Model
-          <select value={modelId} onChange={(event) => setModelId(event.target.value)}>
-            <option value="">Demo model</option>
-            {models.map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Deployment
-          <select value={deploymentId} onChange={(event) => setDeploymentId(event.target.value)}>
-            <option value="">First available</option>
-            {deployments.map((deployment) => (
-              <option key={deployment.id} value={deployment.id}>
-                {deployment.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="button-row">
-          <button className="secondary-button" onClick={createDeployment} type="button">
-            <Plus size={16} />
-            Deploy
-          </button>
-          <button className="primary-button" onClick={score} type="button">
-            <Play size={16} />
-            Score
-          </button>
-        </div>
-      </div>
-
-      <div className="panel">
-        <div className="panel-header">
-          <h2>Scoring output</h2>
-        </div>
-        <pre className="json-output">{JSON.stringify(scoreResult ?? { status: "waiting" }, null, 2)}</pre>
-      </div>
-    </section>
-  );
-}
-
-function SharePanel({
-  datasets,
-  models,
-  deployments,
-  setNotice
-}: {
-  datasets: DataAsset[];
-  models: ModelArtifact[];
-  deployments: Deployment[];
-  setNotice: (message: string) => void;
-}) {
-  const [targetUser, setTargetUser] = useState("analyst@example.com");
-
-  async function shareResource() {
-    const dataset = datasets[0];
-    await api.share({
-      target_user_id: targetUser,
-      resource_kind: "dataset",
-      resource_id: dataset?.id ?? "demo-dataset",
-      permission: "read"
-    });
-    setNotice("Share grant created");
-  }
-
-  async function exportResource() {
-    const model = models[0];
-    await api.exportResource({
-      resource_kind: model ? "model" : "dataset",
-      resource_id: model?.id ?? datasets[0]?.id ?? "demo-resource",
-      format: model ? "pickle" : "csv"
-    });
-    setNotice("Export job queued");
-  }
-
-  return (
-    <section className="two-column">
-      <div className="panel form-panel">
-        <div className="panel-header">
-          <h2>Collaboration</h2>
-          <Share2 size={18} />
-        </div>
-        <label>
-          User
-          <input value={targetUser} onChange={(event) => setTargetUser(event.target.value)} />
-        </label>
-        <div className="button-row">
-          <button className="secondary-button" onClick={shareResource} type="button">
-            <Share2 size={16} />
-            Share
-          </button>
-          <button className="primary-button" onClick={exportResource} type="button">
-            <Download size={16} />
-            Export
-          </button>
-        </div>
-      </div>
-
-      <div className="panel">
-        <div className="panel-header">
-          <h2>Available resources</h2>
-        </div>
-        <div className="resource-strip">
-          <span>{datasets.length} datasets</span>
-          <span>{models.length} models</span>
-          <span>{deployments.length} deployments</span>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function AssetList({
-  title,
-  assets
-}: {
-  title: string;
-  assets: Array<{
-    id: string;
-    name: string;
-    meta: string;
-    status: string;
-    canDelete?: boolean;
-    onDelete?: () => void;
-  }>;
-}) {
-  return (
-    <div className="panel">
-      <div className="panel-header">
-        <h2>{title}</h2>
-      </div>
-      <div className="asset-list">
-        {assets.map((asset) => (
-          <div className="asset-row" key={asset.id}>
-            <div>
-              <strong>{asset.name}</strong>
-              <span>{asset.meta}</span>
-            </div>
-            <div className="asset-actions">
-              <em>{asset.status}</em>
-              {asset.canDelete && asset.onDelete && (
-                <button
-                  aria-label={`Delete ${asset.name}`}
-                  className="icon-button danger-icon"
-                  onClick={asset.onDelete}
-                  title="Delete dataset"
-                  type="button"
-                >
-                  <Trash2 size={16} />
-                </button>
-              )}
-            </div>
-          </div>
-        ))}
-        {assets.length === 0 && <div className="empty-state">Nothing registered yet</div>}
-      </div>
-    </div>
-  );
 }

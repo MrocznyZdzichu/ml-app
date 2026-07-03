@@ -1,41 +1,94 @@
 import csv
-from dataclasses import dataclass
+import duckdb
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
-from typing import Protocol
 
 from fastapi import HTTPException, status
-
-from app.modules.datasets.domain import DataAsset, SourceType
-
-
-@dataclass(frozen=True)
-class TabularDataset:
-    columns: list[str]
-    rows: list[list[str]]
-
-
-class DatasetSource(Protocol):
-    def read(self, asset: DataAsset, action: str = "read") -> TabularDataset:
-        ...
 
 
 class DatasetSourceRegistry:
     def __init__(self, repository_root: Path) -> None:
         self.csv = CsvFileDatasetSource(repository_root)
-        self._sources: dict[tuple[SourceType, str], DatasetSource] = {
-            (SourceType.FILE, "csv"): self.csv,
-        }
+        self.parquet = ParquetFileDatasetSource(repository_root)
 
-    def read(self, asset: DataAsset, action: str = "read") -> TabularDataset:
-        source = self._sources.get((asset.source_type, asset.format.lower()))
-        if source:
-            return source.read(asset, action)
-        raise HTTPException(
-            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-            detail=f"Dataset source {asset.source_type.value}/{asset.format} cannot be {action} yet",
-        )
+
+class ParquetFileDatasetSource:
+    """Inspects flat Parquet datasets without materializing their rows in Python."""
+
+    def __init__(self, repository_root: Path) -> None:
+        self.repository_root = repository_root.resolve()
+
+    def inspect_path_with_schema(self, path: Path) -> tuple[None, int, list[dict[str, str]]]:
+        resolved = path.resolve()
+        try:
+            resolved.relative_to(self.repository_root)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Dataset file location is outside the repository root",
+            ) from exc
+
+        connection = duckdb.connect(database=":memory:")
+        try:
+            described = connection.execute(
+                "DESCRIBE SELECT * FROM read_parquet(?)",
+                [str(resolved)],
+            ).fetchall()
+            if not described:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Parquet file does not contain any columns",
+                )
+            unsupported = [
+                f"{row[0]} ({row[1]})"
+                for row in described
+                if self._is_unsupported_type(str(row[1]))
+            ]
+            if unsupported:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "Parquet file contains unsupported nested or binary columns: "
+                        + ", ".join(unsupported)
+                    ),
+                )
+            row_count = int(
+                connection.execute(
+                    "SELECT count(*) FROM read_parquet(?)",
+                    [str(resolved)],
+                ).fetchone()[0]
+            )
+            schema = [
+                {"name": str(row[0]), "type": self._frontend_type(str(row[1]))}
+                for row in described
+            ]
+            return None, row_count, schema
+        except HTTPException:
+            raise
+        except duckdb.Error as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Parquet file is invalid or unreadable: {exc}",
+            ) from exc
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _is_unsupported_type(value: str) -> bool:
+        normalized = value.upper()
+        return any(token in normalized for token in ("STRUCT", "LIST", "MAP", "UNION", "[]", "BLOB"))
+
+    @staticmethod
+    def _frontend_type(value: str) -> str:
+        normalized = value.upper()
+        if any(token in normalized for token in ("INT", "DECIMAL", "DOUBLE", "FLOAT", "REAL", "HUGEINT")):
+            return "number"
+        if "BOOL" in normalized:
+            return "boolean"
+        if any(token in normalized for token in ("DATE", "TIME")):
+            return "date"
+        return "text"
 
 
 class CsvFileDatasetSource:
@@ -111,47 +164,6 @@ class CsvFileDatasetSource:
             for index, header in enumerate(headers)
         ]
         return has_header, row_count, columns
-
-    def read(self, asset: DataAsset, action: str = "read") -> TabularDataset:
-        if asset.source_type != SourceType.FILE or asset.format.lower() != "csv":
-            raise HTTPException(
-                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-                detail=f"Only uploaded CSV datasets can be {action}",
-            )
-        if not asset.location_uri or not asset.location_uri.startswith("file://"):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Dataset file location is not available",
-            )
-
-        path = self._resolve_path(asset.location_uri.removeprefix("file://"))
-        if not path.exists():
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dataset file not found")
-
-        rows = self._read_rows(self.decode(path.read_bytes()))
-        if not rows:
-            return TabularDataset(columns=[], rows=[])
-
-        if asset.has_header:
-            headers = [self._column_name(value, index) for index, value in enumerate(rows[0])]
-            data_rows = rows[1:]
-        else:
-            width = max(len(row) for row in rows)
-            headers = [f"column_{index + 1}" for index in range(width)]
-            data_rows = rows
-
-        return TabularDataset(columns=self._unique_column_names(headers), rows=data_rows)
-
-    def _resolve_path(self, location_path: str) -> Path:
-        path = Path(location_path).resolve()
-        try:
-            path.relative_to(self.repository_root)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Dataset file location is outside the repository root",
-            ) from exc
-        return path
 
     def _read_rows(self, text: str) -> list[list[str]]:
         dialect = self._dialect(text[:4096])

@@ -188,17 +188,18 @@ controls for confounding variables.
 
 ### Large Dataset Execution
 
-Uploaded CSV files are copied to repository storage in chunks, so upload no
-longer creates a second complete in-memory byte buffer. A streaming pass records
-the row count and source schema. Dataset selection reads only lightweight schema
-context and does not trigger Parquet materialization.
+Uploaded CSV and Parquet files are copied to repository storage in chunks, so
+upload does not create a second complete in-memory byte buffer. CSV receives a
+streaming schema/count pass; DuckDB reads Parquet metadata and performs a full
+row count without materializing rows in Python. Dataset selection reads only
+lightweight schema context.
 
-The first explicit profile creates `dataset.mlapp.parquet` beside the source CSV
-and then performs the full scan. Later profiles reuse that artifact while the
-source file modification time is unchanged. DuckDB can spill analytical work to
-a dataset-local temporary directory rather than requiring the full relation in
-RAM. Celery result data contains only compact aggregates and expires from Redis
-after one hour; the existing frontend cache remains session-scoped.
+The first explicit profile creates `dataset.mlapp.parquet` beside a source CSV
+and then performs the full scan. Uploaded Parquet is used directly with no
+second copy. DuckDB can spill analytical work to a dataset-local temporary
+directory rather than requiring the full relation in RAM. Celery result data
+contains only compact aggregates and expires from Redis after one hour; the
+existing frontend cache remains session-scoped.
 
 Saved SQL and Browser Data Views are resolved recursively to their physical
 source, compiled into validated DuckDB queries, and materialized as reusable,
@@ -457,10 +458,10 @@ Drill down opens a detail view for the selected group. The detail view:
 
 ### Custom SQL
 
-Custom SQL opens a modal editor. During interactive Data Browser execution, SQL
-runs against a bounded in-memory SQLite table named after the selected dataset.
-If the dataset name contains spaces or other special characters, quote it with
-double quotes:
+Custom SQL opens a modal editor. The query runs in DuckDB over the complete
+Parquet-backed dataset or Data View. The response contains a bounded preview and
+the exact number of rows produced by the full query. If the dataset name
+contains spaces or other special characters, quote it with double quotes:
 
 ```sql
 SELECT
@@ -472,7 +473,9 @@ GROUP BY region
 ORDER BY avg_churn DESC
 ```
 
-Only read-only `SELECT` and `WITH` queries are supported. The editor supports:
+Only one read-only `SELECT` or `WITH` query is supported. Queries may reference
+only the selected data asset; external file readers, network readers, extension
+loading, and system catalogs are blocked. The editor supports:
 
 - Tab and Shift+Tab indentation,
 - indentation carry-over on new lines,
@@ -547,9 +550,8 @@ drill compatibility while using snake-case model attributes in Python.
 
 - UI role helpers live in `frontend/src/analysis/dataRoles.ts`.
 - Dataset use cases live in `backend/app/modules/datasets/service.py`.
-- Interactive query execution lives in
-  `backend/app/modules/datasets/query_engine.py`; columnar relations, saved view
-  pushdown, and cache materialization live in
+- Bounded SQL execution lives in `backend/app/modules/datasets/sql_query.py`;
+  columnar relations, saved view pushdown, and cache materialization live in
   `backend/app/modules/datasets/columnar.py`.
 - Full-dataset chart queries live in
   `backend/app/modules/datasets/visualizations.py`.

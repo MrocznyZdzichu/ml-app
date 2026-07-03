@@ -1,6 +1,7 @@
 from pathlib import Path
 from uuid import uuid4
 
+import duckdb
 from fastapi.testclient import TestClient
 
 from app.main import create_app
@@ -71,6 +72,138 @@ def test_csv_upload_stores_metadata_and_is_private_by_default() -> None:
     assert persisted.name == "iris-sample"
     assert persisted.row_count == 2
     assert persisted.has_header is True
+
+
+def test_upload_can_create_an_immutable_version_of_a_logical_dataset() -> None:
+    client = TestClient(create_app())
+    token = _register(client, "version-owner")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    first = client.post(
+        "/api/v1/datasets/upload",
+        headers=headers,
+        data={"name": "Iris"},
+        files={"file": ("iris-v1.csv", b"id,species\n1,setosa\n", "text/csv")},
+    )
+    assert first.status_code == 201
+    first_dataset = first.json()
+    assert first_dataset["logical_id"] != first_dataset["id"]
+    assert first_dataset["version_number"] == 1
+
+    second = client.post(
+        "/api/v1/datasets/upload",
+        headers=headers,
+        data={"name": "Ignored rename", "logical_id": first_dataset["logical_id"]},
+        files={"file": ("iris-v2.csv", b"id,species\n1,setosa\n2,versicolor\n", "text/csv")},
+    )
+    assert second.status_code == 201
+    second_dataset = second.json()
+    assert second_dataset["id"] != first_dataset["id"]
+    assert second_dataset["logical_id"] == first_dataset["logical_id"]
+    assert second_dataset["version_number"] == 2
+    assert second_dataset["name"] == "Iris"
+    assert second_dataset["row_count"] == 2
+
+    versions = client.get(
+        f"/api/v1/datasets/{first_dataset['logical_id']}/versions",
+        headers=headers,
+    )
+    assert versions.status_code == 200
+    assert [item["version_number"] for item in versions.json()] == [1, 2]
+
+    latest = client.get(
+        f"/api/v1/datasets/{first_dataset['logical_id']}",
+        headers=headers,
+    )
+    assert latest.status_code == 200
+    assert latest.json()["id"] == second_dataset["id"]
+
+
+def test_parquet_upload_is_native_and_available_to_dataset_tools(tmp_path: Path) -> None:
+    parquet_path = tmp_path / "customers.parquet"
+    connection = duckdb.connect()
+    connection.execute(
+        "COPY ("
+        "SELECT 1::BIGINT AS customer_id, 'north'::VARCHAR AS region, "
+        "10.5::DOUBLE AS amount, true::BOOLEAN AS active, DATE '2026-01-02' AS joined "
+        "UNION ALL "
+        "SELECT 2, 'south', NULL, false, DATE '2026-02-03'"
+        ") TO ? (FORMAT PARQUET)",
+        [str(parquet_path)],
+    )
+    connection.close()
+    parquet_body = parquet_path.read_bytes()
+    client = TestClient(create_app())
+    token = _register(client, "alice")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    upload = client.post(
+        "/api/v1/datasets/upload",
+        headers=headers,
+        data={"name": "customers-native", "description": "Native Parquet"},
+        files={"file": ("customers.parquet", parquet_body, "application/vnd.apache.parquet")},
+    )
+
+    assert upload.status_code == 201, upload.text
+    dataset = upload.json()
+    assert dataset["format"] == "parquet"
+    assert dataset["row_count"] == 2
+    assert dataset["has_header"] is None
+    assert dataset["file_size_bytes"] == len(parquet_body)
+    assert dataset["location_uri"].endswith("/customers.parquet")
+    assert dataset["metadata"]["source_schema"] == [
+        {"name": "customer_id", "type": "number"},
+        {"name": "region", "type": "text"},
+        {"name": "amount", "type": "number"},
+        {"name": "active", "type": "boolean"},
+        {"name": "joined", "type": "date"},
+    ]
+
+    preview = client.get(
+        f"/api/v1/datasets/{dataset['id']}/preview",
+        headers=headers,
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["row_count"] == 2
+    assert preview.json()["records"][0] == {
+        "customer_id": 1,
+        "region": "north",
+        "amount": 10.5,
+        "active": True,
+        "joined": "2026-01-02",
+    }
+
+    query = client.post(
+        f"/api/v1/datasets/{dataset['id']}/query",
+        headers=headers,
+        json={"sql": 'SELECT region, amount FROM "customers-native" WHERE active = true', "limit": 50},
+    )
+    assert query.status_code == 200, query.text
+    assert query.json()["records"] == [{"region": "north", "amount": 10.5}]
+
+
+def test_dataset_upload_rejects_unsupported_and_invalid_files() -> None:
+    client = TestClient(create_app())
+    token = _register(client, "alice")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    unsupported = client.post(
+        "/api/v1/datasets/upload",
+        headers=headers,
+        data={"name": "spreadsheet"},
+        files={"file": ("dataset.xlsx", b"not-a-dataset", "application/octet-stream")},
+    )
+    assert unsupported.status_code == 400
+    assert "Only .csv and .parquet" in unsupported.json()["detail"]
+
+    invalid_parquet = client.post(
+        "/api/v1/datasets/upload",
+        headers=headers,
+        data={"name": "broken"},
+        files={"file": ("broken.parquet", b"not-parquet", "application/vnd.apache.parquet")},
+    )
+    assert invalid_parquet.status_code == 400
+    assert "invalid or unreadable" in invalid_parquet.json()["detail"]
 
 
 def test_dataset_delete_removes_file_and_keeps_deleted_metadata() -> None:
@@ -260,6 +393,48 @@ def test_dataset_sql_query_supports_quoted_dataset_name() -> None:
     )
     assert rejected.status_code == 400
 
+    unsafe = client.post(
+        f"/api/v1/datasets/{dataset_id}/query",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"sql": "SELECT * FROM read_csv_auto('/etc/passwd')", "limit": 50},
+    )
+    assert unsafe.status_code == 400
+    assert "forbidden external function" in unsafe.json()["detail"]
+
+
+def test_dataset_sql_query_counts_full_result_while_returning_bounded_rows() -> None:
+    client = TestClient(create_app())
+    token = _register(client, "sql-owner")
+    rows = "\n".join(f"{index},{index * 10}" for index in range(1, 101))
+    upload = client.post(
+        "/api/v1/datasets/upload",
+        headers={"Authorization": f"Bearer {token}"},
+        data={"name": "bounded-query"},
+        files={
+            "file": (
+                "bounded-query.csv",
+                f"id,amount\n{rows}\n".encode(),
+                "text/csv",
+            )
+        },
+    )
+    assert upload.status_code == 201
+
+    response = client.post(
+        f"/api/v1/datasets/{upload.json()['id']}/query",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "sql": 'SELECT * FROM "bounded-query" ORDER BY id',
+            "limit": 7,
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["row_count"] == 100
+    assert result["returned_count"] == 7
+    assert result["limit"] == 7
+
 
 def test_deleted_dataset_metadata_survives_app_restart_and_relogin() -> None:
     client = TestClient(create_app())
@@ -378,6 +553,34 @@ def test_dataset_preview_infers_column_types_beyond_returned_limit() -> None:
     assert {column["name"]: column["type"] for column in body["columns"]}["score"] == "mixed"
 
 
+def test_registered_source_without_columnar_adapter_is_not_materialized_for_preview() -> None:
+    client = TestClient(create_app())
+    token = _register(client, "external-preview-owner")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    registered = client.post(
+        "/api/v1/datasets",
+        headers=headers,
+        json={
+            "name": "warehouse-orders",
+            "source_type": "database",
+            "format": "postgresql",
+            "location_uri": "postgresql://registered-externally",
+        },
+    )
+    assert registered.status_code == 201
+
+    preview = client.get(
+        f"/api/v1/datasets/{registered.json()['id']}/preview",
+        headers=headers,
+    )
+
+    assert preview.status_code == 415
+    assert preview.json()["detail"] == (
+        "Dataset source database/postgresql does not have a columnar preview adapter yet"
+    )
+
+
 def test_data_view_can_be_created_and_previewed_from_browser_definition() -> None:
     client = TestClient(create_app())
     token = _register(client, "view-owner")
@@ -456,3 +659,53 @@ def test_data_view_can_be_created_and_previewed_from_browser_definition() -> Non
     body = preview.json()
     assert [column["name"] for column in body["columns"]] == ["region", "plan_type", "records", "Sum amount"]
     assert body["records"] == [{"region": "north", "plan_type": "basic", "records": 2, "Sum amount": 30}]
+
+
+def test_sql_data_view_can_only_read_its_declared_source() -> None:
+    client = TestClient(create_app())
+    token = _register(client, "sql-view-owner")
+    headers = {"Authorization": f"Bearer {token}"}
+    upload = client.post(
+        "/api/v1/datasets/upload",
+        headers=headers,
+        data={"name": "orders"},
+        files={
+            "file": (
+                "orders.csv",
+                b"region,amount\nnorth,10\nsouth,20\n",
+                "text/csv",
+            )
+        },
+    )
+    assert upload.status_code == 201
+    dataset_id = upload.json()["id"]
+
+    created = client.post(
+        "/api/v1/datasets/views",
+        headers=headers,
+        json={
+            "name": "north-orders",
+            "source_dataset_id": dataset_id,
+            "definition": {
+                "kind": "sql",
+                "sql": 'SELECT * FROM orders WHERE region = \'north\'',
+            },
+        },
+    )
+    assert created.status_code == 201
+    assert created.json()["row_count"] == 1
+
+    unsafe = client.post(
+        "/api/v1/datasets/views",
+        headers=headers,
+        json={
+            "name": "unsafe-view",
+            "source_dataset_id": dataset_id,
+            "definition": {
+                "kind": "sql",
+                "sql": "SELECT * FROM read_csv_auto('/etc/passwd')",
+            },
+        },
+    )
+    assert unsafe.status_code == 400
+    assert "forbidden external function" in unsafe.json()["detail"]

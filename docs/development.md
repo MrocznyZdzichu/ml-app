@@ -18,6 +18,12 @@ Use `.\rebuild-run.bat build` after dependency or Dockerfile changes.
 
 ## Backend Only
 
+`backend/requirements.txt` documents supported direct dependency ranges.
+Application images install the fully resolved `backend/requirements.lock`, so
+local, CI, and deployment builds use the same tested dependency graph. After a
+dependency change, regenerate the lock in Python 3.12 on Linux, rebuild the
+images, and run the complete backend test suite.
+
 ```powershell
 cd backend
 python -m venv .venv
@@ -39,13 +45,13 @@ npm run dev
 Backend tests:
 
 ```powershell
-docker exec ml-app-api-1 pytest tests
+docker exec --user app ml-app-api-1 pytest tests
 ```
 
 Run the focused full-dataset profiling tests:
 
 ```powershell
-docker exec ml-app-api-1 pytest tests/test_full_profile.py tests/test_profile_jobs.py tests/test_visualizations.py
+docker exec --user app ml-app-api-1 pytest tests/test_full_profile.py tests/test_profile_jobs.py tests/test_visualizations.py
 ```
 
 Frontend production build:
@@ -69,11 +75,10 @@ docker compose config
 
 ## Descriptive Profiling Runtime
 
-Uploaded CSV datasets are profiled asynchronously by the Celery worker. The
-first full profile creates a reusable Zstandard-compressed Parquet sidecar next
-to the source file under `data/repository`; later profiles reuse it while the
-source file is unchanged. DuckDB scans all rows and may spill intermediate work
-to the dataset-local temporary directory.
+Uploaded CSV and Parquet datasets are profiled asynchronously by the Celery
+worker. CSV creates a reusable Zstandard-compressed Parquet sidecar on its first
+full columnar analysis; uploaded Parquet is scanned natively. DuckDB scans all
+rows and may spill intermediate work to the dataset-local temporary directory.
 
 The main local tuning variables are documented in `.env.example`:
 
@@ -142,7 +147,7 @@ display branches back into the dashboard orchestration component.
 When changing this path, run:
 
 ```powershell
-docker exec ml-app-api-1 pytest tests/test_visualizations.py tests/test_datasets_upload.py tests/test_full_profile.py
+docker exec --user app ml-app-api-1 pytest tests/test_visualizations.py tests/test_datasets_upload.py tests/test_full_profile.py
 ```
 
 ## Local Runtime Data
@@ -179,7 +184,7 @@ git add --dry-run .
 
 - Add Alembic migrations and SQLAlchemy repositories.
 - Add database connection testing and external source adapters.
-- Add parquet and xlsx source adapters.
+- Add an xlsx source adapter.
 - Move the live Data Browser preview and Custom SQL execution to paged DuckDB
   query pushdown instead of bounded frontend/Python records.
 - Add query cancellation, quotas, and persisted observability for long-running analytics.

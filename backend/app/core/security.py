@@ -11,6 +11,9 @@ from fastapi import Header, HTTPException, status
 
 from app.core.config import settings
 
+PBKDF2_ITERATIONS = 600_000
+LEGACY_PBKDF2_ITERATIONS = 120_000
+
 
 @dataclass(frozen=True)
 class Principal:
@@ -26,23 +29,34 @@ def hash_password(password: str) -> str:
         "sha256",
         password.encode("utf-8"),
         salt.encode("utf-8"),
-        120_000,
+        PBKDF2_ITERATIONS,
     ).hex()
-    return f"pbkdf2_sha256${salt}${digest}"
+    return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt}${digest}"
 
 
 def verify_password(password: str, password_hash: str) -> bool:
-    try:
-        algorithm, salt, expected_digest = password_hash.split("$", 2)
-    except ValueError:
+    parts = password_hash.split("$")
+    if len(parts) == 3:
+        algorithm, salt, expected_digest = parts
+        iterations = LEGACY_PBKDF2_ITERATIONS
+    elif len(parts) == 4:
+        algorithm, raw_iterations, salt, expected_digest = parts
+        try:
+            iterations = int(raw_iterations)
+        except ValueError:
+            return False
+    else:
         return False
-    if algorithm != "pbkdf2_sha256":
+    if (
+        algorithm != "pbkdf2_sha256"
+        or iterations not in {LEGACY_PBKDF2_ITERATIONS, PBKDF2_ITERATIONS}
+    ):
         return False
     actual_digest = hashlib.pbkdf2_hmac(
         "sha256",
         password.encode("utf-8"),
         salt.encode("utf-8"),
-        120_000,
+        iterations,
     ).hex()
     return hmac.compare_digest(actual_digest, expected_digest)
 

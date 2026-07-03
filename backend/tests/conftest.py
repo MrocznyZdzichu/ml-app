@@ -8,8 +8,21 @@ import pytest
 from sqlalchemy import delete, or_, select
 
 from app.core.database import get_engine
+from app.modules.business_cases.repository import (
+    artifacts_table,
+    business_case_data_attachments_table,
+    business_cases_table,
+    metadata as business_case_metadata,
+)
 from app.modules.auth.repository import user_accounts_table
 from app.modules.datasets.repository import data_assets_table
+from app.modules.pipelines.repository import (
+    metadata as pipeline_metadata,
+    pipeline_runs_table,
+    pipeline_step_runs_table,
+    pipeline_versions_table,
+    pipelines_table,
+)
 
 
 TEST_ACCOUNT_PATTERN = re.compile(
@@ -51,6 +64,20 @@ def _delete_test_accounts(user_ids: set[str]) -> None:
     if not user_ids:
         return
     with get_engine().begin() as connection:
+        business_case_metadata.create_all(connection)
+        pipeline_metadata.create_all(connection)
+        connection.execute(
+            delete(pipeline_step_runs_table).where(pipeline_step_runs_table.c.owner_id.in_(user_ids))
+        )
+        connection.execute(delete(pipeline_runs_table).where(pipeline_runs_table.c.owner_id.in_(user_ids)))
+        connection.execute(delete(pipeline_versions_table).where(pipeline_versions_table.c.owner_id.in_(user_ids)))
+        connection.execute(delete(pipelines_table).where(pipelines_table.c.owner_id.in_(user_ids)))
+        connection.execute(
+            delete(business_case_data_attachments_table)
+            .where(business_case_data_attachments_table.c.owner_id.in_(user_ids))
+        )
+        connection.execute(delete(artifacts_table).where(artifacts_table.c.owner_id.in_(user_ids)))
+        connection.execute(delete(business_cases_table).where(business_cases_table.c.owner_id.in_(user_ids)))
         connection.execute(
             delete(data_assets_table).where(or_(
                 data_assets_table.c.owner_id.in_(user_ids),

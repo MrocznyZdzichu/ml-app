@@ -2,6 +2,8 @@ import os
 import hashlib
 import json
 import threading
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -9,18 +11,25 @@ from uuid import uuid4
 import duckdb
 from fastapi import HTTPException, status
 
-from app.core.config import settings
 from app.modules.datasets.domain import DataAsset, SourceType
+from app.shared.sql_security import bind_user_sql_to_inputs
+from app.shared.duckdb_runtime import configured_duckdb_connection
 
 
 AssetLoader = Callable[[str], DataAsset]
+
+
+@dataclass
+class _ConversionLock:
+    lock: threading.Lock
+    users: int = 0
 
 
 class ColumnarDatasetStore:
     """Provides a reusable Parquet representation for full-dataset analytics."""
 
     _locks_guard = threading.Lock()
-    _conversion_locks: dict[str, threading.Lock] = {}
+    _conversion_locks: dict[str, _ConversionLock] = {}
 
     def __init__(self, repository_root: Path | None = None) -> None:
         self.repository_root = (repository_root or Path("data/repository")).resolve()
@@ -36,13 +45,7 @@ class ColumnarDatasetStore:
     def connect(self, asset: DataAsset) -> duckdb.DuckDBPyConnection:
         dataset_dir = self.analytics_directory(asset)
         temporary_dir = dataset_dir / ".duckdb-tmp"
-        temporary_dir.mkdir(parents=True, exist_ok=True)
-        connection = duckdb.connect(database=":memory:")
-        connection.execute(f"SET temp_directory = {self.literal(str(temporary_dir))}")
-        connection.execute(f"SET threads = {settings.duckdb_threads}")
-        connection.execute(f"SET memory_limit = {self.literal(settings.duckdb_memory_limit)}")
-        connection.execute("SET preserve_insertion_order = false")
-        return connection
+        return configured_duckdb_connection(temporary_dir)
 
     def ensure_parquet(self, asset: DataAsset, load_asset: AssetLoader | None = None, depth: int = 0) -> Path:
         if asset.source_type == SourceType.VIEW:
@@ -50,14 +53,14 @@ class ColumnarDatasetStore:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Data View source resolver is not available")
             return self._ensure_view_parquet(asset, load_asset, depth)
         source_path = self.source_path(asset)
+        if asset.format.lower() == "parquet":
+            return source_path
         parquet_path = source_path.with_name("dataset.mlapp.parquet")
         if parquet_path.exists() and parquet_path.stat().st_mtime_ns >= source_path.stat().st_mtime_ns:
             return parquet_path
 
         lock_key = str(parquet_path.resolve())
-        with self._locks_guard:
-            conversion_lock = self._conversion_locks.setdefault(lock_key, threading.Lock())
-        with conversion_lock:
+        with self._conversion_lock(lock_key):
             if parquet_path.exists() and parquet_path.stat().st_mtime_ns >= source_path.stat().st_mtime_ns:
                 return parquet_path
             return self._build_parquet(asset, source_path, parquet_path)
@@ -78,10 +81,11 @@ class ColumnarDatasetStore:
         if parquet_path.exists() and parquet_path.stat().st_mtime_ns >= source_parquet.stat().st_mtime_ns:
             return parquet_path
 
-        lock_key = str(parquet_path.resolve())
-        with self._locks_guard:
-            conversion_lock = self._conversion_locks.setdefault(lock_key, threading.Lock())
-        with conversion_lock:
+        # Serialize every materialization of one view. Locking by the
+        # definition-specific filename would let two revisions concurrently
+        # delete each other's freshly written cache during stale-file cleanup.
+        lock_key = str((view_directory / "dataset.mlapp.view.lock").resolve())
+        with self._conversion_lock(lock_key):
             if parquet_path.exists() and parquet_path.stat().st_mtime_ns >= source_parquet.stat().st_mtime_ns:
                 return parquet_path
             temporary_path = parquet_path.with_name(f".{parquet_path.name}.{uuid4().hex}.tmp")
@@ -89,8 +93,18 @@ class ColumnarDatasetStore:
             try:
                 source_relation = f"read_parquet({self.literal(str(source_parquet))})"
                 source_name = source.name.strip() or "dataset"
-                connection.execute(f"CREATE TEMP VIEW {self.identifier(source_name)} AS SELECT * FROM {source_relation}")
-                query, parameters = self._view_query(connection, source_relation, source_name, definition)
+                internal_source_name = f"__mlapp_source_{uuid4().hex}"
+                connection.execute(
+                    f"CREATE TEMP VIEW {self.identifier(internal_source_name)} "
+                    f"AS SELECT * FROM {source_relation}"
+                )
+                query, parameters = self._view_query(
+                    connection,
+                    source_relation,
+                    source_name,
+                    internal_source_name,
+                    definition,
+                )
                 connection.execute(
                     f"COPY ({query}) TO {self.literal(str(temporary_path))} "
                     "(FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 122880)",
@@ -107,19 +121,47 @@ class ColumnarDatasetStore:
                 temporary_path.unlink(missing_ok=True)
             return parquet_path
 
+    @classmethod
+    @contextmanager
+    def _conversion_lock(cls, lock_key: str):
+        with cls._locks_guard:
+            entry = cls._conversion_locks.get(lock_key)
+            if entry is None:
+                entry = _ConversionLock(threading.Lock())
+                cls._conversion_locks[lock_key] = entry
+            entry.users += 1
+        try:
+            with entry.lock:
+                yield
+        finally:
+            with cls._locks_guard:
+                entry.users -= 1
+                if entry.users == 0 and cls._conversion_locks.get(lock_key) is entry:
+                    cls._conversion_locks.pop(lock_key, None)
+
     def _view_query(
         self,
         connection: duckdb.DuckDBPyConnection,
         source_relation: str,
         source_name: str,
+        internal_source_name: str,
         definition: dict[str, Any],
     ) -> tuple[str, list[Any]]:
         kind = str(definition.get("kind") or "browser")
         if kind == "sql":
-            sql = str(definition.get("sql") or "").strip().removesuffix(";").strip()
-            if not sql.lower().startswith(("select", "with")) or ";" in sql:
-                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Data View SQL must be one read-only SELECT query")
-            return sql, []
+            sql = str(definition.get("sql") or "")
+            try:
+                query = bind_user_sql_to_inputs(
+                    connection,
+                    sql,
+                    {source_name: internal_source_name},
+                )
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Data View SQL is invalid: {exc}",
+                ) from exc
+            return query, []
         columns = [str(row[0]) for row in connection.execute(f"DESCRIBE SELECT * FROM {source_relation}").fetchall()]
         return self.compile_browser_query(source_relation, columns, definition)
 
@@ -295,10 +337,10 @@ class ColumnarDatasetStore:
         ]
 
     def source_path(self, asset: DataAsset) -> Path:
-        if asset.source_type != SourceType.FILE or asset.format.lower() != "csv":
+        if asset.source_type != SourceType.FILE or asset.format.lower() not in {"csv", "parquet"}:
             raise HTTPException(
                 status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-                detail="Full-dataset profiling currently requires an uploaded CSV dataset",
+                detail="Full-dataset profiling currently requires a CSV or Parquet dataset",
             )
         if not asset.location_uri or not asset.location_uri.startswith("file://"):
             raise HTTPException(

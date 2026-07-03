@@ -1,8 +1,14 @@
 import unittest
+import hashlib
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
+from app.core.security import (
+    PBKDF2_ITERATIONS,
+    hash_password,
+    verify_password,
+)
 from app.main import create_app
 
 
@@ -67,4 +73,23 @@ class AuthFlowTests(unittest.TestCase):
                 json={"email": email, "password": "wrong-password"},
             ).status_code,
             401,
+        )
+
+    def test_password_hashes_are_versioned_and_legacy_hashes_remain_valid(self) -> None:
+        password = "password123"
+        current_hash = hash_password(password)
+
+        self.assertTrue(current_hash.startswith(f"pbkdf2_sha256${PBKDF2_ITERATIONS}$"))
+        self.assertTrue(verify_password(password, current_hash))
+        self.assertFalse(verify_password("wrong-password", current_hash))
+
+        salt = "legacy-salt"
+        legacy_digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            password.encode("utf-8"),
+            salt.encode("utf-8"),
+            120_000,
+        ).hex()
+        self.assertTrue(
+            verify_password(password, f"pbkdf2_sha256${salt}${legacy_digest}")
         )

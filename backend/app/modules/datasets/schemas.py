@@ -39,6 +39,15 @@ class DataViewCreate(BaseModel):
     description: str = ""
     tags: list[str] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def validate_definition_kind(self) -> Self:
+        kind = self.definition.get("kind", "browser")
+        if kind not in {"browser", "sql"}:
+            raise ValueError("Data View definition kind must be 'browser' or 'sql'")
+        if kind == "sql" and not str(self.definition.get("sql") or "").strip():
+            raise ValueError("SQL Data View definition requires a non-empty query")
+        return self
+
 
 class DataAssetRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -48,6 +57,9 @@ class DataAssetRead(BaseModel):
     name: str
     source_type: SourceType
     format: str
+    logical_id: str
+    version_number: int
+    version_stage: str
     description: str
     original_filename: str | None = None
     location_uri: str | None

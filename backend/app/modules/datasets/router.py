@@ -41,19 +41,32 @@ def upload_dataset(
     name: str | None = Form(default=None),
     description: str = Form(default=""),
     tags: str = Form(default=""),
+    logical_id: str | None = Form(default=None),
     principal: Principal = Depends(require_user),
 ) -> DataAssetRead:
     tag_values = [tag.strip() for tag in tags.split(",") if tag.strip()]
     return DataAssetRead.model_validate(
-        service.upload_csv_stream(
+        service.upload_file_stream(
             stream=file.file,
-            filename=file.filename or "dataset.csv",
+            filename=file.filename or "dataset",
             principal=principal,
             name=name,
             description=description,
             tags=tag_values,
+            logical_id=logical_id,
         )
     )
+
+
+@router.get("/{logical_id}/versions", response_model=list[DataAssetRead])
+def list_dataset_versions(
+    logical_id: str,
+    principal: Principal = Depends(require_user),
+) -> list[DataAssetRead]:
+    return [
+        DataAssetRead.model_validate(asset)
+        for asset in service.list_versions(logical_id, principal)
+    ]
 
 
 @router.post("/views", response_model=DataAssetRead, status_code=201)

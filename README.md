@@ -18,6 +18,7 @@ The current product slice focuses on a practical analyst workflow:
 - profile datasets with descriptive, target-aware, and comparison summaries,
 - run read-only Custom SQL,
 - save reusable Data Views,
+- execute versioned Data Engineering → Feature Engineering workflows,
 - continue from saved views into browsing, visualization, and descriptive analysis,
 - compose reusable interactive dashboards over full datasets and Data Views,
 - exercise placeholder model registry, deployment, sharing, and export contracts.
@@ -133,8 +134,9 @@ and its browser-side filtering, grouping, aggregation, and sorting therefore do
 not represent rows outside that preview. Saving its state as a Data View
 recompiles those operations into DuckDB and applies them to the complete source
 relation. Custom SQL results are also bounded, but the current Custom SQL
-execution path first loads the source relation into an in-process SQLite
-database; it is not yet appropriate for very large datasets.
+execution path runs in DuckDB over the complete Parquet-backed relation. The API
+returns at most the requested preview limit together with the exact total result
+row count; the full result is never transferred to the browser.
 
 ### Analysis: Descriptive Analysis
 
@@ -219,6 +221,26 @@ must not be interpreted as a full-view profile.
 When possible, data roles are inherited from the source dataset for columns that
 survive in the view.
 
+### Pipelines: Data, Feature Engineering, Training, and Test Scoring
+
+Versioned high-level workflows can execute Data Engineering followed by Feature
+Engineering. DE performs full-row DuckDB transformations and passes its Parquet
+result directly to FE. FE fits imputation, scaling, bounded category encoding,
+date extraction, and numeric interactions only on the declared training input,
+then applies the fitted state to validation, test, or scoring inputs.
+
+Official runs create feature datasets with schema hashes and feature manifests,
+plus a separate engine-neutral `feature_transform` artifact. Every high-level
+step has its own auditable StepRun. See
+[`docs/feature-engineering-stage-1.md`](docs/feature-engineering-stage-1.md).
+
+Training and Test Scoring complete the first executable ML path. Controlled
+incremental estimators consume every declared training row in bounded batches,
+create immutable model and metrics artifacts, and score an explicitly wired
+test dataset to a lineage-backed Parquet prediction dataset. No deployment or
+online endpoint is created. See
+[`docs/model-training-scoring-stage-1.md`](docs/model-training-scoring-stage-1.md).
+
 Deleted datasets and views remain visible in the Data workspace deletion history
 but are excluded from Overview metrics, Recent assets, and Analysis selectors.
 
@@ -227,8 +249,9 @@ but are excluded from Overview metrics, Recent assets, and Analysis selectors.
 The Models, Serving, and Share tabs expose the intended API and UI contracts,
 but they are scaffolding rather than production workflows:
 
-- training requests create in-memory job and model metadata; no estimator is
-  fitted and no artifact is written,
+- the legacy standalone training form still creates prototype metadata; real
+  fitting and artifact registration run through pipeline Training and Test
+  Scoring steps,
 - deployment requests create in-memory metadata but do not start a runtime,
 - online scoring returns placeholder `0.0` predictions,
 - sharing grants, batch-score jobs, and export jobs are metadata-only and are
@@ -240,13 +263,13 @@ records created in the main API.
 
 ## Current Implementation Boundaries
 
-- Local ingestion supports UTF-8 CSV files only. Parquet, XLSX, remote databases,
-  and object-storage ingestion are not implemented.
+- Local file ingestion supports UTF-8 CSV and flat tabular Parquet datasets.
+  XLSX, remote databases, and object-storage ingestion are not implemented.
 - Users and dataset metadata are durable in PostgreSQL. Uploaded files and
   generated Parquet sidecars are stored in `data/repository`; MinIO is started
   for future object-storage work but is not the active dataset store.
-- Full-dataset descriptive profiling is implemented for uploaded CSV datasets
-  and materialized SQL/Browser Data Views.
+- Full-dataset descriptive profiling is implemented for uploaded CSV and
+  Parquet datasets and materialized SQL/Browser Data Views.
 - Visualization, chart drill-down, and Data View materialization use DuckDB over
   the complete physical or transformed relation and return bounded results.
 - Scatter trend output is capped at 80 render points per curve and 100 selected
@@ -254,7 +277,7 @@ records created in the main API.
   are explicitly marked as approximate; other supported fits use full-data
   regression aggregates or sufficient statistics.
 - Interactive Data Browsing is a bounded client-side exploration path. Custom
-  SQL currently materializes the relation in API-process memory and SQLite.
+  SQL is a full-dataset DuckDB path with a bounded result contract.
 - Analytics scalability is currently single-node. There is no distributed query
   engine, persisted query cancellation, quota enforcement, or production job
   scheduler yet.
@@ -286,7 +309,7 @@ documented in `docs/synthetic-ml-scenarios.md`.
 Run backend tests:
 
 ```powershell
-docker exec ml-app-api-1 pytest tests
+docker exec --user app ml-app-api-1 pytest tests
 ```
 
 Build the frontend:
@@ -329,6 +352,7 @@ separate from the placeholder deployment records in the application UI.
 - [Development notes](docs/development.md)
 - [Analysis and Data Browser reference](docs/analysis-data-browser-reference.md)
 - [Descriptive profiling performance](docs/descriptive-profiling-performance.md)
+- [Feature Engineering Stage 1](docs/feature-engineering-stage-1.md)
 
 ## Git Notes
 

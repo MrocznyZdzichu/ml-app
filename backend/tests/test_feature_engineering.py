@@ -1,0 +1,874 @@
+import json
+import time
+from pathlib import Path
+from uuid import uuid4
+
+import duckdb
+import pytest
+from fastapi.testclient import TestClient
+from pydantic import ValidationError
+
+from app.modules.datasets.domain import DataAsset, DataAssetStatus, SourceType
+from app.modules.datasets.repository import InMemoryDatasetRepository
+from app.modules.business_cases.domain import Artifact, ArtifactOrigin, ArtifactType
+from app.modules.business_cases.repository import InMemoryBusinessCaseRepository
+from app.modules.pipelines.execution import CsvDatasetInputAdapter
+from app.modules.pipelines.feature_engineering import (
+    DuckDbFeatureEngineeringEngine,
+    FeatureEngineeringDefinition,
+)
+from app.modules.pipelines.workflow import validate_workflow_definition
+from app.main import create_app
+
+
+def _asset(asset_id: str, owner_id: str, path: Path, rows: int) -> DataAsset:
+    return DataAsset(
+        id=asset_id,
+        owner_id=owner_id,
+        name=asset_id,
+        source_type=SourceType.FILE,
+        format="csv",
+        location_uri=f"file://{path.as_posix()}",
+        row_count=rows,
+        has_header=True,
+        status=DataAssetStatus.READY,
+    )
+
+
+def _definition(handle_unknown: str = "other") -> FeatureEngineeringDefinition:
+    return FeatureEngineeringDefinition.model_validate({
+        "contract_version": "1.0",
+        "mode": "fit_transform",
+        "inputs": [
+            {"input_id": "training", "role": "training", "dataset_id": "train"},
+            {"input_id": "validation", "role": "validation", "dataset_id": "validation"},
+        ],
+        "feature_columns": ["age", "city"],
+        "target_column": "target",
+        "row_id_column": "id",
+        "transformations": [
+            {
+                "transform_id": "impute_age",
+                "type": "impute",
+                "columns": ["age"],
+                "config": {"method": "mean", "add_indicator": True},
+            },
+            {
+                "transform_id": "scale_age",
+                "type": "scale_numeric",
+                "columns": ["age"],
+                "config": {"method": "standard", "output_suffix": "__scaled"},
+            },
+            {
+                "transform_id": "encode_city",
+                "type": "encode_categorical",
+                "columns": ["city"],
+                "config": {
+                    "method": "one_hot",
+                    "min_frequency": 1,
+                    "max_categories": 10,
+                    "handle_unknown": handle_unknown,
+                    "drop_original": True,
+                },
+            },
+        ],
+        "outputs": [
+            {
+                "output_id": "training_features",
+                "input_id": "training",
+                "dataset_name": "Training features",
+                "business_case_role": "training",
+            },
+            {
+                "output_id": "validation_features",
+                "input_id": "validation",
+                "dataset_name": "Validation features",
+                "business_case_role": "validation",
+            },
+        ],
+    })
+
+
+def test_feature_engineering_fits_only_training_and_handles_unseen_categories(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    source = repository_root / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    train_path = source / "train.csv"
+    validation_path = source / "validation.csv"
+    train_path.write_text(
+        "id,age,city,target\n1,10,A,0\n2,20,B,1\n3,,A,0\n",
+        encoding="utf-8",
+    )
+    validation_path.write_text(
+        "id,age,city,target\n4,100,C,1\n5,,A,0\n",
+        encoding="utf-8",
+    )
+    repository = InMemoryDatasetRepository()
+    repository.add(_asset("train", "owner-1", train_path, 3))
+    repository.add(_asset("validation", "owner-1", validation_path, 2))
+    engine = DuckDbFeatureEngineeringEngine(
+        input_adapter=CsvDatasetInputAdapter(repository, repository_root),
+        repository_root=repository_root,
+    )
+
+    result = engine.execute(
+        definition=_definition(),
+        run_id="run-1",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    assert result.input_row_count == 5
+    assert result.processed_row_count == 5
+    assert result.output_row_count == 5
+    assert all(item["data_scope"] == "full" for item in result.output_manifest)
+    state_item = next(item for item in result.output_manifest if item["output_id"] == "fitted_transform")
+    state = json.loads(
+        Path(state_item["location_uri"].removeprefix("file://")).read_text(encoding="utf-8")
+    )
+    assert state["transforms"]["impute_age"]["values"]["age"] == 15
+    assert state["transforms"]["scale_age"]["columns"]["age"] == {
+        "center": 15.0,
+        "scale": pytest.approx(4.08248290463863),
+    }
+    validation_item = next(
+        item for item in result.output_manifest if item["output_id"] == "validation_features"
+    )
+    validation_rows = duckdb.connect().execute(
+        "SELECT id, age, age__was_missing, age__scaled, city__0, city__1, city__other "
+        "FROM read_parquet(?) ORDER BY id",
+        [validation_item["location_uri"].removeprefix("file://")],
+    ).fetchall()
+    assert validation_rows == [
+        (4, 100.0, False, pytest.approx(20.820662813657012), 0, 0, 1),
+        (5, 15.0, True, 0.0, 1, 0, 0),
+    ]
+    assert validation_item["schema_hash"]
+    assert any(item["role"] == "target" for item in validation_item["feature_manifest"])
+    assert any(item["role"] == "row_id" for item in validation_item["feature_manifest"])
+
+
+def test_feature_engineering_unknown_error_reports_input_and_count(tmp_path: Path) -> None:
+    repository_root = tmp_path / "repository"
+    source = repository_root / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    train_path = source / "train.csv"
+    validation_path = source / "validation.csv"
+    train_path.write_text("id,age,city,target\n1,10,A,0\n2,20,B,1\n", encoding="utf-8")
+    validation_path.write_text("id,age,city,target\n3,30,C,1\n", encoding="utf-8")
+    repository = InMemoryDatasetRepository()
+    repository.add(_asset("train", "owner-1", train_path, 2))
+    repository.add(_asset("validation", "owner-1", validation_path, 1))
+    engine = DuckDbFeatureEngineeringEngine(
+        input_adapter=CsvDatasetInputAdapter(repository, repository_root),
+        repository_root=repository_root,
+    )
+
+    with pytest.raises(ValueError, match="validation.*1 unknown values.*city"):
+        engine.execute(
+            definition=_definition(handle_unknown="error"),
+            run_id="run-2",
+            owner_id="owner-1",
+            is_dry_run=True,
+        )
+
+
+def test_transform_mode_reuses_pinned_state_without_refitting(tmp_path: Path) -> None:
+    repository_root = tmp_path / "repository"
+    source = repository_root / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    train_path = source / "train.csv"
+    validation_path = source / "validation.csv"
+    scoring_path = source / "scoring.csv"
+    train_path.write_text("id,age,city,target\n1,10,A,0\n2,20,B,1\n", encoding="utf-8")
+    validation_path.write_text("id,age,city,target\n3,30,A,1\n", encoding="utf-8")
+    scoring_path.write_text("id,age,city\n4,100,C\n", encoding="utf-8")
+    datasets = InMemoryDatasetRepository()
+    datasets.add(_asset("train", "owner-1", train_path, 2))
+    datasets.add(_asset("validation", "owner-1", validation_path, 1))
+    datasets.add(_asset("scoring", "owner-1", scoring_path, 1))
+    business_cases = InMemoryBusinessCaseRepository()
+    engine = DuckDbFeatureEngineeringEngine(
+        input_adapter=CsvDatasetInputAdapter(datasets, repository_root),
+        business_cases=business_cases,
+        repository_root=repository_root,
+    )
+    fitted = engine.execute(
+        definition=_definition(),
+        run_id="fit-run",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+    state_item = next(item for item in fitted.output_manifest if item["output_id"] == "fitted_transform")
+    business_cases.add_artifact(Artifact(
+        id="state-1",
+        owner_id="owner-1",
+        type=ArtifactType.FEATURE_TRANSFORM,
+        reference_id="state-ref",
+        origin=ArtifactOrigin.PLATFORM_GENERATED,
+        metadata={"location_uri": state_item["location_uri"]},
+    ))
+    payload = _definition().model_dump(mode="json")
+    payload.update({
+        "mode": "transform",
+        "inputs": [{"input_id": "scoring", "role": "scoring_input", "dataset_id": "scoring"}],
+        "outputs": [{
+            "output_id": "scoring_features",
+            "input_id": "scoring",
+            "dataset_name": "Scoring features",
+            "business_case_role": "scoring_input",
+        }],
+        "fitted_state_artifact_id": "state-1",
+    })
+
+    result = engine.execute(
+        definition=FeatureEngineeringDefinition.model_validate(payload),
+        run_id="score-run",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    output = result.output_manifest[0]
+    row = duckdb.connect().execute(
+        "SELECT age__scaled, city__other FROM read_parquet(?)",
+        [output["location_uri"].removeprefix("file://")],
+    ).fetchone()
+    assert row == (17.0, 1)
+    assert all(item["output_id"] != "fitted_transform" for item in result.output_manifest)
+
+
+def test_feature_recipe_supports_derived_columns_math_sql_and_full_data_pca(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    source = repository_root / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    train_path = source / "train.csv"
+    validation_path = source / "validation.csv"
+    train_path.write_text(
+        "id,x,y,target\n1,1,2,0\n2,2,4,1\n3,4,5,1\n4,8,9,0\n",
+        encoding="utf-8",
+    )
+    validation_path.write_text(
+        "id,x,y,target\n5,100,200,1\n",
+        encoding="utf-8",
+    )
+    datasets = InMemoryDatasetRepository()
+    datasets.add(_asset("train", "owner-1", train_path, 4))
+    datasets.add(_asset("validation", "owner-1", validation_path, 1))
+    engine = DuckDbFeatureEngineeringEngine(
+        input_adapter=CsvDatasetInputAdapter(datasets, repository_root),
+        repository_root=repository_root,
+    )
+    definition = FeatureEngineeringDefinition.model_validate({
+        "contract_version": "1.0",
+        "mode": "fit_transform",
+        "inputs": [
+            {"input_id": "training", "role": "training", "dataset_id": "train"},
+            {"input_id": "validation", "role": "validation", "dataset_id": "validation"},
+        ],
+        "feature_columns": ["x__square__scaled", "custom_score", "pc_1", "pc_2"],
+        "target_column": "target",
+        "row_id_column": "id",
+        "transformations": [
+            {
+                "transform_id": "square_x",
+                "type": "math_transform",
+                "columns": ["x"],
+                "config": {"operation": "square", "output_suffix": "__square"},
+            },
+            {
+                "transform_id": "scale_square",
+                "type": "scale_numeric",
+                "columns": ["x__square"],
+                "config": {"method": "standard", "output_suffix": "__scaled"},
+            },
+            {
+                "transform_id": "custom_score",
+                "type": "sql_expression",
+                "columns": [],
+                "config": {
+                    "expression": '"x__square__scaled" + CAST("y" AS DOUBLE)',
+                    "output_column": "custom_score",
+                },
+            },
+            {
+                "transform_id": "pca_projection",
+                "type": "pca",
+                "columns": ["x__square__scaled", "y"],
+                "config": {
+                    "n_components": 2,
+                    "output_prefix": "pc_",
+                    "whiten": False,
+                    "drop_original": False,
+                },
+            },
+        ],
+        "outputs": [
+            {
+                "output_id": "training_features",
+                "input_id": "training",
+                "dataset_name": "Training features",
+                "business_case_role": "training",
+            },
+            {
+                "output_id": "validation_features",
+                "input_id": "validation",
+                "dataset_name": "Validation features",
+                "business_case_role": "validation",
+            },
+        ],
+    })
+
+    result = engine.execute(
+        definition=definition,
+        run_id="advanced-fe",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    state_item = next(item for item in result.output_manifest if item["output_id"] == "fitted_transform")
+    state = json.loads(
+        Path(state_item["location_uri"].removeprefix("file://")).read_text(encoding="utf-8")
+    )
+    assert state["transforms"]["scale_square"]["columns"]["x__square"]["center"] == 21.25
+    assert state["transforms"]["pca_projection"]["means"][0] == pytest.approx(0.0)
+    assert state["transforms"]["pca_projection"]["means"][1] == pytest.approx(5.0)
+    assert len(state["transforms"]["pca_projection"]["components"]) == 2
+    validation = next(
+        item for item in result.output_manifest if item["output_id"] == "validation_features"
+    )
+    row = duckdb.connect().execute(
+        'SELECT "x__square", "x__square__scaled", custom_score, pc_1, pc_2 '
+        "FROM read_parquet(?)",
+        [validation["location_uri"].removeprefix("file://")],
+    ).fetchone()
+    assert row[0] == 10_000
+    assert row[2] == pytest.approx(row[1] + 200)
+    assert all(value is not None for value in row[3:])
+    roles = {item["name"]: item["role"] for item in validation["feature_manifest"]}
+    assert all(roles[name] == "feature" for name in definition.feature_columns)
+
+
+def test_feature_sql_expression_rejects_queries_and_external_reads() -> None:
+    for expression in [
+        "(SELECT max(x) FROM input)",
+        "read_csv_auto('/tmp/private.csv')",
+    ]:
+        with pytest.raises(ValidationError, match="Invalid FE SQL expression"):
+            FeatureEngineeringDefinition.model_validate({
+                "contract_version": "1.0",
+                "mode": "fit_transform",
+                "inputs": [{"input_id": "training", "role": "training", "dataset_id": "train"}],
+                "feature_columns": ["result"],
+                "transformations": [{
+                    "transform_id": "unsafe",
+                    "type": "sql_expression",
+                    "columns": [],
+                    "config": {"expression": expression, "output_column": "result"},
+                }],
+                "outputs": [{
+                    "output_id": "training_features",
+                    "input_id": "training",
+                    "dataset_name": "Training features",
+                    "business_case_role": "training",
+                }],
+            })
+
+
+def test_workflow_accepts_de_followed_by_feature_engineering() -> None:
+    workflow = {
+        "contract_version": "2.0",
+        "steps": [
+            {
+                "step_id": "de_1",
+                "name": "Data Engineering",
+                "type": "data_engineering",
+                "inputs": [],
+                "output_port_id": "dataset",
+                "config": {
+                    "definition": {
+                        "contract_version": "1.0",
+                        "inputs": [{"input_id": "source", "dataset_id": "dataset-1"}],
+                        "steps": [],
+                        "outputs": [{
+                            "output_id": "prepared",
+                            "input": {"node_id": "source", "port_id": "out"},
+                            "materialization": "dataset",
+                            "dataset_name": "Prepared",
+                        }],
+                    }
+                },
+            },
+            {
+                "step_id": "fe_1",
+                "name": "Feature Engineering",
+                "type": "feature_engineering",
+                "inputs": [{
+                    "port_id": "training",
+                    "source": {"step_id": "de_1", "port_id": "dataset"},
+                }],
+                "output_port_id": "dataset",
+                "additional_output_port_ids": ["fitted_transform"],
+                "config": {
+                    "definition": {
+                        "contract_version": "1.0",
+                        "mode": "fit_transform",
+                        "inputs": [{"input_id": "training", "role": "training"}],
+                        "row_id_column": "id",
+                        "transformations": [],
+                        "outputs": [
+                            {
+                                "output_id": "training_features",
+                                "input_id": "training",
+                                "dataset_name": "Training features",
+                                "business_case_role": "training",
+                            },
+                            {
+                                "output_id": "validation_features",
+                                "input_id": "validation",
+                                "dataset_name": "Validation features",
+                                "business_case_role": "validation",
+                            },
+                            {
+                                "output_id": "test_features",
+                                "input_id": "test",
+                                "dataset_name": "Test features",
+                                "business_case_role": "test",
+                            },
+                        ],
+                        "evaluation": {
+                            "split_strategy": "random",
+                            "validation_size": 0.15,
+                            "test_size": 0.15,
+                            "seed": 42,
+                        },
+                    }
+                },
+            },
+        ],
+        "outputs": [{"output_id": "result", "source": {"step_id": "fe_1", "port_id": "dataset"}}],
+    }
+
+    validated = validate_workflow_definition(workflow, executable=True)
+
+    assert [item["type"] for item in validated["steps"]] == [
+        "data_engineering",
+        "feature_engineering",
+    ]
+    feature_step = validated["steps"][1]
+    assert feature_step["output_port_id"] == "training"
+    assert feature_step["additional_output_port_ids"] == [
+        "validation",
+        "test",
+        "fitted_transform",
+    ]
+    assert {
+        (output["output_id"], output["source"]["port_id"])
+        for output in validated["outputs"]
+    } == {
+        ("training_features", "training"),
+        ("validation_features", "validation"),
+        ("test_features", "test"),
+    }
+
+
+def test_feature_contract_rejects_target_as_feature() -> None:
+    payload = _definition().model_dump(mode="json")
+    payload["feature_columns"].append("target")
+
+    with pytest.raises(ValidationError, match="cannot be selected as features"):
+        FeatureEngineeringDefinition.model_validate(payload)
+
+
+def test_stratified_holdout_and_cv_are_deterministic_and_disjoint(tmp_path: Path) -> None:
+    repository_root = tmp_path / "repository"
+    source = repository_root / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    path = source / "all.csv"
+    path.write_text(
+        "id,value,target\n"
+        + "\n".join(f"{index},{index * 2},{index % 2}" for index in range(100))
+        + "\n",
+        encoding="utf-8",
+    )
+    datasets = InMemoryDatasetRepository()
+    datasets.add(_asset("all", "owner-1", path, 100))
+    definition = FeatureEngineeringDefinition.model_validate({
+        "mode": "fit_transform",
+        "inputs": [{"input_id": "training", "role": "training", "dataset_id": "all"}],
+        "feature_columns": ["value"],
+        "target_column": "target",
+        "row_id_column": "id",
+        "transformations": [],
+        "outputs": [
+            {"output_id": "training_features", "input_id": "training", "dataset_name": "Train", "business_case_role": "training"},
+            {"output_id": "validation_features", "input_id": "validation", "dataset_name": "Validation", "business_case_role": "validation"},
+            {"output_id": "test_features", "input_id": "test", "dataset_name": "Test", "business_case_role": "test"},
+        ],
+        "evaluation": {
+            "split_strategy": "stratified",
+            "validation_size": 0.1,
+            "test_size": 0.2,
+            "seed": 17,
+            "stratify_column": "target",
+            "cross_validation": {
+                "enabled": True,
+                "strategy": "stratified",
+                "folds": 5,
+                "seed": 23,
+            },
+        },
+    })
+    engine = DuckDbFeatureEngineeringEngine(
+        input_adapter=CsvDatasetInputAdapter(datasets, repository_root),
+        repository_root=repository_root,
+    )
+
+    first = engine.execute(
+        definition=definition, run_id="split-1", owner_id="owner-1", is_dry_run=True,
+    )
+    second = engine.execute(
+        definition=definition, run_id="split-2", owner_id="owner-1", is_dry_run=True,
+    )
+
+    def rows(result, output_id: str):
+        item = next(entry for entry in result.output_manifest if entry["output_id"] == output_id)
+        return duckdb.connect().execute(
+            "SELECT id, target, __mlapp_cv_fold FROM read_parquet(?) ORDER BY id"
+            if output_id == "training_features"
+            else "SELECT id, target, NULL FROM read_parquet(?) ORDER BY id",
+            [item["location_uri"].removeprefix("file://")],
+        ).fetchall()
+
+    train = rows(first, "training_features")
+    validation = rows(first, "validation_features")
+    test = rows(first, "test_features")
+    assert (len(train), len(validation), len(test)) == (70, 10, 20)
+    assert {row[0] for row in train}.isdisjoint({row[0] for row in validation})
+    assert {row[0] for row in train}.isdisjoint({row[0] for row in test})
+    assert {row[0] for row in validation}.isdisjoint({row[0] for row in test})
+    assert sum(row[1] for row in train) == 35
+    assert sum(row[1] for row in validation) == 5
+    assert sum(row[1] for row in test) == 10
+    assert {row[2] for row in train} == {0, 1, 2, 3, 4}
+    assert train == rows(second, "training_features")
+    manifest = next(
+        item for item in first.output_manifest if item["output_id"] == "training_features"
+    )["evaluation"]
+    assert manifest["split_row_counts"] == {"training": 70, "validation": 10, "test": 20}
+    assert sum(item["row_count"] for item in manifest["cross_validation"]["fold_row_counts"]) == 70
+
+
+@pytest.mark.parametrize(("strategy", "column"), [("group", "group_id"), ("time", "event_time")])
+def test_group_and_time_splits_respect_boundaries(
+    tmp_path: Path,
+    strategy: str,
+    column: str,
+) -> None:
+    repository_root = tmp_path / strategy
+    source = repository_root / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    path = source / "all.csv"
+    path.write_text(
+        "id,value,target,group_id,event_time\n"
+        + "\n".join(
+            f"{index},{index},0,g{index // 2},2026-01-01T00:{index:02d}:00"
+            for index in range(50)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    datasets = InMemoryDatasetRepository()
+    datasets.add(_asset("all", "owner-1", path, 50))
+    evaluation = {
+        "split_strategy": strategy,
+        "validation_size": 0.2,
+        "test_size": 0.2,
+        "seed": 11,
+        "group_column": "group_id",
+        "time_column": "event_time",
+        "cross_validation": {
+            "enabled": True,
+            "strategy": strategy,
+            "folds": 3,
+            "seed": 12,
+        },
+    }
+    definition = FeatureEngineeringDefinition.model_validate({
+        "inputs": [{"input_id": "training", "role": "training", "dataset_id": "all"}],
+        "feature_columns": ["value"],
+        "target_column": "target",
+        "row_id_column": "id",
+        "group_column": "group_id",
+        "event_time_column": "event_time",
+        "outputs": [
+            {"output_id": "training_features", "input_id": "training", "dataset_name": "Train"},
+            {"output_id": "validation_features", "input_id": "validation", "dataset_name": "Validation", "business_case_role": "validation"},
+            {"output_id": "test_features", "input_id": "test", "dataset_name": "Test", "business_case_role": "test"},
+        ],
+        "evaluation": evaluation,
+    })
+    result = DuckDbFeatureEngineeringEngine(
+        input_adapter=CsvDatasetInputAdapter(datasets, repository_root),
+        repository_root=repository_root,
+    ).execute(
+        definition=definition, run_id=f"{strategy}-run", owner_id="owner-1", is_dry_run=True,
+    )
+
+    partitions = {}
+    for output_id in ("training_features", "validation_features", "test_features"):
+        item = next(entry for entry in result.output_manifest if entry["output_id"] == output_id)
+        partitions[output_id] = duckdb.connect().execute(
+            f"SELECT id, group_id, event_time FROM read_parquet(?) ORDER BY id",
+            [item["location_uri"].removeprefix("file://")],
+        ).fetchall()
+    if strategy == "group":
+        group_sets = [{row[1] for row in rows} for rows in partitions.values()]
+        assert group_sets[0].isdisjoint(group_sets[1])
+        assert group_sets[0].isdisjoint(group_sets[2])
+        assert group_sets[1].isdisjoint(group_sets[2])
+    else:
+        train_max = max(row[2] for row in partitions["training_features"])
+        validation_min = min(row[2] for row in partitions["validation_features"])
+        validation_max = max(row[2] for row in partitions["validation_features"])
+        test_min = min(row[2] for row in partitions["test_features"])
+        assert train_max < validation_min <= validation_max < test_min
+
+
+def test_de_to_fe_pipeline_run_creates_step_runs_dataset_and_fitted_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.worker.tasks import execute_pipeline_run
+
+    monkeypatch.setattr(
+        execute_pipeline_run,
+        "delay",
+        lambda run_id: None,
+    )
+    client = TestClient(create_app())
+    email = f"alice-{uuid4()}@example.com"
+    registered = client.post(
+        "/api/v1/auth/register",
+        json={"email": email, "password": "password123", "display_name": "Alice"},
+    )
+    assert registered.status_code == 201
+    headers = {"Authorization": f"Bearer {registered.json()['access_token']}"}
+    business_case = client.post(
+        "/api/v1/business-cases",
+        headers=headers,
+        json={
+            "name": "Churn features",
+            "problem_type": "binary_classification",
+            "target_column": "target",
+        },
+    ).json()
+    source_rows = [
+        f"{index},{18 + index % 50},{'A' if index % 2 == 0 else 'B'},{index % 2}"
+        for index in range(1, 101)
+    ]
+    upload = client.post(
+        "/api/v1/datasets/upload",
+        headers=headers,
+        data={"name": "Churn training"},
+        files={"file": (
+            "training.csv",
+            ("id,age,city,target\n" + "\n".join(source_rows) + "\n").encode(),
+            "text/csv",
+        )},
+    )
+    assert upload.status_code == 201
+    dataset_id = upload.json()["id"]
+    workflow = {
+        "contract_version": "2.0",
+        "steps": [
+            {
+                "step_id": "de_1",
+                "name": "Data Engineering",
+                "type": "data_engineering",
+                "inputs": [],
+                "output_port_id": "dataset",
+                "config": {
+                    "definition": {
+                        "contract_version": "1.0",
+                        "inputs": [{"input_id": "source", "dataset_id": dataset_id}],
+                        "steps": [],
+                        "outputs": [{
+                            "output_id": "prepared",
+                            "input": {"node_id": "source", "port_id": "out"},
+                            "materialization": "dataset",
+                            "dataset_name": "Prepared churn",
+                            "business_case_role": "training",
+                        }],
+                    }
+                },
+            },
+            {
+                "step_id": "fe_1",
+                "name": "Feature Engineering",
+                "type": "feature_engineering",
+                "inputs": [{
+                    "port_id": "training",
+                    "source": {"step_id": "de_1", "port_id": "dataset"},
+                }],
+                "output_port_id": "dataset",
+                "additional_output_port_ids": ["fitted_transform"],
+                "config": {
+                    "definition": {
+                        "contract_version": "1.0",
+                        "mode": "fit_transform",
+                        "inputs": [{"input_id": "training", "role": "training"}],
+                        "feature_columns": ["age", "city"],
+                        "target_column": "target",
+                        "row_id_column": "id",
+                        "evaluation": {
+                            "split_strategy": "stratified",
+                            "validation_size": 0.15,
+                            "test_size": 0.15,
+                            "seed": 42,
+                            "stratify_column": "target",
+                        },
+                        "transformations": [
+                            {
+                                "transform_id": "impute_age",
+                                "type": "impute",
+                                "columns": ["age"],
+                                "config": {"method": "mean", "add_indicator": True},
+                            },
+                            {
+                                "transform_id": "encode_city",
+                                "type": "encode_categorical",
+                                "columns": ["city"],
+                                "config": {
+                                    "method": "one_hot",
+                                    "max_categories": 10,
+                                    "handle_unknown": "other",
+                                    "drop_original": True,
+                                },
+                            },
+                        ],
+                        "outputs": [
+                            {
+                                "output_id": "training_features",
+                                "input_id": "training",
+                                "dataset_name": "Churn training features",
+                                "business_case_role": "training",
+                            },
+                            {
+                                "output_id": "validation_features",
+                                "input_id": "validation",
+                                "dataset_name": "Churn validation features",
+                                "business_case_role": "validation",
+                            },
+                            {
+                                "output_id": "test_features",
+                                "input_id": "test",
+                                "dataset_name": "Churn test features",
+                                "business_case_role": "test",
+                            },
+                        ],
+                    }
+                },
+            },
+        ],
+        "outputs": [{
+            "output_id": "result",
+            "source": {"step_id": "fe_1", "port_id": "dataset"},
+        }],
+    }
+    created = client.post(
+        "/api/v1/pipelines",
+        headers=headers,
+        json={
+            "business_case_id": business_case["id"],
+            "name": "Prepare churn features",
+            "type": "feature_engineering",
+            "definition": workflow,
+        },
+    )
+    assert created.status_code == 201, created.text
+    pipeline_id = created.json()["id"]
+    published = client.post(
+        f"/api/v1/pipelines/{pipeline_id}/versions/draft/publish",
+        headers=headers,
+    )
+    assert published.status_code == 200, published.text
+    queued = client.post(
+        f"/api/v1/pipelines/{pipeline_id}/runs",
+        headers=headers,
+        json={"trigger_type": "manual", "is_dry_run": False},
+    )
+    assert queued.status_code == 201, queued.text
+    run = queued.json()
+    execute_pipeline_run.run(run["id"])
+    deadline = time.monotonic() + 20
+    while run["status"] in {"queued", "running"} and time.monotonic() < deadline:
+        time.sleep(0.1)
+        run = client.get(
+            f"/api/v1/pipelines/{pipeline_id}/runs/{run['id']}",
+            headers=headers,
+        ).json()
+
+    assert run["status"] == "succeeded", run["error_message"]
+    assert run["input_row_count"] == 100
+    assert run["output_row_count"] == 100
+    dataset_items = [
+        item for item in run["output_manifest"] if item.get("artifact_type") == "dataset"
+    ]
+    final_dataset_items = [
+        item for item in dataset_items if item["output_stage"] == "final"
+    ]
+    intermediate_dataset_items = [
+        item for item in dataset_items if item["output_stage"] == "intermediate"
+    ]
+    assert len(intermediate_dataset_items) == 1
+    assert intermediate_dataset_items[0]["pipeline_step_id"] == "de_1"
+    assert intermediate_dataset_items[0]["dataset_name"] == "Prepared churn"
+    assert intermediate_dataset_items[0]["row_count"] == 100
+    assert {item["business_case_role"] for item in final_dataset_items} == {
+        "training",
+        "validation",
+        "test",
+    }
+    assert sum(item["row_count"] for item in final_dataset_items) == 100
+    dataset_item = next(
+        item for item in final_dataset_items if item["business_case_role"] == "training"
+    )
+    state_item = next(
+        item for item in run["output_manifest"] if item.get("artifact_type") == "feature_transform"
+    )
+    assert dataset_item["materialization"] == "dataset"
+    assert dataset_item["dataset_id"]
+    assert dataset_item["schema_hash"]
+    assert state_item["materialization"] == "artifact"
+    assert state_item["artifact_id"] in run["output_artifact_ids"]
+    step_runs = client.get(
+        f"/api/v1/pipelines/{pipeline_id}/runs/{run['id']}/steps",
+        headers=headers,
+    )
+    assert step_runs.status_code == 200
+    assert [(item["pipeline_step_id"], item["status"]) for item in step_runs.json()] == [
+        ("de_1", "succeeded"),
+        ("fe_1", "succeeded"),
+    ]
+    persisted = client.get(
+        f"/api/v1/datasets/{dataset_item['dataset_id']}/preview?limit=10",
+        headers=headers,
+    )
+    assert persisted.status_code == 200
+    assert persisted.json()["row_count"] == dataset_item["row_count"]
+    assert {"city__0", "city__1", "city__other"}.issubset(
+        {item["name"] for item in persisted.json()["columns"]}
+    )
+    attachments = client.get(
+        f"/api/v1/business-cases/{business_case['id']}/data-attachments",
+        headers=headers,
+    )
+    assert attachments.status_code == 200
+    generated_dataset_ids = {item["dataset_id"] for item in final_dataset_items}
+    assert {
+        item["role"] for item in attachments.json()
+        if item["data_asset_id"] in generated_dataset_ids
+    } == {"training", "validation", "test"}

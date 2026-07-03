@@ -6,11 +6,13 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Index,
     Integer,
     MetaData,
     String,
     Table,
     Text,
+    func,
     select,
     text,
 )
@@ -32,6 +34,9 @@ data_assets_table = Table(
     Column("name", String(255), nullable=False),
     Column("source_type", String(32), nullable=False),
     Column("format", String(32), nullable=False),
+    Column("logical_id", String(64), nullable=False, index=True),
+    Column("version_number", Integer, nullable=False, default=1),
+    Column("version_stage", String(32), nullable=False, default="source"),
     Column("description", Text, nullable=False, default=""),
     Column("original_filename", String(512), nullable=True),
     Column("location_uri", Text, nullable=True),
@@ -48,16 +53,32 @@ data_assets_table = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
+Index(
+    "uq_data_assets_logical_version",
+    data_assets_table.c.owner_id,
+    data_assets_table.c.logical_id,
+    data_assets_table.c.version_number,
+    unique=True,
+)
 
 
 class DatasetRepository(Protocol):
     def add(self, asset: DataAsset) -> DataAsset:
         ...
 
+    def add_version(self, asset: DataAsset) -> DataAsset:
+        ...
+
     def list_for_owner(self, owner_id: str) -> list[DataAsset]:
         ...
 
     def get(self, asset_id: str) -> DataAsset | None:
+        ...
+
+    def list_versions(self, owner_id: str, logical_id: str) -> list[DataAsset]:
+        ...
+
+    def get_latest_version(self, owner_id: str, logical_id: str) -> DataAsset | None:
         ...
 
     def update(self, asset: DataAsset) -> DataAsset:
@@ -72,11 +93,33 @@ class InMemoryDatasetRepository:
         self._items[asset.id] = asset
         return asset
 
+    def add_version(self, asset: DataAsset) -> DataAsset:
+        versions = self.list_versions(asset.owner_id, asset.logical_id)
+        asset.version_number = max((item.version_number for item in versions), default=0) + 1
+        self._items[asset.id] = asset
+        return asset
+
     def list_for_owner(self, owner_id: str) -> list[DataAsset]:
         return [asset for asset in self._items.values() if asset.owner_id == owner_id]
 
     def get(self, asset_id: str) -> DataAsset | None:
         return self._items.get(asset_id)
+
+    def list_versions(self, owner_id: str, logical_id: str) -> list[DataAsset]:
+        return sorted(
+            (
+                asset for asset in self._items.values()
+                if asset.owner_id == owner_id and asset.logical_id == logical_id
+            ),
+            key=lambda asset: asset.version_number,
+        )
+
+    def get_latest_version(self, owner_id: str, logical_id: str) -> DataAsset | None:
+        versions = [
+            asset for asset in self.list_versions(owner_id, logical_id)
+            if asset.status != DataAssetStatus.DELETED
+        ]
+        return versions[-1] if versions else None
 
     def update(self, asset: DataAsset) -> DataAsset:
         asset.updated_at = datetime.now(timezone.utc)
@@ -95,6 +138,22 @@ class PostgresDatasetRepository:
             connection.execute(
                 data_assets_table.insert().values(**self._to_record(asset)),
             )
+        return asset
+
+    def add_version(self, asset: DataAsset) -> DataAsset:
+        self._ensure_initialized()
+        with self.engine.begin() as connection:
+            connection.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext(:logical_id))"),
+                {"logical_id": f"{asset.owner_id}:{asset.logical_id}"},
+            )
+            next_version = connection.execute(
+                select(func.coalesce(func.max(data_assets_table.c.version_number), 0) + 1)
+                .where(data_assets_table.c.owner_id == asset.owner_id)
+                .where(data_assets_table.c.logical_id == asset.logical_id)
+            ).scalar_one()
+            asset.version_number = int(next_version)
+            connection.execute(data_assets_table.insert().values(**self._to_record(asset)))
         return asset
 
     def list_for_owner(self, owner_id: str) -> list[DataAsset]:
@@ -116,6 +175,31 @@ class PostgresDatasetRepository:
             return None
         return self._from_record(row._mapping)
 
+    def list_versions(self, owner_id: str, logical_id: str) -> list[DataAsset]:
+        self._ensure_initialized()
+        statement = (
+            select(data_assets_table)
+            .where(data_assets_table.c.owner_id == owner_id)
+            .where(data_assets_table.c.logical_id == logical_id)
+            .order_by(data_assets_table.c.version_number.asc())
+        )
+        with self.engine.begin() as connection:
+            return [self._from_record(row._mapping) for row in connection.execute(statement)]
+
+    def get_latest_version(self, owner_id: str, logical_id: str) -> DataAsset | None:
+        self._ensure_initialized()
+        statement = (
+            select(data_assets_table)
+            .where(data_assets_table.c.owner_id == owner_id)
+            .where(data_assets_table.c.logical_id == logical_id)
+            .where(data_assets_table.c.status != DataAssetStatus.DELETED.value)
+            .order_by(data_assets_table.c.version_number.desc())
+            .limit(1)
+        )
+        with self.engine.begin() as connection:
+            row = connection.execute(statement).first()
+        return self._from_record(row._mapping) if row else None
+
     def update(self, asset: DataAsset) -> DataAsset:
         self._ensure_initialized()
         asset.updated_at = datetime.now(timezone.utc)
@@ -134,9 +218,6 @@ class PostgresDatasetRepository:
         with self.engine.begin() as connection:
             connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {DATASET_SCHEMA}"))
             metadata.create_all(connection)
-            connection.execute(text("ALTER TABLE mlapp.data_assets ADD COLUMN IF NOT EXISTS deleted_by VARCHAR(64)"))
-            connection.execute(text("ALTER TABLE mlapp.data_assets ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ"))
-            connection.execute(text("ALTER TABLE mlapp.data_assets ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb"))
         self._initialized = True
 
     def _to_record(self, asset: DataAsset) -> dict[str, object]:
@@ -146,6 +227,9 @@ class PostgresDatasetRepository:
             "name": asset.name,
             "source_type": asset.source_type.value,
             "format": asset.format,
+            "logical_id": asset.logical_id,
+            "version_number": asset.version_number,
+            "version_stage": asset.version_stage,
             "description": asset.description,
             "original_filename": asset.original_filename,
             "location_uri": asset.location_uri,
@@ -170,6 +254,9 @@ class PostgresDatasetRepository:
             name=record["name"],
             source_type=SourceType(record["source_type"]),
             format=record["format"],
+            logical_id=record["logical_id"],
+            version_number=record["version_number"],
+            version_stage=record["version_stage"],
             description=record["description"],
             original_filename=record["original_filename"],
             location_uri=record["location_uri"],

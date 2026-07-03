@@ -11,7 +11,6 @@ from app.modules.analysis.full_profile import FullDatasetProfiler
 from app.modules.analysis.profile_jobs import DescriptiveProfileJobs
 from app.modules.analysis.time_series_jobs import TimeSeriesAnalysisJobs
 from app.modules.datasets.domain import DataAsset, DataAssetStatus, SourceType
-from app.modules.datasets.query_engine import DatasetQueryEngine
 from app.modules.datasets.repository import DatasetRepository, PostgresDatasetRepository
 from app.modules.datasets.schemas import (
     DataAssetCreate,
@@ -27,24 +26,31 @@ from app.modules.datasets.schemas import (
     FullDescriptiveProfileRequest,
     TimeSeriesAnalysisRequest,
 )
+from app.modules.datasets.sql_query import FullDatasetSqlQuery
 from app.modules.datasets.sources import DatasetSourceRegistry
 from app.modules.datasets.visualizations import FullDatasetVisualization
 from app.modules.datasets.time_series import FullDatasetTimeSeriesAnalyzer
+from app.modules.datasets.temporary import TemporaryPipelineOutputResolver
 
 
 class DatasetService:
-    """Coordinates dataset lifecycle and delegates tabular execution to DatasetQueryEngine."""
+    """Coordinates dataset lifecycle and delegates analytics to columnar engines."""
 
-    def __init__(self, repository: DatasetRepository | None = None) -> None:
+    def __init__(
+        self,
+        repository: DatasetRepository | None = None,
+        temporary_outputs: TemporaryPipelineOutputResolver | None = None,
+    ) -> None:
         self.repository = repository or PostgresDatasetRepository()
         self.repository_root = Path("data/repository")
         self.sources = DatasetSourceRegistry(self.repository_root)
-        self.query_engine = DatasetQueryEngine(self.sources)
+        self.sql_query = FullDatasetSqlQuery()
         self.full_profiler = FullDatasetProfiler()
         self.full_visualization = FullDatasetVisualization()
         self.time_series = FullDatasetTimeSeriesAnalyzer(self.full_visualization.store)
         self.time_series_jobs = TimeSeriesAnalysisJobs()
         self.profile_jobs = DescriptiveProfileJobs()
+        self.temporary_outputs = temporary_outputs or TemporaryPipelineOutputResolver()
 
     def register(self, payload: DataAssetCreate, principal: Principal) -> DataAsset:
         asset = DataAsset(
@@ -53,6 +59,7 @@ class DatasetService:
             name=payload.name,
             source_type=payload.source_type,
             format=payload.format,
+            logical_id=str(uuid4()),
             description=payload.description,
             location_uri=payload.location_uri,
             tags=list(payload.tags),
@@ -62,6 +69,10 @@ class DatasetService:
 
     def create_view(self, payload: DataViewCreate, principal: Principal) -> DataAsset:
         source = self.get_asset(payload.source_dataset_id, principal)
+        self._require_persistent_asset(
+            source,
+            "Temporary dry-run output must be materialized before it can back a Data View",
+        )
         if source.status == DataAssetStatus.DELETED:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -75,6 +86,7 @@ class DatasetService:
             name=payload.name.strip(),
             source_type=SourceType.VIEW,
             format="view",
+            logical_id=str(uuid4()),
             description=payload.description,
             location_uri=f"view://{source.id}",
             row_count=None,
@@ -93,11 +105,22 @@ class DatasetService:
                 }
             },
         )
-        preview = self.full_visualization.preview(
-            view,
-            limit=1,
-            load_asset=lambda asset_id: self.get_asset(asset_id, principal),
-        )
+        try:
+            preview = self.full_visualization.preview(
+                view,
+                limit=1,
+                load_asset=lambda asset_id: self.get_asset(asset_id, principal),
+            )
+        except Exception:
+            view_directory = (
+                self.repository_root / "users" / principal.user_id / view.id
+            ).resolve()
+            owner_root = (
+                self.repository_root / "users" / principal.user_id
+            ).resolve()
+            if self._is_relative_to(view_directory, owner_root):
+                shutil.rmtree(view_directory, ignore_errors=True)
+            raise
         columns = [str(column["name"]) for column in preview["columns"]]
         inherited_roles = self._inherit_data_roles(source, columns)
         view.row_count = int(preview["row_count"])
@@ -122,7 +145,7 @@ class DatasetService:
         description: str = "",
         tags: list[str] | None = None,
     ) -> DataAsset:
-        return self.upload_csv_stream(
+        return self.upload_file_stream(
             stream=BytesIO(content),
             filename=filename,
             principal=principal,
@@ -140,10 +163,44 @@ class DatasetService:
         description: str = "",
         tags: list[str] | None = None,
     ) -> DataAsset:
-        if not filename.lower().endswith(".csv"):
+        return self.upload_file_stream(
+            stream=stream,
+            filename=filename,
+            principal=principal,
+            name=name,
+            description=description,
+            tags=tags,
+        )
+
+    def upload_file_stream(
+        self,
+        stream: BinaryIO,
+        filename: str,
+        principal: Principal,
+        name: str | None = None,
+        description: str = "",
+        tags: list[str] | None = None,
+        logical_id: str | None = None,
+    ) -> DataAsset:
+        logical_asset = None
+        if logical_id:
+            logical_asset = self.repository.get_latest_version(principal.user_id, logical_id)
+            if logical_asset is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Logical dataset was not found",
+                )
+            if logical_asset.source_type == SourceType.VIEW:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Data View versions cannot be uploaded",
+                )
+        extension = Path(filename).suffix.lower()
+        file_format = {".csv": "csv", ".parquet": "parquet"}.get(extension)
+        if not file_format:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Only .csv files are supported",
+                detail="Only .csv and .parquet files are supported",
             )
         dataset_id = str(uuid4())
         safe_filename = self._safe_filename(filename)
@@ -157,10 +214,11 @@ class DatasetService:
             storage_path.unlink(missing_ok=True)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Uploaded CSV file is empty",
+                detail="Uploaded dataset file is empty",
             )
         try:
-            has_header, row_count, source_schema = self.sources.csv.inspect_path_with_schema(storage_path)
+            inspector = self.sources.csv if file_format == "csv" else self.sources.parquet
+            has_header, row_count, source_schema = inspector.inspect_path_with_schema(storage_path)
         except Exception:
             shutil.rmtree(storage_path.parent, ignore_errors=True)
             raise
@@ -171,7 +229,10 @@ class DatasetService:
             owner_id=principal.user_id,
             name=name or Path(filename).stem,
             source_type=SourceType.FILE,
-            format="csv",
+            format=file_format,
+            logical_id=logical_id or str(uuid4()),
+            version_number=1,
+            version_stage="source",
             description=description,
             original_filename=filename,
             location_uri=f"file://{storage_path.as_posix()}",
@@ -184,19 +245,43 @@ class DatasetService:
             tags=list(tags or []),
             metadata={"source_schema": source_schema},
         )
+        if logical_asset is not None:
+            asset.name = logical_asset.name
+            asset.description = description or logical_asset.description
+            asset.tags = list(tags if tags is not None else logical_asset.tags)
+            asset.metadata = {
+                **asset.metadata,
+                "version_of": logical_asset.logical_id,
+                "previous_version_id": logical_asset.id,
+            }
+            return self.repository.add_version(asset)
         return self.repository.add(asset)
 
     def list_assets(self, principal: Principal) -> list[DataAsset]:
         return self.repository.list_for_owner(principal.user_id)
 
     def get_asset(self, dataset_id: str, principal: Principal) -> DataAsset:
+        if self.temporary_outputs.recognizes(dataset_id):
+            return self.temporary_outputs.resolve(dataset_id, principal.user_id)
         asset = self.repository.get(dataset_id)
+        if asset is None:
+            asset = self.repository.get_latest_version(principal.user_id, dataset_id)
         if not asset or asset.owner_id != principal.user_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found")
         return asset
 
+    def list_versions(self, logical_id: str, principal: Principal) -> list[DataAsset]:
+        versions = self.repository.list_versions(principal.user_id, logical_id)
+        if not versions:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Logical dataset not found")
+        return versions
+
     def profile(self, dataset_id: str, payload: DataAssetProfileRequest, principal: Principal) -> DataAssetProfileRead:
         asset = self.get_asset(dataset_id, principal)
+        self._require_persistent_asset(
+            asset,
+            "Temporary dry-run output cannot have mutable profiling status",
+        )
         if asset.status == DataAssetStatus.DELETED:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -219,6 +304,7 @@ class DatasetService:
         principal: Principal,
     ) -> DataAsset:
         asset = self.get_asset(dataset_id, principal)
+        self._require_persistent_asset(asset, "Temporary dry-run output metadata cannot be changed")
         if asset.status == DataAssetStatus.DELETED:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -234,17 +320,18 @@ class DatasetService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Deleted dataset cannot be browsed",
             )
-        if asset.source_type == SourceType.FILE and asset.format.lower() == "csv":
+        if asset.source_type == SourceType.FILE and asset.format.lower() in {"csv", "parquet"}:
             return DataAssetPreviewRead.model_validate(self.full_profiler.schema(asset, limit))
         if asset.source_type == SourceType.VIEW:
             return DataAssetPreviewRead.model_validate(
                 self.full_visualization.preview(asset, limit, lambda asset_id: self.get_asset(asset_id, principal))
             )
-        return self.query_engine.preview(
-            asset,
-            lambda asset_id: self.get_asset(asset_id, principal),
-            limit,
-            dataset_id=dataset_id,
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=(
+                f"Dataset source {asset.source_type.value}/{asset.format} "
+                "does not have a columnar preview adapter yet"
+            ),
         )
 
     def start_descriptive_profile(
@@ -282,12 +369,11 @@ class DatasetService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Deleted dataset cannot be queried",
             )
-        return self.query_engine.query(
+        return self.sql_query.execute(
             asset,
             lambda asset_id: self.get_asset(asset_id, principal),
             payload.sql,
             payload.limit,
-            dataset_id=dataset_id,
         )
 
     def visualize(
@@ -363,6 +449,7 @@ class DatasetService:
 
     def delete_asset(self, dataset_id: str, principal: Principal) -> DataAsset:
         asset = self.get_asset(dataset_id, principal)
+        self._require_persistent_asset(asset, "Temporary dry-run output is managed by its pipeline run")
         if asset.status == DataAssetStatus.DELETED:
             return asset
 
@@ -372,6 +459,10 @@ class DatasetService:
         asset.deleted_by = principal.user_id
         asset.deleted_at = now
         return self.repository.update(asset)
+
+    def _require_persistent_asset(self, asset: DataAsset, detail: str) -> None:
+        if self.temporary_outputs.recognizes(asset.id):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
 
     def _safe_filename(self, filename: str) -> str:
         return Path(filename.replace("\\", "_").replace("/", "_")).name

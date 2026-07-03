@@ -40,6 +40,20 @@ class ModelArtifact:
     version: str
     algorithm: str
     artifact_uri: str
+    logical_id: str = ""
+    version_number: int = 1
     metrics: dict[str, float] = field(default_factory=dict)
     stage: ModelStage = ModelStage.CANDIDATE
+    business_case_id: str = ""
+    pipeline_id: str = ""
+    pipeline_version_id: str = ""
+    pipeline_run_id: str = ""
+    pipeline_step_id: str = ""
+    problem_type: str = ""
+    target_column: str = ""
+    feature_columns: list[str] = field(default_factory=list)
+    model_hash: str = ""
+    training_config: dict[str, Any] = field(default_factory=dict)
+    model_parameters: dict[str, Any] = field(default_factory=dict)
+    lineage: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

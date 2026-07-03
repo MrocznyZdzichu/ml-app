@@ -1,0 +1,187 @@
+from datetime import datetime, timezone
+from uuid import uuid4
+
+from fastapi import HTTPException, status
+
+from app.core.security import Principal
+from app.modules.business_cases.domain import (
+    Artifact,
+    ArtifactOrigin,
+    ArtifactType,
+    BusinessCase,
+    BusinessCaseDataAttachment,
+    DataArtifactKind,
+)
+from app.modules.business_cases.repository import BusinessCaseRepository, PostgresBusinessCaseRepository
+from app.modules.business_cases.schemas import (
+    BusinessCaseCreate,
+    BusinessCaseUpdate,
+    BusinessCaseDataAttachmentCreate,
+    BusinessCaseDataAttachmentUpdate,
+)
+
+
+business_case_repository = PostgresBusinessCaseRepository()
+
+
+class BusinessCaseService:
+    def __init__(self, repository: BusinessCaseRepository | None = None) -> None:
+        self.repository = repository or business_case_repository
+
+    def create_business_case(self, payload: BusinessCaseCreate, principal: Principal) -> BusinessCase:
+        now = datetime.now(timezone.utc)
+        business_case = BusinessCase(
+            id=str(uuid4()),
+            owner_id=principal.user_id,
+            name=payload.name.strip(),
+            description=payload.description,
+            problem_type=payload.problem_type,
+            status=payload.status,
+            business_owner=payload.business_owner,
+            primary_metric=payload.primary_metric,
+            target_column=payload.target_column,
+            business_goal=payload.business_goal,
+            success_criteria=payload.success_criteria,
+            created_by=principal.user_id,
+            updated_by=principal.user_id,
+            created_at=now,
+            updated_at=now,
+        )
+        return self.repository.add_business_case(business_case)
+
+    def list_business_cases(self, principal: Principal) -> list[BusinessCase]:
+        return self.repository.list_business_cases(principal.user_id)
+
+    def get_business_case(self, business_case_id: str, principal: Principal) -> BusinessCase:
+        business_case = self.repository.get_business_case(business_case_id)
+        if not business_case or business_case.owner_id != principal.user_id:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Business case not found")
+        return business_case
+
+    def update_business_case(
+        self,
+        business_case_id: str,
+        payload: BusinessCaseUpdate,
+        principal: Principal,
+    ) -> BusinessCase:
+        business_case = self.get_business_case(business_case_id, principal)
+        business_case.name = payload.name.strip()
+        business_case.description = payload.description
+        business_case.problem_type = payload.problem_type
+        business_case.status = payload.status
+        business_case.business_owner = payload.business_owner
+        business_case.primary_metric = payload.primary_metric
+        business_case.target_column = payload.target_column
+        business_case.business_goal = payload.business_goal
+        business_case.success_criteria = payload.success_criteria
+        business_case.updated_by = principal.user_id
+        business_case.updated_at = datetime.now(timezone.utc)
+        return self.repository.update_business_case(business_case)
+
+    def attach_data_asset(
+        self,
+        business_case_id: str,
+        payload: BusinessCaseDataAttachmentCreate,
+        principal: Principal,
+    ) -> BusinessCaseDataAttachment:
+        business_case = self.get_business_case(business_case_id, principal)
+        artifact_type = ArtifactType.DATA_VIEW if payload.data_asset_kind == DataArtifactKind.DATA_VIEW else ArtifactType.DATASET
+        artifact = Artifact(
+            id=str(uuid4()),
+            owner_id=principal.user_id,
+            type=artifact_type,
+            reference_id=payload.data_asset_id,
+            origin=payload.origin,
+            business_case_id=business_case.id,
+            external_notes=payload.external_notes,
+            metadata=dict(payload.metadata),
+            created_by=principal.user_id,
+        )
+        self.repository.add_artifact(artifact)
+        attachment = BusinessCaseDataAttachment(
+            id=str(uuid4()),
+            owner_id=principal.user_id,
+            business_case_id=business_case.id,
+            artifact_id=artifact.id,
+            data_asset_id=payload.data_asset_id,
+            data_asset_kind=payload.data_asset_kind,
+            role=payload.role,
+            context_note=payload.context_note,
+            primary_key_column=payload.primary_key_column,
+            target_column=payload.target_column,
+            created_by=principal.user_id,
+        )
+        return self.repository.add_data_attachment(attachment)
+
+    def list_data_attachments(
+        self,
+        business_case_id: str,
+        principal: Principal,
+    ) -> list[BusinessCaseDataAttachment]:
+        business_case = self.get_business_case(business_case_id, principal)
+        return self.repository.list_data_attachments(business_case.id)
+
+    def update_data_attachment(
+        self,
+        business_case_id: str,
+        attachment_id: str,
+        payload: BusinessCaseDataAttachmentUpdate,
+        principal: Principal,
+    ) -> BusinessCaseDataAttachment:
+        business_case = self.get_business_case(business_case_id, principal)
+        attachment = self._get_owned_data_attachment(business_case.id, attachment_id, principal)
+        attachment.role = payload.role
+        attachment.context_note = payload.context_note
+        attachment.primary_key_column = payload.primary_key_column
+        attachment.target_column = payload.target_column
+        return self.repository.update_data_attachment(attachment)
+
+    def delete_data_attachment(
+        self,
+        business_case_id: str,
+        attachment_id: str,
+        principal: Principal,
+    ) -> None:
+        business_case = self.get_business_case(business_case_id, principal)
+        self._get_owned_data_attachment(business_case.id, attachment_id, principal)
+        self.repository.delete_data_attachment(attachment_id)
+
+    def _get_owned_data_attachment(
+        self,
+        business_case_id: str,
+        attachment_id: str,
+        principal: Principal,
+    ) -> BusinessCaseDataAttachment:
+        attachment = self.repository.get_data_attachment(attachment_id)
+        if (
+            not attachment
+            or attachment.owner_id != principal.user_id
+            or attachment.business_case_id != business_case_id
+        ):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Business case data attachment not found")
+        return attachment
+
+    def register_platform_artifact(
+        self,
+        *,
+        owner_id: str,
+        reference_id: str,
+        artifact_type: ArtifactType,
+        business_case_id: str | None,
+        created_by: str,
+        metadata: dict,
+    ) -> Artifact:
+        existing = self.repository.find_artifact(owner_id, reference_id, business_case_id)
+        if existing:
+            return existing
+        artifact = Artifact(
+            id=str(uuid4()),
+            owner_id=owner_id,
+            type=artifact_type,
+            reference_id=reference_id,
+            origin=ArtifactOrigin.PLATFORM_GENERATED,
+            business_case_id=business_case_id,
+            metadata=metadata,
+            created_by=created_by,
+        )
+        return self.repository.add_artifact(artifact)

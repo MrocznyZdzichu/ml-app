@@ -43,22 +43,23 @@ The dataset module is split into these responsibilities:
 
 - `DatasetService` handles use cases: upload, registration, metadata updates,
   deletion, preview, Custom SQL, and Data View creation.
-- `DatasetQueryEngine` executes tabular previews, read-only SQL, browser view
-  definitions, grouping, aggregation, sorting, and filtering for the bounded
-  interactive browser path. Moving this live preview path to pushdown is a
-  remaining scalability task.
+- `FullDatasetProfiler` and `FullDatasetSqlQuery` execute bounded previews and
+  read-only SQL directly over columnar relations. Registered external sources
+  remain metadata-only until a pushdown-capable adapter is available.
 - `ColumnarDatasetStore` owns reusable physical Parquet relations, recursive
   Data View resolution, browser-definition pushdown, SQL-view materialization,
   cache invalidation, and concurrency-safe first-run conversion.
 - `FullDatasetVisualization` executes bounded visualization queries over full
   relations and returns compact chart contracts rather than raw tables.
-- `DatasetSourceRegistry` selects a source adapter. CSV files are supported
-  today; the adapter boundary is prepared for parquet, xlsx, databases, and APIs.
+- `DatasetSourceRegistry` selects source-specific inspection. UTF-8 CSV and flat
+  tabular Parquet files are supported today; databases and APIs require future
+  adapters and are never implicitly copied into application memory.
 - `DatasetRepository` persists dataset metadata in PostgreSQL.
 
-Uploaded CSV files are stored under the local development repository directory
-mounted at `data/repository`. The CSV adapter validates that local file reads stay
-inside that repository root.
+Uploaded CSV and Parquet files are stored under the local development repository
+directory mounted at `data/repository`. Source inspectors validate that local
+file reads stay inside that repository root. Parquet is scanned natively;
+CSV receives a reusable Parquet sidecar when full columnar analytics first need it.
 
 ## Data Roles Metadata
 

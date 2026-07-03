@@ -2,6 +2,7 @@ from typing import Protocol
 
 from sqlalchemy import JSON, Column, DateTime, MetaData, String, Table, select, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 
 from app.core.database import get_engine
 from app.modules.auth.domain import UserAccount
@@ -9,6 +10,10 @@ from app.modules.auth.domain import UserAccount
 
 AUTH_SCHEMA = "mlapp"
 metadata = MetaData(schema=AUTH_SCHEMA)
+
+
+class DuplicateEmailError(ValueError):
+    """Raised when the normalized account email is already registered."""
 
 user_accounts_table = Table(
     "user_accounts",
@@ -39,8 +44,11 @@ class InMemoryUserRepository:
         self._email_index: dict[str, str] = {}
 
     def add(self, user: UserAccount) -> UserAccount:
+        normalized_email = _normalize_email(user.email)
+        if normalized_email in self._email_index:
+            raise DuplicateEmailError("User with this email already exists")
         self._items[user.id] = user
-        self._email_index[_normalize_email(user.email)] = user.id
+        self._email_index[normalized_email] = user.id
         return user
 
     def get(self, user_id: str) -> UserAccount | None:
@@ -64,8 +72,11 @@ class PostgresUserRepository:
 
     def add(self, user: UserAccount) -> UserAccount:
         self._ensure_initialized()
-        with self.engine.begin() as connection:
-            connection.execute(user_accounts_table.insert().values(**self._to_record(user)))
+        try:
+            with self.engine.begin() as connection:
+                connection.execute(user_accounts_table.insert().values(**self._to_record(user)))
+        except IntegrityError as exc:
+            raise DuplicateEmailError("User with this email already exists") from exc
         return user
 
     def get(self, user_id: str) -> UserAccount | None:

@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -55,6 +55,16 @@ class Settings(BaseSettings):
         "http://localhost:5173",
         "http://127.0.0.1:5173",
     ]
+
+    @model_validator(mode="after")
+    def reject_insecure_non_local_secret(self) -> "Settings":
+        environment = self.app_env.strip().lower()
+        if environment not in {"local", "development", "test"}:
+            if self.app_secret_key in {"dev-secret", "change-me-in-development"}:
+                raise ValueError("APP_SECRET_KEY must be changed outside local development")
+            if len(self.app_secret_key) < 32:
+                raise ValueError("APP_SECRET_KEY must contain at least 32 characters outside local development")
+        return self
 
 
 @lru_cache
