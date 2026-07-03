@@ -36,10 +36,24 @@ class ModelArtifactRead(BaseModel):
     training_job_id: str
     name: str
     version: str
+    logical_id: str
+    version_number: int
     algorithm: str
     artifact_uri: str
     metrics: dict[str, float]
     stage: ModelStage
+    business_case_id: str
+    pipeline_id: str
+    pipeline_version_id: str
+    pipeline_run_id: str
+    pipeline_step_id: str
+    problem_type: str
+    target_column: str
+    feature_columns: list[str]
+    model_hash: str
+    training_config: dict[str, Any]
+    model_parameters: dict[str, Any]
+    lineage: dict[str, Any]
     created_at: datetime
 
 

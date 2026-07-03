@@ -285,6 +285,15 @@ def test_pipeline_version_and_run_contracts_are_auditable(monkeypatch) -> None:
     )
     assert published.status_code == 200
     assert published.json()["status"] == "published"
+    catalog = client.get(
+        "/api/v1/pipelines",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert catalog.status_code == 200
+    catalog_pipeline = next(item for item in catalog.json() if item["id"] == pipeline["id"])
+    assert catalog_pipeline["latest_published_version_number"] == 1
+    assert catalog_pipeline["published_version_count"] == 1
+    assert catalog_pipeline["draft_version_number"] is None
 
     no_draft_update = client.patch(
         f"/api/v1/pipelines/{pipeline['id']}/versions/draft",

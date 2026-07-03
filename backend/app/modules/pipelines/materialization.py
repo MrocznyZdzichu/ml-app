@@ -160,6 +160,7 @@ class PipelineOutputMaterializer:
         now = datetime.now(timezone.utc)
         lineage = {
             "input_artifact_ids": input_artifact_ids,
+            "pipeline_id": run.pipeline_id,
             "pipeline_version_id": version.id,
             "pipeline_definition_hash": version.definition_hash,
             "pipeline_run_id": run.id,
@@ -318,6 +319,14 @@ class PipelineOutputMaterializer:
             "created_at": now.isoformat(),
             "created_by": run.created_by,
         }
+        logical_model_id = (
+            str(uuid5(
+                NAMESPACE_URL,
+                f"mlapp:model-family:{run.owner_id}:{run.pipeline_id}:{step_id}:{item['output_id']}",
+            ))
+            if artifact_type == ArtifactType.MODEL_VERSION
+            else ""
+        )
         artifact = Artifact(
             id=str(uuid4()),
             owner_id=run.owner_id,
@@ -333,7 +342,10 @@ class PipelineOutputMaterializer:
                 "feature_columns": list(item.get("feature_columns") or []),
                 "target_column": item.get("target_column", ""),
                 "model_hash": item.get("model_hash", ""),
+                "logical_model_id": logical_model_id,
                 "metrics": dict(item.get("metrics") or {}),
+                "training_config": dict(item.get("training_config") or {}),
+                "model_parameters": dict(item.get("model_parameters") or {}),
                 "lineage": lineage,
             },
             created_by=run.created_by,

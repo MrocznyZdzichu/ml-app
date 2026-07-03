@@ -79,6 +79,9 @@ class Pipeline:
     updated_by: str = ""
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    latest_published_version_number: int | None = None
+    published_version_count: int = 0
+    draft_version_number: int | None = None
 
 
 @dataclass

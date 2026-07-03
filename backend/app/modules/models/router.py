@@ -31,6 +31,17 @@ def list_models(principal: Principal = Depends(require_user)) -> list[ModelArtif
     return [ModelArtifactRead.model_validate(model) for model in service.list_models(principal)]
 
 
+@router.get("/{logical_id}/versions", response_model=list[ModelArtifactRead])
+def list_model_versions(
+    logical_id: str,
+    principal: Principal = Depends(require_user),
+) -> list[ModelArtifactRead]:
+    return [
+        ModelArtifactRead.model_validate(model)
+        for model in service.list_versions(logical_id, principal)
+    ]
+
+
 @router.get("/{model_id}", response_model=ModelArtifactRead)
 def get_model(model_id: str, principal: Principal = Depends(require_user)) -> ModelArtifactRead:
     return ModelArtifactRead.model_validate(service.get_model(model_id, principal))

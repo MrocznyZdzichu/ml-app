@@ -63,6 +63,12 @@ def test_training_and_scoring_process_full_declared_inputs(tmp_path: Path) -> No
     assert model["data_scope"] == "full"
     assert model["metrics"]["evaluated_row_count"] == 20
     assert model["model_hash"]
+    assert model["training_config"]["feature_columns"] == ["x"]
+    assert model["training_config"]["target_column"] == "target"
+    assert model["model_parameters"]["total_weight_count"] == 1
+    assert model["model_parameters"]["weights"][0]["feature"] == "x"
+    assert model["model_parameters"]["returned_weight_count"] == 1
+    assert model["model_parameters"]["truncated"] is False
 
     scored = SklearnScoringEngine(repository).execute(
         ScoringDefinition(

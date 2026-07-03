@@ -56,6 +56,9 @@ class PipelineRead(BaseModel):
     updated_by: str
     created_at: datetime
     updated_at: datetime
+    latest_published_version_number: int | None
+    published_version_count: int
+    draft_version_number: int | None
 
 
 class PipelineVersionUpdate(BaseModel):

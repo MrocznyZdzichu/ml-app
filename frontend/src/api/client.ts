@@ -378,11 +378,35 @@ export type AnalysisJob = {
 
 export type ModelArtifact = {
   id: string;
+  owner_id: string;
+  training_job_id: string;
   name: string;
   version: string;
+  logical_id: string;
+  version_number: number;
   algorithm: string;
   stage: string;
   artifact_uri: string;
+  metrics: Record<string, number>;
+  business_case_id: string;
+  pipeline_id: string;
+  pipeline_version_id: string;
+  pipeline_run_id: string;
+  pipeline_step_id: string;
+  problem_type: string;
+  target_column: string;
+  feature_columns: string[];
+  model_hash: string;
+  training_config: Record<string, unknown>;
+  model_parameters: {
+    weights?: Array<{ class: unknown; feature: string; weight: number }>;
+    intercepts?: number[];
+    total_weight_count?: number;
+    returned_weight_count?: number;
+    truncated?: boolean;
+  };
+  lineage: Record<string, unknown>;
+  created_at: string;
 };
 
 export type Deployment = {
@@ -414,6 +438,9 @@ export type BusinessCase = {
   updated_by: string;
   created_at: string;
   updated_at: string;
+  latest_published_version_number: number | null;
+  published_version_count: number;
+  draft_version_number: number | null;
 };
 
 export type BusinessCaseDataAttachment = {
@@ -479,7 +506,7 @@ export type PipelineRun = {
   output_artifact_ids: string[];
   output_manifest: Array<{
     output_id: string;
-    artifact_type?: "dataset" | "feature_transform";
+    artifact_type?: "dataset" | "prediction_dataset" | "feature_transform" | "model_version" | "metrics";
     materialization: "temporary" | "dataset" | "artifact";
     location_uri: string;
     row_count?: number;
@@ -750,6 +777,8 @@ export const api = {
       body: JSON.stringify(payload)
     }),
   listModels: () => request<ModelArtifact[]>("/models"),
+  listModelVersions: (logicalId: string) =>
+    request<ModelArtifact[]>(`/models/${encodeURIComponent(logicalId)}/versions`),
   createDeployment: (payload: Record<string, unknown>) =>
     request<Deployment>("/serving/deployments", {
       method: "POST",

@@ -96,7 +96,35 @@ class PipelineService:
     def list_pipelines(self, principal: Principal, business_case_id: str | None = None) -> list[Pipeline]:
         if business_case_id:
             self.business_cases.get_business_case(business_case_id, principal)
-        return self.repository.list_pipelines(principal.user_id, business_case_id)
+        pipelines = self.repository.list_pipelines(principal.user_id, business_case_id)
+        versions_by_pipeline: dict[str, list[PipelineVersion]] = {
+            pipeline.id: [] for pipeline in pipelines
+        }
+        for version in self.repository.list_versions_for_pipelines(
+            principal.user_id,
+            list(versions_by_pipeline),
+        ):
+            versions_by_pipeline.setdefault(version.pipeline_id, []).append(version)
+        for pipeline in pipelines:
+            versions = versions_by_pipeline[pipeline.id]
+            published = [
+                version for version in versions
+                if version.status == PipelineVersionStatus.PUBLISHED
+            ]
+            drafts = [
+                version for version in versions
+                if version.status == PipelineVersionStatus.DRAFT
+            ]
+            pipeline.latest_published_version_number = (
+                max(version.version_number for version in published)
+                if published else None
+            )
+            pipeline.published_version_count = len(published)
+            pipeline.draft_version_number = (
+                max(version.version_number for version in drafts)
+                if drafts else None
+            )
+        return pipelines
 
     def get_pipeline(self, pipeline_id: str, principal: Principal) -> Pipeline:
         pipeline = self.repository.get_pipeline(pipeline_id)

@@ -239,6 +239,12 @@ class SklearnTrainingEngine:
                 json.dumps(metrics, sort_keys=True, ensure_ascii=True),
                 encoding="utf-8",
             )
+            training_config = definition.model_dump(mode="json")
+            model_parameters = self._model_parameter_summary(
+                estimator,
+                definition.feature_columns,
+                classes.tolist() if classes is not None else [],
+            )
             return ModelingResult(
                 input_row_count=row_count,
                 processed_row_count=row_count * actual_epochs,
@@ -263,6 +269,8 @@ class SklearnTrainingEngine:
                         "target_column": definition.target_column,
                         "model_hash": model_hash,
                         "metrics": metrics,
+                        "training_config": training_config,
+                        "model_parameters": model_parameters,
                         "row_count": 1,
                         "data_scope": "full",
                         "is_dry_run": is_dry_run,
@@ -281,6 +289,44 @@ class SklearnTrainingEngine:
             )
         finally:
             connection.close()
+
+    @staticmethod
+    def _model_parameter_summary(
+        estimator: Any,
+        feature_columns: list[str],
+        classes: list[Any],
+        limit: int = 2_000,
+    ) -> dict[str, Any]:
+        """Return a bounded, JSON-safe view of fitted linear-model parameters."""
+        coefficients = np.asarray(getattr(estimator, "coef_", np.empty((0, 0))))
+        if coefficients.ndim == 1:
+            coefficients = coefficients.reshape(1, -1)
+        weights: list[dict[str, Any]] = []
+        total_weight_count = int(coefficients.size)
+        for class_index, row in enumerate(coefficients):
+            class_label = classes[class_index] if class_index < len(classes) else None
+            for feature_index, value in enumerate(row):
+                if len(weights) >= limit:
+                    break
+                weights.append({
+                    "class": json_safe(class_label),
+                    "feature": (
+                        feature_columns[feature_index]
+                        if feature_index < len(feature_columns)
+                        else f"feature_{feature_index}"
+                    ),
+                    "weight": float(value),
+                })
+            if len(weights) >= limit:
+                break
+        intercept = np.asarray(getattr(estimator, "intercept_", np.empty(0))).reshape(-1)
+        return {
+            "weights": weights,
+            "intercepts": [float(value) for value in intercept[:100]],
+            "total_weight_count": total_weight_count,
+            "returned_weight_count": len(weights),
+            "truncated": total_weight_count > len(weights),
+        }
 
     @staticmethod
     def _estimator(definition: TrainingDefinition):

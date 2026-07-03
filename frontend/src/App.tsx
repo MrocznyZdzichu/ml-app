@@ -67,6 +67,7 @@ import {
 import type { WorkflowDefinition } from "./pipelines/workflowContract";
 import {
   DryRunPreview,
+  PipelineVersionHistoryDialog,
   PipelineRunDetailsDialog,
   PipelineRunHistoryDialog
 } from "./pipelines/PipelineRunDialogs";
@@ -138,6 +139,7 @@ export default function App() {
     datasetId: string;
     requestId: number;
   } | null>(null);
+  const [modelBusinessCaseFilter, setModelBusinessCaseFilter] = useState("");
   const [apiStatus, setApiStatus] = useState("checking");
   const [authStatus, setAuthStatus] = useState(getAccessToken() ? "checking" : "anonymous");
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
@@ -237,6 +239,11 @@ export default function App() {
     setActiveTab("analysis");
   }
 
+  function openBusinessCaseModels(businessCaseId: string) {
+    setModelBusinessCaseFilter(businessCaseId);
+    setActiveTab("models");
+  }
+
   if (authStatus !== "authenticated" || !currentUser) {
     return (
       <AuthScreen
@@ -320,6 +327,7 @@ export default function App() {
             pipelines={pipelines}
             onRefresh={refreshWorkspace}
             onEditPipeline={openPipelineEditor}
+            onOpenModels={openBusinessCaseModels}
             setNotice={setNotice}
           />
         )}
@@ -350,16 +358,17 @@ export default function App() {
             openRequest={pipelineOpenRequest}
             onOpenRequestConsumed={() => setPipelineOpenRequest(null)}
             onRefresh={refreshWorkspace}
+            onExamineDataset={openDatasetAnalysis}
             setNotice={setNotice}
           />
         )}
         {activeTab === "models" && (
           <DeferredPanel>
             <ModelsPanel
-              datasets={datasets}
               models={models}
-              onRefresh={refreshWorkspace}
-              setNotice={setNotice}
+              businessCases={businessCases}
+              pipelines={pipelines}
+              initialBusinessCaseId={modelBusinessCaseFilter}
             />
           </DeferredPanel>
         )}
@@ -394,6 +403,7 @@ function BusinessCasesPanel({
   pipelines,
   onRefresh,
   onEditPipeline,
+  onOpenModels,
   setNotice
 }: {
   businessCases: BusinessCase[];
@@ -401,6 +411,7 @@ function BusinessCasesPanel({
   pipelines: Pipeline[];
   onRefresh: () => Promise<void>;
   onEditPipeline: (pipelineId: string) => void;
+  onOpenModels: (businessCaseId: string) => void;
   setNotice: (message: string) => void;
 }) {
   const [name, setName] = useState("");
@@ -696,6 +707,14 @@ function BusinessCasesPanel({
                 >
                   <Share2 size={14} />
                   Pipelines
+                </button>
+                <button
+                  className="secondary-button compact-button"
+                  type="button"
+                  onClick={() => onOpenModels(item.id)}
+                >
+                  <Brain size={14} />
+                  Models
                 </button>
               </div>
             </div>
@@ -1013,6 +1032,7 @@ function PipelinesPanel({
   openRequest,
   onOpenRequestConsumed,
   onRefresh,
+  onExamineDataset,
   setNotice
 }: {
   businessCases: BusinessCase[];
@@ -1021,6 +1041,7 @@ function PipelinesPanel({
   openRequest: { pipelineId: string; requestId: number } | null;
   onOpenRequestConsumed: () => void;
   onRefresh: () => Promise<void>;
+  onExamineDataset: (datasetId: string) => void;
   setNotice: (message: string) => void;
 }) {
   const [businessCaseId, setBusinessCaseId] = useState("");
@@ -1061,6 +1082,7 @@ function PipelinesPanel({
   const [activeStepRuns, setActiveStepRuns] = useState<PipelineStepRun[]>([]);
   const [selectedRunDetails, setSelectedRunDetails] = useState<PipelineRun | null>(null);
   const [isRunHistoryOpen, setIsRunHistoryOpen] = useState(false);
+  const [versionHistoryPipeline, setVersionHistoryPipeline] = useState<Pipeline | null>(null);
   const [runHistoryRefreshKey, setRunHistoryRefreshKey] = useState(0);
   const [pipelineDataAttachments, setPipelineDataAttachments] = useState<BusinessCaseDataAttachment[]>([]);
   const selectedPipeline = pipelines.find((item) => item.id === selectedPipelineId) ?? pipelines[0];
@@ -1446,16 +1468,31 @@ function PipelinesPanel({
           </div>
           <div className="pipeline-table" role="table" aria-label="Pipelines">
             <div className="pipeline-table-row head" role="row">
-              <span>Name</span><span>Business case</span><span>Purpose</span><span>Status</span><span>Updated</span><span />
+              <span>Name</span><span>Business case</span><span>Purpose</span><span>Version</span><span>Status</span><span>Updated</span><span />
             </div>
             {pipelines.map((item) => (
               <div className="pipeline-table-row" role="row" key={item.id}>
                 <span><strong>{item.name}</strong><small>{item.description || "No description"}</small></span>
                 <span>{businessCaseName(businessCases, item.business_case_id)}</span>
                 <span>{item.type.replaceAll("_", " ")}</span>
+                <span>
+                  <strong>{item.latest_published_version_number ? `v${item.latest_published_version_number}` : "—"}</strong>
+                  <small>
+                    {item.published_version_count} published
+                    {item.draft_version_number ? ` · v${item.draft_version_number} draft` : ""}
+                  </small>
+                </span>
                 <span><i className={`pipeline-status ${item.status}`}>{item.status}</i></span>
                 <span>{formatDateTime(item.updated_at)}</span>
                 <span>
+                  <button
+                    className="secondary-button compact-button"
+                    type="button"
+                    disabled={item.published_version_count === 0}
+                    onClick={() => setVersionHistoryPipeline(item)}
+                  >
+                    <History size={14} /> Versions
+                  </button>
                   <button
                     className="primary-button compact-button"
                     type="button"
@@ -1518,6 +1555,14 @@ function PipelinesPanel({
             refreshKey={runHistoryRefreshKey}
             onClose={() => setIsRunHistoryOpen(false)}
             onDetails={setSelectedRunDetails}
+            onExamineDataset={onExamineDataset}
+          />
+        )}
+        {versionHistoryPipeline && (
+          <PipelineVersionHistoryDialog
+            pipeline={versionHistoryPipeline}
+            businessCaseName={businessCaseName(businessCases, versionHistoryPipeline.business_case_id)}
+            onClose={() => setVersionHistoryPipeline(null)}
           />
         )}
         {selectedRunDetails && (

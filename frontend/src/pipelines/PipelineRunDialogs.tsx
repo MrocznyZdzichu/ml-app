@@ -1,28 +1,171 @@
-import { ChevronLeft, ChevronRight, RotateCcw, Search, X } from "lucide-react";
+import { Box, Check, ChevronLeft, ChevronRight, Clipboard, Database, Download, Eye, RotateCcw, Search, X } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { api } from "../api/client";
 import type {
   BusinessCase,
   Pipeline,
+  PipelineVersion,
   PipelineRun,
   PipelineRunDetails,
   PipelineRunOutputPreview,
   PipelineRunOutputProfile
 } from "../api/client";
 
+export function PipelineVersionHistoryDialog({
+  pipeline,
+  businessCaseName,
+  onClose
+}: {
+  pipeline: Pipeline;
+  businessCaseName: string;
+  onClose: () => void;
+}) {
+  const [versions, setVersions] = useState<PipelineVersion[]>([]);
+  const [selectedVersion, setSelectedVersion] = useState<PipelineVersion | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    api.listPipelineVersions(pipeline.id)
+      .then((items) => {
+        if (!active) return;
+        setVersions(
+          items
+            .filter((item) => item.status === "published")
+            .sort((left, right) => right.version_number - left.version_number)
+        );
+      })
+      .catch((requestError) => active && setError(
+        requestError instanceof Error ? requestError.message : "Could not load pipeline versions"
+      ));
+    return () => { active = false; };
+  }, [pipeline.id]);
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <div className="modal-dialog pipeline-version-history-dialog" role="dialog" aria-modal="true" aria-label={`Published versions of ${pipeline.name}`}>
+        <div className="modal-header">
+          <div>
+            <span className="builder-kicker">Published workflow</span>
+            <h2>{pipeline.name}</h2>
+            <p>{businessCaseName} · immutable definitions used by pipeline runs</p>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close pipeline versions"><X size={18} /></button>
+        </div>
+        {error && <div className="error-banner">{error}</div>}
+        {!versions.length && !error && <div className="empty-state">Loading published versions…</div>}
+        <div className="pipeline-version-history-layout">
+          <div className="pipeline-version-list">
+            {versions.map((version, index) => (
+              <article className={selectedVersion?.id === version.id ? "selected" : ""} key={version.id}>
+                <div className="pipeline-version-marker">v{version.version_number}</div>
+                <div>
+                  <strong>
+                    Version {version.version_number}
+                    {index === 0 && <i className="pipeline-status published">latest</i>}
+                  </strong>
+                  <span>{version.published_at ? formatDateTime(version.published_at) : "publication date unavailable"}</span>
+                  <small>definition hash {version.definition_hash.slice(0, 12)}</small>
+                </div>
+                <button className="secondary-button compact-button" type="button" onClick={() => setSelectedVersion(version)}>
+                  Inspect
+                </button>
+              </article>
+            ))}
+          </div>
+        </div>
+        {selectedVersion && (
+          <PipelineDefinitionDialog
+            pipeline={pipeline}
+            version={selectedVersion}
+            onClose={() => setSelectedVersion(null)}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PipelineDefinitionDialog({
+  pipeline,
+  version,
+  onClose
+}: {
+  pipeline: Pipeline;
+  version: PipelineVersion;
+  onClose: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState("");
+  const definitionJson = JSON.stringify(version.definition, null, 2);
+
+  async function copyDefinition() {
+    setError("");
+    try {
+      await navigator.clipboard.writeText(definitionJson);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1800);
+    } catch {
+      setError("Clipboard access was denied by the browser.");
+    }
+  }
+
+  function downloadDefinition() {
+    const blob = new Blob([definitionJson], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${safeDownloadName(pipeline.name)}-v${version.version_number}.json`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
+  return (
+    <div className="modal-backdrop definition-modal-backdrop nested-modal" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="modal-dialog pipeline-definition-dialog" role="dialog" aria-modal="true" aria-label={`Pipeline ${pipeline.name} version ${version.version_number} definition`}>
+        <header className="pipeline-definition-header">
+          <div>
+            <span className="builder-kicker">Immutable pipeline definition</span>
+            <h2>{pipeline.name} · v{version.version_number}</h2>
+            <p>Hash <code>{version.definition_hash}</code></p>
+          </div>
+          <div className="pipeline-definition-actions">
+            <button className="secondary-button" type="button" onClick={copyDefinition}>
+              {copied ? <Check size={15} /> : <Clipboard size={15} />}
+              {copied ? "Copied" : "Copy definition"}
+            </button>
+            <button className="primary-button" type="button" onClick={downloadDefinition}>
+              <Download size={15} /> Download JSON
+            </button>
+            <button className="icon-button" type="button" onClick={onClose} aria-label="Close definition"><X size={18} /></button>
+          </div>
+        </header>
+        {error && <div className="error-banner">{error}</div>}
+        <div className="pipeline-definition-code">
+          <pre>{definitionJson}</pre>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export function PipelineRunHistoryDialog({
   pipelines,
   businessCases,
   refreshKey,
   onClose,
-  onDetails
+  onDetails,
+  onExamineDataset
 }: {
   pipelines: Pipeline[];
   businessCases: BusinessCase[];
   refreshKey: number;
   onClose: () => void;
   onDetails: (run: PipelineRun) => void;
+  onExamineDataset: (datasetId: string) => void;
 }) {
   const [historyRuns, setHistoryRuns] = useState<PipelineRun[]>([]);
   const [pipelineFilter, setPipelineFilter] = useState("all");
@@ -30,6 +173,7 @@ export function PipelineRunHistoryDialog({
   const [reloadKey, setReloadKey] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [artifactsRun, setArtifactsRun] = useState<PipelineRun | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -148,19 +292,119 @@ export function PipelineRunHistoryDialog({
                     </small>
                   </span>
                   <span>
-                    <button
-                      className="secondary-button compact-button"
-                      type="button"
-                      onClick={() => onDetails(run)}
-                    >
-                      Details
-                    </button>
+                    <div className="run-row-actions">
+                      <button
+                        className="secondary-button compact-button"
+                        type="button"
+                        onClick={() => setArtifactsRun(run)}
+                        disabled={run.status !== "succeeded" || run.is_dry_run}
+                      >
+                        <Box size={14} /> Generated artifacts
+                      </button>
+                      <button
+                        className="secondary-button compact-button"
+                        type="button"
+                        onClick={() => onDetails(run)}
+                      >
+                        Details
+                      </button>
+                    </div>
                   </span>
                 </div>
               );
             })}
             {!visibleRuns.length && (
               <div className="catalog-empty">No runs match the selected filters.</div>
+            )}
+          </div>
+        )}
+        {artifactsRun && (
+          <GeneratedArtifactsDialog
+            run={artifactsRun}
+            onClose={() => setArtifactsRun(null)}
+            onExamineDataset={(datasetId) => {
+              setArtifactsRun(null);
+              onClose();
+              onExamineDataset(datasetId);
+            }}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function GeneratedArtifactsDialog({
+  run,
+  onClose,
+  onExamineDataset
+}: {
+  run: PipelineRun;
+  onClose: () => void;
+  onExamineDataset: (datasetId: string) => void;
+}) {
+  const [details, setDetails] = useState<PipelineRunDetails | null>(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    api.getPipelineRunDetails(run.pipeline_id, run.id)
+      .then((result) => active && setDetails(result))
+      .catch((requestError) => active && setError(
+        requestError instanceof Error ? requestError.message : "Could not load generated artifacts"
+      ));
+    return () => { active = false; };
+  }, [run.id, run.pipeline_id]);
+
+  const artifactByReference = new Map(
+    (details?.lineage ?? []).map((item) => [item.reference_id, item])
+  );
+  return (
+    <div className="modal-backdrop nested-modal" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <div className="modal-dialog generated-artifacts-dialog" role="dialog" aria-modal="true" aria-label="Generated artifacts">
+        <div className="modal-header">
+          <div>
+            <span className="builder-kicker">Pipeline run {shortId(run.id)}</span>
+            <h2>Generated artifacts</h2>
+            <p>{run.output_artifact_ids.length} registered objects · {run.output_row_count ?? 0} output rows processed at full scope.</p>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close generated artifacts"><X size={18} /></button>
+        </div>
+        {error && <div className="error-banner">{error}</div>}
+        {!details && !error && <div className="empty-state">Loading generated artifacts…</div>}
+        {details && (
+          <div className="generated-artifact-list">
+            {details.outputs.filter((output) => output.artifact_id).map((output) => {
+              const lineage = details.lineage.find((item) => item.artifact_id === output.artifact_id)
+                ?? artifactByReference.get(output.dataset_id ?? "");
+              const isDataset = ["dataset", "prediction_dataset"].includes(output.artifact_type ?? "");
+              return (
+                <article key={`${output.pipeline_step_id}:${output.output_id}`}>
+                  <div className="generated-artifact-icon">
+                    {isDataset ? <Database size={18} /> : <Box size={18} />}
+                  </div>
+                  <div>
+                    <strong>{output.dataset_name || output.output_id}</strong>
+                    <span>
+                      {(output.artifact_type ?? "artifact").replaceAll("_", " ")}
+                      {" · "}{output.row_count ?? "—"} rows
+                      {" · "}{output.data_scope} scope
+                    </span>
+                    <small>
+                      artifact {shortId(output.artifact_id ?? "")}
+                      {lineage ? ` · step ${String(lineage.lineage.pipeline_step_id ?? "unknown")}` : ""}
+                    </small>
+                  </div>
+                  {isDataset && output.dataset_id && (
+                    <button className="primary-button compact-button" type="button" onClick={() => onExamineDataset(output.dataset_id!)}>
+                      <Eye size={14} /> Examine
+                    </button>
+                  )}
+                </article>
+              );
+            })}
+            {!details.outputs.some((output) => output.artifact_id) && (
+              <div className="empty-state">This run did not register persistent output artifacts.</div>
             )}
           </div>
         )}
@@ -665,6 +909,14 @@ function durationLabel(
 
 function shortId(value: string) {
   return value.slice(0, 8);
+}
+
+function safeDownloadName(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "pipeline";
 }
 
 function displayPreviewValue(value: unknown) {

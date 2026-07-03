@@ -132,6 +132,13 @@ class PipelineRepository(Protocol):
     def list_versions(self, pipeline_id: str) -> list[PipelineVersion]:
         ...
 
+    def list_versions_for_pipelines(
+        self,
+        owner_id: str,
+        pipeline_ids: list[str],
+    ) -> list[PipelineVersion]:
+        ...
+
     def get_version(self, version_id: str) -> PipelineVersion | None:
         ...
 
@@ -203,6 +210,19 @@ class InMemoryPipelineRepository:
         return sorted(
             [item for item in self._versions.values() if item.pipeline_id == pipeline_id],
             key=lambda item: item.version_number,
+        )
+
+    def list_versions_for_pipelines(
+        self,
+        owner_id: str,
+        pipeline_ids: list[str],
+    ) -> list[PipelineVersion]:
+        return sorted(
+            [
+                item for item in self._versions.values()
+                if item.owner_id == owner_id and item.pipeline_id in pipeline_ids
+            ],
+            key=lambda item: (item.pipeline_id, item.version_number),
         )
 
     def get_version(self, version_id: str) -> PipelineVersion | None:
@@ -313,6 +333,31 @@ class PostgresPipelineRepository:
         )
         with self.engine.begin() as connection:
             return [self._version_from_record(row._mapping) for row in connection.execute(statement)]
+
+    def list_versions_for_pipelines(
+        self,
+        owner_id: str,
+        pipeline_ids: list[str],
+    ) -> list[PipelineVersion]:
+        if not pipeline_ids:
+            return []
+        self._ensure_initialized()
+        statement = (
+            select(pipeline_versions_table)
+            .where(
+                pipeline_versions_table.c.owner_id == owner_id,
+                pipeline_versions_table.c.pipeline_id.in_(pipeline_ids),
+            )
+            .order_by(
+                pipeline_versions_table.c.pipeline_id.asc(),
+                pipeline_versions_table.c.version_number.asc(),
+            )
+        )
+        with self.engine.begin() as connection:
+            return [
+                self._version_from_record(row._mapping)
+                for row in connection.execute(statement)
+            ]
 
     def get_version(self, version_id: str) -> PipelineVersion | None:
         self._ensure_initialized()
