@@ -16,6 +16,9 @@ Niniejsze instrukcje obowiązują podczas wszystkich prac w tym repozytorium.
 
 ## Obowiązkowy workflow
 
+- Domyślną gałęzią roboczą zespołu przed pierwszym wydaniem jest `dev`. Nie twórz standardowo osobnych feature branchy, chyba że użytkownik wyraźnie poprosi o wyjątek.
+- Zmiany integrujemy na `dev`, a do `master` przenosimy je okresowo jako świadome podbicie stabilniejszego stanu.
+- Traktuj gałąź `dev` jako gałąź trwałą; nie planuj jej usuwania po merge'ach.
 - Po każdej zmianie w repozytorium uruchom `rebuild-run.bat` i sprawdź, czy zakończył się powodzeniem.
 - Weryfikuj zmiany proporcjonalnie do ryzyka: wykonuj odpowiednie testy, kompilację, kontrolę typów i test działającej aplikacji.
 - Nie uznawaj zadania za zakończone, jeśli aplikacja po zmianach nie została uruchomiona lub istotna ścieżka nie została zweryfikowana.
