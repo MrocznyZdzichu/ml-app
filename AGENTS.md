@@ -229,6 +229,11 @@ Poniższe ustalenia są obowiązującym kierunkiem rozwoju platformy po rozmowie
 - Pozniejszy pipeline `monitoring` przyjmuje prediction dataset i actuals, wykonuje jawny join targetow oraz dopiero wtedy wylicza metryki i tworzy raport skutecznosci.
 - Nie modyfikuj prediction datasetu po nadejsciu targetow; target joining tworzy nowy wersjonowany artefakt.
 - DE w automatycznie tworzonym pipeline batch scoringowym zawiera tylko deterministyczne, inference-safe przygotowanie wymagane przez kontrakt modelu. Nie przenos training-only splitow, operacji zaleznych od targetu ani transformacji fitowanych na biezacym batchu.
+- Tworzenie pipeline'u rozroznia `purpose` (metadane/kontekst) od `template` (poczatkowy edytowalny szkielet). UI sugeruje template na podstawie purpose, ale zapisuje wybrany template w parametrach definicji.
+- Pierwsze template'y: `training` = DE, FE, Training, Test Scoring; `batch_scoring` = DE, FE Transform, Batch Scoring. Template monitoringu pokazuj jako planowany, ale nie jako wykonywalny, dopoki nie istnieja handlery target join i KPI report.
+- Batch scoring konfiguruj akcja `Infer from training pipeline`. Sam pipeline i numer jego wersji nie identyfikuja artefaktow, bo wersja moze miec wiele runow. Uzytkownik wybiera pipeline, opublikowana PipelineVersion i konkretny Model Version/run.
+- Inferowany draft przypina konkretny model artifact oraz fitted transform artifact z tego samego runu, kopiuje recepture FE w trybie transform i tylko inference-safe kroki DE. Pominiete kroki training-only komunikuj jawnie; nie wybieraj po cichu `latest`.
+- W pipeline batch scoringowym nie wymagaj recznego wklejania identyfikatora fitted state ani nie pokazuj krokow Training/Test Scoring jako sugerowanych operacji.
 
 ### Dynamiczne cechy i portowe lineage
 

@@ -62,7 +62,10 @@ export function WorkflowDiagram({
                 <small>STEP {index + 1}</small>
                 <strong>{step.name}</strong>
                 <em>{step.type === "training" ? `${count} features`
-                  : step.type === "scoring" ? "batch prediction"
+                  : step.type === "scoring"
+                    ? step.config.definition.purpose === "batch"
+                      ? "batch prediction"
+                      : "holdout evaluation"
                     : `${count} transformations`}</em>
               </span>
               <Settings2 size={16} />

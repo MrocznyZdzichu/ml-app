@@ -4181,6 +4181,38 @@ textarea {
 
 .bc-mapping-form {
   border-color: #a9c9c5;
+  max-width: 620px;
+  width: min(620px, calc(100vw - 32px));
+}
+
+.form-warning,
+.inference-summary {
+  border: 1px solid #c9a96a;
+  border-radius: 8px;
+  display: grid;
+  gap: 4px;
+  padding: 11px 13px;
+}
+
+.form-warning {
+  background: rgba(201, 169, 106, 0.1);
+  color: #d9b979;
+}
+
+.inference-summary {
+  background: rgba(26, 188, 156, 0.08);
+  border-color: rgba(26, 188, 156, 0.45);
+}
+
+.inference-summary span,
+.form-warning span {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.inference-source-dialog {
+  max-width: 680px;
+  width: min(680px, calc(100vw - 32px));
 }
 
 .bc-detail-panel {

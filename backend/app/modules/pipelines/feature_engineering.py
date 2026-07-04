@@ -255,8 +255,6 @@ class FeatureEngineeringDefinition(BaseModel):
         ) if value]
         if set(protected) & set(self.feature_columns):
             raise ValueError("Target, row ID, group and event time columns cannot be selected as features")
-        if self.mode == "transform" and not self.fitted_state_artifact_id:
-            raise ValueError("Transform mode requires fitted_state_artifact_id")
         if self.evaluation.split_strategy in {"random", "stratified"} and not self.row_id_column:
             raise ValueError("Random and stratified splits require row_id_column for reproducibility")
         if (
@@ -274,6 +272,8 @@ class FeatureEngineeringDefinition(BaseModel):
             raise ValueError("Executable Feature Engineering requires at least one output")
         if self.mode == "fit_transform" and "training" not in {item.role for item in self.inputs}:
             raise ValueError("fit_transform requires exactly one training input")
+        if self.mode == "transform" and not self.fitted_state_artifact_id:
+            raise ValueError("Transform mode requires fitted_state_artifact_id")
         if self.evaluation.split_strategy != "predefined":
             if len(self.inputs) != 1 or self.inputs[0].role != "training":
                 raise ValueError("Generated splits require one source input with the training role")

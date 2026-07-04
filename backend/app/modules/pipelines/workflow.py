@@ -208,6 +208,8 @@ def validate_workflow_definition(definition: dict[str, Any], executable: bool) -
             from app.modules.pipelines.modeling import TrainingDefinition
 
             validated = TrainingDefinition.model_validate(nested_definition)
+            if executable:
+                validated.validate_executable()
             step.config["definition"] = validated.model_dump(mode="json")
             ports = {item.port_id for item in step.inputs}
             if "training" not in ports:
@@ -225,6 +227,8 @@ def validate_workflow_definition(definition: dict[str, Any], executable: bool) -
             from app.modules.pipelines.modeling import ScoringDefinition
 
             validated = ScoringDefinition.model_validate(nested_definition)
+            if executable:
+                validated.validate_executable()
             step.config["definition"] = validated.model_dump(mode="json")
             ports = {item.port_id for item in step.inputs}
             if validated.purpose == "batch":

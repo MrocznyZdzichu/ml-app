@@ -64,9 +64,10 @@ import {
 import {
   canonicalizeWorkflowDatasetIds,
   emptyWorkflowDefinition,
-  normalizeWorkflowDefinition
+  normalizeWorkflowDefinition,
+  workflowTemplateDefinition
 } from "./pipelines/workflowContract";
-import type { WorkflowDefinition } from "./pipelines/workflowContract";
+import type { PipelineTemplate, WorkflowDefinition } from "./pipelines/workflowContract";
 import {
   browsableDryRunOutputs,
   DryRunPreview,
@@ -1067,9 +1068,13 @@ function BusinessCasesPanel({
             </div>
 
             {isMappingFormOpen && (
-              <form className="panel form-panel bc-mapping-form" onSubmit={attachData}>
-                <div className="panel-header">
+              <div className="modal-backdrop" role="presentation"
+                onMouseDown={(event) => event.target === event.currentTarget && resetDataMappingForm()}>
+              <form className="modal-dialog form-panel bc-mapping-form" onSubmit={attachData}
+                onMouseDown={(event) => event.stopPropagation()}>
+                <div className="modal-header">
                   <div>
+                    <span className="builder-kicker">Business Case data</span>
                     <h2>{editingAttachmentId ? "Edit data mapping" : "Add data mapping"}</h2>
                     <p>
                       {editingAttachmentId
@@ -1077,7 +1082,8 @@ function BusinessCasesPanel({
                         : "Connect a dataset or Data View to this business case."}
                     </p>
                   </div>
-                  <Database size={18} />
+                  <button className="icon-button" type="button" onClick={resetDataMappingForm}
+                    aria-label="Close data mapping"><X size={17} /></button>
                 </div>
                 <label>
                   Dataset/Data View
@@ -1128,6 +1134,7 @@ function BusinessCasesPanel({
                   </button>
                 </div>
               </form>
+              </div>
             )}
 
             {deletedAttachments.length > 0 && (
@@ -1427,6 +1434,7 @@ function PipelinesPanel({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [pipelineType, setPipelineType] = useState("custom");
+  const [pipelineTemplate, setPipelineTemplate] = useState<PipelineTemplate>("custom");
   const [selectedPipelineId, setSelectedPipelineId] = useState("");
   const [isCreatePipelineOpen, setIsCreatePipelineOpen] = useState(false);
   const [copyPipelineTarget, setCopyPipelineTarget] = useState<Pipeline | null>(null);
@@ -1577,7 +1585,7 @@ function PipelinesPanel({
       name,
       description,
       type: pipelineType,
-      definition: emptyWorkflowDefinition()
+      definition: workflowTemplateDefinition(pipelineTemplate)
     });
     setNotice(`Pipeline created: ${created.name}`);
     setSelectedPipelineId(created.id);
@@ -1585,6 +1593,7 @@ function PipelinesPanel({
     setIsPipelineEditorOpen(true);
     setName("");
     setDescription("");
+    setPipelineTemplate(suggestedPipelineTemplate(pipelineType));
     await onRefresh();
   }
 
@@ -2031,17 +2040,41 @@ function PipelinesPanel({
               </label>
               <label>Name<input value={name} onChange={(event) => setName(event.target.value)} autoFocus required /></label>
               <label>Purpose
-                <select value={pipelineType} onChange={(event) => setPipelineType(event.target.value)}>
+                <select value={pipelineType} onChange={(event) => {
+                  const purpose = event.target.value;
+                  setPipelineType(purpose);
+                  setPipelineTemplate(suggestedPipelineTemplate(purpose));
+                }}>
                   <option value="custom">Custom workflow</option>
                   <option value="training">Training workflow</option>
-                  <option value="batch_scoring">Scoring workflow</option>
+                  <option value="batch_scoring">Batch scoring</option>
                   <option value="monitoring">Monitoring workflow</option>
                 </select>
               </label>
+              <label>Template
+                <select value={pipelineTemplate}
+                  onChange={(event) => setPipelineTemplate(event.target.value as PipelineTemplate)}>
+                  <option value="custom">Empty custom workflow</option>
+                  <option value="training">Training · DE, FE, Training, Test Scoring</option>
+                  <option value="batch_scoring">Batch scoring · DE, FE Transform, Batch Scoring</option>
+                  <option value="monitoring" disabled>Monitoring · planned, not executable yet</option>
+                </select>
+                <small>
+                  Suggested from purpose. The template initializes an editable draft; purpose remains metadata.
+                </small>
+              </label>
+              {pipelineType === "monitoring" && (
+                <div className="form-warning">
+                  Monitoring requires target joining and KPI-report execution, which are not implemented yet.
+                </div>
+              )}
               <label>Description<textarea className="compact-textarea" value={description} onChange={(event) => setDescription(event.target.value)} /></label>
               <div className="modal-actions">
                 <button className="secondary-button" type="button" onClick={() => setIsCreatePipelineOpen(false)}>Cancel</button>
-                <button className="primary-button" type="submit"><Plus size={16} /> Create pipeline</button>
+                <button className="primary-button" type="submit"
+                  disabled={pipelineType === "monitoring" || pipelineTemplate === "monitoring"}>
+                  <Plus size={16} /> Create pipeline
+                </button>
               </div>
             </form>
           </div>
@@ -2369,6 +2402,7 @@ function PipelinesPanel({
             businessCase={businessCases.find((item) => item.id === selectedBusinessCaseIdValue)}
             datasets={latestLogicalDatasetAliases(datasets)}
             models={models}
+            pipelines={pipelines}
             dataAttachments={pipelineDataAttachments.map((attachment) => {
               const dataset = datasets.find((item) => item.id === attachment.data_asset_id);
               return dataset ? { ...attachment, data_asset_id: dataset.logical_id } : attachment;
@@ -2625,6 +2659,13 @@ function businessCaseName(businessCases: BusinessCase[], businessCaseId: string)
 
 function pipelineName(pipelines: Pipeline[], pipelineId: string) {
   return pipelines.find((item) => item.id === pipelineId)?.name ?? "unknown pipeline";
+}
+
+function suggestedPipelineTemplate(purpose: string): PipelineTemplate {
+  if (purpose === "training") return "training";
+  if (purpose === "batch_scoring") return "batch_scoring";
+  if (purpose === "monitoring") return "monitoring";
+  return "custom";
 }
 
 function latestModelFamilies(models: ModelArtifact[]) {

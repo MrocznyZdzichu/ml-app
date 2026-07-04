@@ -36,8 +36,8 @@ class TrainingDefinition(BaseModel):
         "sgd_regressor",
         "passive_aggressive_regressor",
     ]
-    target_column: str = Field(min_length=1, max_length=255)
-    feature_columns: list[str] = Field(min_length=1, max_length=500)
+    target_column: str = Field(default="", max_length=255)
+    feature_columns: list[str] = Field(default_factory=list, max_length=500)
     feature_selection: Literal["upstream_contract", "explicit"] = "upstream_contract"
     model_name: str = Field(default="Trained model", min_length=1, max_length=200)
     epochs: int = Field(default=5, ge=1, le=100)
@@ -97,6 +97,12 @@ class TrainingDefinition(BaseModel):
                 raise ValueError(f"{non_negative_key} cannot be negative")
         return self
 
+    def validate_executable(self) -> None:
+        if not self.target_column:
+            raise ValueError("Training requires a target column")
+        if not self.feature_columns:
+            raise ValueError("Training requires at least one model feature")
+
 
 class ScoringDefinition(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -104,7 +110,7 @@ class ScoringDefinition(BaseModel):
     contract_version: Literal["1.0"] = "1.0"
     purpose: Literal["test", "batch"] = "test"
     model_artifact_id: str = Field(default="", max_length=128)
-    row_id_column: str = Field(min_length=1, max_length=255)
+    row_id_column: str = Field(default="", max_length=255)
     target_column: str = Field(default="", max_length=255)
     prediction_column: str = Field(default="prediction", min_length=1, max_length=255)
     dataset_name: str = Field(default="Model predictions", min_length=1, max_length=200)
@@ -114,14 +120,18 @@ class ScoringDefinition(BaseModel):
     @model_validator(mode="after")
     def validate_purpose(self) -> "ScoringDefinition":
         if self.purpose == "batch":
-            if not self.model_artifact_id:
-                raise ValueError("Batch scoring requires a pinned model_artifact_id")
             if self.target_column:
                 raise ValueError(
                     "Batch scoring cannot consume a target column; "
                     "actuals belong to a monitoring pipeline"
                 )
         return self
+
+    def validate_executable(self) -> None:
+        if not self.row_id_column:
+            raise ValueError("Scoring requires a row ID column")
+        if self.purpose == "batch" and not self.model_artifact_id:
+            raise ValueError("Batch scoring requires a pinned model_artifact_id")
 
 
 @dataclass(frozen=True)

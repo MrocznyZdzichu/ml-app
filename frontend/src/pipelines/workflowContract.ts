@@ -10,6 +10,8 @@ import {
 } from "./featureEngineeringContract";
 import type { FeatureEngineeringDefinition } from "./featureEngineeringContract";
 import {
+  emptyScoringDefinition,
+  emptyTrainingDefinition,
   normalizeScoringDefinition,
   normalizeTrainingDefinition
 } from "./modelingContract";
@@ -76,6 +78,153 @@ export type WorkflowDefinition = {
   }>;
   parameters: Record<string, unknown>;
 };
+
+export type PipelineTemplate = "training" | "batch_scoring" | "custom" | "monitoring";
+
+export function workflowTemplateDefinition(template: PipelineTemplate): WorkflowDefinition {
+  if (template === "custom" || template === "monitoring") {
+    return {
+      ...emptyWorkflowDefinition(),
+      parameters: { template }
+    };
+  }
+  const deStep: DataEngineeringWorkflowStep = {
+    step_id: "de_1",
+    name: template === "training" ? "Data Engineering" : "Scoring Data Engineering",
+    type: "data_engineering",
+    inputs: [],
+    output_port_id: "dataset",
+    additional_output_port_ids: [],
+    config: { definition: emptyPipelineDefinition() }
+  };
+  if (template === "batch_scoring") {
+    const featureDefinition: FeatureEngineeringDefinition = {
+      ...emptyFeatureEngineeringDefinition(),
+      mode: "transform",
+      inputs: [{
+        input_id: "scoring_input",
+        role: "scoring_input",
+        dataset_id: "",
+        version_policy: "select_at_run_any"
+      }],
+      outputs: [{
+        output_id: "scoring_features",
+        input_id: "scoring_input",
+        dataset_name: "Scoring features",
+        business_case_role: "scoring_input"
+      }]
+    };
+    const featureStep: FeatureEngineeringWorkflowStep = {
+      step_id: "fe_1",
+      name: "Feature Engineering Transform",
+      type: "feature_engineering",
+      inputs: [{
+        port_id: "scoring_input",
+        source: { step_id: deStep.step_id, port_id: deStep.output_port_id }
+      }],
+      output_port_id: "scoring_input",
+      additional_output_port_ids: [],
+      config: { definition: featureDefinition }
+    };
+    const scoringStep: Extract<WorkflowStepDefinition, { type: "scoring" }> = {
+      step_id: "scoring_1",
+      name: "Batch Scoring",
+      type: "scoring",
+      inputs: [{
+        port_id: "data",
+        source: { step_id: featureStep.step_id, port_id: featureStep.output_port_id }
+      }],
+      output_port_id: "predictions",
+      additional_output_port_ids: [],
+      config: {
+        definition: {
+          ...emptyScoringDefinition(),
+          purpose: "batch",
+          dataset_name: "Batch predictions",
+          report_name: "Batch scoring"
+        }
+      }
+    };
+    return {
+      contract_version: "2.0",
+      steps: [deStep, featureStep, scoringStep],
+      outputs: workflowOutputsForStep(scoringStep),
+      parameters: { template }
+    };
+  }
+
+  const featureDefinition: FeatureEngineeringDefinition = {
+    ...emptyFeatureEngineeringDefinition(),
+    inputs: [
+      { input_id: "training", role: "training", dataset_id: "", version_policy: "latest" },
+      { input_id: "validation", role: "validation", dataset_id: "", version_policy: "latest" },
+      { input_id: "test", role: "test", dataset_id: "", version_policy: "latest" }
+    ],
+    outputs: [
+      {
+        output_id: "training_features",
+        input_id: "training",
+        dataset_name: "Training features",
+        business_case_role: "training"
+      },
+      {
+        output_id: "validation_features",
+        input_id: "validation",
+        dataset_name: "Validation features",
+        business_case_role: "validation"
+      },
+      {
+        output_id: "test_features",
+        input_id: "test",
+        dataset_name: "Test features",
+        business_case_role: "test"
+      }
+    ]
+  };
+  const featureStep: FeatureEngineeringWorkflowStep = {
+    step_id: "fe_1",
+    name: "Feature Engineering",
+    type: "feature_engineering",
+    inputs: [{
+      port_id: "training",
+      source: { step_id: deStep.step_id, port_id: deStep.output_port_id }
+    }],
+    output_port_id: "training",
+    additional_output_port_ids: ["validation", "test", "fitted_transform"],
+    config: { definition: featureDefinition }
+  };
+  const trainingStep: Extract<WorkflowStepDefinition, { type: "training" }> = {
+    step_id: "training_1",
+    name: "Model Training",
+    type: "training",
+    inputs: [
+      { port_id: "training", source: { step_id: featureStep.step_id, port_id: "training" } },
+      { port_id: "validation", source: { step_id: featureStep.step_id, port_id: "validation" } },
+      { port_id: "fitted_transform", source: { step_id: featureStep.step_id, port_id: "fitted_transform" } }
+    ],
+    output_port_id: "model",
+    additional_output_port_ids: ["metrics"],
+    config: { definition: emptyTrainingDefinition() }
+  };
+  const scoringStep: Extract<WorkflowStepDefinition, { type: "scoring" }> = {
+    step_id: "scoring_1",
+    name: "Test Scoring",
+    type: "scoring",
+    inputs: [
+      { port_id: "data", source: { step_id: featureStep.step_id, port_id: "test" } },
+      { port_id: "model", source: { step_id: trainingStep.step_id, port_id: "model" } }
+    ],
+    output_port_id: "predictions",
+    additional_output_port_ids: [],
+    config: { definition: emptyScoringDefinition() }
+  };
+  return {
+    contract_version: "2.0",
+    steps: [deStep, featureStep, trainingStep, scoringStep],
+    outputs: workflowOutputsForStep(scoringStep),
+    parameters: { template }
+  };
+}
 
 export function canonicalizeWorkflowDatasetIds(
   definition: WorkflowDefinition,

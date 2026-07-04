@@ -72,6 +72,7 @@ export function FeatureEngineeringBuilder({
   dataAttachments,
   upstreamDefinition,
   hasUpstream,
+  fittedStateLocked = false,
   disabled,
   onChange
 }: {
@@ -80,6 +81,7 @@ export function FeatureEngineeringBuilder({
   dataAttachments: BusinessCaseDataAttachment[];
   upstreamDefinition?: PipelineDefinition;
   hasUpstream: boolean;
+  fittedStateLocked?: boolean;
   disabled: boolean;
   onChange: (definition: FeatureEngineeringDefinition) => void;
 }) {
@@ -358,7 +360,7 @@ export function FeatureEngineeringBuilder({
               className={definition.mode === mode ? "fe-choice selected" : "fe-choice"}
               type="button"
               key={mode}
-              disabled={disabled}
+              disabled={disabled || fittedStateLocked}
               onClick={() => onChange({ ...definition, mode })}
             >
               {definition.mode === mode && <Check size={16} />}
@@ -374,6 +376,7 @@ export function FeatureEngineeringBuilder({
             <span>Fitted transform artifact</span>
             <input
               value={definition.fitted_state_artifact_id}
+              readOnly={fittedStateLocked}
               disabled={disabled}
               onChange={(event) => onChange({
                 ...definition,
@@ -381,7 +384,9 @@ export function FeatureEngineeringBuilder({
               })}
               placeholder="Paste the ID shown after an official FE run"
             />
-            <small>The platform never resolves this as “latest”.</small>
+            <small>{fittedStateLocked
+              ? "Pinned automatically from the selected immutable training run."
+              : "The platform never resolves this as “latest”."}</small>
           </label>
         )}
       </section>

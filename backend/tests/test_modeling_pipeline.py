@@ -460,6 +460,19 @@ def test_training_parameters_are_scoped_to_selected_algorithm() -> None:
         )
 
 
+def test_incomplete_modeling_steps_are_valid_drafts_but_not_executable() -> None:
+    training = TrainingDefinition(
+        problem_type="binary_classification",
+        algorithm="sgd_classifier",
+    )
+    with pytest.raises(ValueError, match="target column"):
+        training.validate_executable()
+
+    scoring = ScoringDefinition(purpose="batch")
+    with pytest.raises(ValueError, match="row ID"):
+        scoring.validate_executable()
+
+
 def test_runtime_input_resolution_does_not_inject_inputs_into_training_definition() -> None:
     definition = {
         "steps": [
