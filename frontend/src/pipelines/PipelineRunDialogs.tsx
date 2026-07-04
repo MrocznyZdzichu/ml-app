@@ -1,6 +1,6 @@
 import { BarChart3, Box, Brain, Check, ChevronLeft, ChevronRight, Clipboard, Database, Download, Eye, RotateCcw, Search, X } from "lucide-react";
 import type { CSSProperties } from "react";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 
 import { api } from "../api/client";
 import type {
@@ -14,7 +14,11 @@ import type {
   PipelineRunOutputPreview,
   PipelineRunOutputProfile
 } from "../api/client";
-import { ModelDetailsDialog } from "../operational/LifecyclePanels";
+const ModelDetailsDialog = lazy(() =>
+  import("../operational/LifecyclePanels").then((module) => ({
+    default: module.ModelDetailsDialog
+  }))
+);
 
 export function PipelineVersionHistoryDialog({
   pipeline,
@@ -936,12 +940,14 @@ export function DryRunPreview({
       )}
       <small>Temporary Parquet · no official dataset or artifact was created.</small>
       {selectedModel && (
-        <ModelDetailsDialog
-          model={selectedModel}
-          businessCaseName="Dry-run preview"
-          pipelineName={`Pipeline ${run.pipeline_id.slice(0, 8)}`}
-          onClose={() => setSelectedModel(null)}
-        />
+        <Suspense fallback={null}>
+          <ModelDetailsDialog
+            model={selectedModel}
+            businessCaseName="Dry-run preview"
+            pipelineName={`Pipeline ${run.pipeline_id.slice(0, 8)}`}
+            onClose={() => setSelectedModel(null)}
+          />
+        </Suspense>
       )}
       {selectedReport && (
         <TemporaryScoringReportDialog

@@ -534,55 +534,120 @@ function BusinessCasesPanel({
   const [bcReportPipelineFilter, setBcReportPipelineFilter] = useState("");
 
   const selectedBusinessCase = businessCases.find((item) => item.id === selectedBusinessCaseId);
-  const datasetById = new Map(datasets.map((dataset) => [dataset.id, dataset]));
-  const availableDataAssets = datasetVersionGroups(
-    datasets.filter((dataset) => dataset.status !== "deleted")
-  ).map((group) => group.latest);
+  const datasetById = useMemo(
+    () => new Map(datasets.map((dataset) => [dataset.id, dataset])),
+    [datasets]
+  );
+  const activeDatasetGroups = useMemo(
+    () => datasetVersionGroups(datasets.filter((dataset) => dataset.status !== "deleted")),
+    [datasets]
+  );
+  const latestDatasetByLogicalId = useMemo(
+    () => new Map(activeDatasetGroups.map((group) => [group.logicalId, group.latest])),
+    [activeDatasetGroups]
+  );
+  const availableDataAssets = useMemo(
+    () => activeDatasetGroups.map((group) => group.latest),
+    [activeDatasetGroups]
+  );
   const attachedDataset = (dataAssetId: string) => {
     const attachedVersion = datasetById.get(dataAssetId);
     if (!attachedVersion) return undefined;
-    return datasetVersionGroups(
-      datasets.filter(
-        (dataset) => dataset.logical_id === attachedVersion.logical_id && dataset.status !== "deleted"
-      )
-    )[0]?.latest ?? attachedVersion;
+    return latestDatasetByLogicalId.get(attachedVersion.logical_id) ?? attachedVersion;
   };
-  const activeAttachments = attachments.filter((attachment) => attachedDataset(attachment.data_asset_id)?.status !== "deleted");
-  const deletedAttachments = attachments.filter((attachment) => attachedDataset(attachment.data_asset_id)?.status === "deleted");
-  const selectedBusinessCasePipelines = selectedBusinessCase
-    ? pipelines.filter((pipeline) => pipeline.business_case_id === selectedBusinessCase.id)
-    : [];
-  const selectedBusinessCaseModels = latestModelFamilies(
-    models.filter((model) => model.business_case_id === selectedBusinessCase?.id)
+  const activeAttachments = useMemo(
+    () => attachments.filter((attachment) => {
+      const attached = datasetById.get(attachment.data_asset_id);
+      const latest = attached
+        ? latestDatasetByLogicalId.get(attached.logical_id) ?? attached
+        : undefined;
+      return latest?.status !== "deleted";
+    }),
+    [attachments, datasetById, latestDatasetByLogicalId]
   );
-  const selectedBusinessCaseReports = latestReportFamilies(
-    scoringReports.filter((report) => report.business_case_id === selectedBusinessCase?.id)
+  const deletedAttachments = useMemo(
+    () => attachments.filter((attachment) => {
+      const attached = datasetById.get(attachment.data_asset_id);
+      const latest = attached
+        ? latestDatasetByLogicalId.get(attached.logical_id) ?? attached
+        : undefined;
+      return latest?.status === "deleted";
+    }),
+    [attachments, datasetById, latestDatasetByLogicalId]
   );
-  const visibleAttachments = activeAttachments.filter((attachment) => {
-    const dataset = attachedDataset(attachment.data_asset_id);
-    if (bcUploadedOnly) return isUploadedDataset(dataset);
-    return pipelineMatches(
-      datasetPipelineId(dataset),
-      selectedBusinessCasePipelines,
+  const selectedBusinessCasePipelines = useMemo(
+    () => selectedBusinessCase
+      ? pipelines.filter((pipeline) => pipeline.business_case_id === selectedBusinessCase.id)
+      : [],
+    [pipelines, selectedBusinessCase]
+  );
+  const selectedBusinessCaseModels = useMemo(
+    () => latestModelFamilies(
+      models.filter((model) => model.business_case_id === selectedBusinessCase?.id)
+    ),
+    [models, selectedBusinessCase]
+  );
+  const selectedBusinessCaseReports = useMemo(
+    () => latestReportFamilies(
+      scoringReports.filter((report) => report.business_case_id === selectedBusinessCase?.id)
+    ),
+    [scoringReports, selectedBusinessCase]
+  );
+  const visibleAttachments = useMemo(
+    () => activeAttachments.filter((attachment) => {
+      const attached = datasetById.get(attachment.data_asset_id);
+      const dataset = attached
+        ? latestDatasetByLogicalId.get(attached.logical_id) ?? attached
+        : undefined;
+      if (bcUploadedOnly) return isUploadedDataset(dataset);
+      return pipelineMatches(
+        datasetPipelineId(dataset),
+        selectedBusinessCasePipelines,
+        bcDataPurposeFilter,
+        bcDataPipelineFilter
+      );
+    }),
+    [
+      activeAttachments,
+      bcDataPipelineFilter,
       bcDataPurposeFilter,
-      bcDataPipelineFilter
-    );
-  });
-  const visibleBusinessCaseModels = selectedBusinessCaseModels.filter((model) =>
-    pipelineMatches(
-      model.pipeline_id,
-      selectedBusinessCasePipelines,
-      bcModelPurposeFilter,
-      bcModelPipelineFilter
-    )
+      bcUploadedOnly,
+      datasetById,
+      latestDatasetByLogicalId,
+      selectedBusinessCasePipelines
+    ]
   );
-  const visibleBusinessCaseReports = selectedBusinessCaseReports.filter((report) =>
-    pipelineMatches(
-      report.pipeline_id,
-      selectedBusinessCasePipelines,
+  const visibleBusinessCaseModels = useMemo(
+    () => selectedBusinessCaseModels.filter((model) =>
+      pipelineMatches(
+        model.pipeline_id,
+        selectedBusinessCasePipelines,
+        bcModelPurposeFilter,
+        bcModelPipelineFilter
+      )
+    ),
+    [
+      bcModelPipelineFilter,
+      bcModelPurposeFilter,
+      selectedBusinessCaseModels,
+      selectedBusinessCasePipelines
+    ]
+  );
+  const visibleBusinessCaseReports = useMemo(
+    () => selectedBusinessCaseReports.filter((report) =>
+      pipelineMatches(
+        report.pipeline_id,
+        selectedBusinessCasePipelines,
+        bcReportPurposeFilter,
+        bcReportPipelineFilter
+      )
+    ),
+    [
+      bcReportPipelineFilter,
       bcReportPurposeFilter,
-      bcReportPipelineFilter
-    )
+      selectedBusinessCasePipelines,
+      selectedBusinessCaseReports
+    ]
   );
   const filteredBusinessCases = useMemo(() => {
     const query = businessCaseSearch.trim().toLowerCase();

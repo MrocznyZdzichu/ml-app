@@ -80,21 +80,22 @@ class PipelineService:
             updated_at=now,
             template=self._definition_template(payload.definition),
         )
-        self.repository.add_pipeline(pipeline)
-        self.repository.add_version(
-            PipelineVersion(
-                id=str(uuid4()),
-                owner_id=principal.user_id,
-                pipeline_id=pipeline.id,
-                business_case_id=business_case.id,
-                version_number=1,
-                status=PipelineVersionStatus.DRAFT,
-                definition=validate_definition(payload.definition, executable=False),
-                definition_hash=definition_hash(payload.definition),
-                created_by=principal.user_id,
-                created_at=now,
-            )
+        definition = validate_definition(payload.definition, executable=False)
+        draft = PipelineVersion(
+            id=str(uuid4()),
+            owner_id=principal.user_id,
+            pipeline_id=pipeline.id,
+            business_case_id=business_case.id,
+            version_number=1,
+            status=PipelineVersionStatus.DRAFT,
+            definition=definition,
+            definition_hash=definition_hash(definition),
+            created_by=principal.user_id,
+            created_at=now,
         )
+        self.repository.add_pipeline(pipeline)
+        self.repository.add_version(draft)
+        self._apply_version_summary(pipeline, [draft])
         return pipeline
 
     def list_pipelines(self, principal: Principal, business_case_id: str | None = None) -> list[Pipeline]:
@@ -110,41 +111,41 @@ class PipelineService:
         ):
             versions_by_pipeline.setdefault(version.pipeline_id, []).append(version)
         for pipeline in pipelines:
-            versions = versions_by_pipeline[pipeline.id]
-            published = [
-                version for version in versions
-                if version.status == PipelineVersionStatus.PUBLISHED
-            ]
-            drafts = [
-                version for version in versions
-                if version.status == PipelineVersionStatus.DRAFT
-            ]
-            pipeline.latest_published_version_number = (
-                max(version.version_number for version in published)
-                if published else None
-            )
-            pipeline.published_version_count = len(published)
-            pipeline.draft_version_number = (
-                max(version.version_number for version in drafts)
-                if drafts else None
-            )
-            summary_version = (
-                max(published, key=lambda item: item.version_number)
-                if published
-                else max(drafts, key=lambda item: item.version_number, default=None)
-            )
-            pipeline.template = self._definition_template(
-                summary_version.definition if summary_version else {}
-            )
+            self._apply_version_summary(pipeline, versions_by_pipeline[pipeline.id])
         return pipelines
 
     def get_pipeline(self, pipeline_id: str, principal: Principal) -> Pipeline:
+        pipeline = self._get_owned_pipeline(pipeline_id, principal)
+        self._apply_version_summary(
+            pipeline,
+            self.repository.list_versions(pipeline.id),
+        )
+        return pipeline
+
+    def _get_owned_pipeline(self, pipeline_id: str, principal: Principal) -> Pipeline:
         pipeline = self.repository.get_pipeline(pipeline_id)
         if not pipeline or pipeline.owner_id != principal.user_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pipeline not found")
-        versions = self.repository.list_versions(pipeline.id)
-        published = [item for item in versions if item.status == PipelineVersionStatus.PUBLISHED]
-        drafts = [item for item in versions if item.status == PipelineVersionStatus.DRAFT]
+        return pipeline
+
+    def _apply_version_summary(
+        self,
+        pipeline: Pipeline,
+        versions: list[PipelineVersion],
+    ) -> None:
+        published = [
+            item for item in versions if item.status == PipelineVersionStatus.PUBLISHED
+        ]
+        drafts = [
+            item for item in versions if item.status == PipelineVersionStatus.DRAFT
+        ]
+        pipeline.latest_published_version_number = (
+            max(item.version_number for item in published) if published else None
+        )
+        pipeline.published_version_count = len(published)
+        pipeline.draft_version_number = (
+            max(item.version_number for item in drafts) if drafts else None
+        )
         summary_version = (
             max(published, key=lambda item: item.version_number)
             if published
@@ -153,7 +154,6 @@ class PipelineService:
         pipeline.template = self._definition_template(
             summary_version.definition if summary_version else {}
         )
-        return pipeline
 
     @staticmethod
     def _definition_template(definition: dict[str, Any]) -> str:
@@ -193,7 +193,7 @@ class PipelineService:
         payload: PipelineCopy,
         principal: Principal,
     ) -> Pipeline:
-        source = self.get_pipeline(pipeline_id, principal)
+        source = self._get_owned_pipeline(pipeline_id, principal)
         versions = self.repository.list_versions(source.id)
         draft = next(
             (item for item in reversed(versions) if item.status == PipelineVersionStatus.DRAFT),
@@ -222,25 +222,25 @@ class PipelineService:
             template=self._definition_template(source_version.definition),
         )
         definition = normalize_definition(deepcopy(source_version.definition))
-        self.repository.add_pipeline(copied)
-        self.repository.add_version(
-            PipelineVersion(
-                id=str(uuid4()),
-                owner_id=principal.user_id,
-                pipeline_id=copied.id,
-                business_case_id=copied.business_case_id,
-                version_number=1,
-                status=PipelineVersionStatus.DRAFT,
-                definition=definition,
-                definition_hash=definition_hash(definition),
-                created_by=principal.user_id,
-                created_at=now,
-            )
+        draft = PipelineVersion(
+            id=str(uuid4()),
+            owner_id=principal.user_id,
+            pipeline_id=copied.id,
+            business_case_id=copied.business_case_id,
+            version_number=1,
+            status=PipelineVersionStatus.DRAFT,
+            definition=definition,
+            definition_hash=definition_hash(definition),
+            created_by=principal.user_id,
+            created_at=now,
         )
+        self.repository.add_pipeline(copied)
+        self.repository.add_version(draft)
+        self._apply_version_summary(copied, [draft])
         return copied
 
     def delete_pipeline(self, pipeline_id: str, principal: Principal) -> str:
-        pipeline = self.get_pipeline(pipeline_id, principal)
+        pipeline = self._get_owned_pipeline(pipeline_id, principal)
         if self.repository.delete_pipeline_without_runs(pipeline.id):
             return "deleted"
         pipeline.status = PipelineStatus.DEPRECATED
@@ -250,7 +250,7 @@ class PipelineService:
         return "deprecated"
 
     def list_versions(self, pipeline_id: str, principal: Principal) -> list[PipelineVersion]:
-        pipeline = self.get_pipeline(pipeline_id, principal)
+        pipeline = self._get_owned_pipeline(pipeline_id, principal)
         return self.repository.list_versions(pipeline.id)
 
     def update_draft_version(
@@ -259,7 +259,7 @@ class PipelineService:
         payload: PipelineVersionUpdate,
         principal: Principal,
     ) -> PipelineVersion:
-        pipeline = self.get_pipeline(pipeline_id, principal)
+        pipeline = self._get_owned_pipeline(pipeline_id, principal)
         self._require_active_pipeline(pipeline)
         version = self.repository.get_draft_version(pipeline.id)
         if not version:
@@ -275,7 +275,7 @@ class PipelineService:
         return self.repository.update_version(version)
 
     def publish_draft_version(self, pipeline_id: str, principal: Principal) -> PipelineVersion:
-        pipeline = self.get_pipeline(pipeline_id, principal)
+        pipeline = self._get_owned_pipeline(pipeline_id, principal)
         self._require_active_pipeline(pipeline)
         version = self.repository.get_draft_version(pipeline.id)
         if not version:
@@ -301,7 +301,7 @@ class PipelineService:
         return self.repository.update_version(version)
 
     def create_next_draft_version(self, pipeline_id: str, principal: Principal) -> PipelineVersion:
-        pipeline = self.get_pipeline(pipeline_id, principal)
+        pipeline = self._get_owned_pipeline(pipeline_id, principal)
         self._require_active_pipeline(pipeline)
         if self.repository.get_draft_version(pipeline.id):
             raise HTTPException(
@@ -330,7 +330,7 @@ class PipelineService:
         return self.repository.add_version(version)
 
     def create_run(self, pipeline_id: str, payload: PipelineRunCreate, principal: Principal) -> PipelineRun:
-        pipeline = self.get_pipeline(pipeline_id, principal)
+        pipeline = self._get_owned_pipeline(pipeline_id, principal)
         self._require_active_pipeline(pipeline)
         version = self._resolve_run_version(pipeline, payload.pipeline_version_id)
         if version.status == PipelineVersionStatus.DRAFT and not payload.is_dry_run:
@@ -543,7 +543,7 @@ class PipelineService:
                 )
 
     def get_run(self, pipeline_id: str, run_id: str, principal: Principal) -> PipelineRun:
-        pipeline = self.get_pipeline(pipeline_id, principal)
+        pipeline = self._get_owned_pipeline(pipeline_id, principal)
         run = self.repository.get_run(run_id)
         if not run or run.pipeline_id != pipeline.id or run.owner_id != principal.user_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pipeline run not found")
@@ -637,7 +637,7 @@ class PipelineService:
         offset: int = 0,
     ) -> list[PipelineRun]:
         if pipeline_id:
-            pipeline = self.get_pipeline(pipeline_id, principal)
+            pipeline = self._get_owned_pipeline(pipeline_id, principal)
             pipeline_id = pipeline.id
         return self.repository.list_runs(
             pipeline_id,

@@ -2,6 +2,8 @@ import { SlidersHorizontal } from "lucide-react";
 
 import type { DataAsset, Pipeline } from "../api/client";
 
+const pipelineIndexCache = new WeakMap<Pipeline[], Map<string, Pipeline>>();
+
 export function datasetPipelineId(dataset: DataAsset | undefined): string {
   if (!dataset) return "";
   const output = asRecord(dataset.metadata.pipeline_output);
@@ -23,7 +25,12 @@ export function pipelineMatches(
 ): boolean {
   if (selectedPipelineId && pipelineId !== selectedPipelineId) return false;
   if (!purpose) return true;
-  return pipelines.find((pipeline) => pipeline.id === pipelineId)?.template === purpose;
+  let pipelineById = pipelineIndexCache.get(pipelines);
+  if (!pipelineById) {
+    pipelineById = new Map(pipelines.map((pipeline) => [pipeline.id, pipeline]));
+    pipelineIndexCache.set(pipelines, pipelineById);
+  }
+  return pipelineById.get(pipelineId)?.template === purpose;
 }
 
 export function ArtifactFilters({

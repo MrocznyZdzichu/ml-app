@@ -5,7 +5,7 @@ import { api } from "../api/client";
 import type { BusinessCase, DatasetLineageReference, Pipeline, ScoringReport } from "../api/client";
 import { ModelPerformanceReport } from "../pipelines/PipelineRunDialogs";
 import { ArtifactFilters, pipelineMatches } from "../components/ArtifactFilters";
-import { DatasetLineageList } from "./LifecyclePanels";
+import { DatasetLineageList } from "./DatasetLineageList";
 
 export function ScoringReportsPanel({
   reports,

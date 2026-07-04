@@ -91,16 +91,20 @@ def test_pipeline_runs_are_presented_as_versions_of_one_logical_model() -> None:
         )
 
     artifacts = Mock()
-    artifacts.list_artifacts.return_value = [
+    pipeline_models = [
         artifact("model-2", "run-2", created_at + timedelta(minutes=5)),
         artifact("model-1", "run-1", created_at),
     ]
+    artifacts.list_artifacts.side_effect = lambda owner_id, artifact_type: (
+        pipeline_models if artifact_type == ArtifactType.MODEL_VERSION else []
+    )
     pipelines = Mock()
     pipelines.get_run.side_effect = lambda run_id: SimpleNamespace(
         owner_id="owner-1",
         pipeline_id="pipeline-1",
         id=run_id,
     )
+    pipelines.list_versions_for_pipelines.return_value = []
     service = ModelService(
         repository=InMemoryModelRepository(),
         artifacts=artifacts,
@@ -115,6 +119,8 @@ def test_pipeline_runs_are_presented_as_versions_of_one_logical_model() -> None:
         ("model-2", "v2", 2),
         ("model-1", "v1", 1),
     ]
+    assert pipelines.list_versions_for_pipelines.call_count == 1
+    assert artifacts.list_artifacts.call_count == 2
     assert [model.id for model in service.list_versions(models[0].logical_id, principal)] == [
         "model-1",
         "model-2",
