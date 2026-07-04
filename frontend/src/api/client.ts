@@ -107,8 +107,11 @@ export type DataAsset = {
   updated_at: string;
 };
 
-export function temporaryPipelineOutputId(runId: string, outputId: string) {
-  return `dry-run-output:${encodeURIComponent(runId)}:${encodeURIComponent(outputId)}`;
+export function temporaryPipelineOutputId(runId: string, outputId: string, pipelineStepId = "") {
+  const parts = [encodeURIComponent(runId)];
+  if (pipelineStepId) parts.push(encodeURIComponent(pipelineStepId));
+  parts.push(encodeURIComponent(outputId));
+  return `dry-run-output:${parts.join(":")}`;
 }
 
 function datasetRouteId(datasetId: string) {
@@ -409,6 +412,43 @@ export type ModelArtifact = {
   created_at: string;
 };
 
+export type ScoringReport = {
+  id: string;
+  owner_id: string;
+  name: string;
+  logical_id: string;
+  version_number: number;
+  business_case_id: string;
+  pipeline_id: string;
+  pipeline_version_id: string;
+  pipeline_run_id: string;
+  pipeline_step_id: string;
+  problem_type: string;
+  prediction_dataset_id: string;
+  prediction_artifact_id: string;
+  model_artifact_id: string;
+  evaluated_row_count: number;
+  evaluation: ModelEvaluationSnapshot;
+  lineage: Record<string, unknown>;
+  created_at: string;
+};
+
+export type DatasetLineageReference = {
+  artifact_id: string;
+  artifact_type: string;
+  dataset_id: string;
+  logical_id: string;
+  version_number: number;
+  name: string;
+  role: string;
+  stage: string;
+  format: string;
+  row_count: number | null;
+  pipeline_step_id: string;
+  pipeline_run_id: string;
+  depth: number;
+};
+
 export type Deployment = {
   id: string;
   name: string;
@@ -487,6 +527,80 @@ export type PipelineVersion = {
   published_at: string | null;
 };
 
+export type ModelEvaluationMetric = {
+  id: string;
+  label: string;
+  value: number;
+  direction: "higher" | "lower" | "target_zero" | string;
+  unit: string;
+};
+
+export type ModelEvaluationSnapshot = {
+  contract_version: string;
+  kind: "model_performance";
+  status: "available" | "target_unavailable";
+  problem_type: string;
+  generated_at: string;
+  data_scope: {
+    mode: "full";
+    scanned_row_count?: number;
+    evaluated_row_count: number;
+    excluded_row_count: number;
+  };
+  columns?: { target?: string; prediction?: string; score?: string | null };
+  metrics: ModelEvaluationMetric[];
+  class_metrics?: Array<{
+    label: unknown;
+    support: number;
+    predicted_count: number;
+    precision: number;
+    recall: number;
+    f1: number;
+  }>;
+  class_count?: number;
+  positive_class?: unknown;
+  confusion_matrix?: {
+    labels: unknown[];
+    values: number[][];
+    truncated: boolean;
+    total_class_count: number;
+  };
+  curves?: Record<string, {
+    x_label: string;
+    y_label: string;
+    points: Array<{ x: number; y: number; threshold?: number | null; count?: number }>;
+    rendering: string;
+  }>;
+  distributions?: {
+    score_by_actual?: Array<{
+      lower: number;
+      upper: number;
+      negative_count: number;
+      positive_count: number;
+    }>;
+  };
+  residuals?: {
+    summary: {
+      mean: number;
+      standard_deviation: number;
+      p05: number;
+      median: number;
+      p95: number;
+    };
+    histogram: Array<{ lower: number; upper: number; count: number }>;
+    actual_vs_predicted: {
+      points: Array<{ actual: number; predicted: number }>;
+      rendering: string;
+    };
+  };
+  warnings: string[];
+  monitoring: {
+    baseline_eligible: boolean;
+    requires_actuals: boolean;
+    comparison_dimensions?: string[];
+  };
+};
+
 export type PipelineRun = {
   id: string;
   owner_id: string;
@@ -506,7 +620,7 @@ export type PipelineRun = {
   output_artifact_ids: string[];
   output_manifest: Array<{
     output_id: string;
-    artifact_type?: "dataset" | "prediction_dataset" | "feature_transform" | "model_version" | "metrics";
+    artifact_type?: "dataset" | "prediction_dataset" | "feature_transform" | "model_version" | "metrics" | "report";
     materialization: "temporary" | "dataset" | "artifact";
     location_uri: string;
     row_count?: number;
@@ -526,6 +640,17 @@ export type PipelineRun = {
     output_stage?: "intermediate" | "final";
     quality_output_kind?: "rejected_records";
     source_output_id?: string;
+    evaluation?: ModelEvaluationSnapshot | Record<string, unknown>;
+    split_evaluation?: Record<string, unknown>;
+    model_name?: string;
+    algorithm?: string;
+    problem_type?: string;
+    target_column?: string;
+    feature_columns?: string[];
+    model_hash?: string;
+    metrics?: Record<string, number>;
+    training_config?: Record<string, unknown>;
+    model_parameters?: ModelArtifact["model_parameters"];
     quality?: {
       status: "not_configured" | "passed" | "issues_detected";
       data_scope: "full";
@@ -602,6 +727,7 @@ export type PipelineRunDetails = {
 
 export type PipelineRunOutputPreview = {
   output_id: string;
+  pipeline_step_id: string;
   row_count: number;
   limit: number;
   offset: number;
@@ -614,6 +740,7 @@ export type PipelineRunOutputPreview = {
 
 export type PipelineRunOutputProfile = {
   output_id: string;
+  pipeline_step_id: string;
   row_count: number;
   profiled_column_count: number;
   total_column_count: number;
@@ -676,10 +803,19 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload)
     }),
-  updatePipeline: (pipelineId: string, payload: { name: string }) =>
+  updatePipeline: (pipelineId: string, payload: { name: string; description: string; type: string }) =>
     request<Pipeline>(`/pipelines/${pipelineId}`, {
       method: "PATCH",
       body: JSON.stringify(payload)
+    }),
+  copyPipeline: (pipelineId: string, payload: { name: string }) =>
+    request<Pipeline>(`/pipelines/${pipelineId}/copy`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  deletePipeline: (pipelineId: string) =>
+    request<{ action: "deleted" | "deprecated" }>(`/pipelines/${pipelineId}`, {
+      method: "DELETE"
     }),
   listPipelineVersions: (pipelineId: string) =>
     request<PipelineVersion[]>(`/pipelines/${pipelineId}/versions`),
@@ -715,13 +851,20 @@ export const api = {
     request<PipelineRun>(`/pipelines/${pipelineId}/runs/${runId}/retry`, { method: "POST" }),
   listPipelineStepRuns: (pipelineId: string, runId: string) =>
     request<PipelineStepRun[]>(`/pipelines/${pipelineId}/runs/${runId}/steps`),
-  previewPipelineRunOutput: (pipelineId: string, runId: string, outputId: string, limit: number, offset: number) =>
+  previewPipelineRunOutput: (
+    pipelineId: string,
+    runId: string,
+    outputId: string,
+    pipelineStepId: string,
+    limit: number,
+    offset: number
+  ) =>
     request<PipelineRunOutputPreview>(
-      `/pipelines/${pipelineId}/runs/${runId}/preview?output_id=${encodeURIComponent(outputId)}&limit=${limit}&offset=${offset}`
+      `/pipelines/${pipelineId}/runs/${runId}/preview?output_id=${encodeURIComponent(outputId)}&pipeline_step_id=${encodeURIComponent(pipelineStepId)}&limit=${limit}&offset=${offset}`
     ),
-  profilePipelineRunOutput: (pipelineId: string, runId: string, outputId: string) =>
+  profilePipelineRunOutput: (pipelineId: string, runId: string, outputId: string, pipelineStepId: string) =>
     request<PipelineRunOutputProfile>(
-      `/pipelines/${pipelineId}/runs/${runId}/profile?output_id=${encodeURIComponent(outputId)}`
+      `/pipelines/${pipelineId}/runs/${runId}/profile?output_id=${encodeURIComponent(outputId)}&pipeline_step_id=${encodeURIComponent(pipelineStepId)}`
     ),
   createDataset: (payload: Record<string, unknown>) =>
     request<DataAsset>("/datasets", { method: "POST", body: JSON.stringify(payload) }),
@@ -779,6 +922,18 @@ export const api = {
   listModels: () => request<ModelArtifact[]>("/models"),
   listModelVersions: (logicalId: string) =>
     request<ModelArtifact[]>(`/models/${encodeURIComponent(logicalId)}/versions`),
+  getModelDataLineage: (modelId: string) =>
+    request<DatasetLineageReference[]>(`/models/${encodeURIComponent(modelId)}/data-lineage`),
+  listScoringReports: (businessCaseId?: string) =>
+    request<ScoringReport[]>(
+      businessCaseId
+        ? `/scoring-reports?business_case_id=${encodeURIComponent(businessCaseId)}`
+        : "/scoring-reports"
+    ),
+  listScoringReportVersions: (logicalId: string) =>
+    request<ScoringReport[]>(`/scoring-reports/${encodeURIComponent(logicalId)}/versions`),
+  getScoringReportDataLineage: (reportId: string) =>
+    request<DatasetLineageReference[]>(`/scoring-reports/${encodeURIComponent(reportId)}/data-lineage`),
   createDeployment: (payload: Record<string, unknown>) =>
     request<Deployment>("/serving/deployments", {
       method: "POST",

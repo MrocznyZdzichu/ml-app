@@ -1,4 +1,4 @@
-import { Pencil, Trash2 } from "lucide-react";
+import { Eye, History, Pencil, Play, Trash2 } from "lucide-react";
 
 export type AssetListItem = {
   id: string;
@@ -9,6 +9,12 @@ export type AssetListItem = {
   onDelete?: () => void;
   actionLabel?: string;
   onAction?: () => void;
+  actions?: Array<{
+    label: string;
+    onClick: () => void;
+    icon?: "view" | "versions" | "run" | "edit";
+    disabled?: boolean;
+  }>;
 };
 
 export function AssetList({
@@ -32,6 +38,17 @@ export function AssetList({
             </div>
             <div className="asset-actions">
               <em>{asset.status}</em>
+              {asset.actions?.map((action) => {
+                const Icon = action.icon === "versions" ? History
+                  : action.icon === "run" ? Play
+                    : action.icon === "view" ? Eye : Pencil;
+                return (
+                  <button className="secondary-button compact-button" type="button"
+                    key={action.label} onClick={action.onClick} disabled={action.disabled}>
+                    <Icon size={14} /> {action.label}
+                  </button>
+                );
+              })}
               {asset.actionLabel && asset.onAction && (
                 <button
                   className="secondary-button compact-button"

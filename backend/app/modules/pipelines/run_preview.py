@@ -21,10 +21,11 @@ class PipelineRunOutputReader:
         run: PipelineRun,
         *,
         output_id: str | None,
+        pipeline_step_id: str | None = None,
         limit: int,
         offset: int,
     ) -> dict[str, Any]:
-        output = self._resolve_output(run, output_id)
+        output = self._resolve_output(run, output_id, pipeline_step_id)
         path = self._resolve_output_path(output)
         row_count = int(output.get("row_count") or 0)
         connection = self._connect(path)
@@ -42,6 +43,7 @@ class PipelineRunOutputReader:
             connection.close()
         return {
             "output_id": str(output.get("output_id") or ""),
+            "pipeline_step_id": str(output.get("pipeline_step_id") or ""),
             "row_count": row_count,
             "limit": limit,
             "offset": offset,
@@ -57,10 +59,11 @@ class PipelineRunOutputReader:
         run: PipelineRun,
         *,
         output_id: str | None,
+        pipeline_step_id: str | None = None,
         max_columns: int,
         top_n: int,
     ) -> dict[str, Any]:
-        output = self._resolve_output(run, output_id)
+        output = self._resolve_output(run, output_id, pipeline_step_id)
         path = self._resolve_output_path(output)
         schema = output.get("schema") or []
         columns = [str(item["name"]) for item in schema if isinstance(item, dict) and item.get("name")]
@@ -76,15 +79,21 @@ class PipelineRunOutputReader:
             connection.close()
         return {
             "output_id": str(output.get("output_id") or ""),
+            "pipeline_step_id": str(output.get("pipeline_step_id") or ""),
             "row_count": row_count,
             "profiled_column_count": len(summaries),
             "total_column_count": len(columns),
             "columns": summaries,
         }
 
-    def resolve_output(self, run: PipelineRun, output_id: str | None = None) -> tuple[dict[str, Any], Path]:
+    def resolve_output(
+        self,
+        run: PipelineRun,
+        output_id: str | None = None,
+        pipeline_step_id: str | None = None,
+    ) -> tuple[dict[str, Any], Path]:
         """Resolve an authorized run's temporary output without exposing its filesystem path."""
-        output = self._resolve_output(run, output_id)
+        output = self._resolve_output(run, output_id, pipeline_step_id)
         return output, self._resolve_output_path(output)
 
     def _column_summary(
@@ -125,7 +134,12 @@ class PipelineRunOutputReader:
             ],
         }
 
-    def _resolve_output(self, run: PipelineRun, output_id: str | None) -> dict[str, Any]:
+    def _resolve_output(
+        self,
+        run: PipelineRun,
+        output_id: str | None,
+        pipeline_step_id: str | None = None,
+    ) -> dict[str, Any]:
         if not run.is_dry_run:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Only dry-run outputs can be previewed here")
         if run.status != PipelineRunStatus.SUCCEEDED:
@@ -135,7 +149,13 @@ class PipelineRunOutputReader:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dry-run output not found")
         if output_id:
             for output in outputs:
-                if output.get("output_id") == output_id:
+                if (
+                    output.get("output_id") == output_id
+                    and (
+                        not pipeline_step_id
+                        or output.get("pipeline_step_id") == pipeline_step_id
+                    )
+                ):
                     return output
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dry-run output not found")
         return outputs[0]

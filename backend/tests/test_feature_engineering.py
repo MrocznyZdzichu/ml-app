@@ -555,9 +555,11 @@ def test_stratified_holdout_and_cv_are_deterministic_and_disjoint(tmp_path: Path
     assert sum(row[1] for row in test) == 10
     assert {row[2] for row in train} == {0, 1, 2, 3, 4}
     assert train == rows(second, "training_features")
-    manifest = next(
+    manifest_output = next(
         item for item in first.output_manifest if item["output_id"] == "training_features"
-    )["evaluation"]
+    )
+    assert "evaluation" not in manifest_output
+    manifest = manifest_output["split_evaluation"]
     assert manifest["split_row_counts"] == {"training": 70, "validation": 10, "test": 20}
     assert sum(item["row_count"] for item in manifest["cross_validation"]["fold_row_counts"]) == 70
 

@@ -135,3 +135,35 @@ def test_temporary_output_identifier_round_trips_reserved_characters(tmp_path: P
     asset = resolver.resolve(temporary_pipeline_output_id(run.id, output_id), run.owner_id)
 
     assert asset.metadata["output_id"] == output_id
+
+
+def test_temporary_output_identifier_selects_pipeline_step(tmp_path: Path) -> None:
+    repository_root = tmp_path / "repository"
+    run, first_path = _temporary_run(repository_root)
+    second_path = first_path.with_name("second.parquet")
+    duckdb.connect().execute(
+        "COPY (SELECT 7 AS value) TO ? (FORMAT PARQUET)",
+        [str(second_path)],
+    ).close()
+    run.output_manifest[0]["pipeline_step_id"] = "de_1"
+    run.output_manifest.append({
+        "pipeline_step_id": "fe_1",
+        "output_id": "result",
+        "location_uri": f"file://{second_path.as_posix()}",
+        "row_count": 1,
+        "schema": [{"name": "value", "type": "INTEGER"}],
+    })
+    pipelines = InMemoryPipelineRepository()
+    pipelines.add_run(run)
+    resolver = TemporaryPipelineOutputResolver(
+        repository=pipelines,
+        output_reader=PipelineRunOutputReader(repository_root),
+    )
+
+    asset = resolver.resolve(
+        temporary_pipeline_output_id(run.id, "result", "fe_1"),
+        run.owner_id,
+    )
+
+    assert asset.metadata["pipeline_step_id"] == "fe_1"
+    assert asset.row_count == 1

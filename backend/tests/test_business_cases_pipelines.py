@@ -480,11 +480,17 @@ def test_pipeline_name_can_be_changed_without_creating_a_new_version() -> None:
     renamed = client.patch(
         f"/api/v1/pipelines/{pipeline_id}",
         headers=headers,
-        json={"name": "  Iris training and operations  "},
+        json={
+            "name": "  Iris training and operations  ",
+            "description": "End-to-end governed workflow",
+            "type": "training",
+        },
     )
 
     assert renamed.status_code == 200
     assert renamed.json()["name"] == "Iris training and operations"
+    assert renamed.json()["description"] == "End-to-end governed workflow"
+    assert renamed.json()["type"] == "training"
     assert renamed.json()["updated_by"] == created.json()["owner_id"]
     versions_after = client.get(
         f"/api/v1/pipelines/{pipeline_id}/versions",
@@ -500,6 +506,131 @@ def test_pipeline_name_can_be_changed_without_creating_a_new_version() -> None:
         json={"name": "   "},
     )
     assert blank.status_code == 422
+
+
+def test_pipeline_can_be_copied_as_editable_draft_and_only_deleted_without_runs(
+    monkeypatch,
+) -> None:
+    from app.worker.tasks import execute_pipeline_run
+
+    monkeypatch.setattr(execute_pipeline_run, "delay", lambda run_id: None)
+    client = TestClient(create_app())
+    token = _register(client, "pipeline-copy")
+    other_token = _register(client, "pipeline-copy-other")
+    headers = {"Authorization": f"Bearer {token}"}
+    other_headers = {"Authorization": f"Bearer {other_token}"}
+    business_case = _create_business_case(client, token)
+    uploaded = client.post(
+        "/api/v1/datasets/upload",
+        headers=headers,
+        data={"name": "Reusable pipeline input"},
+        files={"file": ("copy-source.csv", b"id,value\n1,10\n", "text/csv")},
+    )
+    assert uploaded.status_code == 201
+    definition = {
+        "contract_version": "1.0",
+        "inputs": [{
+            "input_id": "source",
+            "dataset_id": uploaded.json()["logical_id"],
+            "output_port_id": "out",
+        }],
+        "steps": [],
+        "outputs": [{
+            "output_id": "result",
+            "input": {"node_id": "source", "port_id": "out"},
+            "materialization": "temporary",
+            "write_mode": "replace",
+        }],
+        "parameters": {"variant": "challenger"},
+    }
+    created = client.post(
+        "/api/v1/pipelines",
+        headers=headers,
+        json={
+            "business_case_id": business_case["id"],
+            "name": "Reusable DE and FE",
+            "description": "Shared preparation workflow",
+            "type": "training",
+            "definition": definition,
+        },
+    )
+    assert created.status_code == 201
+    source = created.json()
+
+    copied = client.post(
+        f"/api/v1/pipelines/{source['id']}/copy",
+        headers=headers,
+        json={"name": "  Challenger model pipeline  "},
+    )
+    assert copied.status_code == 201
+    copy = copied.json()
+    assert copy["id"] != source["id"]
+    assert copy["name"] == "Challenger model pipeline"
+    assert copy["business_case_id"] == source["business_case_id"]
+    assert copy["description"] == source["description"]
+    assert copy["type"] == source["type"]
+    assert copy["status"] == "draft"
+
+    copied_versions = client.get(
+        f"/api/v1/pipelines/{copy['id']}/versions",
+        headers=headers,
+    )
+    assert copied_versions.status_code == 200
+    assert len(copied_versions.json()) == 1
+    copied_draft = copied_versions.json()[0]
+    assert copied_draft["version_number"] == 1
+    assert copied_draft["status"] == "draft"
+    nested_definition = copied_draft["definition"]["steps"][0]["config"]["definition"]
+    assert nested_definition["parameters"]["variant"] == "challenger"
+
+    forbidden_copy = client.post(
+        f"/api/v1/pipelines/{source['id']}/copy",
+        headers=other_headers,
+        json={"name": "Stolen pipeline"},
+    )
+    assert forbidden_copy.status_code == 404
+
+    deleted = client.delete(f"/api/v1/pipelines/{copy['id']}", headers=headers)
+    assert deleted.status_code == 200
+    assert deleted.json() == {"action": "deleted"}
+    assert client.get(f"/api/v1/pipelines/{copy['id']}", headers=headers).status_code == 404
+    assert client.get(
+        f"/api/v1/pipelines/{copy['id']}/versions",
+        headers=headers,
+    ).status_code == 404
+
+    run = client.post(
+        f"/api/v1/pipelines/{source['id']}/runs",
+        headers=headers,
+        json={"trigger_type": "manual", "is_dry_run": True},
+    )
+    assert run.status_code == 201
+    deprecated = client.delete(f"/api/v1/pipelines/{source['id']}", headers=headers)
+    assert deprecated.status_code == 200
+    assert deprecated.json() == {"action": "deprecated"}
+    preserved = client.get(f"/api/v1/pipelines/{source['id']}", headers=headers)
+    assert preserved.status_code == 200
+    assert preserved.json()["status"] == "deprecated"
+    assert client.get(
+        f"/api/v1/pipelines/{source['id']}/runs/{run.json()['id']}",
+        headers=headers,
+    ).status_code == 200
+    assert client.patch(
+        f"/api/v1/pipelines/{source['id']}",
+        headers=headers,
+        json={"name": "Should not change"},
+    ).status_code == 409
+    assert client.post(
+        f"/api/v1/pipelines/{source['id']}/runs",
+        headers=headers,
+        json={"trigger_type": "manual", "is_dry_run": True},
+    ).status_code == 409
+
+    forbidden_delete = client.delete(
+        f"/api/v1/pipelines/{source['id']}",
+        headers=other_headers,
+    )
+    assert forbidden_delete.status_code == 404
 
 
 def test_business_case_and_pipeline_survive_app_restart_and_relogin() -> None:

@@ -59,3 +59,19 @@ class ModelArtifactRead(BaseModel):
 
 class PromoteModelRequest(BaseModel):
     stage: ModelStage
+
+
+class DatasetLineageRead(BaseModel):
+    artifact_id: str
+    artifact_type: str
+    dataset_id: str
+    logical_id: str
+    version_number: int
+    name: str
+    role: str
+    stage: str
+    format: str
+    row_count: int | None
+    pipeline_step_id: str
+    pipeline_run_id: str
+    depth: int

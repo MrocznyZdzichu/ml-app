@@ -6,6 +6,7 @@ from app.modules.business_cases.router import router as business_cases_router
 from app.modules.datasets.router import router as datasets_router
 from app.modules.exports.router import router as exports_router
 from app.modules.models.router import router as models_router
+from app.modules.scoring_reports.router import router as scoring_reports_router
 from app.modules.pipelines.router import router as pipelines_router
 from app.modules.serving.router import router as serving_router
 from app.modules.sharing.router import router as sharing_router
@@ -20,6 +21,7 @@ api_router.include_router(datasets_router)
 api_router.include_router(analysis_router)
 api_router.include_router(pipelines_router)
 api_router.include_router(models_router)
+api_router.include_router(scoring_reports_router)
 api_router.include_router(serving_router)
 api_router.include_router(sharing_router)
 api_router.include_router(exports_router)

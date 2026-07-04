@@ -6,19 +6,70 @@ import numpy as np
 import pytest
 
 from app.modules.pipelines.modeling import (
+    ModelingResult,
     ScoringDefinition,
     SklearnScoringEngine,
     SklearnTrainingEngine,
     TrainingDefinition,
 )
 from app.modules.pipelines.runtime import SourceRelation
-from app.modules.pipelines.workflow import validate_workflow_definition
+from app.modules.pipelines.step_handlers import StepExecutionContext, TrainingStepHandler
+from app.modules.pipelines.workflow import WorkflowStep, validate_workflow_definition
 from app.worker.tasks import _definition_with_resolved_inputs
 
 
 def _relation(path: Path, rows: int) -> SourceRelation:
     escaped = str(path).replace("'", "''")
     return SourceRelation(sql=f"read_parquet('{escaped}')", row_count=rows)
+
+
+def test_training_resolves_dynamic_one_hot_features_from_upstream_contract() -> None:
+    captured: dict[str, TrainingDefinition] = {}
+
+    class Engine:
+        def execute(self, definition, training, validation, **kwargs):
+            captured["definition"] = definition
+            return ModelingResult(10, 10, 1, [], [])
+
+    step = WorkflowStep.model_validate({
+        "step_id": "training_1",
+        "name": "Training",
+        "type": "training",
+        "inputs": [{
+            "port_id": "training",
+            "source": {"step_id": "fe_1", "port_id": "training"},
+        }],
+        "output_port_id": "model",
+        "config": {"definition": {
+            "problem_type": "binary_classification",
+            "algorithm": "sgd_classifier",
+            "target_column": "churned",
+            "feature_columns": ["age", "segment"],
+            "feature_selection": "upstream_contract",
+        }},
+    })
+    relation = SourceRelation(
+        sql="input",
+        row_count=10,
+        metadata={"feature_manifest": [
+            {"name": "age", "role": "feature"},
+            {"name": "segment_0", "role": "feature"},
+            {"name": "segment_1", "role": "feature"},
+            {"name": "churned", "role": "target"},
+        ]},
+    )
+
+    TrainingStepHandler(Engine()).execute(
+        step,
+        StepExecutionContext(
+            run_id="run-1",
+            owner_id="owner-1",
+            is_dry_run=True,
+            upstream_relations={("fe_1", "training"): relation},
+        ),
+    )
+
+    assert captured["definition"].feature_columns == ["age", "segment_0", "segment_1"]
 
 
 def test_training_and_scoring_process_full_declared_inputs(tmp_path: Path) -> None:
@@ -88,6 +139,14 @@ def test_training_and_scoring_process_full_declared_inputs(tmp_path: Path) -> No
     assert scored.input_row_count == scored.output_row_count == 20
     assert output["artifact_type"] == "prediction_dataset"
     assert output["metrics"]["scored_row_count"] == 20
+    assert output["evaluation"]["contract_version"] == "1.0"
+    assert output["evaluation"]["status"] == "available"
+    assert output["evaluation"]["data_scope"]["evaluated_row_count"] == 20
+    assert {
+        metric["id"] for metric in output["evaluation"]["metrics"]
+    } >= {"accuracy", "f1_macro", "roc_auc", "average_precision"}
+    assert output["evaluation"]["confusion_matrix"]["values"]
+    assert output["evaluation"]["monitoring"]["baseline_eligible"] is True
     assert output["score_contract"]["positive_class"] == 1
     assert output["score_contract"]["prediction_score_kind"] == "positive_class_probability"
     scored_rows = duckdb.connect().execute(

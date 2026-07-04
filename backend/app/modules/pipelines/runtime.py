@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -14,6 +14,7 @@ from app.shared.sql_security import identifier
 class SourceRelation:
     sql: str
     row_count: int
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 def relation_columns(

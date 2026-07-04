@@ -126,6 +126,9 @@ class PipelineRepository(Protocol):
     def update_pipeline(self, pipeline: Pipeline) -> Pipeline:
         ...
 
+    def delete_pipeline_without_runs(self, pipeline_id: str) -> bool:
+        ...
+
     def add_version(self, version: PipelineVersion) -> PipelineVersion:
         ...
 
@@ -201,6 +204,15 @@ class InMemoryPipelineRepository:
     def update_pipeline(self, pipeline: Pipeline) -> Pipeline:
         self._pipelines[pipeline.id] = pipeline
         return pipeline
+
+    def delete_pipeline_without_runs(self, pipeline_id: str) -> bool:
+        if any(item.pipeline_id == pipeline_id for item in self._runs.values()):
+            return False
+        self._versions = {
+            key: item for key, item in self._versions.items()
+            if item.pipeline_id != pipeline_id
+        }
+        return self._pipelines.pop(pipeline_id, None) is not None
 
     def add_version(self, version: PipelineVersion) -> PipelineVersion:
         self._versions[version.id] = version
@@ -317,6 +329,26 @@ class PostgresPipelineRepository:
         with self.engine.begin() as connection:
             connection.execute(statement)
         return pipeline
+
+    def delete_pipeline_without_runs(self, pipeline_id: str) -> bool:
+        self._ensure_initialized()
+        with self.engine.begin() as connection:
+            existing_run = connection.execute(
+                select(pipeline_runs_table.c.id)
+                .where(pipeline_runs_table.c.pipeline_id == pipeline_id)
+                .limit(1)
+            ).first()
+            if existing_run:
+                return False
+            connection.execute(
+                pipeline_versions_table.delete().where(
+                    pipeline_versions_table.c.pipeline_id == pipeline_id
+                )
+            )
+            result = connection.execute(
+                pipelines_table.delete().where(pipelines_table.c.id == pipeline_id)
+            )
+        return bool(result.rowcount)
 
     def add_version(self, version: PipelineVersion) -> PipelineVersion:
         self._ensure_initialized()

@@ -13,8 +13,16 @@ from app.modules.pipelines.run_preview import PipelineRunOutputReader
 TEMPORARY_PIPELINE_OUTPUT_PREFIX: Final = "dry-run-output:"
 
 
-def temporary_pipeline_output_id(run_id: str, output_id: str) -> str:
-    return f"{TEMPORARY_PIPELINE_OUTPUT_PREFIX}{quote(run_id, safe='')}:{quote(output_id, safe='')}"
+def temporary_pipeline_output_id(
+    run_id: str,
+    output_id: str,
+    pipeline_step_id: str | None = None,
+) -> str:
+    parts = [quote(run_id, safe="")]
+    if pipeline_step_id:
+        parts.append(quote(pipeline_step_id, safe=""))
+    parts.append(quote(output_id, safe=""))
+    return f"{TEMPORARY_PIPELINE_OUTPUT_PREFIX}{':'.join(parts)}"
 
 
 class TemporaryPipelineOutputResolver:
@@ -33,12 +41,16 @@ class TemporaryPipelineOutputResolver:
         return asset_id.startswith(TEMPORARY_PIPELINE_OUTPUT_PREFIX)
 
     def resolve(self, asset_id: str, owner_id: str) -> DataAsset:
-        run_id, output_id = self._parse(asset_id)
+        run_id, output_id, pipeline_step_id = self._parse(asset_id)
         run = self.repository.get_run(run_id)
         if not run or run.owner_id != owner_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Temporary dry-run output not found")
 
-        output, path = self.output_reader.resolve_output(run, output_id)
+        output, path = self.output_reader.resolve_output(
+            run,
+            output_id,
+            pipeline_step_id=pipeline_step_id,
+        )
         created_at = run.finished_at or run.started_at or run.created_at
         return DataAsset(
             id=asset_id,
@@ -62,6 +74,7 @@ class TemporaryPipelineOutputResolver:
                 "pipeline_version_id": run.pipeline_version_id,
                 "pipeline_run_id": run.id,
                 "output_id": output_id,
+                "pipeline_step_id": pipeline_step_id or str(output.get("pipeline_step_id") or ""),
                 "scope": "full",
                 "schema": output.get("schema") or [],
             },
@@ -70,9 +83,11 @@ class TemporaryPipelineOutputResolver:
         )
 
     @staticmethod
-    def _parse(asset_id: str) -> tuple[str, str]:
+    def _parse(asset_id: str) -> tuple[str, str, str | None]:
         encoded = asset_id.removeprefix(TEMPORARY_PIPELINE_OUTPUT_PREFIX)
-        parts = encoded.split(":", 1)
-        if len(parts) != 2 or not all(parts):
+        parts = encoded.split(":")
+        if len(parts) not in {2, 3} or not all(parts):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Temporary dry-run output not found")
-        return unquote(parts[0]), unquote(parts[1])
+        if len(parts) == 2:
+            return unquote(parts[0]), unquote(parts[1]), None
+        return unquote(parts[0]), unquote(parts[2]), unquote(parts[1])

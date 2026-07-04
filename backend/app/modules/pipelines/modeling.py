@@ -18,6 +18,7 @@ from sklearn.linear_model import (
     SGDRegressor,
 )
 
+from app.modules.pipelines.model_evaluation import ModelEvaluationSnapshotBuilder
 from app.modules.pipelines.runtime import SourceRelation, json_safe, safe_filename, sql_literal
 from app.shared.duckdb_runtime import configured_duckdb_connection, write_parquet_atomic
 from app.shared.sql_security import identifier
@@ -37,6 +38,7 @@ class TrainingDefinition(BaseModel):
     ]
     target_column: str = Field(min_length=1, max_length=255)
     feature_columns: list[str] = Field(min_length=1, max_length=500)
+    feature_selection: Literal["upstream_contract", "explicit"] = "upstream_contract"
     model_name: str = Field(default="Trained model", min_length=1, max_length=200)
     epochs: int = Field(default=5, ge=1, le=100)
     early_stopping: bool = False
@@ -104,6 +106,7 @@ class ScoringDefinition(BaseModel):
     target_column: str = Field(default="", max_length=255)
     prediction_column: str = Field(default="prediction", min_length=1, max_length=255)
     dataset_name: str = Field(default="Model predictions", min_length=1, max_length=200)
+    report_name: str = Field(default="Test scoring report", min_length=1, max_length=200)
     batch_size: int = Field(default=10_000, ge=100, le=100_000)
 
 
@@ -609,6 +612,14 @@ class SklearnScoringEngine:
                 f"SELECT * FROM {identifier(table_name)}",
                 output_path,
             )
+            evaluation = ModelEvaluationSnapshotBuilder().build(
+                connection,
+                f"SELECT * FROM {identifier(table_name)}",
+                problem_type=problem_type,
+                target_column=definition.target_column,
+                prediction_column=definition.prediction_column,
+                score_contract=score_contract,
+            )
             metrics: dict[str, Any] = {"scored_row_count": total}
             if definition.target_column:
                 if problem_type == "regression":
@@ -618,6 +629,11 @@ class SklearnScoringEngine:
                     })
                 else:
                     metrics["accuracy"] = correct / total
+            metrics.update({
+                str(item["id"]): item["value"]
+                for item in evaluation.get("metrics", [])
+                if isinstance(item, dict) and item.get("id") and item.get("value") is not None
+            })
             preview_cursor = connection.execute(
                 f"SELECT * FROM read_parquet({sql_literal(str(output_path))}) LIMIT 50"
             )
@@ -641,6 +657,7 @@ class SklearnScoringEngine:
                     "dataset_name": definition.dataset_name,
                     "business_case_role": "scoring_output",
                     "metrics": metrics,
+                    "evaluation": evaluation,
                     "score_contract": score_contract,
                     "data_scope": "full",
                     "is_dry_run": is_dry_run,

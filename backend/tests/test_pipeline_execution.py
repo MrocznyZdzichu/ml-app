@@ -102,6 +102,57 @@ def test_dry_run_output_reader_paginates_and_profiles_full_parquet(tmp_path: Pat
     ]
 
 
+def test_dry_run_output_reader_disambiguates_same_output_id_by_pipeline_step(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    output_dir = repository_root / "users" / "owner-1" / "pipeline-runs" / "run-1"
+    output_dir.mkdir(parents=True)
+    de_path = output_dir / "de-result.parquet"
+    fe_path = output_dir / "fe-result.parquet"
+    connection = duckdb.connect()
+    connection.execute("COPY (SELECT 1 AS marker) TO ? (FORMAT PARQUET)", [str(de_path)])
+    connection.execute("COPY (SELECT 2 AS marker) TO ? (FORMAT PARQUET)", [str(fe_path)])
+    connection.close()
+    run = PipelineRun(
+        id="run-1",
+        owner_id="owner-1",
+        pipeline_id="pipeline-1",
+        pipeline_version_id="version-1",
+        business_case_id="bc-1",
+        status=PipelineRunStatus.SUCCEEDED,
+        trigger_type=PipelineRunTrigger.MANUAL,
+        is_dry_run=True,
+        output_manifest=[
+            {
+                "pipeline_step_id": "de_1",
+                "output_id": "result",
+                "location_uri": f"file://{de_path.as_posix()}",
+                "row_count": 1,
+                "schema": [{"name": "marker", "type": "INTEGER"}],
+            },
+            {
+                "pipeline_step_id": "fe_1",
+                "output_id": "result",
+                "location_uri": f"file://{fe_path.as_posix()}",
+                "row_count": 1,
+                "schema": [{"name": "marker", "type": "INTEGER"}],
+            },
+        ],
+    )
+
+    page = PipelineRunOutputReader(repository_root).preview(
+        run,
+        output_id="result",
+        pipeline_step_id="fe_1",
+        limit=10,
+        offset=0,
+    )
+
+    assert page["pipeline_step_id"] == "fe_1"
+    assert page["records"] == [{"marker": 2}]
+
+
 def test_materialized_pipeline_outputs_are_versions_of_one_logical_dataset(
     tmp_path: Path,
 ) -> None:

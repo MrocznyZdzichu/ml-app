@@ -32,6 +32,20 @@ class PipelineCreate(BaseModel):
 
 class PipelineUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=4000)
+    type: PipelineType | None = None
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("Pipeline name cannot be blank")
+        return stripped
+
+
+class PipelineCopy(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
 
     @field_validator("name")
     @classmethod
@@ -155,6 +169,7 @@ class PipelineStepRunRead(BaseModel):
 
 class PipelineRunOutputPreviewRead(BaseModel):
     output_id: str
+    pipeline_step_id: str = ""
     row_count: int
     limit: int
     offset: int
@@ -181,6 +196,7 @@ class PipelineRunOutputColumnProfileRead(BaseModel):
 
 class PipelineRunOutputProfileRead(BaseModel):
     output_id: str
+    pipeline_step_id: str = ""
     row_count: int
     profiled_column_count: int
     total_column_count: int

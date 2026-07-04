@@ -21,6 +21,8 @@ celery_app.conf.update(
     result_serializer="json",
     accept_content=["json"],
     result_expires=settings.descriptive_profile_result_expires_seconds,
+    task_always_eager=settings.celery_task_always_eager,
+    task_store_eager_result=settings.celery_task_always_eager,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
 )

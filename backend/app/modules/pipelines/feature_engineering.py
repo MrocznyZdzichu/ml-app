@@ -407,7 +407,7 @@ class DuckDbFeatureEngineeringEngine:
                     "data_scope": "full",
                     "is_dry_run": is_dry_run,
                     "feature_manifest": state.get("feature_manifest", []),
-                    "evaluation": evaluation_manifest,
+                    "split_evaluation": evaluation_manifest,
                 })
         finally:
             connection.close()
@@ -1059,7 +1059,7 @@ class DuckDbFeatureEngineeringEngine:
                 json.dumps([(str(row[0]), str(row[1])) for row in schema_rows]).encode("utf-8")
             ).hexdigest(),
             "feature_manifest": state.get("feature_manifest", []),
-            "evaluation": evaluation_manifest,
+            "split_evaluation": evaluation_manifest,
             "data_scope": "full",
             "is_dry_run": is_dry_run,
             "dataset_name": output.dataset_name,

@@ -9,7 +9,10 @@ from app.modules.datasets.time_series import FullDatasetTimeSeriesAnalyzer
 from app.modules.datasets.temporary import TemporaryPipelineOutputResolver
 from app.modules.pipelines.domain import PipelineRunStatus, PipelineStepRun
 from app.modules.pipelines.runtime import SourceRelation, sql_literal
-from app.modules.pipelines.materialization import PipelineOutputMaterializer
+from app.modules.pipelines.materialization import (
+    PipelineOutputMaterializer,
+    ScoringReportMaterializer,
+)
 from app.modules.pipelines.repository import PostgresPipelineRepository
 from app.modules.pipelines.step_handlers import (
     PipelineStepHandlerRegistry,
@@ -69,7 +72,7 @@ def execute_pipeline_run(run_id: str) -> dict:
         all_output_manifests: list[dict] = []
         all_artifact_ids: list[str] = []
         all_warnings: list[str] = []
-        upstream_artifact_ids: dict[str, list[str]] = {}
+        upstream_artifact_ids: dict[tuple[str, str], list[str]] = {}
         handler_registry = PipelineStepHandlerRegistry()
         result = None
         executed_step = None
@@ -111,8 +114,23 @@ def execute_pipeline_run(run_id: str) -> dict:
             step_input_artifact_ids = list(dict.fromkeys(
                 artifact_id
                 for port in step.inputs
-                for artifact_id in upstream_artifact_ids.get(port.source.step_id, [])
+                for artifact_id in upstream_artifact_ids.get(
+                    (port.source.step_id, port.source.port_id),
+                    [],
+                )
             ))
+            step_input_lineage = [
+                {
+                    "input_port_id": port.port_id,
+                    "source_step_id": port.source.step_id,
+                    "source_port_id": port.source.port_id,
+                    "artifact_ids": upstream_artifact_ids.get(
+                        (port.source.step_id, port.source.port_id),
+                        [],
+                    ),
+                }
+                for port in step.inputs
+            ]
             if not run.is_dry_run:
                 materialized_manifest, materialized_artifact_ids = PipelineOutputMaterializer().materialize(
                     run=run,
@@ -122,6 +140,7 @@ def execute_pipeline_run(run_id: str) -> dict:
                     step_id=step.step_id,
                     input_dataset_ids=result.input_dataset_ids,
                     input_artifact_ids=step_input_artifact_ids or None,
+                    input_lineage=step_input_lineage,
                     step_type=step.type,
                     output_stage=(
                         "final"
@@ -130,7 +149,6 @@ def execute_pipeline_run(run_id: str) -> dict:
                     ),
                 )
                 step_output_manifest = materialized_manifest
-                upstream_artifact_ids[step.step_id] = materialized_artifact_ids
                 all_artifact_ids.extend(materialized_artifact_ids)
             for manifest in step_output_manifest:
                 manifest["pipeline_step_id"] = step.step_id
@@ -149,6 +167,15 @@ def execute_pipeline_run(run_id: str) -> dict:
                 str(item.get("output_id")): item
                 for item in step_output_manifest
             }
+            for port_id, output_id in {
+                **result.relation_output_ids,
+                **result.artifact_output_ids,
+            }.items():
+                bound_output = manifests_by_output_id.get(output_id)
+                artifact_id = str((bound_output or {}).get("artifact_id") or "")
+                upstream_artifact_ids[(step.step_id, port_id)] = (
+                    [artifact_id] if artifact_id else []
+                )
             for port_id, output_id in result.relation_output_ids.items():
                 output = manifests_by_output_id.get(output_id)
                 if output is None:
@@ -162,6 +189,13 @@ def execute_pipeline_run(run_id: str) -> dict:
                         ")"
                     ),
                     row_count=int(output["row_count"]),
+                    metadata={
+                        "feature_manifest": list(output.get("feature_manifest") or []),
+                        "dataset_id": str(output.get("dataset_id") or ""),
+                        "artifact_id": str(output.get("artifact_id") or ""),
+                        "business_case_role": str(output.get("business_case_role") or ""),
+                        "dataset_name": str(output.get("dataset_name") or ""),
+                    },
                 )
             for port_id, output_id in result.artifact_output_ids.items():
                 output = manifests_by_output_id.get(output_id)
@@ -191,6 +225,15 @@ def execute_pipeline_run(run_id: str) -> dict:
             for item in all_output_manifests
             if item.get("quality_output_kind") == "rejected_records"
         )
+        if not run.is_dry_run:
+            report_manifests, report_artifact_ids = ScoringReportMaterializer().materialize(
+                run=run,
+                version=version,
+                workflow=workflow,
+                output_manifest=all_output_manifests,
+            )
+            all_output_manifests.extend(report_manifests)
+            all_artifact_ids.extend(report_artifact_ids)
         run.output_manifest = all_output_manifests
         run.output_artifact_ids = list(dict.fromkeys(all_artifact_ids))
         run.warnings = list(dict.fromkeys(all_warnings))

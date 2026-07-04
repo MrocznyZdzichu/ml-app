@@ -1,0 +1,1 @@
+"""Versioned scoring report registry."""

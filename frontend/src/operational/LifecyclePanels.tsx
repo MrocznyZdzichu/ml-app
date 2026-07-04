@@ -1,9 +1,10 @@
-import { Brain, Download, Eye, GitBranch, History, Play, Plus, Rocket, Search, Share2, SlidersHorizontal, X } from "lucide-react";
+import { Brain, Database, Download, Eye, GitBranch, History, Play, Plus, Rocket, Search, Share2, SlidersHorizontal, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../api/client";
 import type {
   DataAsset,
+  DatasetLineageReference,
   BusinessCase,
   Deployment,
   ModelArtifact,
@@ -18,12 +19,14 @@ export function ModelsPanel({
   models,
   businessCases,
   pipelines,
-  initialBusinessCaseId = ""
+  initialBusinessCaseId = "",
+  onOpenDataset
 }: {
   models: ModelArtifact[];
   businessCases: BusinessCase[];
   pipelines: Pipeline[];
   initialBusinessCaseId?: string;
+  onOpenDataset?: (datasetId: string) => void;
 }) {
   const [query, setQuery] = useState("");
   const [businessCaseId, setBusinessCaseId] = useState(initialBusinessCaseId);
@@ -149,6 +152,7 @@ export function ModelsPanel({
           businessCaseName={businessCaseById.get(selectedModel.business_case_id)?.name ?? "Unassigned"}
           pipelineName={pipelineById.get(selectedModel.pipeline_id)?.name ?? "Unknown pipeline"}
           onClose={() => setSelectedModel(null)}
+          onOpenDataset={onOpenDataset}
         />
       )}
       {historyModel && (
@@ -167,7 +171,7 @@ export function ModelsPanel({
   );
 }
 
-function ModelVersionHistoryDialog({
+export function ModelVersionHistoryDialog({
   model,
   businessCaseName,
   pipelineName,
@@ -232,19 +236,36 @@ function ModelVersionHistoryDialog({
   );
 }
 
-function ModelDetailsDialog({
+export function ModelDetailsDialog({
   model,
   businessCaseName,
   pipelineName,
-  onClose
+  onClose,
+  onOpenDataset
 }: {
   model: ModelArtifact;
   businessCaseName: string;
   pipelineName: string;
   onClose: () => void;
+  onOpenDataset?: (datasetId: string) => void;
 }) {
   const [tab, setTab] = useState<"overview" | "training" | "parameters" | "lineage">("overview");
+  const [dataLineage, setDataLineage] = useState<DatasetLineageReference[]>([]);
+  const [lineageError, setLineageError] = useState("");
   const weights = model.model_parameters.weights ?? [];
+  useEffect(() => {
+    if (model.id.startsWith("dry-run:")) {
+      setDataLineage([]);
+      return;
+    }
+    let active = true;
+    api.getModelDataLineage(model.id)
+      .then((items) => active && setDataLineage(items))
+      .catch((error) => active && setLineageError(
+        error instanceof Error ? error.message : "Could not load model data lineage"
+      ));
+    return () => { active = false; };
+  }, [model.id]);
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <div className="modal-dialog model-details-dialog" role="dialog" aria-modal="true" aria-label={`Model details: ${model.name}`}>
@@ -279,6 +300,11 @@ function ModelDetailsDialog({
               <h3>Feature contract</h3>
               <div className="model-feature-list">{model.feature_columns.map((item) => <code key={item}>{item}</code>)}</div>
             </section>
+            <DatasetLineageList
+              items={dataLineage}
+              error={lineageError}
+              onOpenDataset={onOpenDataset}
+            />
           </>
         )}
         {tab === "training" && (
@@ -327,6 +353,41 @@ function ModelDetailsDialog({
         )}
       </div>
     </div>
+  );
+}
+
+export function DatasetLineageList({
+  items,
+  error,
+  onOpenDataset
+}: {
+  items: DatasetLineageReference[];
+  error?: string;
+  onOpenDataset?: (datasetId: string) => void;
+}) {
+  return (
+    <section className="model-detail-section">
+      <h3><Database size={16} /> Related datasets</h3>
+      {error && <div className="error-banner">{error}</div>}
+      <div className="dataset-lineage-list">
+        {items.map((item) => (
+          <article key={item.artifact_id}>
+            <div>
+              <strong>{item.name} · v{item.version_number}</strong>
+              <span>{item.role.replaceAll("_", " ")} · {item.stage} · {item.row_count?.toLocaleString() ?? "—"} rows</span>
+              <small>{item.pipeline_step_id ? `step ${item.pipeline_step_id}` : "registered source"}</small>
+            </div>
+            {onOpenDataset && (
+              <button className="secondary-button compact-button" type="button"
+                onClick={() => onOpenDataset(item.dataset_id)}>
+                <Eye size={14} /> Open dataset
+              </button>
+            )}
+          </article>
+        ))}
+        {!items.length && !error && <div className="empty-state">No resolved dataset lineage is available.</div>}
+      </div>
+    </section>
   );
 }
 

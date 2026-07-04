@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, Query
 
 from app.core.security import Principal, require_user
 from app.modules.pipelines.schemas import (
+    PipelineCopy,
     PipelineCreate,
     PipelineRead,
     PipelineRunCreate,
@@ -60,6 +61,23 @@ def update_pipeline(
     principal: Principal = Depends(require_user),
 ) -> PipelineRead:
     return PipelineRead.model_validate(service.update_pipeline(pipeline_id, payload, principal))
+
+
+@router.post("/{pipeline_id}/copy", response_model=PipelineRead, status_code=201)
+def copy_pipeline(
+    pipeline_id: str,
+    payload: PipelineCopy,
+    principal: Principal = Depends(require_user),
+) -> PipelineRead:
+    return PipelineRead.model_validate(service.copy_pipeline(pipeline_id, payload, principal))
+
+
+@router.delete("/{pipeline_id}")
+def delete_pipeline(
+    pipeline_id: str,
+    principal: Principal = Depends(require_user),
+) -> dict[str, str]:
+    return {"action": service.delete_pipeline(pipeline_id, principal)}
 
 
 @router.get("/{pipeline_id}/versions", response_model=list[PipelineVersionRead])
@@ -184,6 +202,7 @@ def preview_pipeline_run_output(
     pipeline_id: str,
     run_id: str,
     output_id: str | None = Query(default=None),
+    pipeline_step_id: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     principal: Principal = Depends(require_user),
@@ -194,6 +213,7 @@ def preview_pipeline_run_output(
             run_id,
             principal,
             output_id=output_id,
+            pipeline_step_id=pipeline_step_id,
             limit=limit,
             offset=offset,
         )
@@ -205,6 +225,7 @@ def profile_pipeline_run_output(
     pipeline_id: str,
     run_id: str,
     output_id: str | None = Query(default=None),
+    pipeline_step_id: str | None = Query(default=None),
     max_columns: int = Query(default=30, ge=1, le=100),
     top_n: int = Query(default=10, ge=1, le=50),
     principal: Principal = Depends(require_user),
@@ -215,6 +236,7 @@ def profile_pipeline_run_output(
             run_id,
             principal,
             output_id=output_id,
+            pipeline_step_id=pipeline_step_id,
             max_columns=max_columns,
             top_n=top_n,
         )

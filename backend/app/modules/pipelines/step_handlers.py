@@ -165,6 +165,16 @@ class TrainingStepHandler:
         training = sources.get("training")
         if training is None:
             raise ValueError("Training step requires a bound 'training' dataset input")
+        if definition.feature_selection == "upstream_contract":
+            resolved_features = [
+                str(item.get("name"))
+                for item in training.metadata.get("feature_manifest", [])
+                if item.get("role") == "feature" and item.get("name")
+            ]
+            if resolved_features:
+                definition = definition.model_copy(
+                    update={"feature_columns": resolved_features}
+                )
         result = self.engine.execute(
             definition,
             training,

@@ -1150,7 +1150,7 @@ function ColumnPicker({
               onChange={(event) => onChange(event.target.checked
                 ? [...selected, column.name]
                 : selected.filter((item) => item !== column.name))} />
-            <span>{column.name}<small>{column.type}</small></span>
+            <span><strong title={column.name}>{column.name}</strong><small>{column.type}</small></span>
           </label>
         ))}
         {!visible.length && <div className="fe-no-columns">No matching columns</div>}

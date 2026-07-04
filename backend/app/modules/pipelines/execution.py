@@ -54,6 +54,10 @@ class CsvDatasetInputAdapter:
             return SourceRelation(
                 sql=f"read_parquet({sql_literal(str(path))})",
                 row_count=int(asset.row_count or -1),
+                metadata={
+                    "dataset_id": asset.id,
+                    "feature_manifest": list(asset.metadata.get("feature_manifest") or []),
+                },
             )
         header = "true" if asset.has_header is not False else "false"
         relation = (
@@ -61,7 +65,14 @@ class CsvDatasetInputAdapter:
             f"{sql_literal(str(path))}, header={header}, sample_size=-1, "
             "null_padding=true, ignore_errors=false)"
         )
-        return SourceRelation(sql=relation, row_count=int(asset.row_count or -1))
+        return SourceRelation(
+            sql=relation,
+            row_count=int(asset.row_count or -1),
+            metadata={
+                "dataset_id": asset.id,
+                "feature_manifest": list(asset.metadata.get("feature_manifest") or []),
+            },
+        )
 
     @staticmethod
     def _validate_asset(asset: DataAsset) -> None:

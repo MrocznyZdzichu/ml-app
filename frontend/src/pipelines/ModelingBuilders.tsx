@@ -57,12 +57,31 @@ export function TrainingBuilder({ definition, defaults, disabled, onChange }: {
         target_column,
         feature_columns: definition.feature_columns.filter((item) => item !== target_column)
       })} />
+    <label>Feature selection<select value={definition.feature_selection} disabled={disabled}
+      onChange={(event) => update({
+        feature_selection: event.target.value as TrainingDefinition["feature_selection"]
+      })}>
+      <option value="upstream_contract">Use upstream Feature Engineering contract</option>
+      <option value="explicit">Select columns manually</option>
+    </select></label>
+    {definition.feature_selection === "upstream_contract" && (
+      <div className="fe-suggestion">
+        <Sparkles size={17} />
+        <span>
+          Runtime uses every upstream column marked as a model feature, including fitted
+          one-hot, PCA and other dynamically generated columns.
+        </span>
+      </div>
+    )}
     <div className="modeling-action-grid">
-      <button className="modeling-config-button" type="button" disabled={disabled}
+      <button className="modeling-config-button" type="button"
+        disabled={disabled || definition.feature_selection === "upstream_contract"}
         onClick={() => setOpenDialog("features")}>
         <ListChecks size={18} />
         <span><strong>Add features</strong>
-          <small>{definition.feature_columns.length} selected from {defaults.available_columns.length} available</small></span>
+          <small>{definition.feature_selection === "upstream_contract"
+            ? "Resolved from the fitted FE manifest at runtime"
+            : `${definition.feature_columns.length} selected from ${defaults.available_columns.length} available`}</small></span>
       </button>
       <button className="modeling-config-button" type="button" disabled={disabled}
         onClick={() => setOpenDialog("parameters")}>
@@ -286,6 +305,8 @@ export function ScoringBuilder({ definition, defaults, disabled, onChange }: {
       onChange={(event) => update({ prediction_column: event.target.value })} /></label>
     <label>Output dataset name<input value={definition.dataset_name} disabled={disabled}
       onChange={(event) => update({ dataset_name: event.target.value })} /></label>
+    <label>Scoring report name<input value={definition.report_name} disabled={disabled}
+      onChange={(event) => update({ report_name: event.target.value })} /></label>
     <label>Batch size<input type="number" min={100} max={100000} value={definition.batch_size} disabled={disabled}
       onChange={(event) => update({ batch_size: Number(event.target.value) })} /></label>
     <small>Output: Parquet prediction dataset with row ID, prediction and optional metrics.</small>

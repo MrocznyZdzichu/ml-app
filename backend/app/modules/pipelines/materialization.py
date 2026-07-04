@@ -24,6 +24,164 @@ from app.modules.pipelines.domain import PipelineRun, PipelineVersion
 from app.modules.pipelines.workflow import WorkflowDefinition, data_engineering_step
 
 
+class ScoringReportMaterializer:
+    """Registers immutable scoring evaluations without copying row-level data."""
+
+    def __init__(
+        self,
+        business_cases: BusinessCaseRepository | None = None,
+    ) -> None:
+        self.business_cases = business_cases or PostgresBusinessCaseRepository()
+
+    def materialize(
+        self,
+        *,
+        run: PipelineRun,
+        version: PipelineVersion,
+        workflow: WorkflowDefinition,
+        output_manifest: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        if run.is_dry_run:
+            return [], []
+        report_manifests: list[dict[str, Any]] = []
+        report_artifact_ids: list[str] = []
+        model_outputs = [
+            item
+            for item in output_manifest
+            if item.get("artifact_type") == ArtifactType.MODEL_VERSION.value
+        ]
+        for prediction in output_manifest:
+            if (
+                prediction.get("artifact_type") != ArtifactType.PREDICTION_DATASET.value
+                or not isinstance(prediction.get("evaluation"), dict)
+            ):
+                continue
+            step_id = str(prediction.get("pipeline_step_id") or "")
+            output_id = str(prediction.get("output_id") or "predictions")
+            reference_id = str(uuid5(
+                NAMESPACE_URL,
+                f"mlapp:scoring-report:{run.id}:{step_id}:{output_id}",
+            ))
+            existing = self.business_cases.find_artifact(
+                run.owner_id,
+                reference_id,
+                run.business_case_id,
+            )
+            if existing is None:
+                logical_report_id = str(uuid5(
+                    NAMESPACE_URL,
+                    (
+                        f"mlapp:scoring-report-family:{run.owner_id}:"
+                        f"{run.pipeline_id}:{step_id}"
+                    ),
+                ))
+                prediction_artifact_id = str(prediction.get("artifact_id") or "")
+                matching_model = self._model_for_scoring_step(
+                    workflow,
+                    step_id,
+                    model_outputs,
+                )
+                model_artifact_id = str((matching_model or {}).get("artifact_id") or "")
+                input_artifact_ids = [
+                    artifact_id
+                    for artifact_id in (model_artifact_id, prediction_artifact_id)
+                    if artifact_id
+                ]
+                now = datetime.now(timezone.utc)
+                lineage = {
+                    "input_artifact_ids": input_artifact_ids,
+                    "input_lineage": [
+                        {
+                            "input_port_id": "model",
+                            "artifact_ids": [model_artifact_id] if model_artifact_id else [],
+                        },
+                        {
+                            "input_port_id": "predictions",
+                            "artifact_ids": [prediction_artifact_id]
+                            if prediction_artifact_id else [],
+                        },
+                    ],
+                    "pipeline_id": run.pipeline_id,
+                    "pipeline_version_id": version.id,
+                    "pipeline_definition_hash": version.definition_hash,
+                    "pipeline_run_id": run.id,
+                    "pipeline_step_id": step_id,
+                    "created_at": now.isoformat(),
+                    "row_count": int(prediction.get("row_count") or 0),
+                    "created_by": run.created_by,
+                }
+                scoring_step = next(
+                    (step for step in workflow.steps if step.step_id == step_id),
+                    None,
+                )
+                step_name = scoring_step.name if scoring_step is not None else "Scoring"
+                report_name = str(
+                    (
+                        (scoring_step.config.get("definition") or {}).get("report_name")
+                        if scoring_step is not None else ""
+                    )
+                    or f"{step_name} report"
+                )
+                existing = Artifact(
+                    id=str(uuid4()),
+                    owner_id=run.owner_id,
+                    type=ArtifactType.REPORT,
+                    reference_id=reference_id,
+                    origin=ArtifactOrigin.PLATFORM_GENERATED,
+                    business_case_id=run.business_case_id,
+                    metadata={
+                        "report_name": report_name,
+                        "logical_report_id": logical_report_id,
+                        "evaluation": dict(prediction["evaluation"]),
+                        "prediction_dataset_id": prediction.get("dataset_id", ""),
+                        "prediction_artifact_id": prediction_artifact_id,
+                        "model_artifact_id": model_artifact_id,
+                        "lineage": lineage,
+                    },
+                    created_by=run.created_by,
+                    created_at=now,
+                )
+                self.business_cases.add_artifact(existing)
+            report_artifact_ids.append(existing.id)
+            report_manifests.append({
+                "output_id": f"{output_id}_scoring_report",
+                "artifact_type": ArtifactType.REPORT.value,
+                "materialization": "artifact",
+                "artifact_id": existing.id,
+                "reference_id": existing.reference_id,
+                "pipeline_step_id": step_id,
+                "output_stage": prediction.get("output_stage", "final"),
+                "row_count": int(prediction.get("row_count") or 0),
+                "data_scope": "full",
+                "is_dry_run": False,
+                "evaluation": dict(prediction["evaluation"]),
+            })
+        return report_manifests, report_artifact_ids
+
+    @staticmethod
+    def _model_for_scoring_step(
+        workflow: WorkflowDefinition,
+        scoring_step_id: str,
+        model_outputs: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        scoring_step = next(
+            (step for step in workflow.steps if step.step_id == scoring_step_id),
+            None,
+        )
+        source_step_ids = {
+            port.source.step_id
+            for port in (scoring_step.inputs if scoring_step is not None else [])
+        }
+        return next(
+            (
+                model
+                for model in reversed(model_outputs)
+                if str(model.get("pipeline_step_id") or "") in source_step_ids
+            ),
+            model_outputs[-1] if model_outputs else None,
+        )
+
+
 class PipelineOutputMaterializer:
     def __init__(
         self,
@@ -45,6 +203,7 @@ class PipelineOutputMaterializer:
         step_id: str | None = None,
         input_dataset_ids: list[str] | None = None,
         input_artifact_ids: list[str] | None = None,
+        input_lineage: list[dict[str, Any]] | None = None,
         step_type: str = "data_engineering",
         output_stage: str = "final",
     ) -> tuple[list[dict[str, Any]], list[str]]:
@@ -79,6 +238,7 @@ class PipelineOutputMaterializer:
                     step_id=step_id,
                     item=item,
                     input_artifact_ids=input_artifact_ids,
+                    input_lineage=input_lineage or [],
                 )
                 item.update({
                     "artifact_id": artifact.id,
@@ -100,6 +260,7 @@ class PipelineOutputMaterializer:
                     step_id=step_id,
                     item=item,
                     input_artifact_ids=input_artifact_ids,
+                    input_lineage=input_lineage or [],
                 )
                 item.update({
                     "artifact_id": artifact.id,
@@ -118,6 +279,7 @@ class PipelineOutputMaterializer:
                 step_id=step_id,
                 item=item,
                 input_artifact_ids=input_artifact_ids,
+                input_lineage=input_lineage or [],
                 step_type=step_type,
                 output_stage=output_stage,
             )
@@ -144,6 +306,7 @@ class PipelineOutputMaterializer:
         step_id: str,
         item: dict[str, Any],
         input_artifact_ids: list[str],
+        input_lineage: list[dict[str, Any]],
         step_type: str,
         output_stage: str,
     ) -> tuple[DataAsset, Artifact]:
@@ -160,6 +323,7 @@ class PipelineOutputMaterializer:
         now = datetime.now(timezone.utc)
         lineage = {
             "input_artifact_ids": input_artifact_ids,
+            "input_lineage": input_lineage,
             "pipeline_id": run.pipeline_id,
             "pipeline_version_id": version.id,
             "pipeline_definition_hash": version.definition_hash,
@@ -202,6 +366,7 @@ class PipelineOutputMaterializer:
                     "schema_hash": item.get("schema_hash", ""),
                     "feature_manifest": list(item.get("feature_manifest") or []),
                     "evaluation": dict(item.get("evaluation") or {}),
+                    "split_evaluation": dict(item.get("split_evaluation") or {}),
                     "metrics": dict(item.get("metrics") or {}),
                     "score_contract": dict(item.get("score_contract") or {}),
                     "pipeline_output": {
@@ -209,6 +374,7 @@ class PipelineOutputMaterializer:
                         "pipeline_step_id": step_id,
                         "output_id": output_id,
                         "stage": output_stage,
+                        "role": str(item.get("business_case_role") or ""),
                     },
                 },
                 created_at=now,
@@ -284,6 +450,7 @@ class PipelineOutputMaterializer:
         step_id: str,
         item: dict[str, Any],
         input_artifact_ids: list[str],
+        input_lineage: list[dict[str, Any]],
     ) -> Artifact:
         artifact_type = ArtifactType(str(item["artifact_type"]))
         reference_id = str(uuid5(
@@ -312,6 +479,7 @@ class PipelineOutputMaterializer:
         now = datetime.now(timezone.utc)
         lineage = {
             "input_artifact_ids": input_artifact_ids,
+            "input_lineage": input_lineage,
             "pipeline_version_id": version.id,
             "pipeline_definition_hash": version.definition_hash,
             "pipeline_run_id": run.id,
@@ -362,6 +530,7 @@ class PipelineOutputMaterializer:
         step_id: str,
         item: dict[str, Any],
         input_artifact_ids: list[str],
+        input_lineage: list[dict[str, Any]],
     ) -> Artifact:
         reference_id = str(uuid5(
             NAMESPACE_URL,
@@ -381,6 +550,7 @@ class PipelineOutputMaterializer:
         os.replace(source_path, target_path)
         lineage = {
             "input_artifact_ids": input_artifact_ids,
+            "input_lineage": input_lineage,
             "pipeline_version_id": version.id,
             "pipeline_definition_hash": version.definition_hash,
             "pipeline_run_id": run.id,

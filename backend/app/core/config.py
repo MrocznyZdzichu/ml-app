@@ -21,6 +21,10 @@ class Settings(BaseSettings):
         alias="DATABASE_URL",
     )
     redis_url: str = Field(default="redis://redis:6379/0", alias="REDIS_URL")
+    celery_task_always_eager: bool = Field(
+        default=False,
+        alias="CELERY_TASK_ALWAYS_EAGER",
+    )
     descriptive_profile_result_expires_seconds: int = Field(
         default=3600,
         ge=60,

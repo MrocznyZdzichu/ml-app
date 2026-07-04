@@ -7,6 +7,7 @@ export type TrainingDefinition = {
   algorithm: TrainingAlgorithm;
   target_column: string;
   feature_columns: string[];
+  feature_selection: "upstream_contract" | "explicit";
   model_name: string;
   epochs: number;
   early_stopping: boolean;
@@ -41,6 +42,7 @@ export type ScoringDefinition = {
   target_column: string;
   prediction_column: string;
   dataset_name: string;
+  report_name: string;
   batch_size: number;
 };
 
@@ -50,6 +52,7 @@ export const emptyTrainingDefinition = (): TrainingDefinition => ({
   algorithm: "sgd_classifier",
   target_column: "",
   feature_columns: [],
+  feature_selection: "upstream_contract",
   model_name: "Trained model",
   epochs: 50,
   early_stopping: false,
@@ -66,6 +69,7 @@ export const emptyScoringDefinition = (): ScoringDefinition => ({
   target_column: "",
   prediction_column: "prediction",
   dataset_name: "Test predictions",
+  report_name: "Test scoring report",
   batch_size: 10000
 });
 
@@ -172,7 +176,10 @@ export function scoringWithDefaults(
     target_column: current.target_column || defaults.target_column,
     dataset_name: current.dataset_name === "Test predictions"
       ? `${defaults.model_name.replace(/ model$/, "")} test predictions`
-      : current.dataset_name
+      : current.dataset_name,
+    report_name: current.report_name === "Test scoring report"
+      ? `${defaults.model_name.replace(/ model$/, "")} test scoring report`
+      : current.report_name
   };
 }
 
@@ -194,6 +201,7 @@ export function normalizeTrainingDefinition(value: unknown): TrainingDefinition 
     algorithm,
     target_column: String(raw.target_column ?? ""),
     feature_columns: Array.isArray(raw.feature_columns) ? raw.feature_columns.map(String) : [],
+    feature_selection: raw.feature_selection === "explicit" ? "explicit" : "upstream_contract",
     model_name: String(raw.model_name ?? "Trained model"),
     epochs: boundedNumber(raw.epochs, 50, 1, 100),
     early_stopping: raw.early_stopping === true,
@@ -239,6 +247,7 @@ export function normalizeScoringDefinition(value: unknown): ScoringDefinition {
     target_column: String(raw.target_column ?? ""),
     prediction_column: String(raw.prediction_column ?? "prediction"),
     dataset_name: String(raw.dataset_name ?? "Test predictions"),
+    report_name: String(raw.report_name ?? "Test scoring report"),
     batch_size: boundedNumber(raw.batch_size, 10000, 100, 100000)
   };
 }

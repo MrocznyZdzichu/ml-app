@@ -1,9 +1,12 @@
-import { Box, Check, ChevronLeft, ChevronRight, Clipboard, Database, Download, Eye, RotateCcw, Search, X } from "lucide-react";
+import { BarChart3, Box, Brain, Check, ChevronLeft, ChevronRight, Clipboard, Database, Download, Eye, RotateCcw, Search, X } from "lucide-react";
+import type { CSSProperties } from "react";
 import { useEffect, useState } from "react";
 
 import { api } from "../api/client";
 import type {
   BusinessCase,
+  ModelArtifact,
+  ModelEvaluationSnapshot,
   Pipeline,
   PipelineVersion,
   PipelineRun,
@@ -11,6 +14,7 @@ import type {
   PipelineRunOutputPreview,
   PipelineRunOutputProfile
 } from "../api/client";
+import { ModelDetailsDialog } from "../operational/LifecyclePanels";
 
 export function PipelineVersionHistoryDialog({
   pipeline,
@@ -653,10 +657,17 @@ export function DryRunPreview({
 }: {
   run: PipelineRun;
   onClose: () => void;
-  onExamine: () => void;
+  onExamine: (outputId: string, pipelineStepId: string) => void;
 }) {
-  const output = run.output_manifest[0];
+  const outputs = browsableDryRunOutputs(run);
+  const modelOutput = run.output_manifest.find((item) => item.artifact_type === "model_version");
+  const scoringReportOutput = run.output_manifest.find(isScoringReportOutput);
+  const [selectedOutputIndex, setSelectedOutputIndex] = useState(0);
+  const [selectedModel, setSelectedModel] = useState<ModelArtifact | null>(null);
+  const [selectedReport, setSelectedReport] = useState<ModelEvaluationSnapshot | null>(null);
+  const output = outputs[selectedOutputIndex] ?? outputs[0];
   const outputId = output?.output_id ?? "";
+  const pipelineStepId = output?.pipeline_step_id ?? "";
   const [activeView, setActiveView] = useState<"rows" | "profile">("rows");
   const [pageSize, setPageSize] = useState(50);
   const [offset, setOffset] = useState(0);
@@ -668,19 +679,26 @@ export function DryRunPreview({
   const [profileError, setProfileError] = useState("");
 
   useEffect(() => {
+    setSelectedOutputIndex(0);
+    setSelectedModel(null);
+    setSelectedReport(null);
+  }, [run.id]);
+
+  useEffect(() => {
     setOffset(0);
     setPreview(null);
     setProfile(null);
     setPreviewError("");
     setProfileError("");
-  }, [run.id, outputId]);
+    setActiveView("rows");
+  }, [run.id, outputId, pipelineStepId]);
 
   useEffect(() => {
     if (!outputId) return;
     let cancelled = false;
     setIsPreviewLoading(true);
     setPreviewError("");
-    api.previewPipelineRunOutput(run.pipeline_id, run.id, outputId, pageSize, offset)
+    api.previewPipelineRunOutput(run.pipeline_id, run.id, outputId, pipelineStepId, pageSize, offset)
       .then((result) => {
         if (!cancelled) setPreview(result);
       })
@@ -695,14 +713,14 @@ export function DryRunPreview({
     return () => {
       cancelled = true;
     };
-  }, [run.pipeline_id, run.id, outputId, pageSize, offset]);
+  }, [run.pipeline_id, run.id, outputId, pipelineStepId, pageSize, offset]);
 
   useEffect(() => {
     if (activeView !== "profile" || !outputId || profile) return;
     let cancelled = false;
     setIsProfileLoading(true);
     setProfileError("");
-    api.profilePipelineRunOutput(run.pipeline_id, run.id, outputId)
+    api.profilePipelineRunOutput(run.pipeline_id, run.id, outputId, pipelineStepId)
       .then((result) => {
         if (!cancelled) setProfile(result);
       })
@@ -717,7 +735,7 @@ export function DryRunPreview({
     return () => {
       cancelled = true;
     };
-  }, [activeView, run.pipeline_id, run.id, outputId, profile]);
+  }, [activeView, run.pipeline_id, run.id, outputId, pipelineStepId, profile]);
 
   const fallbackRecords = output?.preview?.records ?? [];
   const records = preview?.records ?? fallbackRecords;
@@ -741,7 +759,7 @@ export function DryRunPreview({
           <button
             className="primary-button compact-button"
             type="button"
-            onClick={onExamine}
+            onClick={() => onExamine(outputId, pipelineStepId)}
             disabled={!outputId}
           >
             <Search size={15} /> Examine
@@ -756,6 +774,44 @@ export function DryRunPreview({
           </button>
         </div>
       </div>
+      {(modelOutput || scoringReportOutput) && (
+        <div className="dry-run-artifact-actions" aria-label="Temporary dry-run artifacts">
+          <span>Temporary artifacts</span>
+          {modelOutput && (
+            <button
+              className="secondary-button compact-button"
+              type="button"
+              onClick={() => setSelectedModel(dryRunModel(run, modelOutput))}
+            >
+              <Brain size={14} /> Preview model
+            </button>
+          )}
+          {scoringReportOutput && (
+            <button
+              className="secondary-button compact-button"
+              type="button"
+              onClick={() => setSelectedReport(scoringReportOutput.evaluation as ModelEvaluationSnapshot)}
+            >
+              <BarChart3 size={14} /> Preview scoring report
+            </button>
+          )}
+        </div>
+      )}
+      {outputs.length > 1 && (
+        <label className="dry-run-output-selector">
+          <span>Result object <small>{outputs.length} temporary Parquet outputs</small></span>
+          <select
+            value={selectedOutputIndex}
+            onChange={(event) => setSelectedOutputIndex(Number(event.target.value))}
+          >
+            {outputs.map((item, index) => (
+              <option value={index} key={`${item.pipeline_step_id ?? ""}:${item.output_id}:${index}`}>
+                {dryRunOutputLabel(item, index)}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <div className="dry-run-view-tabs">
         <button
           className={activeView === "rows" ? "active" : ""}
@@ -879,8 +935,346 @@ export function DryRunPreview({
         </div>
       )}
       <small>Temporary Parquet · no official dataset or artifact was created.</small>
+      {selectedModel && (
+        <ModelDetailsDialog
+          model={selectedModel}
+          businessCaseName="Dry-run preview"
+          pipelineName={`Pipeline ${run.pipeline_id.slice(0, 8)}`}
+          onClose={() => setSelectedModel(null)}
+        />
+      )}
+      {selectedReport && (
+        <TemporaryScoringReportDialog
+          report={selectedReport}
+          onClose={() => setSelectedReport(null)}
+        />
+      )}
     </section>
   );
+}
+
+export function ModelPerformanceReport({ report }: { report: ModelEvaluationSnapshot }) {
+  if (report.kind !== "model_performance") {
+    return (
+      <div className="evaluation-empty">
+        <strong>Scoring report is unavailable</strong>
+        <p>This result does not contain a model-performance report.</p>
+      </div>
+    );
+  }
+  if (report.status !== "available") {
+    return (
+      <div className="evaluation-empty">
+        <strong>Performance needs actual target values</strong>
+        <p>{report.warnings?.[0] ?? "Assign the target column in the Scoring step."}</p>
+      </div>
+    );
+  }
+  const curves = report.curves ?? {};
+  return (
+    <div className="evaluation-report">
+      <div className="evaluation-scope">
+        <span><strong>{report.data_scope.evaluated_row_count.toLocaleString()}</strong> evaluated rows</span>
+        <span><strong>Full dataset</strong> metrics scope</span>
+        <span><strong>{report.problem_type.replaceAll("_", " ")}</strong> problem</span>
+        {report.monitoring.baseline_eligible && <span><strong>Monitoring-ready</strong> baseline snapshot</span>}
+      </div>
+      <div className="evaluation-metrics">
+        {report.metrics.map((metric) => (
+          <article key={metric.id}>
+            <span>{metric.label}</span>
+            <strong>{formatEvaluationMetric(metric.value, metric.unit)}</strong>
+            <small>{metric.direction === "higher" ? "higher is better" :
+              metric.direction === "lower" ? "lower is better" : "target: zero"}</small>
+          </article>
+        ))}
+      </div>
+      {report.confusion_matrix && report.confusion_matrix.labels.length > 0 && (
+        <section className="evaluation-section">
+          <header><div><h4>Confusion matrix</h4><p>Rows are actual classes; columns are predictions.</p></div></header>
+          <ConfusionMatrix matrix={report.confusion_matrix} />
+        </section>
+      )}
+      {report.class_metrics && report.class_metrics.length > 0 && (
+        <section className="evaluation-section">
+          <header><div><h4>Per-class quality</h4><p>Support and error balance for every reported class.</p></div></header>
+          <div className="evaluation-class-table">
+            <table>
+              <thead><tr><th>Class</th><th>Support</th><th>Precision</th><th>Recall</th><th>F1</th></tr></thead>
+              <tbody>{report.class_metrics.map((item, index) => (
+                <tr key={`${String(item.label)}-${index}`}>
+                  <td>{String(item.label)}</td>
+                  <td>{item.support.toLocaleString()}</td>
+                  <td>{formatEvaluationMetric(item.precision, "ratio")}</td>
+                  <td>{formatEvaluationMetric(item.recall, "ratio")}</td>
+                  <td>{formatEvaluationMetric(item.f1, "ratio")}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        </section>
+      )}
+      {Object.keys(curves).length > 0 && (
+        <div className="evaluation-chart-grid">
+          {Object.entries(curves).map(([key, curve]) => (
+            <section className="evaluation-section" key={key}>
+              <header><div><h4>{evaluationCurveTitle(key)}</h4><p>{curve.rendering}</p></div></header>
+              <EvaluationLineChart curve={curve} curveKind={key}
+                diagonal={key === "roc" || key === "calibration"} />
+            </section>
+          ))}
+        </div>
+      )}
+      {report.distributions?.score_by_actual && (
+        <section className="evaluation-section">
+          <header><div><h4>Score distribution</h4><p>Full-data histogram split by actual class.</p></div></header>
+          <StackedHistogram bins={report.distributions.score_by_actual} />
+        </section>
+      )}
+      {report.residuals && (
+        <>
+          <section className="evaluation-section">
+            <header><div><h4>Residual distribution</h4><p>Prediction minus actual, calculated over all evaluated rows.</p></div></header>
+            <ResidualHistogram bins={report.residuals.histogram} />
+            <div className="evaluation-residual-summary">
+              <span>p05 <strong>{report.residuals.summary.p05.toPrecision(4)}</strong></span>
+              <span>median <strong>{report.residuals.summary.median.toPrecision(4)}</strong></span>
+              <span>p95 <strong>{report.residuals.summary.p95.toPrecision(4)}</strong></span>
+              <span>std. dev. <strong>{report.residuals.summary.standard_deviation.toPrecision(4)}</strong></span>
+            </div>
+          </section>
+          <section className="evaluation-section">
+            <header><div><h4>Actual vs predicted</h4><p>{report.residuals.actual_vs_predicted.rendering}</p></div></header>
+            <ActualPredictedScatter points={report.residuals.actual_vs_predicted.points} />
+          </section>
+        </>
+      )}
+      {report.warnings.length > 0 && (
+        <div className="evaluation-notes">
+          {report.warnings.map((warning) => <p key={warning}>{warning}</p>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TemporaryScoringReportDialog({
+  report,
+  onClose
+}: {
+  report: ModelEvaluationSnapshot;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="modal-backdrop nested-modal"
+      role="presentation"
+      onMouseDown={(event) => event.target === event.currentTarget && onClose()}
+    >
+      <div
+        className="modal-dialog scoring-report-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Temporary scoring report"
+      >
+        <div className="modal-header">
+          <div>
+            <span className="builder-kicker">Temporary artifact</span>
+            <h2>Scoring report</h2>
+            <p>Dry-run preview · no report version has been registered.</p>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close scoring report">
+            <X size={18} />
+          </button>
+        </div>
+        <ModelPerformanceReport report={report} />
+      </div>
+    </div>
+  );
+}
+
+function ConfusionMatrix({ matrix }: {
+  matrix: NonNullable<ModelEvaluationSnapshot["confusion_matrix"]>;
+}) {
+  const maximum = Math.max(1, ...matrix.values.flat());
+  return (
+    <div className="evaluation-confusion">
+      <table>
+        <thead><tr><th>Actual ↓ / Predicted →</th>{matrix.labels.map((label) => <th key={String(label)}>{String(label)}</th>)}</tr></thead>
+        <tbody>{matrix.values.map((row, rowIndex) => (
+          <tr key={String(matrix.labels[rowIndex])}>
+            <th>{String(matrix.labels[rowIndex])}</th>
+            {row.map((value, columnIndex) => (
+              <td key={`${rowIndex}-${columnIndex}`} style={{ "--cell-strength": value / maximum } as CSSProperties}>
+                {value.toLocaleString()}
+              </td>
+            ))}
+          </tr>
+        ))}</tbody>
+      </table>
+      {matrix.truncated && <small>Matrix limited to {matrix.labels.length} of {matrix.total_class_count} classes.</small>}
+    </div>
+  );
+}
+
+function EvaluationLineChart({
+  curve,
+  curveKind,
+  diagonal
+}: {
+  curve: NonNullable<ModelEvaluationSnapshot["curves"]>[string];
+  curveKind: string;
+  diagonal: boolean;
+}) {
+  const orderedPoints = [...curve.points].sort((left, right) => {
+    if (left.x !== right.x) return left.x - right.x;
+    return curveKind === "precision_recall" ? right.y - left.y : left.y - right.y;
+  });
+  const points = orderedPoints.map((point) => `${20 + point.x * 260},${170 - point.y * 145}`).join(" ");
+  return (
+    <div className="evaluation-line-chart">
+      <svg viewBox="0 0 300 190" role="img" aria-label={`${curve.y_label} by ${curve.x_label}`}>
+        <line x1="20" y1="170" x2="280" y2="170" className="axis" />
+        <line x1="20" y1="25" x2="20" y2="170" className="axis" />
+        {diagonal && <line x1="20" y1="170" x2="280" y2="25" className="baseline" />}
+        <polyline points={points} className="series" />
+      </svg>
+      <span className="x-label">{curve.x_label}</span>
+      <span className="y-label">{curve.y_label}</span>
+    </div>
+  );
+}
+
+function StackedHistogram({
+  bins
+}: {
+  bins: NonNullable<NonNullable<ModelEvaluationSnapshot["distributions"]>["score_by_actual"]>;
+}) {
+  const maximum = Math.max(1, ...bins.map((bin) => bin.negative_count + bin.positive_count));
+  return (
+    <div className="evaluation-histogram" aria-label="Score distribution by actual class">
+      {bins.map((bin, index) => (
+        <div className="bar-stack" key={index} title={`${bin.lower.toPrecision(3)}–${bin.upper.toPrecision(3)}`}>
+          <i className="positive" style={{ height: `${bin.positive_count / maximum * 100}%` }} />
+          <i className="negative" style={{ height: `${bin.negative_count / maximum * 100}%` }} />
+        </div>
+      ))}
+      <div className="histogram-legend"><span className="positive">Actual positive</span><span className="negative">Actual negative</span></div>
+    </div>
+  );
+}
+
+function ResidualHistogram({
+  bins
+}: {
+  bins: NonNullable<ModelEvaluationSnapshot["residuals"]>["histogram"];
+}) {
+  const maximum = Math.max(1, ...bins.map((bin) => bin.count));
+  return <div className="evaluation-histogram residual" aria-label="Residual distribution">
+    {bins.map((bin, index) => <i key={index} style={{ height: `${bin.count / maximum * 100}%` }}
+      title={`${bin.lower.toPrecision(3)}–${bin.upper.toPrecision(3)}: ${bin.count}`} />)}
+  </div>;
+}
+
+function ActualPredictedScatter({
+  points
+}: {
+  points: NonNullable<ModelEvaluationSnapshot["residuals"]>["actual_vs_predicted"]["points"];
+}) {
+  if (!points.length) return <div className="catalog-empty">No scatter points available.</div>;
+  const values = points.flatMap((point) => [point.actual, point.predicted]);
+  const minimum = Math.min(...values);
+  const maximum = Math.max(...values);
+  const span = maximum - minimum || 1;
+  return <div className="evaluation-line-chart">
+    <svg viewBox="0 0 300 190" role="img" aria-label="Actual versus predicted values">
+      <line x1="20" y1="170" x2="280" y2="25" className="baseline" />
+      {points.map((point, index) => (
+        <circle key={index} cx={20 + (point.actual - minimum) / span * 260}
+          cy={170 - (point.predicted - minimum) / span * 145} r="2.2" className="scatter-point" />
+      ))}
+    </svg>
+    <span className="x-label">Actual</span><span className="y-label">Predicted</span>
+  </div>;
+}
+
+function formatEvaluationMetric(value: number, unit: string) {
+  if (!Number.isFinite(value)) return "—";
+  return unit === "ratio" ? `${(value * 100).toFixed(1)}%` : value.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
+function evaluationCurveTitle(key: string) {
+  return key === "roc" ? "ROC curve" :
+    key === "precision_recall" ? "Precision–recall curve" :
+      key === "calibration" ? "Calibration" : key.replaceAll("_", " ");
+}
+
+export function browsableDryRunOutputs(run: PipelineRun): PipelineRun["output_manifest"] {
+  return run.output_manifest.filter((output) => {
+    const artifactType = output.artifact_type ?? "dataset";
+    return (
+      ["dataset", "prediction_dataset"].includes(artifactType)
+      && output.location_uri.toLowerCase().includes(".parquet")
+    );
+  });
+}
+
+function isScoringReportOutput(
+  output: PipelineRun["output_manifest"][number]
+): boolean {
+  const evaluation = output.evaluation as ModelEvaluationSnapshot | undefined;
+  return (
+    output.artifact_type === "prediction_dataset"
+    && evaluation?.kind === "model_performance"
+  );
+}
+
+function dryRunModel(
+  run: PipelineRun,
+  output: PipelineRun["output_manifest"][number]
+): ModelArtifact {
+  return {
+    id: `dry-run:${run.id}:${output.pipeline_step_id ?? ""}:${output.output_id}`,
+    owner_id: run.owner_id,
+    training_job_id: run.id,
+    name: output.model_name || "Temporary model",
+    version: "dry-run",
+    logical_id: "",
+    version_number: 0,
+    algorithm: output.algorithm || "unknown",
+    stage: "candidate",
+    artifact_uri: output.location_uri,
+    metrics: output.metrics ?? {},
+    business_case_id: run.business_case_id,
+    pipeline_id: run.pipeline_id,
+    pipeline_version_id: run.pipeline_version_id,
+    pipeline_run_id: run.id,
+    pipeline_step_id: output.pipeline_step_id ?? "",
+    problem_type: output.problem_type ?? "",
+    target_column: output.target_column ?? "",
+    feature_columns: output.feature_columns ?? [],
+    model_hash: output.model_hash ?? "",
+    training_config: output.training_config ?? {},
+    model_parameters: output.model_parameters ?? {},
+    lineage: {
+      pipeline_id: run.pipeline_id,
+      pipeline_version_id: run.pipeline_version_id,
+      pipeline_run_id: run.id,
+      pipeline_step_id: output.pipeline_step_id,
+      temporary: true
+    },
+    created_at: run.finished_at ?? run.created_at
+  };
+}
+
+function dryRunOutputLabel(
+  output: PipelineRun["output_manifest"][number],
+  index: number
+) {
+  const step = output.pipeline_step_id || "pipeline";
+  const name = output.dataset_name || output.output_id || `output ${index + 1}`;
+  const rows = output.row_count ?? 0;
+  return `${step} · ${name} · ${rows} rows`;
 }
 
 function businessCaseName(businessCases: BusinessCase[], businessCaseId: string) {

@@ -209,6 +209,22 @@ Poniższe ustalenia są obowiązującym kierunkiem rozwoju platformy po rozmowie
 - Monitoring skuteczności modelu/performance wymaga targetu i może działać dopiero po dostarczeniu danych z rzeczywistymi etykietami/wartościami.
 - Platforma powinna automatycznie dobierać metryki do typu problemu ML, początkowo jako placeholder/reguła UI.
 
+### Scoring Reports
+
+- `Scoring Report` jest widocznym dla uzytkownika, wersjonowanym obiektem nalezacym do Business Case.
+- Jedna logiczna rodzina raportow odpowiada parze pipeline + krok scoringowy. Kazdy udany pelny run tworzy nowa, niemutowalna wersje.
+- Wersja raportu jest technicznie artefaktem typu `report` i przechowuje ograniczone agregaty, metryki i dane do wykresow oraz lineage do modelu, prediction datasetu, wersji pipeline'u i runu. Nie kopiuje danych wierszowych.
+- Dry-run nie rejestruje raportu, modelu ani datasetu. Udostepnia tylko tymczasowy podglad tych obiektow.
+- Kontrakt raportu musi pozostac przydatny jako baseline dla przyszlego monitoringu. Porownania produkcyjne powinny bazowac na wersjach raportow, a nie na logice metryk odtworzonej w frontendzie.
+- Nazwa prediction datasetu i nazwa Scoring Report sa niezaleznymi polami konfiguracji kroku scoringowego. Zmiana nazwy raportu nie zmienia logicznej rodziny raportow, ktora nadal wynika z pipeline + stabilnego step_id.
+
+### Dynamiczne cechy i portowe lineage
+
+- Training domyslnie konsumuje upstream Feature Manifest zamiast statycznej listy nazw. Jest to wymagane dla one-hot encodingu, PCA i innych transformacji, ktorych finalny schemat zalezy od fitted state.
+- Model zawsze zapisuje rozwiazana w runtime, konkretna liste cech uzyta przez estimator. Reczny, jawny wybor kolumn pozostaje opcjonalnym trybem.
+- Lineage pomiedzy krokami musi byc przypisane do konkretnej pary step_id + port_id. Nie wolno laczyc wszystkich artefaktow kroku jako inputu kazdego downstream portu.
+- Widoki governance modeli i raportow powinny korzystac z backendowego resolvera grafu artefaktow, zwracajacego nazwy, wersje, role i identyfikatory datasetow. Frontend nie rekonstruuje lineage samodzielnie.
+
 ### Uprawnienia i audyt
 
 - Na obecnym etapie ignoruj pełny model uprawnień. Stosuj placeholdery `owner`, `created_by`, `updated_by`.

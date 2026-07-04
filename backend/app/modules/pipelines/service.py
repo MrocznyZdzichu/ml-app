@@ -1,5 +1,6 @@
 import hashlib
 import json
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -29,6 +30,7 @@ from app.modules.pipelines.repository import PipelineRepository, PostgresPipelin
 from app.modules.pipelines.run_preview import PipelineRunOutputReader
 from app.modules.pipelines.schemas import (
     PipelineCreate,
+    PipelineCopy,
     PipelineRunCreate,
     PipelineUpdate,
     PipelineVersionUpdate,
@@ -139,10 +141,76 @@ class PipelineService:
         principal: Principal,
     ) -> Pipeline:
         pipeline = self.get_pipeline(pipeline_id, principal)
+        self._require_active_pipeline(pipeline)
         pipeline.name = payload.name
+        if payload.description is not None:
+            pipeline.description = payload.description.strip()
+        if payload.type is not None:
+            pipeline.type = payload.type
         pipeline.updated_by = principal.user_id
         pipeline.updated_at = datetime.now(timezone.utc)
         return self.repository.update_pipeline(pipeline)
+
+    def copy_pipeline(
+        self,
+        pipeline_id: str,
+        payload: PipelineCopy,
+        principal: Principal,
+    ) -> Pipeline:
+        source = self.get_pipeline(pipeline_id, principal)
+        versions = self.repository.list_versions(source.id)
+        draft = next(
+            (item for item in reversed(versions) if item.status == PipelineVersionStatus.DRAFT),
+            None,
+        )
+        source_version = draft or (versions[-1] if versions else None)
+        if source_version is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Pipeline has no version to copy",
+            )
+
+        now = datetime.now(timezone.utc)
+        copied = Pipeline(
+            id=str(uuid4()),
+            owner_id=principal.user_id,
+            business_case_id=source.business_case_id,
+            name=payload.name,
+            description=source.description,
+            type=source.type,
+            status=PipelineStatus.DRAFT,
+            created_by=principal.user_id,
+            updated_by=principal.user_id,
+            created_at=now,
+            updated_at=now,
+        )
+        definition = normalize_definition(deepcopy(source_version.definition))
+        self.repository.add_pipeline(copied)
+        self.repository.add_version(
+            PipelineVersion(
+                id=str(uuid4()),
+                owner_id=principal.user_id,
+                pipeline_id=copied.id,
+                business_case_id=copied.business_case_id,
+                version_number=1,
+                status=PipelineVersionStatus.DRAFT,
+                definition=definition,
+                definition_hash=definition_hash(definition),
+                created_by=principal.user_id,
+                created_at=now,
+            )
+        )
+        return copied
+
+    def delete_pipeline(self, pipeline_id: str, principal: Principal) -> str:
+        pipeline = self.get_pipeline(pipeline_id, principal)
+        if self.repository.delete_pipeline_without_runs(pipeline.id):
+            return "deleted"
+        pipeline.status = PipelineStatus.DEPRECATED
+        pipeline.updated_by = principal.user_id
+        pipeline.updated_at = datetime.now(timezone.utc)
+        self.repository.update_pipeline(pipeline)
+        return "deprecated"
 
     def list_versions(self, pipeline_id: str, principal: Principal) -> list[PipelineVersion]:
         pipeline = self.get_pipeline(pipeline_id, principal)
@@ -155,6 +223,7 @@ class PipelineService:
         principal: Principal,
     ) -> PipelineVersion:
         pipeline = self.get_pipeline(pipeline_id, principal)
+        self._require_active_pipeline(pipeline)
         version = self.repository.get_draft_version(pipeline.id)
         if not version:
             raise HTTPException(
@@ -170,6 +239,7 @@ class PipelineService:
 
     def publish_draft_version(self, pipeline_id: str, principal: Principal) -> PipelineVersion:
         pipeline = self.get_pipeline(pipeline_id, principal)
+        self._require_active_pipeline(pipeline)
         version = self.repository.get_draft_version(pipeline.id)
         if not version:
             raise HTTPException(
@@ -190,6 +260,7 @@ class PipelineService:
 
     def create_next_draft_version(self, pipeline_id: str, principal: Principal) -> PipelineVersion:
         pipeline = self.get_pipeline(pipeline_id, principal)
+        self._require_active_pipeline(pipeline)
         if self.repository.get_draft_version(pipeline.id):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -218,6 +289,7 @@ class PipelineService:
 
     def create_run(self, pipeline_id: str, payload: PipelineRunCreate, principal: Principal) -> PipelineRun:
         pipeline = self.get_pipeline(pipeline_id, principal)
+        self._require_active_pipeline(pipeline)
         version = self._resolve_run_version(pipeline, payload.pipeline_version_id)
         if version.status == PipelineVersionStatus.DRAFT and not payload.is_dry_run:
             raise HTTPException(
@@ -471,11 +543,18 @@ class PipelineService:
         principal: Principal,
         *,
         output_id: str | None,
+        pipeline_step_id: str | None,
         limit: int,
         offset: int,
     ) -> dict[str, Any]:
         run = self.get_run(pipeline_id, run_id, principal)
-        return self.output_reader.preview(run, output_id=output_id, limit=limit, offset=offset)
+        return self.output_reader.preview(
+            run,
+            output_id=output_id,
+            pipeline_step_id=pipeline_step_id,
+            limit=limit,
+            offset=offset,
+        )
 
     def profile_run_output(
         self,
@@ -484,11 +563,18 @@ class PipelineService:
         principal: Principal,
         *,
         output_id: str | None,
+        pipeline_step_id: str | None,
         max_columns: int,
         top_n: int,
     ) -> dict[str, Any]:
         run = self.get_run(pipeline_id, run_id, principal)
-        return self.output_reader.profile(run, output_id=output_id, max_columns=max_columns, top_n=top_n)
+        return self.output_reader.profile(
+            run,
+            output_id=output_id,
+            pipeline_step_id=pipeline_step_id,
+            max_columns=max_columns,
+            top_n=top_n,
+        )
 
     def list_step_types(self) -> list[dict[str, str]]:
         executable = {
@@ -502,6 +588,14 @@ class PipelineService:
             for item in PipelineStepType
             if item.value in executable
         ]
+
+    @staticmethod
+    def _require_active_pipeline(pipeline: Pipeline) -> None:
+        if pipeline.status == PipelineStatus.DEPRECATED:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Deprecated pipelines are read-only and cannot be run",
+            )
 
     def _resolve_run_version(self, pipeline: Pipeline, version_id: str | None) -> PipelineVersion:
         versions = self.repository.list_versions(pipeline.id)
