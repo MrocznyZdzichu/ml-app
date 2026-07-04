@@ -78,6 +78,7 @@ class PipelineService:
             updated_by=principal.user_id,
             created_at=now,
             updated_at=now,
+            template=self._definition_template(payload.definition),
         )
         self.repository.add_pipeline(pipeline)
         self.repository.add_version(
@@ -127,13 +128,47 @@ class PipelineService:
                 max(version.version_number for version in drafts)
                 if drafts else None
             )
+            summary_version = (
+                max(published, key=lambda item: item.version_number)
+                if published
+                else max(drafts, key=lambda item: item.version_number, default=None)
+            )
+            pipeline.template = self._definition_template(
+                summary_version.definition if summary_version else {}
+            )
         return pipelines
 
     def get_pipeline(self, pipeline_id: str, principal: Principal) -> Pipeline:
         pipeline = self.repository.get_pipeline(pipeline_id)
         if not pipeline or pipeline.owner_id != principal.user_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pipeline not found")
+        versions = self.repository.list_versions(pipeline.id)
+        published = [item for item in versions if item.status == PipelineVersionStatus.PUBLISHED]
+        drafts = [item for item in versions if item.status == PipelineVersionStatus.DRAFT]
+        summary_version = (
+            max(published, key=lambda item: item.version_number)
+            if published
+            else max(drafts, key=lambda item: item.version_number, default=None)
+        )
+        pipeline.template = self._definition_template(
+            summary_version.definition if summary_version else {}
+        )
         return pipeline
+
+    @staticmethod
+    def _definition_template(definition: dict[str, Any]) -> str:
+        parameters = definition.get("parameters")
+        if isinstance(parameters, dict) and parameters.get("template"):
+            return str(parameters["template"])
+        for step in definition.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            config = step.get("config")
+            nested = config.get("definition") if isinstance(config, dict) else None
+            nested_parameters = nested.get("parameters") if isinstance(nested, dict) else None
+            if isinstance(nested_parameters, dict) and nested_parameters.get("template"):
+                return str(nested_parameters["template"])
+        return "custom"
 
     def update_pipeline(
         self,
@@ -184,6 +219,7 @@ class PipelineService:
             updated_by=principal.user_id,
             created_at=now,
             updated_at=now,
+            template=self._definition_template(source_version.definition),
         )
         definition = normalize_definition(deepcopy(source_version.definition))
         self.repository.add_pipeline(copied)

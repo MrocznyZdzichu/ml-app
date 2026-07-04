@@ -73,6 +73,7 @@ class PipelineRead(BaseModel):
     latest_published_version_number: int | None
     published_version_count: int
     draft_version_number: int | None
+    template: str
 
 
 class PipelineVersionUpdate(BaseModel):

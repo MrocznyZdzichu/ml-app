@@ -12,6 +12,7 @@ import type {
   ScoreResponse
 } from "../api/client";
 import { AssetList } from "../components/AssetList";
+import { ArtifactFilters, pipelineMatches } from "../components/ArtifactFilters";
 
 type NoticeSetter = (message: string) => void;
 
@@ -30,6 +31,8 @@ export function ModelsPanel({
 }) {
   const [query, setQuery] = useState("");
   const [businessCaseId, setBusinessCaseId] = useState(initialBusinessCaseId);
+  const [purposeFilter, setPurposeFilter] = useState("");
+  const [pipelineFilter, setPipelineFilter] = useState("");
   const [selectedModel, setSelectedModel] = useState<ModelArtifact | null>(null);
   const [historyModel, setHistoryModel] = useState<ModelArtifact | null>(null);
   const businessCaseById = useMemo(
@@ -56,6 +59,7 @@ export function ModelsPanel({
     const normalized = query.trim().toLowerCase();
     return modelFamilies.filter(({ latest, versions }) =>
       (!businessCaseId || latest.business_case_id === businessCaseId)
+      && pipelineMatches(latest.pipeline_id, pipelines, purposeFilter, pipelineFilter)
       && (!normalized || [
         latest.name,
         latest.algorithm,
@@ -63,7 +67,10 @@ export function ModelsPanel({
         ...versions.map((version) => version.version)
       ].some((value) => value.toLowerCase().includes(normalized)))
     );
-  }, [businessCaseId, modelFamilies, query]);
+  }, [businessCaseId, modelFamilies, pipelineFilter, pipelines, purposeFilter, query]);
+  const availablePipelines = businessCaseId
+    ? pipelines.filter((pipeline) => pipeline.business_case_id === businessCaseId)
+    : pipelines;
 
   useEffect(() => setBusinessCaseId(initialBusinessCaseId), [initialBusinessCaseId]);
 
@@ -97,12 +104,22 @@ export function ModelsPanel({
           </label>
           <label>
             <span><SlidersHorizontal size={14} /> Business case</span>
-            <select value={businessCaseId} onChange={(event) => setBusinessCaseId(event.target.value)}>
+            <select value={businessCaseId} onChange={(event) => {
+              setBusinessCaseId(event.target.value);
+              setPipelineFilter("");
+            }}>
               <option value="">All business cases</option>
               {businessCases.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           </label>
         </div>
+        <ArtifactFilters
+          pipelines={availablePipelines}
+          purpose={purposeFilter}
+          pipelineId={pipelineFilter}
+          onPurposeChange={setPurposeFilter}
+          onPipelineChange={setPipelineFilter}
+        />
 
         <div className="model-registry-table" role="table" aria-label="Model registry">
           <div className="model-registry-row head" role="row">

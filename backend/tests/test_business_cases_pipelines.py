@@ -240,7 +240,7 @@ def test_pipeline_version_and_run_contracts_are_auditable(monkeypatch) -> None:
                         "write_mode": "replace",
                     }
                 ],
-                "parameters": {},
+                "parameters": {"template": "training"},
             },
         },
     )
@@ -248,6 +248,7 @@ def test_pipeline_version_and_run_contracts_are_auditable(monkeypatch) -> None:
     pipeline = created.json()
     assert pipeline["business_case_id"] == business_case["id"]
     assert pipeline["status"] == "draft"
+    assert pipeline["template"] == "training"
 
     versions = client.get(
         f"/api/v1/pipelines/{pipeline['id']}/versions",
@@ -294,6 +295,7 @@ def test_pipeline_version_and_run_contracts_are_auditable(monkeypatch) -> None:
     assert catalog_pipeline["latest_published_version_number"] == 1
     assert catalog_pipeline["published_version_count"] == 1
     assert catalog_pipeline["draft_version_number"] is None
+    assert catalog_pipeline["template"] == "training"
 
     no_draft_update = client.patch(
         f"/api/v1/pipelines/{pipeline['id']}/versions/draft",

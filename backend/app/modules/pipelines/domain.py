@@ -82,6 +82,7 @@ class Pipeline:
     latest_published_version_number: int | None = None
     published_version_count: int = 0
     draft_version_number: int | None = None
+    template: str = "custom"
 
 
 @dataclass

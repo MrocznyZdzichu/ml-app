@@ -513,6 +513,7 @@ export type Pipeline = {
   latest_published_version_number: number | null;
   published_version_count: number;
   draft_version_number: number | null;
+  template: string;
 };
 
 export type PipelineVersion = {

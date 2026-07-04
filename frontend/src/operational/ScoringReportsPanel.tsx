@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import type { BusinessCase, DatasetLineageReference, Pipeline, ScoringReport } from "../api/client";
 import { ModelPerformanceReport } from "../pipelines/PipelineRunDialogs";
+import { ArtifactFilters, pipelineMatches } from "../components/ArtifactFilters";
 import { DatasetLineageList } from "./LifecyclePanels";
 
 export function ScoringReportsPanel({
@@ -21,6 +22,8 @@ export function ScoringReportsPanel({
 }) {
   const [query, setQuery] = useState("");
   const [businessCaseId, setBusinessCaseId] = useState(initialBusinessCaseId);
+  const [purposeFilter, setPurposeFilter] = useState("");
+  const [pipelineFilter, setPipelineFilter] = useState("");
   const [selected, setSelected] = useState<ScoringReport | null>(null);
   const [history, setHistory] = useState<ScoringReport | null>(null);
   const [sort, setSort] = useState<{
@@ -50,13 +53,17 @@ export function ScoringReportsPanel({
     const normalized = query.trim().toLowerCase();
     return families.filter(({ latest }) =>
       (!businessCaseId || latest.business_case_id === businessCaseId)
+      && pipelineMatches(latest.pipeline_id, pipelines, purposeFilter, pipelineFilter)
       && (!normalized || [
         latest.name,
         latest.problem_type,
         pipelineById.get(latest.pipeline_id)?.name ?? ""
       ].some((value) => value.toLowerCase().includes(normalized)))
     );
-  }, [businessCaseId, families, pipelineById, query]);
+  }, [businessCaseId, families, pipelineById, pipelineFilter, pipelines, purposeFilter, query]);
+  const availablePipelines = businessCaseId
+    ? pipelines.filter((pipeline) => pipeline.business_case_id === businessCaseId)
+    : pipelines;
   const sorted = useMemo(() => [...visible].sort((left, right) => {
     const value = ({ latest }: (typeof visible)[number]) => {
       if (sort.key === "report") return latest.name;
@@ -109,12 +116,22 @@ export function ScoringReportsPanel({
           </label>
           <label>
             <span><SlidersHorizontal size={14} /> Business case</span>
-            <select value={businessCaseId} onChange={(event) => setBusinessCaseId(event.target.value)}>
+            <select value={businessCaseId} onChange={(event) => {
+              setBusinessCaseId(event.target.value);
+              setPipelineFilter("");
+            }}>
               <option value="">All business cases</option>
               {businessCases.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           </label>
         </div>
+        <ArtifactFilters
+          pipelines={availablePipelines}
+          purpose={purposeFilter}
+          pipelineId={pipelineFilter}
+          onPurposeChange={setPurposeFilter}
+          onPipelineChange={setPipelineFilter}
+        />
         <div className="model-registry-table scoring-report-table" role="table" aria-label="Scoring report registry">
           <div className="model-registry-row head" role="row">
             <SortHeader label="Report" active={sort.key === "report"} direction={sort.direction}
