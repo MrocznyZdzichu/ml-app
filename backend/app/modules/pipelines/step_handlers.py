@@ -17,6 +17,11 @@ from app.modules.pipelines.modeling import (
 )
 from app.modules.pipelines.runtime import SourceRelation
 from app.modules.pipelines.workflow import WorkflowStep
+from app.modules.business_cases.domain import ArtifactType
+from app.modules.business_cases.repository import (
+    BusinessCaseRepository,
+    PostgresBusinessCaseRepository,
+)
 
 
 @dataclass(frozen=True)
@@ -38,6 +43,8 @@ class HandledStepResult:
     input_dataset_ids: list[str]
     relation_output_ids: dict[str, str]
     artifact_output_ids: dict[str, str] = field(default_factory=dict)
+    external_input_artifact_ids: list[str] = field(default_factory=list)
+    external_input_lineage: list[dict] = field(default_factory=list)
 
 
 class PipelineStepHandler(Protocol):
@@ -145,6 +152,17 @@ class FeatureEngineeringStepHandler:
             artifact_output_ids={
                 "fitted_transform": "fitted_transform"
             } if definition.mode == "fit_transform" else {},
+            external_input_artifact_ids=(
+                [definition.fitted_state_artifact_id]
+                if definition.mode == "transform" else []
+            ),
+            external_input_lineage=(
+                [{
+                    "input_port_id": "fitted_transform",
+                    "artifact_ids": [definition.fitted_state_artifact_id],
+                }]
+                if definition.mode == "transform" else []
+            ),
         )
 
 
@@ -198,22 +216,44 @@ class TrainingStepHandler:
 class ScoringStepHandler:
     step_type = "scoring"
 
-    def __init__(self, engine: SklearnScoringEngine | None = None) -> None:
+    def __init__(
+        self,
+        engine: SklearnScoringEngine | None = None,
+        artifacts: BusinessCaseRepository | None = None,
+    ) -> None:
         self.engine = engine or SklearnScoringEngine()
+        self.artifacts = artifacts or PostgresBusinessCaseRepository()
 
     def execute(self, step: WorkflowStep, context: StepExecutionContext) -> HandledStepResult:
         definition = ScoringDefinition.model_validate(step.config["definition"])
         inputs = {port.port_id: port for port in step.inputs}
         data_port = inputs.get("data")
         model_port = inputs.get("model")
-        if data_port is None or model_port is None:
-            raise ValueError("Scoring step requires explicit 'data' and 'model' inputs")
+        if data_port is None:
+            raise ValueError("Scoring step requires an explicit 'data' input")
         data = context.upstream_relations.get(
             (data_port.source.step_id, data_port.source.port_id)
         )
-        model = context.upstream_artifacts.get(
-            (model_port.source.step_id, model_port.source.port_id)
-        )
+        model: dict | None = None
+        external_model_artifact_id = ""
+        if definition.purpose == "batch":
+            artifact = self.artifacts.get_artifact(definition.model_artifact_id)
+            if (
+                artifact is None
+                or artifact.owner_id != context.owner_id
+                or artifact.type != ArtifactType.MODEL_VERSION
+            ):
+                raise ValueError("Pinned batch-scoring model artifact was not found")
+            external_model_artifact_id = artifact.id
+            model = {
+                "artifact_id": artifact.id,
+                "artifact_type": artifact.type.value,
+                **dict(artifact.metadata),
+            }
+        elif model_port is not None:
+            model = context.upstream_artifacts.get(
+                (model_port.source.step_id, model_port.source.port_id)
+            )
         if data is None:
             raise ValueError("Scoring data input is not a dataset output")
         if model is None or model.get("artifact_type") != "model_version":
@@ -235,6 +275,16 @@ class ScoringStepHandler:
             input_dataset_ids=[],
             relation_output_ids={"predictions": "predictions"},
             artifact_output_ids={},
+            external_input_artifact_ids=(
+                [external_model_artifact_id] if external_model_artifact_id else []
+            ),
+            external_input_lineage=(
+                [{
+                    "input_port_id": "model",
+                    "artifact_ids": [external_model_artifact_id],
+                }]
+                if external_model_artifact_id else []
+            ),
         )
 
 

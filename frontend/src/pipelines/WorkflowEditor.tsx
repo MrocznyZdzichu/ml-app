@@ -2,11 +2,23 @@ import { Braces, Brain, Calculator, DatabaseZap, Plus, Sparkles, Trash2 } from "
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api/client";
-import type { BusinessCase, BusinessCaseDataAttachment, DataAsset, DatasetColumn } from "../api/client";
+import type {
+  BusinessCase,
+  BusinessCaseDataAttachment,
+  DataAsset,
+  DatasetColumn,
+  ModelArtifact
+} from "../api/client";
 import { FeatureEngineeringBuilder, inferFeatureRecipeColumns } from "./FeatureEngineeringBuilder";
-import { emptyFeatureEngineeringDefinition } from "./featureEngineeringContract";
+import {
+  emptyFeatureEngineeringDefinition,
+  normalizeFeatureEngineeringDefinition
+} from "./featureEngineeringContract";
 import { PipelineBuilder } from "./PipelineBuilder";
-import { emptyPipelineDefinition } from "./pipelineContract";
+import {
+  emptyPipelineDefinition,
+  normalizePipelineDefinition
+} from "./pipelineContract";
 import type { PipelineDefinition } from "./pipelineContract";
 import { datasetColumns, inferPipelineOutputColumns, inputDatasetIds } from "./pipelineSchema";
 import type { WorkflowDefinition, WorkflowStepDefinition } from "./workflowContract";
@@ -31,7 +43,9 @@ export function WorkflowEditor({
   definition,
   businessCase,
   datasets,
+  models,
   dataAttachments,
+  pipelineType,
   outputNameSuggestion,
   disabled,
   onChange
@@ -39,7 +53,9 @@ export function WorkflowEditor({
   definition: WorkflowDefinition;
   businessCase?: BusinessCase;
   datasets: DataAsset[];
+  models: ModelArtifact[];
   dataAttachments: BusinessCaseDataAttachment[];
+  pipelineType: string;
   outputNameSuggestion?: string;
   disabled: boolean;
   onChange: (definition: WorkflowDefinition) => void;
@@ -98,6 +114,14 @@ export function WorkflowEditor({
     hasValidation,
     pipelineName: outputNameSuggestion ?? "Trained model"
   }), [businessCase, dagColumns, dataAttachments, featureDefinition, hasValidation, outputNameSuggestion]);
+  const scoringModels = models.filter(
+    (model) =>
+      model.business_case_id === businessCase?.id
+      && model.fitted_transform_artifact_id
+      && Object.keys(model.data_engineering_definition).length > 0
+      && Object.keys(model.feature_engineering_definition).length > 0
+      && isInferenceSafeModelPreparation(model)
+  );
 
   useEffect(() => {
     let changed = false;
@@ -190,6 +214,12 @@ export function WorkflowEditor({
       type: "training",
       inputs: [
         { port_id: "training", source: { step_id: feature.step_id, port_id: "training" } },
+        ...(feature.additional_output_port_ids.includes("fitted_transform")
+          ? [{
+              port_id: "fitted_transform",
+              source: { step_id: feature.step_id, port_id: "fitted_transform" }
+            }]
+          : []),
         ...(feature.additional_output_port_ids.includes("validation")
           ? [{
               port_id: "validation",
@@ -225,6 +255,117 @@ export function WorkflowEditor({
     };
     setExpandedStepId(step.step_id);
     onChange({ ...definition, steps: [...definition.steps, step], outputs: workflowOutputsForStep(step) });
+  }
+
+  function configureBatchScoring(modelId: string) {
+    const model = scoringModels.find((item) => item.id === modelId);
+    if (!model) return;
+    const sourceDe = normalizePipelineDefinition(model.data_engineering_definition);
+    const sourceFe = normalizeFeatureEngineeringDefinition(
+      model.feature_engineering_definition
+    );
+    const targetColumn = sourceFe.target_column;
+    const deDefinition: PipelineDefinition = {
+      ...sourceDe,
+      inputs: sourceDe.inputs.map((input) => ({
+        ...input,
+        dataset_id: "",
+        version_policy: "select_at_run_any"
+      })),
+      steps: sourceDe.steps.map((step) => ({
+        ...step,
+        config: sanitizeInferenceConfig(step.type, step.config, targetColumn)
+      })),
+      outputs: sourceDe.outputs.map((output) => ({
+        ...output,
+        materialization: "temporary",
+        dataset_name: `${model.name} scoring-ready data`,
+        business_case_role: "scoring_input",
+        data_contract: output.data_contract
+          ? {
+              ...output.data_contract,
+              columns: output.data_contract.columns.filter(
+                (column) => column.name !== targetColumn
+              )
+            }
+          : undefined
+      }))
+    };
+    const deStep: WorkflowStepDefinition = {
+      step_id: "de_1",
+      name: "Scoring Data Engineering",
+      type: "data_engineering",
+      inputs: [],
+      output_port_id: "dataset",
+      additional_output_port_ids: [],
+      config: { definition: deDefinition }
+    };
+    const feDefinition = {
+      ...sourceFe,
+      mode: "transform" as const,
+      inputs: [{
+        input_id: "scoring_input",
+        role: "scoring_input" as const,
+        dataset_id: "",
+        version_policy: "latest" as const
+      }],
+      outputs: [{
+        output_id: "scoring_features",
+        input_id: "scoring_input",
+        dataset_name: `${model.name} scoring features`,
+        business_case_role: "scoring_input" as const
+      }],
+      fitted_state_artifact_id: model.fitted_transform_artifact_id,
+      evaluation: {
+        ...sourceFe.evaluation,
+        split_strategy: "predefined" as const,
+        cross_validation: {
+          ...sourceFe.evaluation.cross_validation,
+          enabled: false
+        }
+      }
+    };
+    const feStep: WorkflowStepDefinition = {
+      step_id: "fe_1",
+      name: "Feature Engineering Transform",
+      type: "feature_engineering",
+      inputs: [{
+        port_id: "scoring_input",
+        source: { step_id: deStep.step_id, port_id: deStep.output_port_id }
+      }],
+      output_port_id: "scoring_input",
+      additional_output_port_ids: [],
+      config: { definition: feDefinition }
+    };
+    const scoringStep: WorkflowStepDefinition = {
+      step_id: "scoring_1",
+      name: "Batch Scoring",
+      type: "scoring",
+      inputs: [{
+        port_id: "data",
+        source: { step_id: feStep.step_id, port_id: feStep.output_port_id }
+      }],
+      output_port_id: "predictions",
+      additional_output_port_ids: [],
+      config: {
+        definition: {
+          ...emptyScoringDefinition(),
+          purpose: "batch",
+          model_artifact_id: model.id,
+          row_id_column: sourceFe.row_id_column,
+          target_column: "",
+          dataset_name: `${model.name} batch predictions`,
+          report_name: "Batch scoring"
+        }
+      }
+    };
+    setExpandedStepId(deStep.step_id);
+    onChange({
+      contract_version: "2.0",
+      steps: [deStep, feStep, scoringStep],
+      outputs: workflowOutputsForStep(scoringStep),
+      parameters: {}
+    });
   }
 
   function updateStep(index: number, step: WorkflowStepDefinition) {
@@ -278,6 +419,20 @@ export function WorkflowEditor({
           </p>
         </div>
         <div className="inline-actions">
+          {pipelineType === "batch_scoring" && (
+            <label className="compact-select">
+              <span>Configure from model</span>
+              <select value="" disabled={disabled}
+                onChange={(event) => configureBatchScoring(event.target.value)}>
+                <option value="">Choose scoring-ready model…</option>
+                {scoringModels.map((model) => (
+                  <option key={model.id} value={model.id}>
+                    {model.name} · {model.version}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <button className="secondary-button" type="button" onClick={addDataEngineeringStep}
             disabled={disabled || definition.steps.length > 0}>
             <Plus size={15} /> Add Data Engineering
@@ -374,6 +529,7 @@ export function WorkflowEditor({
                 <ScoringBuilder
                   definition={step.config.definition}
                   defaults={modelingDefaults}
+                  models={models}
                   disabled={disabled}
                   onChange={(nextDefinition) => updateStep(index, {
                     ...step, config: { definition: nextDefinition }
@@ -397,4 +553,71 @@ function previousDataEngineeringDefinition(
     if (step.type === "data_engineering") return step.config.definition;
   }
   return undefined;
+}
+
+const inferenceSafeDeTypes = new Set([
+  "select_columns",
+  "add_identifier",
+  "rename_columns",
+  "cast_columns",
+  "derive_column",
+  "map_categories"
+]);
+
+function isInferenceSafeModelPreparation(model: ModelArtifact) {
+  const de = normalizePipelineDefinition(model.data_engineering_definition);
+  const fe = normalizeFeatureEngineeringDefinition(model.feature_engineering_definition);
+  return de.inputs.length > 0
+    && de.outputs.length > 0
+    && Boolean(fe.row_id_column)
+    && de.steps.every((step) => (
+      inferenceSafeDeTypes.has(step.type)
+      && !(step.type === "add_identifier" && step.config.mode === "sequence")
+      && (
+        ["select_columns", "rename_columns", "cast_columns"].includes(step.type)
+        || !containsValue(step.config, fe.target_column)
+      )
+    ));
+}
+
+function sanitizeInferenceConfig(
+  type: string,
+  config: Record<string, unknown>,
+  targetColumn: string
+) {
+  if (!targetColumn) return config;
+  if (type === "select_columns") {
+    return {
+      ...config,
+      columns: Array.isArray(config.columns)
+        ? config.columns.filter((column) => column !== targetColumn)
+        : config.columns
+    };
+  }
+  if (type === "rename_columns" || type === "cast_columns") {
+    const field = type === "rename_columns" ? "renames" : "casts";
+    const mapping = config[field] && typeof config[field] === "object"
+      ? config[field] as Record<string, unknown>
+      : {};
+    return {
+      ...config,
+      [field]: Object.fromEntries(
+        Object.entries(mapping).filter(
+          ([source, target]) => source !== targetColumn && target !== targetColumn
+        )
+      )
+    };
+  }
+  return config;
+}
+
+function containsValue(value: unknown, expected: string): boolean {
+  if (!expected) return false;
+  if (Array.isArray(value)) return value.some((item) => containsValue(item, expected));
+  if (value && typeof value === "object") {
+    return Object.entries(value).some(
+      ([key, item]) => key === expected || containsValue(item, expected)
+    );
+  }
+  return value === expected;
 }

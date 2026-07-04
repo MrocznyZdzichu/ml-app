@@ -161,7 +161,10 @@ export function FeatureEngineeringBuilder({
     });
   }
 
-  function updateInputVersionPolicy(index: number, versionPolicy: "latest" | "select_at_run") {
+  function updateInputVersionPolicy(
+    index: number,
+    versionPolicy: "latest" | "select_at_run" | "select_at_run_any"
+  ) {
     onChange({
       ...definition,
       inputs: definition.inputs.map((item, itemIndex) =>
@@ -735,7 +738,10 @@ function PredefinedInputs({
   hasUpstream: boolean;
   disabled: boolean;
   onDatasetChange: (index: number, datasetId: string) => void;
-  onVersionPolicyChange: (index: number, policy: "latest" | "select_at_run") => void;
+  onVersionPolicyChange: (
+    index: number,
+    policy: "latest" | "select_at_run" | "select_at_run_any"
+  ) => void;
   onAdd: (role: FeatureInputRole) => void;
   onRemove: (inputId: string) => void;
 }) {
@@ -775,9 +781,13 @@ function PredefinedInputs({
               </label>
               <label className="fe-field"><span>Version policy</span>
                 <select value={input.version_policy ?? "latest"} disabled={disabled}
-                  onChange={(event) => onVersionPolicyChange(index, event.target.value as "latest" | "select_at_run")}>
+                  onChange={(event) => onVersionPolicyChange(
+                    index,
+                    event.target.value as "latest" | "select_at_run" | "select_at_run_any"
+                  )}>
                   <option value="latest">Latest at run start</option>
                   <option value="select_at_run">Select at run</option>
+                  <option value="select_at_run_any">Select any compatible BC dataset</option>
                 </select>
               </label>
               </>
@@ -809,7 +819,9 @@ function GeneratedSplitControls({
   hasUpstream: boolean;
   disabled: boolean;
   onDatasetChange: (datasetId: string) => void;
-  onVersionPolicyChange: (policy: "latest" | "select_at_run") => void;
+  onVersionPolicyChange: (
+    policy: "latest" | "select_at_run" | "select_at_run_any"
+  ) => void;
   onEvaluationChange: (patch: Partial<FeatureEvaluation>) => void;
 }) {
   const evaluation = definition.evaluation;
@@ -831,9 +843,12 @@ function GeneratedSplitControls({
         {!hasUpstream && (
           <label className="fe-field"><span>Version policy</span>
             <select value={definition.inputs[0]?.version_policy ?? "latest"} disabled={disabled}
-              onChange={(event) => onVersionPolicyChange(event.target.value as "latest" | "select_at_run")}>
+              onChange={(event) => onVersionPolicyChange(
+                event.target.value as "latest" | "select_at_run" | "select_at_run_any"
+              )}>
               <option value="latest">Latest at run start</option>
               <option value="select_at_run">Select at run</option>
+              <option value="select_at_run_any">Select any compatible BC dataset</option>
             </select>
           </label>
         )}

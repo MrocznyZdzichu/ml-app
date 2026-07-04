@@ -409,6 +409,9 @@ export type ModelArtifact = {
     truncated?: boolean;
   };
   lineage: Record<string, unknown>;
+  fitted_transform_artifact_id: string;
+  data_engineering_definition: Record<string, unknown>;
+  feature_engineering_definition: Record<string, unknown>;
   created_at: string;
 };
 

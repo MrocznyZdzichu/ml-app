@@ -1,6 +1,6 @@
 # Synthetic ML scenarios
 
-Both datasets are synthetic, deterministic, and safe for demos. Regenerate them with
+The generated datasets are synthetic, deterministic, and safe for demos. Regenerate them with
 `python examples/generate_synthetic_datasets.py`. The seed is fixed at `20260624`.
 
 ## Dynamic reactor temperature — time-series regression
@@ -43,5 +43,34 @@ counts with silhouette/stability measures, and use the PCA projection chart to
 inspect separation. `observation_id` and `machine_id` are identifiers, not model
 features.
 
-Neither scenario contains missing data or hidden sampling. Every reported analysis
+Neither of these first two scenarios contains missing data or hidden sampling. Every reported analysis
 should state the processed row count and any visualization binning.
+
+## Iris batch scoring — two-class classification
+
+Business case: validate the operational batch-scoring path for the Iris classifier
+on a fresh, unlabeled delivery. The scoring input represents measurements whose
+species will become available later, so performance evaluation must not occur in
+the batch-scoring pipeline.
+
+Files:
+
+- `examples/data/iris-batch-scoring-10k.csv`: 10,000 scoring records with a stable
+  `row_id` and the four measurement columns used by the reference Iris model. It
+  deliberately contains no `species` target.
+- `examples/data/iris-batch-scoring-10k-actuals.csv`: separately held actuals with
+  `row_id` and `species`, intended only for a future target-joining and monitoring
+  pipeline.
+
+The hidden population is balanced: 5,000 Versicolor and 5,000 Virginica records.
+For each class, the generator estimates the full four-dimensional sample covariance
+matrix from `examples/data/iris.csv` and draws correlated multivariate observations.
+Rejection bounds limit every measurement to the observed class range plus a 12%
+margin and enforce basic botanical relationships such as petal length below sepal
+length. Values are in centimeters, rounded to three decimal places, and contain no
+missing data.
+
+This is a synthetic operational batch, not independent biological evidence. Its
+class balance is intentionally controlled and its distribution is derived from the
+small 100-row, two-class reference subset, so it is suitable for pipeline validation
+but not for estimating real-world prevalence or generalization.

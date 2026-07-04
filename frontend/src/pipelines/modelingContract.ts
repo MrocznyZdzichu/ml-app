@@ -38,6 +38,8 @@ export const regressionAlgorithms: TrainingAlgorithm[] = [
 
 export type ScoringDefinition = {
   contract_version: "1.0";
+  purpose: "test" | "batch";
+  model_artifact_id: string;
   row_id_column: string;
   target_column: string;
   prediction_column: string;
@@ -65,6 +67,8 @@ export const emptyTrainingDefinition = (): TrainingDefinition => ({
 
 export const emptyScoringDefinition = (): ScoringDefinition => ({
   contract_version: "1.0",
+  purpose: "test",
+  model_artifact_id: "",
   row_id_column: "",
   target_column: "",
   prediction_column: "prediction",
@@ -173,7 +177,9 @@ export function scoringWithDefaults(
   return {
     ...current,
     row_id_column: current.row_id_column || defaults.row_id_column,
-    target_column: current.target_column || defaults.target_column,
+    target_column: current.purpose === "batch"
+      ? ""
+      : current.target_column || defaults.target_column,
     dataset_name: current.dataset_name === "Test predictions"
       ? `${defaults.model_name.replace(/ model$/, "")} test predictions`
       : current.dataset_name,
@@ -243,6 +249,8 @@ export function normalizeScoringDefinition(value: unknown): ScoringDefinition {
   const raw = record(value);
   return {
     contract_version: "1.0",
+    purpose: raw.purpose === "batch" ? "batch" : "test",
+    model_artifact_id: String(raw.model_artifact_id ?? ""),
     row_id_column: String(raw.row_id_column ?? ""),
     target_column: String(raw.target_column ?? ""),
     prediction_column: String(raw.prediction_column ?? "prediction"),

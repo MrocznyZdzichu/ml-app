@@ -221,6 +221,15 @@ Poniższe ustalenia są obowiązującym kierunkiem rozwoju platformy po rozmowie
 - Kontrakt raportu musi pozostac przydatny jako baseline dla przyszlego monitoringu. Porownania produkcyjne powinny bazowac na wersjach raportow, a nie na logice metryk odtworzonej w frontendzie.
 - Nazwa prediction datasetu i nazwa Scoring Report sa niezaleznymi polami konfiguracji kroku scoringowego. Zmiana nazwy raportu nie zmienia logicznej rodziny raportow, ktora nadal wynika z pipeline + stabilnego step_id.
 
+### Batch scoring a monitoring skutecznosci
+
+- Batch scoring i monitoring skutecznosci sa dwoma odrebnymi pipeline'ami.
+- Pipeline `batch_scoring` przyjmuje jawnie wybrana wersje datasetu bez targetu, stosuje inference-safe DE, przypiety fitted state FE i konkretna wersje modelu, a wynikiem jest niemutowalny prediction dataset. Nie tworzy metryk skutecznosci ani Scoring Report.
+- Prediction dataset zachowuje stabilny identyfikator rekordu i lineage do input datasetu, fitted transform, model version, pipeline version oraz runu.
+- Pozniejszy pipeline `monitoring` przyjmuje prediction dataset i actuals, wykonuje jawny join targetow oraz dopiero wtedy wylicza metryki i tworzy raport skutecznosci.
+- Nie modyfikuj prediction datasetu po nadejsciu targetow; target joining tworzy nowy wersjonowany artefakt.
+- DE w automatycznie tworzonym pipeline batch scoringowym zawiera tylko deterministyczne, inference-safe przygotowanie wymagane przez kontrakt modelu. Nie przenos training-only splitow, operacji zaleznych od targetu ani transformacji fitowanych na biezacym batchu.
+
 ### Dynamiczne cechy i portowe lineage
 
 - Training domyslnie konsumuje upstream Feature Manifest zamiast statycznej listy nazw. Jest to wymagane dla one-hot encodingu, PCA i innych transformacji, ktorych finalny schemat zalezy od fitted state.

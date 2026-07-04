@@ -1256,6 +1256,9 @@ function dryRunModel(
     model_hash: output.model_hash ?? "",
     training_config: output.training_config ?? {},
     model_parameters: output.model_parameters ?? {},
+    fitted_transform_artifact_id: "",
+    data_engineering_definition: {},
+    feature_engineering_definition: {},
     lineage: {
       pipeline_id: run.pipeline_id,
       pipeline_version_id: run.pipeline_version_id,

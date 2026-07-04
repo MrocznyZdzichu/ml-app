@@ -56,4 +56,7 @@ class ModelArtifact:
     training_config: dict[str, Any] = field(default_factory=dict)
     model_parameters: dict[str, Any] = field(default_factory=dict)
     lineage: dict[str, Any] = field(default_factory=dict)
+    fitted_transform_artifact_id: str = ""
+    data_engineering_definition: dict[str, Any] = field(default_factory=dict)
+    feature_engineering_definition: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))

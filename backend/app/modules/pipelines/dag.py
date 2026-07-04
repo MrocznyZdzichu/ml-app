@@ -17,9 +17,18 @@ class PipelineInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     input_id: str = Field(min_length=1, max_length=128)
-    dataset_id: str = Field(min_length=1, max_length=128)
+    dataset_id: str = Field(default="", max_length=128)
     output_port_id: str = Field(default="out", min_length=1, max_length=128)
-    version_policy: Literal["latest", "select_at_run"] = "latest"
+    version_policy: Literal["latest", "select_at_run", "select_at_run_any"] = "latest"
+
+    @model_validator(mode="after")
+    def validate_binding(self) -> "PipelineInput":
+        if self.version_policy != "select_at_run_any" and not self.dataset_id:
+            raise ValueError(
+                f"Pipeline input '{self.input_id}' requires a dataset_id "
+                "unless it is bound to any compatible dataset at run time"
+            )
+        return self
 
 
 class StepInputPort(BaseModel):

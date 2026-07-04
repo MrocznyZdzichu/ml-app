@@ -212,8 +212,11 @@ def validate_workflow_definition(definition: dict[str, Any], executable: bool) -
             ports = {item.port_id for item in step.inputs}
             if "training" not in ports:
                 raise ValueError("Training requires an explicit 'training' input port")
-            if ports - {"training", "validation"}:
-                raise ValueError("Training accepts only 'training' and optional 'validation' input ports")
+            if ports - {"training", "validation", "fitted_transform"}:
+                raise ValueError(
+                    "Training accepts 'training' and optional 'validation' "
+                    "and 'fitted_transform' input ports"
+                )
             if validated.early_stopping and "validation" not in ports:
                 raise ValueError("Training early stopping requires an explicit 'validation' input port")
             if step.output_port_id != "model":
@@ -223,13 +226,84 @@ def validate_workflow_definition(definition: dict[str, Any], executable: bool) -
 
             validated = ScoringDefinition.model_validate(nested_definition)
             step.config["definition"] = validated.model_dump(mode="json")
-            if {item.port_id for item in step.inputs} != {"data", "model"}:
-                raise ValueError("Scoring requires exactly 'data' and 'model' input ports")
+            ports = {item.port_id for item in step.inputs}
+            if validated.purpose == "batch":
+                if ports != {"data"}:
+                    raise ValueError(
+                        "Batch scoring requires exactly one 'data' input port; "
+                        "the immutable model is pinned in its definition"
+                    )
+            elif ports != {"data", "model"}:
+                raise ValueError("Test scoring requires exactly 'data' and 'model' input ports")
             if step.output_port_id != "predictions":
                 raise ValueError("Scoring primary output port must be 'predictions'")
+    _validate_batch_scoring_preparation(workflow)
     if executable and not workflow.outputs:
         raise ValueError("An executable pipeline requires a workflow output")
     return workflow.model_dump(mode="json")
+
+
+def _validate_batch_scoring_preparation(workflow: WorkflowDefinition) -> None:
+    batch_steps = [
+        step
+        for step in workflow.steps
+        if step.type == "scoring"
+        and step.config["definition"].get("purpose") == "batch"
+    ]
+    if not batch_steps:
+        return
+    if any(step.type == "training" for step in workflow.steps):
+        raise ValueError("A batch-scoring workflow cannot contain a Training step")
+    feature = next(
+        (step for step in workflow.steps if step.type == "feature_engineering"),
+        None,
+    )
+    if feature is None or feature.config["definition"].get("mode") != "transform":
+        raise ValueError(
+            "Batch scoring requires Feature Engineering in transform mode "
+            "with a pinned fitted state"
+        )
+    target_column = str(feature.config["definition"].get("target_column") or "")
+    safe_types = {
+        "select_columns",
+        "add_identifier",
+        "rename_columns",
+        "cast_columns",
+        "derive_column",
+        "map_categories",
+    }
+    for step in workflow.steps:
+        if step.type != "data_engineering":
+            continue
+        for operation in step.config["definition"].get("steps", []):
+            operation_type = str(operation.get("type") or "")
+            if operation_type not in safe_types:
+                raise ValueError(
+                    f"Batch-scoring DE operation '{operation_type}' is not inference-safe; "
+                    "keep only deterministic schema and feature preparation"
+                )
+            config = operation.get("config") or {}
+            if operation_type == "add_identifier" and config.get("mode") == "sequence":
+                raise ValueError(
+                    "Batch-scoring record IDs must be stable; sequence identifiers are not allowed"
+                )
+            if target_column and _contains_contract_value(config, target_column):
+                raise ValueError(
+                    f"Batch-scoring DE operation '{operation.get('step_id')}' "
+                    "depends on the target column"
+                )
+
+
+def _contains_contract_value(value: Any, expected: str) -> bool:
+    if isinstance(value, dict):
+        return any(
+            _contains_contract_value(key, expected)
+            or _contains_contract_value(item, expected)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_contract_value(item, expected) for item in value)
+    return str(value) == expected
 
 
 def workflow_validation_errors(exc: ValidationError) -> list[dict[str, str]]:

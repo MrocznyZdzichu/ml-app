@@ -13,7 +13,7 @@ export type FeatureInput = {
   input_id: string;
   role: FeatureInputRole;
   dataset_id: string;
-  version_policy: "latest" | "select_at_run";
+  version_policy: "latest" | "select_at_run" | "select_at_run_any";
 };
 
 export type FeatureTransformation = {
@@ -94,7 +94,11 @@ export function normalizeFeatureEngineeringDefinition(value: unknown): FeatureEn
     inputs: Array.isArray(raw.inputs)
       ? (raw.inputs as FeatureInput[]).map((input) => ({
           ...input,
-          version_policy: input.version_policy === "select_at_run" ? "select_at_run" : "latest"
+          version_policy: input.version_policy === "select_at_run_any"
+            ? "select_at_run_any"
+            : input.version_policy === "select_at_run"
+              ? "select_at_run"
+              : "latest"
         }))
       : fallback.inputs,
     feature_columns: stringArray(raw.feature_columns),

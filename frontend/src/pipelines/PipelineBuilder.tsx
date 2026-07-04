@@ -341,6 +341,7 @@ export function PipelineBuilder({
               >
                 <option value="latest">Latest at run start</option>
                 <option value="select_at_run">Select at run</option>
+                <option value="select_at_run_any">Select any compatible BC dataset</option>
               </select></label>
               <label>Stable source ID<input value={input.input_id} disabled /></label>
               {attachmentByDataset.get(input.dataset_id)?.role && (

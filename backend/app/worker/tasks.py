@@ -112,12 +112,15 @@ def execute_pipeline_run(run_id: str) -> dict:
                 raise PipelineRunCancelled("Pipeline run was cancelled")
             step_output_manifest = list(result.output_manifest)
             step_input_artifact_ids = list(dict.fromkeys(
-                artifact_id
-                for port in step.inputs
-                for artifact_id in upstream_artifact_ids.get(
-                    (port.source.step_id, port.source.port_id),
-                    [],
-                )
+                [
+                    artifact_id
+                    for port in step.inputs
+                    for artifact_id in upstream_artifact_ids.get(
+                        (port.source.step_id, port.source.port_id),
+                        [],
+                    )
+                ]
+                + list(result.external_input_artifact_ids)
             ))
             step_input_lineage = [
                 {
@@ -130,7 +133,7 @@ def execute_pipeline_run(run_id: str) -> dict:
                     ),
                 }
                 for port in step.inputs
-            ]
+            ] + list(result.external_input_lineage)
             if not run.is_dry_run:
                 materialized_manifest, materialized_artifact_ids = PipelineOutputMaterializer().materialize(
                     run=run,

@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from app.core.security import Principal
 from app.modules.business_cases.service import BusinessCaseService
+from app.modules.business_cases.domain import ArtifactType
 from app.modules.business_cases.repository import (
     BusinessCaseRepository,
     PostgresBusinessCaseRepository,
@@ -247,6 +248,11 @@ class PipelineService:
                 detail="Pipeline has no draft version to publish",
             )
         version.definition = validate_definition(version.definition, executable=True)
+        self._validate_external_artifacts(
+            WorkflowDefinition.model_validate(version.definition),
+            principal,
+            pipeline.business_case_id,
+        )
         version.definition_hash = definition_hash(version.definition)
         now = datetime.now(timezone.utc)
         version.status = PipelineVersionStatus.PUBLISHED
@@ -298,6 +304,11 @@ class PipelineService:
             )
         version.definition = validate_definition(version.definition, executable=True)
         workflow = WorkflowDefinition.model_validate(version.definition)
+        self._validate_external_artifacts(
+            workflow,
+            principal,
+            pipeline.business_case_id,
+        )
         if payload.step_id and payload.step_id not in {step.step_id for step in workflow.steps}:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -308,6 +319,7 @@ class PipelineService:
             workflow,
             payload.input_versions,
             principal,
+            pipeline.business_case_id,
         )
         runtime_parameters = dict(payload.runtime_parameters)
         runtime_parameters["resolved_input_versions"] = resolved_inputs
@@ -352,8 +364,16 @@ class PipelineService:
         workflow: WorkflowDefinition,
         requested_versions: dict[str, str],
         principal: Principal,
+        business_case_id: str,
     ) -> dict[str, dict[str, Any]]:
         resolved: dict[str, dict[str, Any]] = {}
+        attached_asset_ids = {
+            attachment.data_asset_id
+            for attachment in self.business_cases.list_data_attachments(
+                business_case_id,
+                principal,
+            )
+        }
         for step in workflow.steps:
             definition = step.config.get("definition")
             if not isinstance(definition, dict):
@@ -364,16 +384,16 @@ class PipelineService:
             for raw_input in inputs:
                 if not isinstance(raw_input, dict):
                     continue
+                policy = str(raw_input.get("version_policy") or "latest")
                 logical_id = str(raw_input.get("dataset_id") or "")
-                if not logical_id:
+                if not logical_id and policy != "select_at_run_any":
                     continue
                 existing_version = self.datasets.get(logical_id)
                 if existing_version is not None and existing_version.owner_id == principal.user_id:
                     logical_id = existing_version.logical_id
                 input_id = str(raw_input.get("input_id") or "")
                 binding_key = f"{step.step_id}:{input_id}"
-                policy = str(raw_input.get("version_policy") or "latest")
-                if policy == "select_at_run":
+                if policy in {"select_at_run", "select_at_run_any"}:
                     selected_id = requested_versions.get(binding_key) or requested_versions.get(input_id)
                     if not selected_id:
                         raise HTTPException(
@@ -387,8 +407,11 @@ class PipelineService:
                     if (
                         asset is None
                         or asset.owner_id != principal.user_id
-                        or asset.logical_id != logical_id
                         or asset.status == DataAssetStatus.DELETED
+                        or (
+                            policy == "select_at_run"
+                            and asset.logical_id != logical_id
+                        )
                     ):
                         raise HTTPException(
                             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -397,6 +420,25 @@ class PipelineService:
                                 "input_key": binding_key,
                             },
                         )
+                    if policy == "select_at_run_any":
+                        attached_logical_ids = {
+                            item.logical_id
+                            for item_id in attached_asset_ids
+                            for item in [self.datasets.get(item_id)]
+                            if item is not None
+                        }
+                        if asset.id not in attached_asset_ids and asset.logical_id not in attached_logical_ids:
+                            raise HTTPException(
+                                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                                detail={
+                                    "message": (
+                                        "Selected scoring dataset must be attached "
+                                        "to the pipeline Business Case"
+                                    ),
+                                    "input_key": binding_key,
+                                },
+                            )
+                        logical_id = asset.logical_id
                 elif policy == "latest":
                     asset = self.datasets.get_latest_version(principal.user_id, logical_id)
                     if asset is None:
@@ -422,6 +464,47 @@ class PipelineService:
                     "dataset_name": asset.name,
                 }
         return resolved
+
+    def _validate_external_artifacts(
+        self,
+        workflow: WorkflowDefinition,
+        principal: Principal,
+        business_case_id: str,
+    ) -> None:
+        references: list[tuple[str, str, ArtifactType]] = []
+        for step in workflow.steps:
+            definition = step.config.get("definition")
+            if not isinstance(definition, dict):
+                continue
+            if step.type == "feature_engineering" and definition.get("mode") == "transform":
+                references.append((
+                    step.step_id,
+                    str(definition.get("fitted_state_artifact_id") or ""),
+                    ArtifactType.FEATURE_TRANSFORM,
+                ))
+            if step.type == "scoring" and definition.get("purpose") == "batch":
+                references.append((
+                    step.step_id,
+                    str(definition.get("model_artifact_id") or ""),
+                    ArtifactType.MODEL_VERSION,
+                ))
+        for step_id, artifact_id, expected_type in references:
+            artifact = self.artifacts.get_artifact(artifact_id)
+            if (
+                artifact is None
+                or artifact.owner_id != principal.user_id
+                or artifact.business_case_id != business_case_id
+                or artifact.type != expected_type
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail={
+                        "message": (
+                            f"Step '{step_id}' references an unavailable "
+                            f"{expected_type.value} artifact"
+                        )
+                    },
+                )
 
     def get_run(self, pipeline_id: str, run_id: str, principal: Principal) -> PipelineRun:
         pipeline = self.get_pipeline(pipeline_id, principal)

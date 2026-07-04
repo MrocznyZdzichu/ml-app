@@ -7,7 +7,7 @@ export type PipelineInputDefinition = {
   input_id: string;
   dataset_id: string;
   output_port_id: string;
-  version_policy: "latest" | "select_at_run";
+  version_policy: "latest" | "select_at_run" | "select_at_run_any";
 };
 
 export type PipelineStepDefinition = {
@@ -84,7 +84,11 @@ export function normalizePipelineDefinition(value: unknown): PipelineDefinition 
           input_id: String(input.input_id ?? "source"),
           dataset_id: String(input.dataset_id ?? ""),
           output_port_id: String(input.output_port_id ?? "out"),
-          version_policy: input.version_policy === "select_at_run" ? "select_at_run" : "latest"
+          version_policy: input.version_policy === "select_at_run_any"
+            ? "select_at_run_any"
+            : input.version_policy === "select_at_run"
+              ? "select_at_run"
+              : "latest"
         }))
       : [],
     steps,

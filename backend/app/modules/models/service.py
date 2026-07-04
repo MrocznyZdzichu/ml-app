@@ -62,6 +62,7 @@ class ModelService:
                 if run is not None and run.owner_id == principal.user_id:
                     model.pipeline_id = run.pipeline_id
                     model.lineage = {**model.lineage, "pipeline_id": run.pipeline_id}
+            self._enrich_batch_scoring_contract(model)
             model.logical_id = model.logical_id or self._logical_model_id(model)
             pipeline_models.append(model)
         known = {item.id for item in pipeline_models}
@@ -120,6 +121,48 @@ class ModelService:
             for version_number, model in enumerate(versions, start=1):
                 model.version_number = version_number
                 model.version = f"v{version_number}"
+
+    def _enrich_batch_scoring_contract(self, model: ModelArtifact) -> None:
+        if model.pipeline_run_id:
+            candidates = self.artifacts.list_artifacts(
+                model.owner_id,
+                ArtifactType.FEATURE_TRANSFORM,
+            )
+            fitted = next(
+                (
+                    artifact
+                    for artifact in candidates
+                    if str(
+                        dict(artifact.metadata.get("lineage") or {}).get(
+                            "pipeline_run_id"
+                        )
+                    )
+                    == model.pipeline_run_id
+                ),
+                None,
+            )
+            if fitted is not None:
+                model.fitted_transform_artifact_id = fitted.id
+
+        if not model.pipeline_version_id:
+            return
+        version = self.pipelines.get_version(model.pipeline_version_id)
+        if version is None or version.owner_id != model.owner_id:
+            return
+        for step in version.definition.get("steps", []):
+            if not isinstance(step, dict):
+                continue
+            config = step.get("config")
+            nested = (
+                config.get("definition")
+                if isinstance(config, dict)
+                and isinstance(config.get("definition"), dict)
+                else {}
+            )
+            if step.get("type") == "data_engineering":
+                model.data_engineering_definition = dict(nested)
+            elif step.get("type") == "feature_engineering":
+                model.feature_engineering_definition = dict(nested)
 
     @staticmethod
     def _artifact_model(artifact: Artifact) -> ModelArtifact:

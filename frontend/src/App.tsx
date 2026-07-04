@@ -389,6 +389,7 @@ export default function App() {
             businessCases={businessCases}
             datasets={datasets}
             pipelines={pipelines}
+            models={models}
             openRequest={pipelineOpenRequest}
             onOpenRequestConsumed={() => setPipelineOpenRequest(null)}
             onRefresh={refreshWorkspace}
@@ -509,7 +510,7 @@ function BusinessCasesPanel({
       key: string;
       name: string;
       logicalId: string;
-      policy: "latest" | "select_at_run";
+      policy: "latest" | "select_at_run" | "select_at_run_any";
     }>;
   } | null>(null);
   const [bcRunSelections, setBcRunSelections] = useState<Record<string, string>>({});
@@ -726,18 +727,23 @@ function BusinessCasesPanel({
         const nested = asRecord(asRecord(step.config).definition);
         return (Array.isArray(nested.inputs) ? nested.inputs : []).flatMap((value) => {
           const input = asRecord(value);
+          const policy = input.version_policy === "select_at_run_any"
+            ? "select_at_run_any" as const
+            : input.version_policy === "select_at_run"
+              ? "select_at_run" as const
+              : "latest" as const;
           const logicalId = asString(input.dataset_id);
-          if (!logicalId) return [];
+          if (!logicalId && policy !== "select_at_run_any") return [];
           const dataset = datasets.find((item) =>
             item.logical_id === logicalId || item.id === logicalId
           );
           return [{
             key: `${step.step_id}:${asString(input.input_id)}`,
-            name: dataset?.name ?? (asString(input.input_id) || "Dataset input"),
+            name: policy === "select_at_run_any"
+              ? "Scoring dataset"
+              : dataset?.name ?? (asString(input.input_id) || "Dataset input"),
             logicalId,
-            policy: input.version_policy === "select_at_run"
-              ? "select_at_run" as const
-              : "latest" as const
+            policy
           }];
         });
       });
@@ -753,7 +759,7 @@ function BusinessCasesPanel({
     event.preventDefault();
     if (!bcRunDialog) return;
     const missing = bcRunDialog.inputs.find(
-      (input) => input.policy === "select_at_run" && !bcRunSelections[input.key]
+      (input) => input.policy !== "latest" && !bcRunSelections[input.key]
     );
     if (missing) {
       setNotice(`Select a version for ${missing.name}`);
@@ -1279,12 +1285,24 @@ function BusinessCasesPanel({
                 onClick={() => setBcRunDialog(null)} aria-label="Close run dialog"><X size={17} /></button>
             </div>
             {bcRunDialog.inputs.map((input) => {
+              const attachedLogicalIds = new Set(
+                activeAttachments
+                  .map((attachment) => attachedDataset(attachment.data_asset_id)?.logical_id)
+                  .filter(Boolean)
+              );
               const inputVersions = datasets
-                .filter((dataset) => dataset.logical_id === input.logicalId && dataset.status !== "deleted")
+                .filter((dataset) =>
+                  dataset.status !== "deleted"
+                  && (
+                    input.policy === "select_at_run_any"
+                      ? attachedLogicalIds.has(dataset.logical_id)
+                      : dataset.logical_id === input.logicalId
+                  )
+                )
                 .sort((left, right) => right.version_number - left.version_number);
               return (
                 <label key={input.key}>{input.name}
-                  {input.policy === "select_at_run" ? (
+                  {input.policy !== "latest" ? (
                     <select value={bcRunSelections[input.key] ?? ""}
                       onChange={(event) => setBcRunSelections((current) => ({
                         ...current,
@@ -1293,6 +1311,7 @@ function BusinessCasesPanel({
                       <option value="">Select immutable version…</option>
                       {inputVersions.map((version) => (
                         <option key={version.id} value={version.id}>
+                          {input.policy === "select_at_run_any" ? `${version.name} · ` : ""}
                           v{version.version_number} · {version.row_count ?? "?"} rows
                         </option>
                       ))}
@@ -1387,6 +1406,7 @@ function PipelinesPanel({
   businessCases,
   datasets,
   pipelines,
+  models,
   openRequest,
   onOpenRequestConsumed,
   onRefresh,
@@ -1396,6 +1416,7 @@ function PipelinesPanel({
   businessCases: BusinessCase[];
   datasets: DataAsset[];
   pipelines: Pipeline[];
+  models: ModelArtifact[];
   openRequest: { pipelineId: string; requestId: number } | null;
   onOpenRequestConsumed: () => void;
   onRefresh: () => Promise<void>;
@@ -1420,7 +1441,7 @@ function PipelinesPanel({
       key: string;
       name: string;
       logicalId: string;
-      policy: "latest" | "select_at_run";
+      policy: "latest" | "select_at_run" | "select_at_run_any";
     }>;
   } | null>(null);
   const [catalogRunSelections, setCatalogRunSelections] = useState<Record<string, string>>({});
@@ -1786,14 +1807,21 @@ function PipelinesPanel({
         const rawInputs = Array.isArray(nested.inputs) ? nested.inputs : [];
         return rawInputs.flatMap((value) => {
           const input = asRecord(value);
+          const policy = input.version_policy === "select_at_run_any"
+            ? "select_at_run_any" as const
+            : input.version_policy === "select_at_run"
+              ? "select_at_run" as const
+              : "latest" as const;
           const logicalId = asString(input.dataset_id);
-          if (!logicalId) return [];
+          if (!logicalId && policy !== "select_at_run_any") return [];
           const dataset = datasets.find((item) => item.logical_id === logicalId || item.id === logicalId);
           return [{
             key: `${step.step_id}:${asString(input.input_id)}`,
-            name: dataset?.name ?? (asString(input.input_id) || "Dataset input"),
+            name: policy === "select_at_run_any"
+              ? "Scoring dataset"
+              : dataset?.name ?? (asString(input.input_id) || "Dataset input"),
             logicalId,
-            policy: input.version_policy === "select_at_run" ? "select_at_run" as const : "latest" as const
+            policy
           }];
         });
       });
@@ -1809,7 +1837,7 @@ function PipelinesPanel({
     event.preventDefault();
     if (!catalogRunDialog) return;
     const missing = catalogRunDialog.inputs.find(
-      (input) => input.policy === "select_at_run" && !catalogRunSelections[input.key]
+      (input) => input.policy !== "latest" && !catalogRunSelections[input.key]
     );
     if (missing) {
       setNotice(`Select a version for ${missing.name}`);
@@ -2124,8 +2152,22 @@ function PipelinesPanel({
                 </div>
               )}
               {!catalogRunResult && catalogRunDialog.inputs.map((input) => {
+                const attachedLogicalIds = new Set(
+                  pipelineDataAttachments
+                    .map((attachment) =>
+                      datasets.find((dataset) => dataset.id === attachment.data_asset_id)?.logical_id
+                    )
+                    .filter(Boolean)
+                );
                 const versionsForInput = datasets
-                  .filter((dataset) => dataset.logical_id === input.logicalId && dataset.status !== "deleted")
+                  .filter((dataset) =>
+                    dataset.status !== "deleted"
+                    && (
+                      input.policy === "select_at_run_any"
+                        ? attachedLogicalIds.has(dataset.logical_id)
+                        : dataset.logical_id === input.logicalId
+                    )
+                  )
                   .sort((left, right) => right.version_number - left.version_number);
                 const latest = versionsForInput[0];
                 return (
@@ -2144,6 +2186,7 @@ function PipelinesPanel({
                         <option value="">Select version…</option>
                         {versionsForInput.map((dataset) => (
                           <option key={dataset.id} value={dataset.id}>
+                            {input.policy === "select_at_run_any" ? `${dataset.name} · ` : ""}
                             v{dataset.version_number} · {dataset.row_count ?? "?"} rows · {formatDateTime(dataset.created_at)}
                           </option>
                         ))}
@@ -2325,11 +2368,13 @@ function PipelinesPanel({
             definition={workflowDefinition}
             businessCase={businessCases.find((item) => item.id === selectedBusinessCaseIdValue)}
             datasets={latestLogicalDatasetAliases(datasets)}
+            models={models}
             dataAttachments={pipelineDataAttachments.map((attachment) => {
               const dataset = datasets.find((item) => item.id === attachment.data_asset_id);
               return dataset ? { ...attachment, data_asset_id: dataset.logical_id } : attachment;
             })}
             outputNameSuggestion={selectedPipeline?.name ?? "result"}
+            pipelineType={selectedPipeline?.type ?? pipelineTypeDraft}
             onChange={updateWorkflowDefinition}
             disabled={!hasDraft}
           />
@@ -2410,8 +2455,22 @@ function PipelinesPanel({
               </div>
             )}
             {!catalogRunResult && catalogRunDialog.inputs.map((input) => {
+              const attachedLogicalIds = new Set(
+                pipelineDataAttachments
+                  .map((attachment) =>
+                    datasets.find((dataset) => dataset.id === attachment.data_asset_id)?.logical_id
+                  )
+                  .filter(Boolean)
+              );
               const versionsForInput = datasets
-                .filter((dataset) => dataset.logical_id === input.logicalId && dataset.status !== "deleted")
+                .filter((dataset) =>
+                  dataset.status !== "deleted"
+                  && (
+                    input.policy === "select_at_run_any"
+                      ? attachedLogicalIds.has(dataset.logical_id)
+                      : dataset.logical_id === input.logicalId
+                  )
+                )
                 .sort((left, right) => right.version_number - left.version_number);
               const latest = versionsForInput[0];
               return (
@@ -2425,6 +2484,7 @@ function PipelinesPanel({
                       <option value="">Select version…</option>
                       {versionsForInput.map((dataset) => (
                         <option key={dataset.id} value={dataset.id}>
+                          {input.policy === "select_at_run_any" ? `${dataset.name} · ` : ""}
                           v{dataset.version_number} · {dataset.row_count ?? "?"} rows · {formatDateTime(dataset.created_at)}
                         </option>
                       ))}
