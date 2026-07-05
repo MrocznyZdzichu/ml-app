@@ -1,17 +1,34 @@
-import { Braces, Brain, Calculator, DatabaseZap, Plus, Sparkles, Trash2 } from "lucide-react";
+import { Activity, Braces, Brain, Calculator, DatabaseZap, Plus, Sparkles, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api/client";
-import type { BusinessCase, BusinessCaseDataAttachment, DataAsset, DatasetColumn } from "../api/client";
+import type {
+  BusinessCase,
+  BusinessCaseDataAttachment,
+  DataAsset,
+  DatasetColumn,
+  ModelArtifact,
+  Pipeline,
+  PipelineRun,
+  PipelineVersion
+} from "../api/client";
 import { FeatureEngineeringBuilder, inferFeatureRecipeColumns } from "./FeatureEngineeringBuilder";
-import { emptyFeatureEngineeringDefinition } from "./featureEngineeringContract";
+import {
+  emptyFeatureEngineeringDefinition,
+  normalizeFeatureEngineeringDefinition
+} from "./featureEngineeringContract";
 import { PipelineBuilder } from "./PipelineBuilder";
-import { emptyPipelineDefinition } from "./pipelineContract";
+import {
+  emptyPipelineDefinition,
+  normalizePipelineDefinition,
+  rewireSequentialFlow
+} from "./pipelineContract";
 import type { PipelineDefinition } from "./pipelineContract";
 import { datasetColumns, inferPipelineOutputColumns, inputDatasetIds } from "./pipelineSchema";
 import type { WorkflowDefinition, WorkflowStepDefinition } from "./workflowContract";
 import { WorkflowDiagram } from "./WorkflowDiagram";
 import { ScoringBuilder, TrainingBuilder } from "./ModelingBuilders";
+import { MonitoringBuilder } from "./MonitoringBuilder";
 import {
   deriveModelingDefaults,
   emptyScoringDefinition,
@@ -21,6 +38,7 @@ import {
 } from "./modelingContract";
 import {
   featureEngineeringOutputPorts,
+  workflowTemplateDefinition,
   workflowOutputsForStep
 } from "./workflowContract";
 
@@ -31,7 +49,10 @@ export function WorkflowEditor({
   definition,
   businessCase,
   datasets,
+  models,
+  pipelines,
   dataAttachments,
+  pipelineType,
   outputNameSuggestion,
   disabled,
   onChange
@@ -39,13 +60,28 @@ export function WorkflowEditor({
   definition: WorkflowDefinition;
   businessCase?: BusinessCase;
   datasets: DataAsset[];
+  models: ModelArtifact[];
+  pipelines: Pipeline[];
   dataAttachments: BusinessCaseDataAttachment[];
+  pipelineType: string;
   outputNameSuggestion?: string;
   disabled: boolean;
   onChange: (definition: WorkflowDefinition) => void;
 }) {
   const [expandedStepId, setExpandedStepId] = useState(definition.steps[0]?.step_id ?? "");
   const [schemaCache, setSchemaCache] = useState<Record<string, DatasetColumn[]>>({});
+  const [isInferenceDialogOpen, setIsInferenceDialogOpen] = useState(false);
+  const [sourcePipelineId, setSourcePipelineId] = useState("");
+  const [sourceVersions, setSourceVersions] = useState<PipelineVersion[]>([]);
+  const [sourceVersionId, setSourceVersionId] = useState("");
+  const [sourceModelId, setSourceModelId] = useState("");
+  const [isMonitoringInferenceOpen, setIsMonitoringInferenceOpen] = useState(false);
+  const [monitoringPipelineId, setMonitoringPipelineId] = useState("");
+  const [monitoringVersions, setMonitoringVersions] = useState<PipelineVersion[]>([]);
+  const [monitoringVersionId, setMonitoringVersionId] = useState("");
+  const [monitoringRuns, setMonitoringRuns] = useState<PipelineRun[]>([]);
+  const [monitoringRunId, setMonitoringRunId] = useState("");
+  const [monitoringDatasetId, setMonitoringDatasetId] = useState("");
   const initializedModelingSteps = useRef(new Set<string>());
   const featureStep = definition.steps.find(
     (step) => step.type === "feature_engineering"
@@ -98,6 +134,55 @@ export function WorkflowEditor({
     hasValidation,
     pipelineName: outputNameSuggestion ?? "Trained model"
   }), [businessCase, dagColumns, dataAttachments, featureDefinition, hasValidation, outputNameSuggestion]);
+  const scoringModels = models.filter(
+    (model) =>
+      model.business_case_id === businessCase?.id
+      && model.fitted_transform_artifact_id
+      && Object.keys(model.data_engineering_definition).length > 0
+      && Object.keys(model.feature_engineering_definition).length > 0
+  );
+  const sourcePipelines = pipelines.filter(
+    (pipeline) =>
+      pipeline.business_case_id === businessCase?.id
+      && scoringModels.some((model) => model.pipeline_id === pipeline.id)
+  );
+  const availableSourceVersions = sourceVersions.filter(
+    (version) =>
+      version.status === "published"
+      && scoringModels.some(
+        (model) =>
+          model.pipeline_id === sourcePipelineId
+          && model.pipeline_version_id === version.id
+      )
+  );
+  const versionModels = scoringModels.filter(
+    (model) =>
+      model.pipeline_id === sourcePipelineId
+      && model.pipeline_version_id === sourceVersionId
+  );
+  const monitoringSourcePipelines = pipelines.filter(
+    (pipeline) =>
+      pipeline.business_case_id === businessCase?.id
+      && pipeline.type === "batch_scoring"
+  );
+  const availableMonitoringVersions = monitoringVersions.filter(
+    (version) => version.status === "published"
+  );
+  const availableMonitoringRuns = monitoringRuns.filter(
+    (run) =>
+      run.status === "succeeded"
+      && !run.is_dry_run
+      && run.pipeline_version_id === monitoringVersionId
+      && run.output_manifest.some(
+        (output) => output.artifact_type === "prediction_dataset" && output.dataset_id
+      )
+  );
+  const selectedMonitoringRun = availableMonitoringRuns.find(
+    (run) => run.id === monitoringRunId
+  );
+  const monitoringPredictionOutputs = selectedMonitoringRun?.output_manifest.filter(
+    (output) => output.artifact_type === "prediction_dataset" && output.dataset_id
+  ) ?? [];
 
   useEffect(() => {
     let changed = false;
@@ -190,6 +275,12 @@ export function WorkflowEditor({
       type: "training",
       inputs: [
         { port_id: "training", source: { step_id: feature.step_id, port_id: "training" } },
+        ...(feature.additional_output_port_ids.includes("fitted_transform")
+          ? [{
+              port_id: "fitted_transform",
+              source: { step_id: feature.step_id, port_id: "fitted_transform" }
+            }]
+          : []),
         ...(feature.additional_output_port_ids.includes("validation")
           ? [{
               port_id: "validation",
@@ -225,6 +316,256 @@ export function WorkflowEditor({
     };
     setExpandedStepId(step.step_id);
     onChange({ ...definition, steps: [...definition.steps, step], outputs: workflowOutputsForStep(step) });
+  }
+
+  function configureBatchScoring(modelId: string) {
+    const model = scoringModels.find((item) => item.id === modelId);
+    if (!model) return;
+    const sourceDe = normalizePipelineDefinition(model.data_engineering_definition);
+    const sourceFe = normalizeFeatureEngineeringDefinition(
+      model.feature_engineering_definition
+    );
+    const targetColumn = sourceFe.target_column;
+    const reusableSteps = sourceDe.steps
+      .filter((step) => isReusableInferenceStep(step.type, step.config, targetColumn))
+      .map((step) => ({
+        ...step,
+        config: sanitizeInferenceConfig(step.type, step.config, targetColumn)
+      }));
+    const sourceOutput = sourceDe.outputs[0];
+    const outputContract = sourceOutput?.data_contract
+      ? {
+          ...sourceOutput.data_contract,
+          columns: sourceOutput.data_contract.columns.filter(
+            (column) => column.name !== targetColumn
+          )
+        }
+      : undefined;
+    const deDefinition = rewireSequentialFlow({
+      ...sourceDe,
+      inputs: [{
+        ...sourceDe.inputs[0],
+        input_id: "scoring_input",
+        dataset_id: "",
+        version_policy: "select_at_run_any"
+      }],
+      steps: reusableSteps,
+      outputs: [{
+        ...(sourceOutput ?? {
+          output_id: "scoring_prepared",
+          input: { node_id: "scoring_input", port_id: "out" },
+          write_mode: "replace"
+        }),
+        output_id: "scoring_prepared",
+        materialization: "temporary",
+        dataset_name: `${model.name} scoring-ready data`,
+        business_case_role: "scoring_input",
+        data_contract: outputContract?.columns.length ? outputContract : undefined
+      }]
+    } as PipelineDefinition);
+    const deStep: WorkflowStepDefinition = {
+      step_id: "de_1",
+      name: "Scoring Data Engineering",
+      type: "data_engineering",
+      inputs: [],
+      output_port_id: "dataset",
+      additional_output_port_ids: [],
+      config: { definition: deDefinition }
+    };
+    const feDefinition = {
+      ...sourceFe,
+      mode: "transform" as const,
+      inputs: [{
+        input_id: "scoring_input",
+        role: "scoring_input" as const,
+        dataset_id: "",
+        version_policy: "latest" as const
+      }],
+      outputs: [{
+        output_id: "scoring_features",
+        input_id: "scoring_input",
+        dataset_name: `${model.name} scoring features`,
+        business_case_role: "scoring_input" as const
+      }],
+      fitted_state_artifact_id: model.fitted_transform_artifact_id,
+      evaluation: {
+        ...sourceFe.evaluation,
+        split_strategy: "predefined" as const,
+        cross_validation: {
+          ...sourceFe.evaluation.cross_validation,
+          enabled: false
+        }
+      }
+    };
+    const feStep: WorkflowStepDefinition = {
+      step_id: "fe_1",
+      name: "Feature Engineering Transform",
+      type: "feature_engineering",
+      inputs: [{
+        port_id: "scoring_input",
+        source: { step_id: deStep.step_id, port_id: deStep.output_port_id }
+      }],
+      output_port_id: "scoring_input",
+      additional_output_port_ids: [],
+      config: { definition: feDefinition }
+    };
+    const scoringStep: WorkflowStepDefinition = {
+      step_id: "scoring_1",
+      name: "Batch Scoring",
+      type: "scoring",
+      inputs: [{
+        port_id: "data",
+        source: { step_id: feStep.step_id, port_id: feStep.output_port_id }
+      }],
+      output_port_id: "predictions",
+      additional_output_port_ids: [],
+      config: {
+        definition: {
+          ...emptyScoringDefinition(),
+          purpose: "batch",
+          model_artifact_id: model.id,
+          row_id_column: sourceFe.row_id_column,
+          target_column: "",
+          dataset_name: `${model.name} batch predictions`,
+          report_name: "Batch scoring"
+        }
+      }
+    };
+    setExpandedStepId(deStep.step_id);
+    onChange({
+      contract_version: "2.0",
+      steps: [deStep, feStep, scoringStep],
+      outputs: workflowOutputsForStep(scoringStep),
+      parameters: {
+        template: "batch_scoring",
+        inferred_from: {
+          pipeline_id: model.pipeline_id,
+          pipeline_version_id: model.pipeline_version_id,
+          pipeline_run_id: model.pipeline_run_id,
+          model_artifact_id: model.id,
+          fitted_transform_artifact_id: model.fitted_transform_artifact_id
+        }
+      }
+    });
+    setIsInferenceDialogOpen(false);
+    setSourceModelId("");
+  }
+
+  async function selectSourcePipeline(pipelineId: string) {
+    setSourcePipelineId(pipelineId);
+    setSourceVersionId("");
+    setSourceModelId("");
+    try {
+      setSourceVersions(
+        pipelineId
+          ? await api.listPipelineVersions(pipelineId)
+          : []
+      );
+    } catch {
+      setSourceVersions([]);
+    }
+  }
+
+  async function selectMonitoringPipeline(pipelineId: string) {
+    setMonitoringPipelineId(pipelineId);
+    setMonitoringVersionId("");
+    setMonitoringRunId("");
+    setMonitoringDatasetId("");
+    try {
+      const [versionItems, runItems] = pipelineId
+        ? await Promise.all([
+            api.listPipelineVersions(pipelineId),
+            api.listPipelineRuns(pipelineId)
+          ])
+        : [[], []];
+      setMonitoringVersions(versionItems);
+      setMonitoringRuns(runItems);
+    } catch {
+      setMonitoringVersions([]);
+      setMonitoringRuns([]);
+    }
+  }
+
+  function configureMonitoringFromRun() {
+    const run = monitoringRuns.find((item) => item.id === monitoringRunId);
+    const prediction = run?.output_manifest.find(
+      (output) =>
+        output.artifact_type === "prediction_dataset"
+        && output.dataset_id === monitoringDatasetId
+    );
+    if (!run || !prediction?.dataset_id) return;
+    const template = workflowTemplateDefinition("monitoring");
+    const process = template.steps.find(
+      (step): step is Extract<WorkflowStepDefinition, { type: "data_engineering" }> =>
+        step.type === "data_engineering"
+    );
+    const report = template.steps.find(
+      (step): step is Extract<WorkflowStepDefinition, { type: "monitoring" }> =>
+        step.type === "monitoring"
+    );
+    if (!process || !report) return;
+    const scoreContract = prediction.score_contract ?? {};
+    const problemType = scoreContract.problem_type === "regression"
+      ? "regression"
+      : Array.isArray(scoreContract.classes) && scoreContract.classes.length > 2
+        ? "multiclass_classification"
+        : "binary_classification";
+    const rowIdColumn = prediction.row_id_column
+      ?? prediction.schema?.find(
+        (column) => ![
+          prediction.prediction_column ?? "prediction",
+          "prediction_score",
+          "positive_class_probability"
+        ].includes(column.name)
+      )?.name
+      ?? "row_id";
+    const predictionColumn = prediction.prediction_column ?? "prediction";
+    const processDefinition = process.config.definition;
+    process.config.definition = {
+      ...processDefinition,
+      inputs: processDefinition.inputs.map((input) =>
+        input.input_id === "predictions"
+          ? {
+              ...input,
+              dataset_id: prediction.dataset_id!,
+              version_policy: "pinned" as const
+            }
+          : input
+      ),
+      steps: processDefinition.steps.map((step) =>
+        step.type === "join"
+          ? {
+              ...step,
+              config: {
+                ...step.config,
+                keys: [{ left: rowIdColumn, right: rowIdColumn }]
+              }
+            }
+          : step
+      )
+    };
+    report.config.definition = {
+      ...report.config.definition,
+      row_id_column: rowIdColumn,
+      prediction_column: predictionColumn,
+      problem_type: problemType
+    };
+    setExpandedStepId(process.step_id);
+    onChange({
+      ...template,
+      steps: [process, report],
+      parameters: {
+        ...template.parameters,
+        inferred_from: {
+          pipeline_id: monitoringPipelineId,
+          pipeline_version_id: monitoringVersionId,
+          pipeline_run_id: run.id,
+          prediction_dataset_id: prediction.dataset_id,
+          prediction_artifact_id: prediction.artifact_id ?? ""
+        }
+      }
+    });
+    setIsMonitoringInferenceOpen(false);
   }
 
   function updateStep(index: number, step: WorkflowStepDefinition) {
@@ -273,37 +614,68 @@ export function WorkflowEditor({
           <span className="builder-kicker">Pipeline workflow</span>
           <h3>High-level steps</h3>
           <p>
-            Data Engineering can feed a fitted, reusable Feature Engineering step.
-            Full datasets stay in the columnar execution layer.
+            {pipelineType === "batch_scoring"
+              ? "Infer an editable DE → fitted FE → Batch Scoring workflow from one immutable training result."
+              : pipelineType === "monitoring"
+                ? "Join immutable predictions with actuals and calculate full-scope model performance."
+                : "Build the training lifecycle from Data Engineering through holdout Test Scoring."}
           </p>
         </div>
         <div className="inline-actions">
-          <button className="secondary-button" type="button" onClick={addDataEngineeringStep}
-            disabled={disabled || definition.steps.length > 0}>
-            <Plus size={15} /> Add Data Engineering
-          </button>
-          <button className="primary-button" type="button" onClick={addFeatureEngineeringStep}
-            disabled={disabled || definition.steps.some((step) => step.type === "feature_engineering")}>
-            <Plus size={15} /> Add Feature Engineering
-          </button>
-          <button className="secondary-button" type="button" onClick={addTrainingStep}
-            disabled={disabled || !definition.steps.some((step) => step.type === "feature_engineering")
-              || definition.steps.some((step) => step.type === "training")}>
-            <Plus size={15} /> Add Training
-          </button>
-          <button className="secondary-button" type="button" onClick={addScoringStep}
-            disabled={disabled || !definition.steps.some((step) => step.type === "training")
-              || definition.steps.some((step) => step.type === "scoring")}>
-            <Plus size={15} /> Add Test Scoring
-          </button>
+          {pipelineType === "batch_scoring" && (
+            <button className="primary-button" type="button" disabled={disabled}
+              onClick={() => setIsInferenceDialogOpen(true)}>
+              <Sparkles size={15} /> Infer from training pipeline
+            </button>
+          )}
+          {pipelineType === "monitoring" && (
+            <button className="primary-button" type="button" disabled={disabled}
+              onClick={() => setIsMonitoringInferenceOpen(true)}>
+              <Sparkles size={15} /> Infer from scoring run
+            </button>
+          )}
+          {pipelineType !== "batch_scoring" && pipelineType !== "monitoring" && (
+            <>
+              <button className="secondary-button" type="button" onClick={addDataEngineeringStep}
+                disabled={disabled || definition.steps.length > 0}>
+                <Plus size={15} /> Add Data Engineering
+              </button>
+              <button className="primary-button" type="button" onClick={addFeatureEngineeringStep}
+                disabled={disabled || definition.steps.some((step) => step.type === "feature_engineering")}>
+                <Plus size={15} /> Add Feature Engineering
+              </button>
+              <button className="secondary-button" type="button" onClick={addTrainingStep}
+                disabled={disabled || !definition.steps.some((step) => step.type === "feature_engineering")
+                  || definition.steps.some((step) => step.type === "training")}>
+                <Plus size={15} /> Add Training
+              </button>
+              <button className="secondary-button" type="button" onClick={addScoringStep}
+                disabled={disabled || !definition.steps.some((step) => step.type === "training")
+                  || definition.steps.some((step) => step.type === "scoring")}>
+                <Plus size={15} /> Add Test Scoring
+              </button>
+            </>
+          )}
         </div>
       </div>
+
+      {pipelineType === "batch_scoring"
+        && definition.steps.some((step) => step.type === "training") && (
+          <div className="form-warning">
+            This Batch Scoring pipeline still contains training lifecycle steps.
+            Use “Infer from training pipeline” to replace it with DE, fitted FE and Batch Scoring.
+          </div>
+        )}
 
       <WorkflowDiagram
         definition={definition}
         selectedStepId={expandedStepId}
         disabled={disabled}
-        onAddFirstStep={addDataEngineeringStep}
+        onAddFirstStep={() => pipelineType === "batch_scoring"
+          ? setIsInferenceDialogOpen(true)
+          : pipelineType === "monitoring"
+            ? undefined
+            : addDataEngineeringStep()}
         onSelectStep={setExpandedStepId}
       />
 
@@ -314,7 +686,9 @@ export function WorkflowEditor({
               <div className="workflow-step-icon">
                 {step.type === "data_engineering" ? <DatabaseZap size={20} />
                   : step.type === "feature_engineering" ? <Sparkles size={20} />
-                    : step.type === "training" ? <Brain size={20} /> : <Calculator size={20} />}
+                    : step.type === "training" ? <Brain size={20} />
+                      : step.type === "monitoring" ? <Activity size={20} />
+                        : <Calculator size={20} />}
               </div>
               <div className="workflow-step-copy">
                 <span>SELECTED STEP · {step.step_id}</span>
@@ -327,7 +701,9 @@ export function WorkflowEditor({
                     ? `${step.config.definition.inputs.length} splits · ${step.config.definition.transformations.length} transforms · ${step.config.definition.outputs.length} outputs`
                     : step.type === "training"
                       ? `${step.config.definition.feature_columns.length} features · max ${step.config.definition.epochs} epochs${step.config.definition.early_stopping ? " · early stopping" : ""}`
-                      : `model + data · ${step.config.definition.dataset_name}`}
+                      : step.type === "monitoring"
+                        ? `predictions + actuals · ${step.config.definition.report_name}`
+                        : `model + data · ${step.config.definition.dataset_name}`}
                 </small>
               </div>
               <button className="secondary-button" type="button" onClick={() => setExpandedStepId("")}>
@@ -358,6 +734,7 @@ export function WorkflowEditor({
                   dataAttachments={dataAttachments}
                   upstreamDefinition={previousDataEngineeringDefinition(definition.steps, index)}
                   hasUpstream={step.inputs.length > 0}
+                  fittedStateLocked={pipelineType === "batch_scoring"}
                   disabled={disabled}
                   onChange={(nextDefinition) => updateFeatureStep(index, step, nextDefinition)}
                 />
@@ -370,10 +747,19 @@ export function WorkflowEditor({
                     ...step, config: { definition: nextDefinition }
                   })}
                 />
+              ) : step.type === "monitoring" ? (
+                <MonitoringBuilder
+                  definition={step.config.definition}
+                  disabled={disabled}
+                  onChange={(nextDefinition) => updateStep(index, {
+                    ...step, config: { definition: nextDefinition }
+                  })}
+                />
               ) : (
                 <ScoringBuilder
                   definition={step.config.definition}
                   defaults={modelingDefaults}
+                  models={models}
                   disabled={disabled}
                   onChange={(nextDefinition) => updateStep(index, {
                     ...step, config: { definition: nextDefinition }
@@ -384,6 +770,53 @@ export function WorkflowEditor({
           </article>
         ))}
       </div>
+      {isInferenceDialogOpen && (
+        <BatchInferenceDialog
+          pipelines={sourcePipelines}
+          versions={availableSourceVersions}
+          models={versionModels}
+          sourcePipelineId={sourcePipelineId}
+          sourceVersionId={sourceVersionId}
+          sourceModelId={sourceModelId}
+          onPipelineChange={(pipelineId) => void selectSourcePipeline(pipelineId)}
+          onVersionChange={(versionId) => {
+            setSourceVersionId(versionId);
+            setSourceModelId("");
+          }}
+          onModelChange={setSourceModelId}
+          onClose={() => setIsInferenceDialogOpen(false)}
+          onApply={() => configureBatchScoring(sourceModelId)}
+        />
+      )}
+      {isMonitoringInferenceOpen && (
+        <MonitoringInferenceDialog
+          pipelines={monitoringSourcePipelines}
+          versions={availableMonitoringVersions}
+          runs={availableMonitoringRuns}
+          outputs={monitoringPredictionOutputs}
+          pipelineId={monitoringPipelineId}
+          versionId={monitoringVersionId}
+          runId={monitoringRunId}
+          datasetId={monitoringDatasetId}
+          onPipelineChange={(pipelineId) => void selectMonitoringPipeline(pipelineId)}
+          onVersionChange={(versionId) => {
+            setMonitoringVersionId(versionId);
+            setMonitoringRunId("");
+            setMonitoringDatasetId("");
+          }}
+          onRunChange={(runId) => {
+            setMonitoringRunId(runId);
+            const run = monitoringRuns.find((item) => item.id === runId);
+            const output = run?.output_manifest.find(
+              (item) => item.artifact_type === "prediction_dataset" && item.dataset_id
+            );
+            setMonitoringDatasetId(output?.dataset_id ?? "");
+          }}
+          onDatasetChange={setMonitoringDatasetId}
+          onClose={() => setIsMonitoringInferenceOpen(false)}
+          onApply={configureMonitoringFromRun}
+        />
+      )}
     </div>
   );
 }
@@ -397,4 +830,315 @@ function previousDataEngineeringDefinition(
     if (step.type === "data_engineering") return step.config.definition;
   }
   return undefined;
+}
+
+function MonitoringInferenceDialog({
+  pipelines,
+  versions,
+  runs,
+  outputs,
+  pipelineId,
+  versionId,
+  runId,
+  datasetId,
+  onPipelineChange,
+  onVersionChange,
+  onRunChange,
+  onDatasetChange,
+  onClose,
+  onApply
+}: {
+  pipelines: Pipeline[];
+  versions: PipelineVersion[];
+  runs: PipelineRun[];
+  outputs: PipelineRun["output_manifest"];
+  pipelineId: string;
+  versionId: string;
+  runId: string;
+  datasetId: string;
+  onPipelineChange: (pipelineId: string) => void;
+  onVersionChange: (versionId: string) => void;
+  onRunChange: (runId: string) => void;
+  onDatasetChange: (datasetId: string) => void;
+  onClose: () => void;
+  onApply: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation"
+      onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="modal-dialog form-panel inference-source-dialog" role="dialog"
+        aria-modal="true" aria-label="Infer Monitoring pipeline"
+        onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <span className="builder-kicker">Monitoring template</span>
+            <h2>Infer from scoring run</h2>
+            <p>Pin one immutable prediction artifact. No “latest” result is selected implicitly.</p>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose}
+            aria-label="Close monitoring inference"><X size={17} /></button>
+        </div>
+        <label>Batch scoring pipeline
+          <select value={pipelineId} onChange={(event) => onPipelineChange(event.target.value)}>
+            <option value="">Choose pipeline…</option>
+            {pipelines.map((pipeline) => (
+              <option key={pipeline.id} value={pipeline.id}>{pipeline.name}</option>
+            ))}
+          </select>
+          {!pipelines.length && (
+            <small>No Batch Scoring pipeline exists in this Business Case.</small>
+          )}
+        </label>
+        <label>Published pipeline version
+          <select value={versionId} disabled={!pipelineId}
+            onChange={(event) => onVersionChange(event.target.value)}>
+            <option value="">Choose version…</option>
+            {versions.map((version) => (
+              <option key={version.id} value={version.id}>
+                v{version.version_number} · {version.definition_hash.slice(0, 10)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>Successful scoring run
+          <select value={runId} disabled={!versionId}
+            onChange={(event) => onRunChange(event.target.value)}>
+            <option value="">Choose run…</option>
+            {runs.map((run) => (
+              <option key={run.id} value={run.id}>
+                {run.id.slice(0, 8)} · {run.output_row_count ?? "?"} rows · {run.finished_at ?? run.created_at}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>Prediction artifact
+          <select value={datasetId} disabled={!runId}
+            onChange={(event) => onDatasetChange(event.target.value)}>
+            <option value="">Choose prediction dataset…</option>
+            {outputs.map((output) => (
+              <option key={output.artifact_id ?? output.dataset_id} value={output.dataset_id}>
+                {output.dataset_name ?? output.output_id} · {output.row_count ?? "?"} rows
+              </option>
+            ))}
+          </select>
+          <small>
+            The exact dataset version, scoring pipeline version and run are saved for audit.
+          </small>
+        </label>
+        <div className="modal-actions">
+          <button className="secondary-button" type="button" onClick={onClose}>Cancel</button>
+          <button className="primary-button" type="button" onClick={onApply}
+            disabled={!pipelineId || !versionId || !runId || !datasetId}>
+            <Sparkles size={15} /> Create monitoring draft
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function BatchInferenceDialog({
+  pipelines,
+  versions,
+  models,
+  sourcePipelineId,
+  sourceVersionId,
+  sourceModelId,
+  onPipelineChange,
+  onVersionChange,
+  onModelChange,
+  onClose,
+  onApply
+}: {
+  pipelines: Pipeline[];
+  versions: PipelineVersion[];
+  models: ModelArtifact[];
+  sourcePipelineId: string;
+  sourceVersionId: string;
+  sourceModelId: string;
+  onPipelineChange: (pipelineId: string) => void;
+  onVersionChange: (versionId: string) => void;
+  onModelChange: (modelId: string) => void;
+  onClose: () => void;
+  onApply: () => void;
+}) {
+  const selectedModel = models.find((model) => model.id === sourceModelId);
+  const readiness = selectedModel
+    ? batchInferenceReadiness(selectedModel)
+    : null;
+  return (
+    <div className="modal-backdrop" role="presentation"
+      onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="modal-dialog form-panel inference-source-dialog" role="dialog"
+        aria-modal="true" aria-label="Infer Batch Scoring pipeline"
+        onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <span className="builder-kicker">Batch scoring template</span>
+            <h2>Infer from training pipeline</h2>
+            <p>Choose one immutable training result. The generated draft remains editable.</p>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose}
+            aria-label="Close inference source"><X size={17} /></button>
+        </div>
+        <label>Training pipeline
+          <select value={sourcePipelineId}
+            onChange={(event) => onPipelineChange(event.target.value)}>
+            <option value="">Choose pipeline…</option>
+            {pipelines.map((pipeline) => (
+              <option key={pipeline.id} value={pipeline.id}>{pipeline.name}</option>
+            ))}
+          </select>
+          {!pipelines.length && (
+            <small>No training pipeline in this Business Case has a persisted model and fitted FE state.</small>
+          )}
+        </label>
+        <label>Published pipeline version
+          <select value={sourceVersionId} disabled={!sourcePipelineId}
+            onChange={(event) => onVersionChange(event.target.value)}>
+            <option value="">Choose version…</option>
+            {versions.map((version) => (
+              <option key={version.id} value={version.id}>
+                v{version.version_number} · {version.definition_hash.slice(0, 10)}
+              </option>
+            ))}
+          </select>
+          {sourcePipelineId && !versions.length && (
+            <small>No published version of this pipeline has a scoring-ready model result.</small>
+          )}
+        </label>
+        <label>Concrete model result
+          <select value={sourceModelId} disabled={!sourceVersionId}
+            onChange={(event) => onModelChange(event.target.value)}>
+            <option value="">Choose model/run…</option>
+            {models.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.name} · {model.version} · run {model.pipeline_run_id.slice(0, 8)}
+              </option>
+            ))}
+          </select>
+          <small>
+            Pipeline version alone is not enough: this pins the exact model and fitted transform produced by one run.
+          </small>
+        </label>
+        {readiness && (
+          <div className={readiness.compatible ? "inference-summary" : "form-warning"}>
+            <strong>{readiness.compatible ? "Ready to infer" : "Cannot infer safely"}</strong>
+            <span>{readiness.message}</span>
+          </div>
+        )}
+        <div className="modal-actions">
+          <button className="secondary-button" type="button" onClick={onClose}>Cancel</button>
+          <button className="primary-button" type="button" onClick={onApply}
+            disabled={!selectedModel || !readiness?.compatible}>
+            <Sparkles size={15} /> Create scoring draft
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+const inferenceSafeDeTypes = new Set([
+  "select_columns",
+  "add_identifier",
+  "rename_columns",
+  "cast_columns",
+  "derive_column",
+  "map_categories"
+]);
+
+function batchInferenceReadiness(model: ModelArtifact) {
+  const de = normalizePipelineDefinition(model.data_engineering_definition);
+  const fe = normalizeFeatureEngineeringDefinition(model.feature_engineering_definition);
+  if (!model.fitted_transform_artifact_id) {
+    return { compatible: false, message: "The selected run has no fitted FE artifact." };
+  }
+  if (de.inputs.length !== 1 || !de.outputs.length) {
+    return {
+      compatible: false,
+      message: "Automatic inference currently requires a single-source training DE. Configure joins manually."
+    };
+  }
+  if (!fe.row_id_column) {
+    return { compatible: false, message: "The source FE contract has no stable row ID." };
+  }
+  const reusable = de.steps.filter(
+    (step) => isReusableInferenceStep(step.type, step.config, fe.target_column)
+  ).length;
+  const omitted = de.steps.length - reusable;
+  return {
+    compatible: true,
+    message: (
+      `${reusable} inference-safe DE block${reusable === 1 ? "" : "s"} will be copied; `
+      + `${omitted} training-only block${omitted === 1 ? "" : "s"} will be omitted. `
+      + "The exact FE recipe, fitted state and model artifact will be pinned."
+    )
+  };
+}
+
+function isReusableInferenceStep(
+  type: string,
+  config: Record<string, unknown>,
+  targetColumn: string
+) {
+  if (!inferenceSafeDeTypes.has(type)) return false;
+  if (type === "add_identifier" && config.mode === "sequence") return false;
+  if (!["select_columns", "rename_columns", "cast_columns"].includes(type)
+    && containsValue(config, targetColumn)) return false;
+  const sanitized = sanitizeInferenceConfig(type, config, targetColumn);
+  if (type === "select_columns") {
+    return Array.isArray(sanitized.columns) && sanitized.columns.length > 0;
+  }
+  if (type === "rename_columns" || type === "cast_columns") {
+    const field = type === "rename_columns" ? "renames" : "casts";
+    return Boolean(
+      sanitized[field]
+      && typeof sanitized[field] === "object"
+      && Object.keys(sanitized[field] as Record<string, unknown>).length
+    );
+  }
+  return true;
+}
+
+function sanitizeInferenceConfig(
+  type: string,
+  config: Record<string, unknown>,
+  targetColumn: string
+) {
+  if (!targetColumn) return config;
+  if (type === "select_columns") {
+    return {
+      ...config,
+      columns: Array.isArray(config.columns)
+        ? config.columns.filter((column) => column !== targetColumn)
+        : config.columns
+    };
+  }
+  if (type === "rename_columns" || type === "cast_columns") {
+    const field = type === "rename_columns" ? "renames" : "casts";
+    const mapping = config[field] && typeof config[field] === "object"
+      ? config[field] as Record<string, unknown>
+      : {};
+    return {
+      ...config,
+      [field]: Object.fromEntries(
+        Object.entries(mapping).filter(
+          ([source, target]) => source !== targetColumn && target !== targetColumn
+        )
+      )
+    };
+  }
+  return config;
+}
+
+function containsValue(value: unknown, expected: string): boolean {
+  if (!expected) return false;
+  if (Array.isArray(value)) return value.some((item) => containsValue(item, expected));
+  if (value && typeof value === "object") {
+    return Object.entries(value).some(
+      ([key, item]) => key === expected || containsValue(item, expected)
+    );
+  }
+  return value === expected;
 }

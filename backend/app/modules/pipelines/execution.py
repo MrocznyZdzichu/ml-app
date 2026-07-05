@@ -57,6 +57,8 @@ class CsvDatasetInputAdapter:
                 metadata={
                     "dataset_id": asset.id,
                     "feature_manifest": list(asset.metadata.get("feature_manifest") or []),
+                    "score_contract": dict(asset.metadata.get("score_contract") or {}),
+                    "model_artifact_id": str(asset.metadata.get("model_artifact_id") or ""),
                 },
             )
         header = "true" if asset.has_header is not False else "false"
@@ -71,6 +73,8 @@ class CsvDatasetInputAdapter:
             metadata={
                 "dataset_id": asset.id,
                 "feature_manifest": list(asset.metadata.get("feature_manifest") or []),
+                "score_contract": dict(asset.metadata.get("score_contract") or {}),
+                "model_artifact_id": str(asset.metadata.get("model_artifact_id") or ""),
             },
         )
 
@@ -123,6 +127,7 @@ class DuckDbPipelineExecutionEngine:
         temp_directory = run_directory / ".duckdb-tmp"
         connection = configured_duckdb_connection(temp_directory)
         relations: dict[tuple[str, str], str] = {}
+        input_metadata: dict[str, dict[str, Any]] = {}
         input_counts: list[int] = []
         manifests: list[dict[str, Any]] = []
         warnings: list[str] = []
@@ -133,6 +138,7 @@ class DuckDbPipelineExecutionEngine:
                 view = internal_name("input", pipeline_input.input_id)
                 connection.execute(f"CREATE TEMP VIEW {identifier(view)} AS SELECT * FROM {source.sql}")
                 relations[(pipeline_input.input_id, pipeline_input.output_port_id)] = view
+                input_metadata[pipeline_input.input_id] = dict(source.metadata)
                 count = source.row_count
                 if count < 0:
                     count = int(connection.execute(f"SELECT count(*) FROM {identifier(view)}").fetchone()[0])
@@ -188,6 +194,15 @@ class DuckDbPipelineExecutionEngine:
                             "is_dry_run": is_dry_run,
                             "dataset_name": output.dataset_name or output.output_id,
                             "business_case_role": output.business_case_role,
+                            "source_metadata": input_metadata,
+                            "score_contract": dict(
+                                input_metadata.get("predictions", {}).get("score_contract")
+                                or {}
+                            ),
+                            "model_artifact_id": str(
+                                input_metadata.get("predictions", {}).get("model_artifact_id")
+                                or ""
+                            ),
                             "quality": quality.report,
                             "preview": {
                                 "records": preview_records,

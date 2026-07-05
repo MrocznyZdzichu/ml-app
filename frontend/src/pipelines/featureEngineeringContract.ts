@@ -13,7 +13,7 @@ export type FeatureInput = {
   input_id: string;
   role: FeatureInputRole;
   dataset_id: string;
-  version_policy: "latest" | "select_at_run";
+  version_policy: DatasetVersionPolicy;
 };
 
 export type FeatureTransformation = {
@@ -94,7 +94,7 @@ export function normalizeFeatureEngineeringDefinition(value: unknown): FeatureEn
     inputs: Array.isArray(raw.inputs)
       ? (raw.inputs as FeatureInput[]).map((input) => ({
           ...input,
-          version_policy: input.version_policy === "select_at_run" ? "select_at_run" : "latest"
+          version_policy: normalizeDatasetVersionPolicy(input.version_policy)
         }))
       : fallback.inputs,
     feature_columns: stringArray(raw.feature_columns),
@@ -212,3 +212,5 @@ export function defaultFeatureTransform(type: FeatureTransformType, index: numbe
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
 }
+import type { DatasetVersionPolicy } from "./dataContractOptions";
+import { normalizeDatasetVersionPolicy } from "./dataContractOptions";

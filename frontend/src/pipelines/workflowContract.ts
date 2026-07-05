@@ -10,10 +10,17 @@ import {
 } from "./featureEngineeringContract";
 import type { FeatureEngineeringDefinition } from "./featureEngineeringContract";
 import {
+  emptyScoringDefinition,
+  emptyTrainingDefinition,
   normalizeScoringDefinition,
   normalizeTrainingDefinition
 } from "./modelingContract";
 import type { ScoringDefinition, TrainingDefinition } from "./modelingContract";
+import {
+  emptyMonitoringDefinition,
+  normalizeMonitoringDefinition
+} from "./monitoringContract";
+import type { MonitoringDefinition } from "./monitoringContract";
 
 export type DataEngineeringWorkflowStep = {
   step_id: string;
@@ -65,6 +72,15 @@ export type WorkflowStepDefinition =
       output_port_id: "predictions";
       additional_output_port_ids: string[];
       config: { definition: ScoringDefinition };
+    }
+  | {
+      step_id: string;
+      name: string;
+      type: "monitoring";
+      inputs: Array<{ port_id: "data"; source: { step_id: string; port_id: string } }>;
+      output_port_id: "performance_report";
+      additional_output_port_ids: string[];
+      config: { definition: MonitoringDefinition };
     };
 
 export type WorkflowDefinition = {
@@ -76,6 +92,223 @@ export type WorkflowDefinition = {
   }>;
   parameters: Record<string, unknown>;
 };
+
+export type PipelineTemplate = "training" | "batch_scoring" | "custom" | "monitoring";
+
+export function workflowTemplateDefinition(template: PipelineTemplate): WorkflowDefinition {
+  if (template === "custom") {
+    return {
+      ...emptyWorkflowDefinition(),
+      parameters: { template }
+    };
+  }
+  if (template === "monitoring") {
+    const processStep: DataEngineeringWorkflowStep = {
+      step_id: "process_join_1",
+      name: "Process & Join",
+      type: "data_engineering",
+      inputs: [],
+      output_port_id: "dataset",
+      additional_output_port_ids: [],
+      config: {
+        definition: {
+          contract_version: "1.0",
+          inputs: [
+            {
+              input_id: "predictions",
+              dataset_id: "",
+              output_port_id: "out",
+              version_policy: "select_at_run_any"
+            },
+            {
+              input_id: "actuals",
+              dataset_id: "",
+              output_port_id: "out",
+              version_policy: "select_at_run_any"
+            }
+          ],
+          steps: [{
+            step_id: "join_predictions_actuals",
+            type: "join",
+            inputs: [
+              { port_id: "left", source: { node_id: "predictions", port_id: "out" } },
+              { port_id: "right", source: { node_id: "actuals", port_id: "out" } }
+            ],
+            output_port_id: "out",
+            config: {
+              join_type: "left",
+              keys: [{ left: "row_id", right: "row_id" }],
+              right_suffix: "_actuals"
+            }
+          }],
+          outputs: [{
+            output_id: "joined_monitoring_data",
+            input: { node_id: "join_predictions_actuals", port_id: "out" },
+            materialization: "dataset",
+            write_mode: "replace",
+            dataset_name: "Predictions with actuals",
+            business_case_role: "monitoring_input"
+          }],
+          parameters: { purpose: "monitoring_process_join" }
+        }
+      }
+    };
+    const monitoringStep: Extract<WorkflowStepDefinition, { type: "monitoring" }> = {
+      step_id: "monitoring_1",
+      name: "Performance Report",
+      type: "monitoring",
+      inputs: [{
+        port_id: "data",
+        source: { step_id: processStep.step_id, port_id: processStep.output_port_id }
+      }],
+      output_port_id: "performance_report",
+      additional_output_port_ids: [],
+      config: { definition: emptyMonitoringDefinition() }
+    };
+    return {
+      contract_version: "2.0",
+      steps: [processStep, monitoringStep],
+      outputs: workflowOutputsForStep(monitoringStep),
+      parameters: { template }
+    };
+  }
+  const deStep: DataEngineeringWorkflowStep = {
+    step_id: "de_1",
+    name: template === "training" ? "Data Engineering" : "Scoring Data Engineering",
+    type: "data_engineering",
+    inputs: [],
+    output_port_id: "dataset",
+    additional_output_port_ids: [],
+    config: { definition: emptyPipelineDefinition() }
+  };
+  if (template === "batch_scoring") {
+    const featureDefinition: FeatureEngineeringDefinition = {
+      ...emptyFeatureEngineeringDefinition(),
+      mode: "transform",
+      inputs: [{
+        input_id: "scoring_input",
+        role: "scoring_input",
+        dataset_id: "",
+        version_policy: "select_at_run_any"
+      }],
+      outputs: [{
+        output_id: "scoring_features",
+        input_id: "scoring_input",
+        dataset_name: "Scoring features",
+        business_case_role: "scoring_input"
+      }]
+    };
+    const featureStep: FeatureEngineeringWorkflowStep = {
+      step_id: "fe_1",
+      name: "Feature Engineering Transform",
+      type: "feature_engineering",
+      inputs: [{
+        port_id: "scoring_input",
+        source: { step_id: deStep.step_id, port_id: deStep.output_port_id }
+      }],
+      output_port_id: "scoring_input",
+      additional_output_port_ids: [],
+      config: { definition: featureDefinition }
+    };
+    const scoringStep: Extract<WorkflowStepDefinition, { type: "scoring" }> = {
+      step_id: "scoring_1",
+      name: "Batch Scoring",
+      type: "scoring",
+      inputs: [{
+        port_id: "data",
+        source: { step_id: featureStep.step_id, port_id: featureStep.output_port_id }
+      }],
+      output_port_id: "predictions",
+      additional_output_port_ids: [],
+      config: {
+        definition: {
+          ...emptyScoringDefinition(),
+          purpose: "batch",
+          dataset_name: "Batch predictions",
+          report_name: "Batch scoring"
+        }
+      }
+    };
+    return {
+      contract_version: "2.0",
+      steps: [deStep, featureStep, scoringStep],
+      outputs: workflowOutputsForStep(scoringStep),
+      parameters: { template }
+    };
+  }
+
+  const featureDefinition: FeatureEngineeringDefinition = {
+    ...emptyFeatureEngineeringDefinition(),
+    inputs: [
+      { input_id: "training", role: "training", dataset_id: "", version_policy: "latest" },
+      { input_id: "validation", role: "validation", dataset_id: "", version_policy: "latest" },
+      { input_id: "test", role: "test", dataset_id: "", version_policy: "latest" }
+    ],
+    outputs: [
+      {
+        output_id: "training_features",
+        input_id: "training",
+        dataset_name: "Training features",
+        business_case_role: "training"
+      },
+      {
+        output_id: "validation_features",
+        input_id: "validation",
+        dataset_name: "Validation features",
+        business_case_role: "validation"
+      },
+      {
+        output_id: "test_features",
+        input_id: "test",
+        dataset_name: "Test features",
+        business_case_role: "test"
+      }
+    ]
+  };
+  const featureStep: FeatureEngineeringWorkflowStep = {
+    step_id: "fe_1",
+    name: "Feature Engineering",
+    type: "feature_engineering",
+    inputs: [{
+      port_id: "training",
+      source: { step_id: deStep.step_id, port_id: deStep.output_port_id }
+    }],
+    output_port_id: "training",
+    additional_output_port_ids: ["validation", "test", "fitted_transform"],
+    config: { definition: featureDefinition }
+  };
+  const trainingStep: Extract<WorkflowStepDefinition, { type: "training" }> = {
+    step_id: "training_1",
+    name: "Model Training",
+    type: "training",
+    inputs: [
+      { port_id: "training", source: { step_id: featureStep.step_id, port_id: "training" } },
+      { port_id: "validation", source: { step_id: featureStep.step_id, port_id: "validation" } },
+      { port_id: "fitted_transform", source: { step_id: featureStep.step_id, port_id: "fitted_transform" } }
+    ],
+    output_port_id: "model",
+    additional_output_port_ids: ["metrics"],
+    config: { definition: emptyTrainingDefinition() }
+  };
+  const scoringStep: Extract<WorkflowStepDefinition, { type: "scoring" }> = {
+    step_id: "scoring_1",
+    name: "Test Scoring",
+    type: "scoring",
+    inputs: [
+      { port_id: "data", source: { step_id: featureStep.step_id, port_id: "test" } },
+      { port_id: "model", source: { step_id: trainingStep.step_id, port_id: "model" } }
+    ],
+    output_port_id: "predictions",
+    additional_output_port_ids: [],
+    config: { definition: emptyScoringDefinition() }
+  };
+  return {
+    contract_version: "2.0",
+    steps: [deStep, featureStep, trainingStep, scoringStep],
+    outputs: workflowOutputsForStep(scoringStep),
+    parameters: { template }
+  };
+}
 
 export function canonicalizeWorkflowDatasetIds(
   definition: WorkflowDefinition,
@@ -95,6 +328,7 @@ export function canonicalizeWorkflowDatasetIds(
             ...nested,
             inputs: inputs.map((value) => {
               const input = recordValue(value);
+              if (input.version_policy === "pinned") return input;
               const referenced = datasets.find((dataset) => dataset.id === input.dataset_id);
               return referenced ? { ...input, dataset_id: referenced.logical_id } : input;
             })
@@ -184,6 +418,19 @@ export function normalizeWorkflowDefinition(value: unknown): WorkflowDefinition 
             output_port_id: "predictions",
             additional_output_port_ids: [],
             config: { definition: normalizeScoringDefinition(config.definition) }
+          }];
+        }
+        if (step.type === "monitoring") {
+          return [{
+            step_id: String(step.step_id ?? "monitoring_1"),
+            name: String(step.name ?? "Performance Report"),
+            type: "monitoring",
+            inputs: Array.isArray(step.inputs)
+              ? step.inputs as Extract<WorkflowStepDefinition, { type: "monitoring" }>["inputs"]
+              : [],
+            output_port_id: "performance_report",
+            additional_output_port_ids: [],
+            config: { definition: normalizeMonitoringDefinition(config.definition) }
           }];
         }
         return [{

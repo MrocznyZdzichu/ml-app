@@ -45,6 +45,12 @@ import type {
   UserProfile
 } from "./api/client";
 import { AssetList } from "./components/AssetList";
+import {
+  ArtifactFilters,
+  datasetPipelineId,
+  isUploadedDataset,
+  pipelineMatches
+} from "./components/ArtifactFilters";
 import { AuthScreen } from "./workspace/AuthScreen";
 import { Metric, Overview } from "./workspace/Overview";
 import {
@@ -64,9 +70,10 @@ import {
 import {
   canonicalizeWorkflowDatasetIds,
   emptyWorkflowDefinition,
-  normalizeWorkflowDefinition
+  normalizeWorkflowDefinition,
+  workflowTemplateDefinition
 } from "./pipelines/workflowContract";
-import type { WorkflowDefinition } from "./pipelines/workflowContract";
+import type { PipelineTemplate, WorkflowDefinition } from "./pipelines/workflowContract";
 import {
   browsableDryRunOutputs,
   DryRunPreview,
@@ -79,6 +86,14 @@ import {
   readPipelineWorkingDraft,
   writePipelineWorkingDraft
 } from "./pipelines/pipelineDraftStorage";
+import {
+  businessCaseDataRoleOptions,
+  requiresRuntimeDatasetSelection
+} from "./pipelines/dataContractOptions";
+import {
+  resolvePipelineRunInputs,
+  type PipelineRunInput
+} from "./pipelines/pipelineRunInputs";
 
 type TabId = "overview" | "business-cases" | "data" | "analysis" | "pipelines" | "models" | "scoring-reports" | "serving" | "share";
 
@@ -367,6 +382,7 @@ export default function App() {
         {activeTab === "data" && (
           <DataPanel
             datasets={datasets}
+            pipelines={pipelines}
             onAnalyze={openDatasetAnalysis}
             onRefresh={refreshWorkspace}
             setNotice={setNotice}
@@ -376,6 +392,7 @@ export default function App() {
           <AnalysisPanel
             datasets={datasets}
             businessCases={businessCases}
+            pipelines={pipelines}
             descriptiveProfileCache={descriptiveProfileCache.current}
             initialDatasetId={analysisOpenRequest?.datasetId}
             initialTab={analysisOpenRequest ? "browse" : "roles"}
@@ -389,6 +406,7 @@ export default function App() {
             businessCases={businessCases}
             datasets={datasets}
             pipelines={pipelines}
+            models={models}
             openRequest={pipelineOpenRequest}
             onOpenRequestConsumed={() => setPipelineOpenRequest(null)}
             onRefresh={refreshWorkspace}
@@ -505,41 +523,134 @@ function BusinessCasesPanel({
   const [bcRunDialog, setBcRunDialog] = useState<{
     pipeline: Pipeline;
     version: PipelineVersion;
-    inputs: Array<{
-      key: string;
-      name: string;
-      logicalId: string;
-      policy: "latest" | "select_at_run";
-    }>;
+    inputs: PipelineRunInput[];
   } | null>(null);
   const [bcRunSelections, setBcRunSelections] = useState<Record<string, string>>({});
   const [bcRunResult, setBcRunResult] = useState<PipelineRun | null>(null);
   const [bcRunSubmitting, setBcRunSubmitting] = useState(false);
+  const [bcDataPurposeFilter, setBcDataPurposeFilter] = useState("");
+  const [bcDataPipelineFilter, setBcDataPipelineFilter] = useState("");
+  const [bcUploadedOnly, setBcUploadedOnly] = useState(false);
+  const [bcModelPurposeFilter, setBcModelPurposeFilter] = useState("");
+  const [bcModelPipelineFilter, setBcModelPipelineFilter] = useState("");
+  const [bcReportPurposeFilter, setBcReportPurposeFilter] = useState("");
+  const [bcReportPipelineFilter, setBcReportPipelineFilter] = useState("");
 
   const selectedBusinessCase = businessCases.find((item) => item.id === selectedBusinessCaseId);
-  const datasetById = new Map(datasets.map((dataset) => [dataset.id, dataset]));
-  const availableDataAssets = datasetVersionGroups(
-    datasets.filter((dataset) => dataset.status !== "deleted")
-  ).map((group) => group.latest);
+  const datasetById = useMemo(
+    () => new Map(datasets.map((dataset) => [dataset.id, dataset])),
+    [datasets]
+  );
+  const activeDatasetGroups = useMemo(
+    () => datasetVersionGroups(datasets.filter((dataset) => dataset.status !== "deleted")),
+    [datasets]
+  );
+  const latestDatasetByLogicalId = useMemo(
+    () => new Map(activeDatasetGroups.map((group) => [group.logicalId, group.latest])),
+    [activeDatasetGroups]
+  );
+  const availableDataAssets = useMemo(
+    () => activeDatasetGroups.map((group) => group.latest),
+    [activeDatasetGroups]
+  );
   const attachedDataset = (dataAssetId: string) => {
     const attachedVersion = datasetById.get(dataAssetId);
     if (!attachedVersion) return undefined;
-    return datasetVersionGroups(
-      datasets.filter(
-        (dataset) => dataset.logical_id === attachedVersion.logical_id && dataset.status !== "deleted"
-      )
-    )[0]?.latest ?? attachedVersion;
+    return latestDatasetByLogicalId.get(attachedVersion.logical_id) ?? attachedVersion;
   };
-  const activeAttachments = attachments.filter((attachment) => attachedDataset(attachment.data_asset_id)?.status !== "deleted");
-  const deletedAttachments = attachments.filter((attachment) => attachedDataset(attachment.data_asset_id)?.status === "deleted");
-  const selectedBusinessCasePipelines = selectedBusinessCase
-    ? pipelines.filter((pipeline) => pipeline.business_case_id === selectedBusinessCase.id)
-    : [];
-  const selectedBusinessCaseModels = latestModelFamilies(
-    models.filter((model) => model.business_case_id === selectedBusinessCase?.id)
+  const activeAttachments = useMemo(
+    () => attachments.filter((attachment) => {
+      const attached = datasetById.get(attachment.data_asset_id);
+      const latest = attached
+        ? latestDatasetByLogicalId.get(attached.logical_id) ?? attached
+        : undefined;
+      return latest?.status !== "deleted";
+    }),
+    [attachments, datasetById, latestDatasetByLogicalId]
   );
-  const selectedBusinessCaseReports = latestReportFamilies(
-    scoringReports.filter((report) => report.business_case_id === selectedBusinessCase?.id)
+  const deletedAttachments = useMemo(
+    () => attachments.filter((attachment) => {
+      const attached = datasetById.get(attachment.data_asset_id);
+      const latest = attached
+        ? latestDatasetByLogicalId.get(attached.logical_id) ?? attached
+        : undefined;
+      return latest?.status === "deleted";
+    }),
+    [attachments, datasetById, latestDatasetByLogicalId]
+  );
+  const selectedBusinessCasePipelines = useMemo(
+    () => selectedBusinessCase
+      ? pipelines.filter((pipeline) => pipeline.business_case_id === selectedBusinessCase.id)
+      : [],
+    [pipelines, selectedBusinessCase]
+  );
+  const selectedBusinessCaseModels = useMemo(
+    () => latestModelFamilies(
+      models.filter((model) => model.business_case_id === selectedBusinessCase?.id)
+    ),
+    [models, selectedBusinessCase]
+  );
+  const selectedBusinessCaseReports = useMemo(
+    () => latestReportFamilies(
+      scoringReports.filter((report) => report.business_case_id === selectedBusinessCase?.id)
+    ),
+    [scoringReports, selectedBusinessCase]
+  );
+  const visibleAttachments = useMemo(
+    () => activeAttachments.filter((attachment) => {
+      const attached = datasetById.get(attachment.data_asset_id);
+      const dataset = attached
+        ? latestDatasetByLogicalId.get(attached.logical_id) ?? attached
+        : undefined;
+      if (bcUploadedOnly) return isUploadedDataset(dataset);
+      return pipelineMatches(
+        datasetPipelineId(dataset),
+        selectedBusinessCasePipelines,
+        bcDataPurposeFilter,
+        bcDataPipelineFilter
+      );
+    }),
+    [
+      activeAttachments,
+      bcDataPipelineFilter,
+      bcDataPurposeFilter,
+      bcUploadedOnly,
+      datasetById,
+      latestDatasetByLogicalId,
+      selectedBusinessCasePipelines
+    ]
+  );
+  const visibleBusinessCaseModels = useMemo(
+    () => selectedBusinessCaseModels.filter((model) =>
+      pipelineMatches(
+        model.pipeline_id,
+        selectedBusinessCasePipelines,
+        bcModelPurposeFilter,
+        bcModelPipelineFilter
+      )
+    ),
+    [
+      bcModelPipelineFilter,
+      bcModelPurposeFilter,
+      selectedBusinessCaseModels,
+      selectedBusinessCasePipelines
+    ]
+  );
+  const visibleBusinessCaseReports = useMemo(
+    () => selectedBusinessCaseReports.filter((report) =>
+      pipelineMatches(
+        report.pipeline_id,
+        selectedBusinessCasePipelines,
+        bcReportPurposeFilter,
+        bcReportPipelineFilter
+      )
+    ),
+    [
+      bcReportPipelineFilter,
+      bcReportPurposeFilter,
+      selectedBusinessCasePipelines,
+      selectedBusinessCaseReports
+    ]
   );
   const filteredBusinessCases = useMemo(() => {
     const query = businessCaseSearch.trim().toLowerCase();
@@ -557,6 +668,13 @@ function BusinessCasesPanel({
   }, [businessCases, businessCaseSearch]);
 
   useEffect(() => {
+    setBcDataPurposeFilter("");
+    setBcDataPipelineFilter("");
+    setBcUploadedOnly(false);
+    setBcModelPurposeFilter("");
+    setBcModelPipelineFilter("");
+    setBcReportPurposeFilter("");
+    setBcReportPipelineFilter("");
     if (!selectedBusinessCase) {
       setAttachments([]);
       return;
@@ -722,25 +840,7 @@ function BusinessCasesPanel({
         normalizeWorkflowDefinition(published.definition),
         datasets
       );
-      const inputs = normalized.steps.flatMap((step) => {
-        const nested = asRecord(asRecord(step.config).definition);
-        return (Array.isArray(nested.inputs) ? nested.inputs : []).flatMap((value) => {
-          const input = asRecord(value);
-          const logicalId = asString(input.dataset_id);
-          if (!logicalId) return [];
-          const dataset = datasets.find((item) =>
-            item.logical_id === logicalId || item.id === logicalId
-          );
-          return [{
-            key: `${step.step_id}:${asString(input.input_id)}`,
-            name: dataset?.name ?? (asString(input.input_id) || "Dataset input"),
-            logicalId,
-            policy: input.version_policy === "select_at_run"
-              ? "select_at_run" as const
-              : "latest" as const
-          }];
-        });
-      });
+      const inputs = resolvePipelineRunInputs(normalized, datasets);
       setBcRunSelections({});
       setBcRunResult(null);
       setBcRunDialog({ pipeline, version: published, inputs });
@@ -753,7 +853,8 @@ function BusinessCasesPanel({
     event.preventDefault();
     if (!bcRunDialog) return;
     const missing = bcRunDialog.inputs.find(
-      (input) => input.policy === "select_at_run" && !bcRunSelections[input.key]
+      (input) => requiresRuntimeDatasetSelection(input.policy)
+        && !bcRunSelections[input.key]
     );
     if (missing) {
       setNotice(`Select a version for ${missing.name}`);
@@ -1006,7 +1107,7 @@ function BusinessCasesPanel({
               <div className="panel-header bc-mapped-data-header">
                 <div>
                   <h2>Mapped data</h2>
-                  <p>{activeAttachments.length} active mapping{activeAttachments.length === 1 ? "" : "s"}</p>
+                  <p>{visibleAttachments.length} of {activeAttachments.length} active mappings shown</p>
                 </div>
                 <button
                   className="primary-button"
@@ -1018,8 +1119,23 @@ function BusinessCasesPanel({
                   Add mapping
                 </button>
               </div>
+              <ArtifactFilters
+                pipelines={selectedBusinessCasePipelines}
+                purpose={bcDataPurposeFilter}
+                pipelineId={bcDataPipelineFilter}
+                onPurposeChange={setBcDataPurposeFilter}
+                onPipelineChange={setBcDataPipelineFilter}
+                uploadedOnly={bcUploadedOnly}
+                onUploadedOnlyChange={(value) => {
+                  setBcUploadedOnly(value);
+                  if (value) {
+                    setBcDataPurposeFilter("");
+                    setBcDataPipelineFilter("");
+                  }
+                }}
+              />
               <div className="asset-list">
-                {activeAttachments.map((item) => {
+                {visibleAttachments.map((item) => {
                   const assetName = attachedDataset(item.data_asset_id)?.name ?? item.data_asset_id;
                   return (
                     <div className={`asset-row${editingAttachmentId === item.id ? " selected" : ""}`} key={item.id}>
@@ -1056,14 +1172,22 @@ function BusinessCasesPanel({
                     </div>
                   );
                 })}
-                {activeAttachments.length === 0 && <div className="empty-state">No data mapped to this business case yet</div>}
+                {!visibleAttachments.length && (
+                  <div className="empty-state">
+                    {activeAttachments.length ? "No mapped datasets match these filters." : "No data mapped to this business case yet"}
+                  </div>
+                )}
               </div>
             </div>
 
             {isMappingFormOpen && (
-              <form className="panel form-panel bc-mapping-form" onSubmit={attachData}>
-                <div className="panel-header">
+              <div className="modal-backdrop" role="presentation"
+                onMouseDown={(event) => event.target === event.currentTarget && resetDataMappingForm()}>
+              <form className="modal-dialog form-panel bc-mapping-form" onSubmit={attachData}
+                onMouseDown={(event) => event.stopPropagation()}>
+                <div className="modal-header">
                   <div>
+                    <span className="builder-kicker">Business Case data</span>
                     <h2>{editingAttachmentId ? "Edit data mapping" : "Add data mapping"}</h2>
                     <p>
                       {editingAttachmentId
@@ -1071,7 +1195,8 @@ function BusinessCasesPanel({
                         : "Connect a dataset or Data View to this business case."}
                     </p>
                   </div>
-                  <Database size={18} />
+                  <button className="icon-button" type="button" onClick={resetDataMappingForm}
+                    aria-label="Close data mapping"><X size={17} /></button>
                 </div>
                 <label>
                   Dataset/Data View
@@ -1089,14 +1214,9 @@ function BusinessCasesPanel({
                 <label>
                   Role
                   <select value={selectedRole} onChange={(event) => setSelectedRole(event.target.value)}>
-                    <option value="source">Source</option>
-                    <option value="training">Training</option>
-                    <option value="validation">Validation</option>
-                    <option value="test">Test</option>
-                    <option value="scoring_input">Scoring input</option>
-                    <option value="scoring_output">Scoring output</option>
-                    <option value="monitoring_actuals">Monitoring actuals</option>
-                    <option value="reference">Reference</option>
+                    {businessCaseDataRoleOptions.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
                   </select>
                 </label>
                 <label>
@@ -1122,6 +1242,7 @@ function BusinessCasesPanel({
                   </button>
                 </div>
               </form>
+              </div>
             )}
 
             {deletedAttachments.length > 0 && (
@@ -1167,11 +1288,18 @@ function BusinessCasesPanel({
         {selectedBusinessCase && activeWorkspace === "models" && (
           <div className="panel">
             <div className="panel-header">
-              <div><h2>Models</h2><p>{selectedBusinessCaseModels.length} model families in this Business Case</p></div>
+              <div><h2>Models</h2><p>{visibleBusinessCaseModels.length} of {selectedBusinessCaseModels.length} model families shown</p></div>
               <button className="secondary-button compact-button" type="button"
                 onClick={() => onOpenModels(selectedBusinessCase.id)}>Open model registry</button>
             </div>
-            <AssetList title="" assets={selectedBusinessCaseModels.map((item) => ({
+            <ArtifactFilters
+              pipelines={selectedBusinessCasePipelines}
+              purpose={bcModelPurposeFilter}
+              pipelineId={bcModelPipelineFilter}
+              onPurposeChange={setBcModelPurposeFilter}
+              onPipelineChange={setBcModelPipelineFilter}
+            />
+            <AssetList title="" assets={visibleBusinessCaseModels.map((item) => ({
               id: item.id,
               name: `${item.name} · ${item.version}`,
               meta: `${item.algorithm} · ${item.problem_type} · ${businessCaseName(businessCases, item.business_case_id)}`,
@@ -1186,11 +1314,18 @@ function BusinessCasesPanel({
         {selectedBusinessCase && activeWorkspace === "reports" && (
           <div className="panel">
             <div className="panel-header">
-              <div><h2>Scoring reports</h2><p>{selectedBusinessCaseReports.length} report families in this Business Case</p></div>
+              <div><h2>Scoring reports</h2><p>{visibleBusinessCaseReports.length} of {selectedBusinessCaseReports.length} report families shown</p></div>
               <button className="secondary-button compact-button" type="button"
                 onClick={() => onOpenScoringReports(selectedBusinessCase.id)}>Open report registry</button>
             </div>
-            <AssetList title="" assets={selectedBusinessCaseReports.map((item) => ({
+            <ArtifactFilters
+              pipelines={selectedBusinessCasePipelines}
+              purpose={bcReportPurposeFilter}
+              pipelineId={bcReportPipelineFilter}
+              onPurposeChange={setBcReportPurposeFilter}
+              onPipelineChange={setBcReportPipelineFilter}
+            />
+            <AssetList title="" assets={visibleBusinessCaseReports.map((item) => ({
               id: item.id,
               name: `${item.name} · v${item.version_number}`,
               meta: `${pipelineName(pipelines, item.pipeline_id)} · ${item.problem_type} · ${item.evaluated_row_count.toLocaleString()} rows`,
@@ -1279,12 +1414,26 @@ function BusinessCasesPanel({
                 onClick={() => setBcRunDialog(null)} aria-label="Close run dialog"><X size={17} /></button>
             </div>
             {bcRunDialog.inputs.map((input) => {
+              const attachedLogicalIds = new Set(
+                activeAttachments
+                  .map((attachment) => attachedDataset(attachment.data_asset_id)?.logical_id)
+                  .filter(Boolean)
+              );
               const inputVersions = datasets
-                .filter((dataset) => dataset.logical_id === input.logicalId && dataset.status !== "deleted")
+                .filter((dataset) =>
+                  dataset.status !== "deleted"
+                  && (
+                    input.policy === "select_at_run_any"
+                      ? attachedLogicalIds.has(dataset.logical_id)
+                      : input.policy === "pinned"
+                        ? dataset.id === input.datasetId
+                        : dataset.logical_id === input.logicalId
+                  )
+                )
                 .sort((left, right) => right.version_number - left.version_number);
               return (
                 <label key={input.key}>{input.name}
-                  {input.policy === "select_at_run" ? (
+                  {requiresRuntimeDatasetSelection(input.policy) ? (
                     <select value={bcRunSelections[input.key] ?? ""}
                       onChange={(event) => setBcRunSelections((current) => ({
                         ...current,
@@ -1293,13 +1442,14 @@ function BusinessCasesPanel({
                       <option value="">Select immutable version…</option>
                       {inputVersions.map((version) => (
                         <option key={version.id} value={version.id}>
+                          {input.policy === "select_at_run_any" ? `${version.name} · ` : ""}
                           v{version.version_number} · {version.row_count ?? "?"} rows
                         </option>
                       ))}
                     </select>
                   ) : (
                     <input readOnly value={inputVersions[0]
-                      ? `Latest → v${inputVersions[0].version_number}`
+                      ? `${input.policy === "pinned" ? "Pinned" : "Latest"} → v${inputVersions[0].version_number}`
                       : "No active version"} />
                   )}
                 </label>
@@ -1387,6 +1537,7 @@ function PipelinesPanel({
   businessCases,
   datasets,
   pipelines,
+  models,
   openRequest,
   onOpenRequestConsumed,
   onRefresh,
@@ -1396,6 +1547,7 @@ function PipelinesPanel({
   businessCases: BusinessCase[];
   datasets: DataAsset[];
   pipelines: Pipeline[];
+  models: ModelArtifact[];
   openRequest: { pipelineId: string; requestId: number } | null;
   onOpenRequestConsumed: () => void;
   onRefresh: () => Promise<void>;
@@ -1406,6 +1558,7 @@ function PipelinesPanel({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [pipelineType, setPipelineType] = useState("custom");
+  const [pipelineTemplate, setPipelineTemplate] = useState<PipelineTemplate>("custom");
   const [selectedPipelineId, setSelectedPipelineId] = useState("");
   const [isCreatePipelineOpen, setIsCreatePipelineOpen] = useState(false);
   const [copyPipelineTarget, setCopyPipelineTarget] = useState<Pipeline | null>(null);
@@ -1416,12 +1569,7 @@ function PipelinesPanel({
   const [catalogRunDialog, setCatalogRunDialog] = useState<{
     pipeline: Pipeline;
     version: PipelineVersion;
-    inputs: Array<{
-      key: string;
-      name: string;
-      logicalId: string;
-      policy: "latest" | "select_at_run";
-    }>;
+    inputs: PipelineRunInput[];
   } | null>(null);
   const [catalogRunSelections, setCatalogRunSelections] = useState<Record<string, string>>({});
   const [isCatalogRunSubmitting, setIsCatalogRunSubmitting] = useState(false);
@@ -1556,7 +1704,7 @@ function PipelinesPanel({
       name,
       description,
       type: pipelineType,
-      definition: emptyWorkflowDefinition()
+      definition: workflowTemplateDefinition(pipelineTemplate)
     });
     setNotice(`Pipeline created: ${created.name}`);
     setSelectedPipelineId(created.id);
@@ -1564,6 +1712,7 @@ function PipelinesPanel({
     setIsPipelineEditorOpen(true);
     setName("");
     setDescription("");
+    setPipelineTemplate(suggestedPipelineTemplate(pipelineType));
     await onRefresh();
   }
 
@@ -1781,22 +1930,7 @@ function PipelinesPanel({
         normalizeWorkflowDefinition(published.definition),
         datasets
       );
-      const inputs = normalized.steps.flatMap((step) => {
-        const nested = asRecord(asRecord(step.config).definition);
-        const rawInputs = Array.isArray(nested.inputs) ? nested.inputs : [];
-        return rawInputs.flatMap((value) => {
-          const input = asRecord(value);
-          const logicalId = asString(input.dataset_id);
-          if (!logicalId) return [];
-          const dataset = datasets.find((item) => item.logical_id === logicalId || item.id === logicalId);
-          return [{
-            key: `${step.step_id}:${asString(input.input_id)}`,
-            name: dataset?.name ?? (asString(input.input_id) || "Dataset input"),
-            logicalId,
-            policy: input.version_policy === "select_at_run" ? "select_at_run" as const : "latest" as const
-          }];
-        });
-      });
+      const inputs = resolvePipelineRunInputs(normalized, datasets);
       setCatalogRunSelections({});
       setCatalogRunResult(null);
       setCatalogRunDialog({ pipeline, version: published, inputs });
@@ -1809,7 +1943,8 @@ function PipelinesPanel({
     event.preventDefault();
     if (!catalogRunDialog) return;
     const missing = catalogRunDialog.inputs.find(
-      (input) => input.policy === "select_at_run" && !catalogRunSelections[input.key]
+      (input) => requiresRuntimeDatasetSelection(input.policy)
+        && !catalogRunSelections[input.key]
     );
     if (missing) {
       setNotice(`Select a version for ${missing.name}`);
@@ -2003,17 +2138,40 @@ function PipelinesPanel({
               </label>
               <label>Name<input value={name} onChange={(event) => setName(event.target.value)} autoFocus required /></label>
               <label>Purpose
-                <select value={pipelineType} onChange={(event) => setPipelineType(event.target.value)}>
+                <select value={pipelineType} onChange={(event) => {
+                  const purpose = event.target.value;
+                  setPipelineType(purpose);
+                  setPipelineTemplate(suggestedPipelineTemplate(purpose));
+                }}>
                   <option value="custom">Custom workflow</option>
                   <option value="training">Training workflow</option>
-                  <option value="batch_scoring">Scoring workflow</option>
+                  <option value="batch_scoring">Batch scoring</option>
                   <option value="monitoring">Monitoring workflow</option>
                 </select>
               </label>
+              <label>Template
+                <select value={pipelineTemplate}
+                  onChange={(event) => setPipelineTemplate(event.target.value as PipelineTemplate)}>
+                  <option value="custom">Empty custom workflow</option>
+                  <option value="training">Training · DE, FE, Training, Test Scoring</option>
+                  <option value="batch_scoring">Batch scoring · DE, FE Transform, Batch Scoring</option>
+                  <option value="monitoring">Monitoring · Target Join, Performance Report</option>
+                </select>
+                <small>
+                  Suggested from purpose. The template initializes an editable draft; purpose remains metadata.
+                </small>
+              </label>
+              {pipelineType === "monitoring" && (
+                <div className="form-note">
+                  Creates an editable Target Join and model-performance monitoring workflow.
+                </div>
+              )}
               <label>Description<textarea className="compact-textarea" value={description} onChange={(event) => setDescription(event.target.value)} /></label>
               <div className="modal-actions">
                 <button className="secondary-button" type="button" onClick={() => setIsCreatePipelineOpen(false)}>Cancel</button>
-                <button className="primary-button" type="submit"><Plus size={16} /> Create pipeline</button>
+                <button className="primary-button" type="submit">
+                  <Plus size={16} /> Create pipeline
+                </button>
               </div>
             </form>
           </div>
@@ -2124,14 +2282,32 @@ function PipelinesPanel({
                 </div>
               )}
               {!catalogRunResult && catalogRunDialog.inputs.map((input) => {
+                const attachedLogicalIds = new Set(
+                  pipelineDataAttachments
+                    .map((attachment) =>
+                      datasets.find((dataset) => dataset.id === attachment.data_asset_id)?.logical_id
+                    )
+                    .filter(Boolean)
+                );
                 const versionsForInput = datasets
-                  .filter((dataset) => dataset.logical_id === input.logicalId && dataset.status !== "deleted")
+                  .filter((dataset) =>
+                    dataset.status !== "deleted"
+                    && (
+                      input.policy === "select_at_run_any"
+                        ? attachedLogicalIds.has(dataset.logical_id)
+                        : input.policy === "pinned"
+                          ? dataset.id === input.datasetId
+                          : dataset.logical_id === input.logicalId
+                    )
+                  )
                   .sort((left, right) => right.version_number - left.version_number);
                 const latest = versionsForInput[0];
                 return (
                   <label key={input.key}>{input.name}
-                    {input.policy === "latest" ? (
-                      <input value={latest ? `Latest → v${latest.version_number}` : "No active version"} readOnly />
+                    {!requiresRuntimeDatasetSelection(input.policy) ? (
+                      <input value={latest
+                        ? `${input.policy === "pinned" ? "Pinned" : "Latest"} → v${latest.version_number}`
+                        : "No active version"} readOnly />
                     ) : (
                       <select
                         value={catalogRunSelections[input.key] ?? ""}
@@ -2144,12 +2320,17 @@ function PipelinesPanel({
                         <option value="">Select version…</option>
                         {versionsForInput.map((dataset) => (
                           <option key={dataset.id} value={dataset.id}>
+                            {input.policy === "select_at_run_any" ? `${dataset.name} · ` : ""}
                             v{dataset.version_number} · {dataset.row_count ?? "?"} rows · {formatDateTime(dataset.created_at)}
                           </option>
                         ))}
                       </select>
                     )}
-                    <small>{input.policy === "latest" ? "Resolved and recorded when the run is created." : "This run requires an explicit immutable version."}</small>
+                    <small>{requiresRuntimeDatasetSelection(input.policy)
+                      ? "This run requires an explicit immutable version."
+                      : input.policy === "pinned"
+                        ? "This exact immutable version is pinned in the pipeline definition."
+                        : "Resolved and recorded when the run is created."}</small>
                   </label>
                 );
               })}
@@ -2325,11 +2506,14 @@ function PipelinesPanel({
             definition={workflowDefinition}
             businessCase={businessCases.find((item) => item.id === selectedBusinessCaseIdValue)}
             datasets={latestLogicalDatasetAliases(datasets)}
+            models={models}
+            pipelines={pipelines}
             dataAttachments={pipelineDataAttachments.map((attachment) => {
               const dataset = datasets.find((item) => item.id === attachment.data_asset_id);
               return dataset ? { ...attachment, data_asset_id: dataset.logical_id } : attachment;
             })}
             outputNameSuggestion={selectedPipeline?.name ?? "result"}
+            pipelineType={selectedPipeline?.type ?? pipelineTypeDraft}
             onChange={updateWorkflowDefinition}
             disabled={!hasDraft}
           />
@@ -2410,14 +2594,32 @@ function PipelinesPanel({
               </div>
             )}
             {!catalogRunResult && catalogRunDialog.inputs.map((input) => {
+              const attachedLogicalIds = new Set(
+                pipelineDataAttachments
+                  .map((attachment) =>
+                    datasets.find((dataset) => dataset.id === attachment.data_asset_id)?.logical_id
+                  )
+                  .filter(Boolean)
+              );
               const versionsForInput = datasets
-                .filter((dataset) => dataset.logical_id === input.logicalId && dataset.status !== "deleted")
+                .filter((dataset) =>
+                  dataset.status !== "deleted"
+                  && (
+                    input.policy === "select_at_run_any"
+                      ? attachedLogicalIds.has(dataset.logical_id)
+                      : input.policy === "pinned"
+                        ? dataset.id === input.datasetId
+                        : dataset.logical_id === input.logicalId
+                  )
+                )
                 .sort((left, right) => right.version_number - left.version_number);
               const latest = versionsForInput[0];
               return (
                 <label key={input.key}>{input.name}
-                  {input.policy === "latest" ? (
-                    <input value={latest ? `Latest → v${latest.version_number}` : "No active version"} readOnly />
+                  {!requiresRuntimeDatasetSelection(input.policy) ? (
+                    <input value={latest
+                      ? `${input.policy === "pinned" ? "Pinned" : "Latest"} → v${latest.version_number}`
+                      : "No active version"} readOnly />
                   ) : (
                     <select value={catalogRunSelections[input.key] ?? ""}
                       onChange={(event) => setCatalogRunSelections((current) => ({ ...current, [input.key]: event.target.value }))}
@@ -2425,12 +2627,17 @@ function PipelinesPanel({
                       <option value="">Select version…</option>
                       {versionsForInput.map((dataset) => (
                         <option key={dataset.id} value={dataset.id}>
+                          {input.policy === "select_at_run_any" ? `${dataset.name} · ` : ""}
                           v{dataset.version_number} · {dataset.row_count ?? "?"} rows · {formatDateTime(dataset.created_at)}
                         </option>
                       ))}
                     </select>
                   )}
-                  <small>{input.policy === "latest" ? "Resolved and recorded when the run is created." : "This run requires an explicit immutable version."}</small>
+                  <small>{requiresRuntimeDatasetSelection(input.policy)
+                    ? "This run requires an explicit immutable version."
+                    : input.policy === "pinned"
+                      ? "This exact immutable version is pinned in the pipeline definition."
+                      : "Resolved and recorded when the run is created."}</small>
                 </label>
               );
             })}
@@ -2567,6 +2774,13 @@ function pipelineName(pipelines: Pipeline[], pipelineId: string) {
   return pipelines.find((item) => item.id === pipelineId)?.name ?? "unknown pipeline";
 }
 
+function suggestedPipelineTemplate(purpose: string): PipelineTemplate {
+  if (purpose === "training") return "training";
+  if (purpose === "batch_scoring") return "batch_scoring";
+  if (purpose === "monitoring") return "monitoring";
+  return "custom";
+}
+
 function latestModelFamilies(models: ModelArtifact[]) {
   const latest = new Map<string, ModelArtifact>();
   for (const model of models) {
@@ -2634,11 +2848,13 @@ function DatasetVersionHistoryDialog({
 
 function DataPanel({
   datasets,
+  pipelines,
   onAnalyze,
   onRefresh,
   setNotice
 }: {
   datasets: DataAsset[];
+  pipelines: Pipeline[];
   onAnalyze: (datasetId: string) => void;
   onRefresh: () => Promise<void>;
   setNotice: (message: string) => void;
@@ -2651,7 +2867,14 @@ function DataPanel({
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [isUploadingFile, setIsUploadingFile] = useState(false);
   const [uploadLogicalId, setUploadLogicalId] = useState("");
-  const activeDatasets = datasets.filter((dataset) => dataset.status !== "deleted" && !isDataView(dataset));
+  const [purposeFilter, setPurposeFilter] = useState("");
+  const [pipelineFilter, setPipelineFilter] = useState("");
+  const [uploadedOnly, setUploadedOnly] = useState(false);
+  const activeDatasets = datasets.filter((dataset) => {
+    if (dataset.status === "deleted" || isDataView(dataset)) return false;
+    if (uploadedOnly) return isUploadedDataset(dataset);
+    return pipelineMatches(datasetPipelineId(dataset), pipelines, purposeFilter, pipelineFilter);
+  });
   const dataViews = datasets.filter((dataset) => dataset.status !== "deleted" && isDataView(dataset));
   const deletedDatasets = datasets.filter((dataset) => dataset.status === "deleted");
 
@@ -2827,6 +3050,27 @@ function DataPanel({
       </form>
 
       <div className="repository-column">
+        <div className="panel dataset-catalog-filters">
+          <div>
+            <h2>Dataset filters</h2>
+            <p>{datasetVersionGroups(activeDatasets).length} dataset families shown</p>
+          </div>
+          <ArtifactFilters
+            pipelines={pipelines}
+            purpose={purposeFilter}
+            pipelineId={pipelineFilter}
+            onPurposeChange={setPurposeFilter}
+            onPipelineChange={setPipelineFilter}
+            uploadedOnly={uploadedOnly}
+            onUploadedOnlyChange={(value) => {
+              setUploadedOnly(value);
+              if (value) {
+                setPurposeFilter("");
+                setPipelineFilter("");
+              }
+            }}
+          />
+        </div>
         <VersionedDatasetList
           datasets={activeDatasets}
           onAddVersion={addDatasetVersion}
@@ -3047,6 +3291,7 @@ function shortId(value: string) {
 function AnalysisPanel({
   datasets,
   businessCases = [],
+  pipelines = [],
   descriptiveProfileCache,
   onRefresh,
   setNotice,
@@ -3058,6 +3303,7 @@ function AnalysisPanel({
 }: {
   datasets: DataAsset[];
   businessCases?: BusinessCase[];
+  pipelines?: Pipeline[];
   descriptiveProfileCache: Map<string, DescriptiveProfileCacheEntry>;
   onRefresh: () => Promise<void>;
   setNotice: (message: string) => void;
@@ -3071,6 +3317,9 @@ function AnalysisPanel({
   const [datasetId, setDatasetId] = useState(initialDatasetId);
   const [businessCaseFilter, setBusinessCaseFilter] = useState("");
   const [showOnlyLatest, setShowOnlyLatest] = useState(true);
+  const [purposeFilter, setPurposeFilter] = useState("");
+  const [pipelineFilter, setPipelineFilter] = useState("");
+  const [uploadedOnly, setUploadedOnly] = useState(false);
   const [analysisAttachments, setAnalysisAttachments] = useState<BusinessCaseDataAttachment[]>([]);
   const [visualizationDrill, setVisualizationDrill] = useState<VisualizationDrillRequest | null>(null);
   useEffect(() => {
@@ -3094,15 +3343,31 @@ function AnalysisPanel({
         .map((attachment) => byId.get(attachment.data_asset_id)?.logical_id)
         .filter((value): value is string => Boolean(value))
     );
-    const scoped = businessCaseFilter
+    const businessCaseScoped = businessCaseFilter
       ? active.filter((dataset) => logicalIds.has(dataset.logical_id))
       : active;
+    const scoped = businessCaseScoped.filter((dataset) => {
+      if (uploadedOnly) return isUploadedDataset(dataset);
+      return pipelineMatches(datasetPipelineId(dataset), pipelines, purposeFilter, pipelineFilter);
+    });
     return showOnlyLatest
       ? datasetVersionGroups(scoped).map((group) => group.latest)
       : scoped.sort((left, right) =>
           left.name.localeCompare(right.name) || right.version_number - left.version_number
         );
-  }, [analysisAttachments, businessCaseFilter, datasets, showOnlyLatest]);
+  }, [
+    analysisAttachments,
+    businessCaseFilter,
+    datasets,
+    pipelineFilter,
+    pipelines,
+    purposeFilter,
+    showOnlyLatest,
+    uploadedOnly
+  ]);
+  const analysisPipelines = businessCaseFilter
+    ? pipelines.filter((pipeline) => pipeline.business_case_id === businessCaseFilter)
+    : pipelines;
 
   useEffect(() => {
     const nextDatasetId = availableDatasets.some((dataset) => dataset.id === datasetId)
@@ -3130,7 +3395,10 @@ function AnalysisPanel({
         <div className="panel analysis-dataset-filters">
           <label>
             <span>Business Case</span>
-            <select value={businessCaseFilter} onChange={(event) => setBusinessCaseFilter(event.target.value)}>
+            <select value={businessCaseFilter} onChange={(event) => {
+              setBusinessCaseFilter(event.target.value);
+              setPipelineFilter("");
+            }}>
               <option value="">All Business Cases</option>
               {businessCases.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
@@ -3141,6 +3409,21 @@ function AnalysisPanel({
             <span><strong>Show only latest versions</strong>
               <small>Collapse each logical dataset family to its newest version.</small></span>
           </label>
+          <ArtifactFilters
+            pipelines={analysisPipelines}
+            purpose={purposeFilter}
+            pipelineId={pipelineFilter}
+            onPurposeChange={setPurposeFilter}
+            onPipelineChange={setPipelineFilter}
+            uploadedOnly={uploadedOnly}
+            onUploadedOnlyChange={(value) => {
+              setUploadedOnly(value);
+              if (value) {
+                setPurposeFilter("");
+                setPipelineFilter("");
+              }
+            }}
+          />
           <span>{availableDatasets.length} datasets available</span>
         </div>
       )}

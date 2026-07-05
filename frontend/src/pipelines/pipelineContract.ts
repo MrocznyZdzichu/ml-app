@@ -7,7 +7,7 @@ export type PipelineInputDefinition = {
   input_id: string;
   dataset_id: string;
   output_port_id: string;
-  version_policy: "latest" | "select_at_run";
+  version_policy: DatasetVersionPolicy;
 };
 
 export type PipelineStepDefinition = {
@@ -24,7 +24,7 @@ export type PipelineOutputDefinition = {
   materialization: "temporary" | "dataset";
   write_mode: "replace";
   dataset_name: string;
-  business_case_role: "source" | "training" | "validation" | "test" | "scoring_input" | "scoring_output" | "monitoring_actuals" | "reference";
+  business_case_role: BusinessCaseDataRole;
   data_contract?: DataContractDefinition;
 };
 
@@ -84,7 +84,7 @@ export function normalizePipelineDefinition(value: unknown): PipelineDefinition 
           input_id: String(input.input_id ?? "source"),
           dataset_id: String(input.dataset_id ?? ""),
           output_port_id: String(input.output_port_id ?? "out"),
-          version_policy: input.version_policy === "select_at_run" ? "select_at_run" : "latest"
+          version_policy: normalizeDatasetVersionPolicy(input.version_policy)
         }))
       : [],
     steps,
@@ -154,3 +154,8 @@ function recordValue(value: unknown): Record<string, unknown> {
     ? value as Record<string, unknown>
     : {};
 }
+import type {
+  BusinessCaseDataRole,
+  DatasetVersionPolicy
+} from "./dataContractOptions";
+import { normalizeDatasetVersionPolicy } from "./dataContractOptions";

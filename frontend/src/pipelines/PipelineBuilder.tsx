@@ -23,6 +23,10 @@ import {
   inferPipelineOutputColumns,
   inferPipelineStepInputColumns
 } from "./pipelineSchema";
+import {
+  businessCaseDataRoleOptions,
+  datasetVersionPolicyOptions
+} from "./dataContractOptions";
 
 export type {
   PipelineDefinition,
@@ -83,7 +87,17 @@ export function PipelineBuilder({
         .sort((left, right) => {
           const roleRank = (datasetId: string) => {
             const role = attachmentByDataset.get(datasetId)?.role;
-            return ["source", "training", "scoring_input", "validation", "test", "reference"].indexOf(role ?? "") + 1 || 99;
+            return [
+              "source",
+              "training",
+              "scoring_input",
+              "scoring_output",
+              "monitoring_actuals",
+              "monitoring_input",
+              "validation",
+              "test",
+              "reference"
+            ].indexOf(role ?? "") + 1 || 99;
           };
           return roleRank(left.id) - roleRank(right.id) || left.name.localeCompare(right.name);
         }),
@@ -339,8 +353,9 @@ export function PipelineBuilder({
                 })}
                 disabled={disabled}
               >
-                <option value="latest">Latest at run start</option>
-                <option value="select_at_run">Select at run</option>
+                {datasetVersionPolicyOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
               </select></label>
               <label>Stable source ID<input value={input.input_id} disabled /></label>
               {attachmentByDataset.get(input.dataset_id)?.role && (
@@ -360,7 +375,10 @@ export function PipelineBuilder({
             inputColumns={definition.steps[selectedStepIndex].inputs.map((input) =>
               inferPipelineNodeColumns(definition, datasets, schemaCache, input.source.node_id, new Set<string>(), columnRoles)
             )}
-            sourceDatasetIds={datasetIdsForStepInputs(definition, definition.steps[selectedStepIndex])}
+            sourceDatasetIds={datasetIdsForStepInputs(
+              definition,
+              definition.steps[selectedStepIndex]
+            ).map((datasetId) => physicalDatasetId(datasets, datasetId))}
             disabled={disabled}
             onChange={(nextStep) => updateStep(selectedStepIndex, nextStep)}
             onTypeChange={(type) => changeStepType(selectedStepIndex, type)}
@@ -378,7 +396,9 @@ export function PipelineBuilder({
               {outputSources.map((source) => <option key={referenceKey(source.reference)} value={referenceKey(source.reference)}>{source.label}</option>)}
             </select></label>
             <label>Business Case role<select value={definition.outputs[0]?.business_case_role ?? "source"} onChange={(event) => update({ outputs: [{ ...datasetOutput(selectedOutput, definition.outputs[0]?.output_id, definition.outputs[0], outputNameSuggestion), business_case_role: event.target.value as PipelineOutputDefinition["business_case_role"] }] })} disabled={disabled || !isExecutable}>
-              {["source", "training", "validation", "test", "scoring_input", "scoring_output", "monitoring_actuals", "reference"].map((role) => <option key={role} value={role}>{role.replaceAll("_", " ")}</option>)}
+              {businessCaseDataRoleOptions.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
             </select></label>
             <DataContractEditor
               contract={definition.outputs[0]?.data_contract}
@@ -572,7 +592,7 @@ function StepConfigEditor({ type, config, availableColumns, inputColumns, source
       <ColumnSelect label="Category column" value={selectedCategoryColumn} columns={categoryColumnNames} onChange={(column) => onChange({ ...config, column })} disabled={disabled} />
       {!selectedCategoryColumn && <small className="metadata-hint">Choose a category column first. Then source-value mapping will show searchable values from that column.</small>}
       <TextField label="Optional output column" value={String(config.output_column ?? "")} onChange={(value) => onChange(value ? { ...config, output_column: value } : withoutKey(config, "output_column"))} disabled={disabled} />
-      <CategoryMappingEditor datasetId={sourceDatasetIds[0]} column={selectedCategoryColumn} values={sanitizeCategoryMapping(recordValue(config.mapping))} disabled={disabled || !selectedCategoryColumn} onChange={(mapping) => onChange({ ...config, mapping })} />
+      <CategoryMappingEditor datasetIds={sourceDatasetIds} column={selectedCategoryColumn} values={sanitizeCategoryMapping(recordValue(config.mapping))} disabled={disabled || !selectedCategoryColumn} onChange={(mapping) => onChange({ ...config, mapping })} />
     </div>;
   }
   if (type === "union") {
@@ -968,32 +988,61 @@ function JoinEditor({ config, leftColumns, rightColumns, disabled, onChange }: {
   })}<button className="secondary-button compact-button" type="button" onClick={() => onChange({ ...config, keys: [...keys, { left: leftNames[0] ?? "", right: suggestJoinKey(leftNames[0] ?? "", rightColumns) }] })}><Plus size={14} /> Add key pair</button></div>;
 }
 
-function CategoryMappingEditor({ datasetId, column, values, disabled, onChange }: {
-  datasetId?: string; column: string; values: Record<string, unknown>; disabled: boolean; onChange: (values: Record<string, unknown>) => void;
+function CategoryMappingEditor({ datasetIds, column, values, disabled, onChange }: {
+  datasetIds: string[]; column: string; values: Record<string, unknown>; disabled: boolean; onChange: (values: Record<string, unknown>) => void;
 }) {
-  const { options, truncated, loading } = useColumnValues(datasetId, column, Boolean(column));
+  const { options, truncated, loading, error } = useColumnValues(
+    datasetIds,
+    column,
+    Boolean(column)
+  );
   if (!column) {
     return <div className="inspector-empty compact">Select a category column to enable searchable source-value suggestions.</div>;
   }
   return <div className="row-editor">
     <PairTable leftLabel="Source value" rightLabel="New value" values={values} disabled={disabled} onChange={onChange} suggestions={options} />
     {loading && <small className="metadata-hint">Loading category values from the full dataset…</small>}
-    {!loading && !options.length && <small className="metadata-hint">No value list is available for this column yet. You can still type values manually.</small>}
+    {!loading && !options.length && <small className="metadata-hint">
+      {error || "No value list is available for this column yet. You can still type values manually."}
+    </small>}
     {truncated && <small className="metadata-hint">Suggestions show the 100 most frequent values from the full dataset.</small>}
   </div>;
 }
 
 function PairTable({ leftLabel, rightLabel, values, disabled, onChange, suggestions = [] }: { leftLabel: string; rightLabel: string; values: Record<string, unknown>; disabled: boolean; onChange: (values: Record<string, unknown>) => void; suggestions?: string[]; }) {
   const rows = Object.entries(values);
+  const rowIds = useRef(new Map<string, string>());
+  const nextRowId = useRef(1);
+  for (const [key] of rows) {
+    if (!rowIds.current.has(key)) {
+      rowIds.current.set(key, `mapping-row-${nextRowId.current++}`);
+    }
+  }
   const addMapping = () => {
     const suggested = suggestions.find((item) => !(item in values));
     const key = suggested ?? ("" in values ? `manual_${rows.length + 1}` : "");
+    if (!rowIds.current.has(key)) {
+      rowIds.current.set(key, `mapping-row-${nextRowId.current++}`);
+    }
     onChange({ ...values, [key]: "" });
   };
-  return <div className="row-editor"><div className="config-table-head"><span>{leftLabel}</span><span>{rightLabel}</span></div>{rows.map(([key, value], index) => <div className="pair-row" key={`${key}-${index}`}>
-    <MappingValueCombobox value={key} suggestions={suggestions} disabled={disabled} onChange={(nextKey) => { const next = { ...values }; delete next[key]; next[nextKey] = value; onChange(next); }} />
+  return <div className="row-editor"><div className="config-table-head"><span>{leftLabel}</span><span>{rightLabel}</span></div>{rows.map(([key, value]) => <div className="pair-row" key={rowIds.current.get(key)}>
+    <MappingValueCombobox value={key} suggestions={suggestions} disabled={disabled} onChange={(nextKey) => {
+      const rowId = rowIds.current.get(key);
+      const next = { ...values };
+      delete next[key];
+      next[nextKey] = value;
+      rowIds.current.delete(key);
+      if (rowId) rowIds.current.set(nextKey, rowId);
+      onChange(next);
+    }} />
     <input value={String(value ?? "")} onChange={(event) => onChange({ ...values, [key]: parseScalar(event.target.value) })} disabled={disabled} />
-    <button className="icon-button" type="button" onClick={() => { const next = { ...values }; delete next[key]; onChange(next); }}><Trash2 size={14} /></button>
+    <button className="icon-button" type="button" onClick={() => {
+      const next = { ...values };
+      delete next[key];
+      rowIds.current.delete(key);
+      onChange(next);
+    }}><Trash2 size={14} /></button>
   </div>)}{!rows.length && <div className="config-empty">No mappings yet. Add a row and choose a source value from suggestions or type one manually.</div>}<button className="secondary-button compact-button" type="button" onClick={addMapping} disabled={disabled}><Plus size={14} /> Add mapping</button></div>;
 }
 
@@ -1153,6 +1202,14 @@ function datasetIdsForNode(definition: PipelineDefinition, nodeId: string, visit
   return step ? step.inputs.flatMap((item) => datasetIdsForNode(definition, item.source.node_id, new Set(visited))) : [];
 }
 
+function physicalDatasetId(datasets: DataAsset[], datasetId: string) {
+  const exact = datasets.find((dataset) => dataset.id === datasetId);
+  if (exact) return exact.id;
+  return datasets
+    .filter((dataset) => dataset.logical_id === datasetId)
+    .sort((left, right) => right.version_number - left.version_number)[0]?.id ?? datasetId;
+}
+
 function columnRoles(dataset: DataAsset | undefined): Record<string, string> {
   if (!dataset) return {};
   const dataRoles = recordValue(dataset.metadata.data_roles);
@@ -1197,24 +1254,52 @@ function isNodeReferenced(definition: PipelineDefinition, nodeId: string) {
     || definition.outputs.some((output) => output.input.node_id === nodeId);
 }
 
-function useColumnValues(datasetId: string | undefined, column: string | undefined, enabled: boolean) {
-  const [state, setState] = useState({ options: [] as string[], truncated: false, loading: false });
+function useColumnValues(
+  datasetIds: string[] | string | undefined,
+  column: string | undefined,
+  enabled: boolean
+) {
+  const [state, setState] = useState({
+    options: [] as string[],
+    truncated: false,
+    loading: false,
+    error: ""
+  });
+  const datasetKey = (Array.isArray(datasetIds) ? datasetIds : [datasetIds])
+    .filter((datasetId): datasetId is string => Boolean(datasetId))
+    .join("|");
   useEffect(() => {
     let active = true;
-    if (!enabled || !datasetId || !column) {
-      setState({ options: [], truncated: false, loading: false });
+    if (!enabled || !datasetKey || !column) {
+      setState({ options: [], truncated: false, loading: false, error: "" });
       return;
     }
     setState((current) => ({ ...current, loading: true }));
-    void api.visualizationGroups(datasetId, column, 100)
-      .then((result) => {
-        if (active) setState({ options: result.values, truncated: result.truncated, loading: false });
-      })
-      .catch(() => {
-        if (active) setState({ options: [], truncated: false, loading: false });
+    void (async () => {
+      let lastError = "";
+      for (const datasetId of datasetKey.split("|")) {
+        try {
+          const result = await api.visualizationGroups(datasetId, column, 100);
+          if (active) setState({
+            options: result.values,
+            truncated: result.truncated,
+            loading: false,
+            error: ""
+          });
+          return;
+        } catch (error) {
+          lastError = error instanceof Error ? error.message : "Unknown error";
+        }
+      }
+      if (active) setState({
+        options: [],
+        truncated: false,
+        loading: false,
+        error: `Could not load source values from upstream datasets: ${lastError}`
       });
+    })();
     return () => { active = false; };
-  }, [column, datasetId, enabled]);
+  }, [column, datasetKey, enabled]);
   return state;
 }
 

@@ -12,6 +12,7 @@ import type {
   TrainingAlgorithm,
   TrainingDefinition
 } from "./modelingContract";
+import type { ModelArtifact } from "../api/client";
 
 export function TrainingBuilder({ definition, defaults, disabled, onChange }: {
   definition: TrainingDefinition;
@@ -286,30 +287,47 @@ function parameterSummary(definition: TrainingDefinition) {
   return `max ${definition.epochs} epochs · batch ${definition.batch_size}${early}`;
 }
 
-export function ScoringBuilder({ definition, defaults, disabled, onChange }: {
+export function ScoringBuilder({ definition, defaults, models, disabled, onChange }: {
   definition: ScoringDefinition;
   defaults: ModelingDefaults;
+  models: ModelArtifact[];
   disabled: boolean;
   onChange: (definition: ScoringDefinition) => void;
 }) {
   const update = (patch: Partial<ScoringDefinition>) => onChange({ ...definition, ...patch });
+  const pinnedModel = models.find((model) => model.id === definition.model_artifact_id);
   return <div className="inspector-form modeling-builder">
-    <div className="scope-badge">Uses the exact model port and scans every scoring row.</div>
+    <div className="scope-badge">
+      {definition.purpose === "batch"
+        ? "Full-scope batch inference with an immutable model and fitted FE state."
+        : "Uses the exact model port and scans every test row."}
+    </div>
+    {definition.purpose === "batch" && (
+      <label>Pinned model<input
+        value={pinnedModel ? `${pinnedModel.name} · ${pinnedModel.version}` : definition.model_artifact_id}
+        readOnly /></label>
+    )}
     <ColumnSelect label="Row ID column" value={definition.row_id_column}
       columns={defaults.available_columns} disabled={disabled}
       onChange={(row_id_column) => update({ row_id_column })} />
-    <ColumnSelect label="Target column for test metrics" value={definition.target_column}
-      columns={defaults.available_columns} optional disabled={disabled}
-      onChange={(target_column) => update({ target_column })} />
+    {definition.purpose === "test" && (
+      <ColumnSelect label="Target column for test metrics" value={definition.target_column}
+        columns={defaults.available_columns} optional disabled={disabled}
+        onChange={(target_column) => update({ target_column })} />
+    )}
     <label>Prediction column<input value={definition.prediction_column} disabled={disabled}
       onChange={(event) => update({ prediction_column: event.target.value })} /></label>
     <label>Output dataset name<input value={definition.dataset_name} disabled={disabled}
       onChange={(event) => update({ dataset_name: event.target.value })} /></label>
-    <label>Scoring report name<input value={definition.report_name} disabled={disabled}
-      onChange={(event) => update({ report_name: event.target.value })} /></label>
+    {definition.purpose === "test" && (
+      <label>Scoring report name<input value={definition.report_name} disabled={disabled}
+        onChange={(event) => update({ report_name: event.target.value })} /></label>
+    )}
     <label>Batch size<input type="number" min={100} max={100000} value={definition.batch_size} disabled={disabled}
       onChange={(event) => update({ batch_size: Number(event.target.value) })} /></label>
-    <small>Output: Parquet prediction dataset with row ID, prediction and optional metrics.</small>
+    <small>{definition.purpose === "batch"
+      ? "Output: immutable Parquet prediction dataset. Performance metrics require a later monitoring pipeline with actuals."
+      : "Output: Parquet test predictions and performance metrics."}</small>
   </div>;
 }
 

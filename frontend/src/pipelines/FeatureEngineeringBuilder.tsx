@@ -38,6 +38,10 @@ import {
   inferPipelineOutputColumns,
   inputDatasetIds
 } from "./pipelineSchema";
+import {
+  datasetVersionPolicyOptions,
+  type DatasetVersionPolicy
+} from "./dataContractOptions";
 
 const transformOptions: Array<{
   type: FeatureTransformType;
@@ -72,6 +76,7 @@ export function FeatureEngineeringBuilder({
   dataAttachments,
   upstreamDefinition,
   hasUpstream,
+  fittedStateLocked = false,
   disabled,
   onChange
 }: {
@@ -80,6 +85,7 @@ export function FeatureEngineeringBuilder({
   dataAttachments: BusinessCaseDataAttachment[];
   upstreamDefinition?: PipelineDefinition;
   hasUpstream: boolean;
+  fittedStateLocked?: boolean;
   disabled: boolean;
   onChange: (definition: FeatureEngineeringDefinition) => void;
 }) {
@@ -161,7 +167,10 @@ export function FeatureEngineeringBuilder({
     });
   }
 
-  function updateInputVersionPolicy(index: number, versionPolicy: "latest" | "select_at_run") {
+  function updateInputVersionPolicy(
+    index: number,
+    versionPolicy: DatasetVersionPolicy
+  ) {
     onChange({
       ...definition,
       inputs: definition.inputs.map((item, itemIndex) =>
@@ -355,7 +364,7 @@ export function FeatureEngineeringBuilder({
               className={definition.mode === mode ? "fe-choice selected" : "fe-choice"}
               type="button"
               key={mode}
-              disabled={disabled}
+              disabled={disabled || fittedStateLocked}
               onClick={() => onChange({ ...definition, mode })}
             >
               {definition.mode === mode && <Check size={16} />}
@@ -371,6 +380,7 @@ export function FeatureEngineeringBuilder({
             <span>Fitted transform artifact</span>
             <input
               value={definition.fitted_state_artifact_id}
+              readOnly={fittedStateLocked}
               disabled={disabled}
               onChange={(event) => onChange({
                 ...definition,
@@ -378,7 +388,9 @@ export function FeatureEngineeringBuilder({
               })}
               placeholder="Paste the ID shown after an official FE run"
             />
-            <small>The platform never resolves this as “latest”.</small>
+            <small>{fittedStateLocked
+              ? "Pinned automatically from the selected immutable training run."
+              : "The platform never resolves this as “latest”."}</small>
           </label>
         )}
       </section>
@@ -735,7 +747,10 @@ function PredefinedInputs({
   hasUpstream: boolean;
   disabled: boolean;
   onDatasetChange: (index: number, datasetId: string) => void;
-  onVersionPolicyChange: (index: number, policy: "latest" | "select_at_run") => void;
+  onVersionPolicyChange: (
+    index: number,
+    policy: DatasetVersionPolicy
+  ) => void;
   onAdd: (role: FeatureInputRole) => void;
   onRemove: (inputId: string) => void;
 }) {
@@ -775,9 +790,13 @@ function PredefinedInputs({
               </label>
               <label className="fe-field"><span>Version policy</span>
                 <select value={input.version_policy ?? "latest"} disabled={disabled}
-                  onChange={(event) => onVersionPolicyChange(index, event.target.value as "latest" | "select_at_run")}>
-                  <option value="latest">Latest at run start</option>
-                  <option value="select_at_run">Select at run</option>
+                  onChange={(event) => onVersionPolicyChange(
+                    index,
+                    event.target.value as DatasetVersionPolicy
+                  )}>
+                  {datasetVersionPolicyOptions.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
                 </select>
               </label>
               </>
@@ -809,7 +828,9 @@ function GeneratedSplitControls({
   hasUpstream: boolean;
   disabled: boolean;
   onDatasetChange: (datasetId: string) => void;
-  onVersionPolicyChange: (policy: "latest" | "select_at_run") => void;
+  onVersionPolicyChange: (
+    policy: DatasetVersionPolicy
+  ) => void;
   onEvaluationChange: (patch: Partial<FeatureEvaluation>) => void;
 }) {
   const evaluation = definition.evaluation;
@@ -831,9 +852,12 @@ function GeneratedSplitControls({
         {!hasUpstream && (
           <label className="fe-field"><span>Version policy</span>
             <select value={definition.inputs[0]?.version_policy ?? "latest"} disabled={disabled}
-              onChange={(event) => onVersionPolicyChange(event.target.value as "latest" | "select_at_run")}>
-              <option value="latest">Latest at run start</option>
-              <option value="select_at_run">Select at run</option>
+              onChange={(event) => onVersionPolicyChange(
+                event.target.value as DatasetVersionPolicy
+              )}>
+              {datasetVersionPolicyOptions.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
             </select>
           </label>
         )}

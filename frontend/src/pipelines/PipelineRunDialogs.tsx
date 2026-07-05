@@ -1,6 +1,6 @@
 import { BarChart3, Box, Brain, Check, ChevronLeft, ChevronRight, Clipboard, Database, Download, Eye, RotateCcw, Search, X } from "lucide-react";
 import type { CSSProperties } from "react";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 
 import { api } from "../api/client";
 import type {
@@ -14,7 +14,11 @@ import type {
   PipelineRunOutputPreview,
   PipelineRunOutputProfile
 } from "../api/client";
-import { ModelDetailsDialog } from "../operational/LifecyclePanels";
+const ModelDetailsDialog = lazy(() =>
+  import("../operational/LifecyclePanels").then((module) => ({
+    default: module.ModelDetailsDialog
+  }))
+);
 
 export function PipelineVersionHistoryDialog({
   pipeline,
@@ -936,12 +940,14 @@ export function DryRunPreview({
       )}
       <small>Temporary Parquet · no official dataset or artifact was created.</small>
       {selectedModel && (
-        <ModelDetailsDialog
-          model={selectedModel}
-          businessCaseName="Dry-run preview"
-          pipelineName={`Pipeline ${run.pipeline_id.slice(0, 8)}`}
-          onClose={() => setSelectedModel(null)}
-        />
+        <Suspense fallback={null}>
+          <ModelDetailsDialog
+            model={selectedModel}
+            businessCaseName="Dry-run preview"
+            pipelineName={`Pipeline ${run.pipeline_id.slice(0, 8)}`}
+            onClose={() => setSelectedModel(null)}
+          />
+        </Suspense>
       )}
       {selectedReport && (
         <TemporaryScoringReportDialog
@@ -971,6 +977,7 @@ export function ModelPerformanceReport({ report }: { report: ModelEvaluationSnap
     );
   }
   const curves = report.curves ?? {};
+  const metricsById = new Map(report.metrics.map((metric) => [metric.id, metric]));
   return (
     <div className="evaluation-report">
       <div className="evaluation-scope">
@@ -1018,7 +1025,17 @@ export function ModelPerformanceReport({ report }: { report: ModelEvaluationSnap
         <div className="evaluation-chart-grid">
           {Object.entries(curves).map(([key, curve]) => (
             <section className="evaluation-section" key={key}>
-              <header><div><h4>{evaluationCurveTitle(key)}</h4><p>{curve.rendering}</p></div></header>
+              <header>
+                <div><h4>{evaluationCurveTitle(key)}</h4><p>{curve.rendering}</p></div>
+                {evaluationCurveMetric(key, metricsById) && (
+                  <div className="evaluation-chart-kpi">
+                    <span>{evaluationCurveMetric(key, metricsById)!.label}</span>
+                    <strong>{formatEvaluationHeadlineMetric(
+                      evaluationCurveMetric(key, metricsById)!
+                    )}</strong>
+                  </div>
+                )}
+              </header>
               <EvaluationLineChart curve={curve} curveKind={key}
                 diagonal={key === "roc" || key === "calibration"} />
             </section>
@@ -1126,21 +1143,44 @@ function EvaluationLineChart({
   curveKind: string;
   diagonal: boolean;
 }) {
+  const ticks = [0, 0.25, 0.5, 0.75, 1];
+  const plot = { left: 58, right: 535, top: 20, bottom: 250 };
   const orderedPoints = [...curve.points].sort((left, right) => {
     if (left.x !== right.x) return left.x - right.x;
     return curveKind === "precision_recall" ? right.y - left.y : left.y - right.y;
   });
-  const points = orderedPoints.map((point) => `${20 + point.x * 260},${170 - point.y * 145}`).join(" ");
+  const points = orderedPoints.map((point) =>
+    `${plot.left + point.x * (plot.right - plot.left)},${plot.bottom - point.y * (plot.bottom - plot.top)}`
+  ).join(" ");
   return (
     <div className="evaluation-line-chart">
-      <svg viewBox="0 0 300 190" role="img" aria-label={`${curve.y_label} by ${curve.x_label}`}>
-        <line x1="20" y1="170" x2="280" y2="170" className="axis" />
-        <line x1="20" y1="25" x2="20" y2="170" className="axis" />
-        {diagonal && <line x1="20" y1="170" x2="280" y2="25" className="baseline" />}
+      <svg viewBox="0 0 560 300" role="img" aria-label={`${curve.y_label} by ${curve.x_label}`}>
+        {ticks.map((tick) => {
+          const x = plot.left + tick * (plot.right - plot.left);
+          const y = plot.bottom - tick * (plot.bottom - plot.top);
+          return <g key={tick}>
+            <line x1={x} y1={plot.top} x2={x} y2={plot.bottom} className="grid" />
+            <line x1={plot.left} y1={y} x2={plot.right} y2={y} className="grid" />
+            <text x={x} y={plot.bottom + 18} className="tick" textAnchor="middle">
+              {tick.toFixed(2)}
+            </text>
+            <text x={plot.left - 10} y={y + 4} className="tick" textAnchor="end">
+              {tick.toFixed(2)}
+            </text>
+          </g>;
+        })}
+        <line x1={plot.left} y1={plot.bottom} x2={plot.right} y2={plot.bottom} className="axis" />
+        <line x1={plot.left} y1={plot.top} x2={plot.left} y2={plot.bottom} className="axis" />
+        {diagonal && <line x1={plot.left} y1={plot.bottom} x2={plot.right} y2={plot.top} className="baseline" />}
         <polyline points={points} className="series" />
+        <text x={(plot.left + plot.right) / 2} y="292" className="axis-title" textAnchor="middle">
+          {curve.x_label}
+        </text>
+        <text x="15" y={(plot.top + plot.bottom) / 2} className="axis-title"
+          textAnchor="middle" transform={`rotate(-90 15 ${(plot.top + plot.bottom) / 2})`}>
+          {curve.y_label}
+        </text>
       </svg>
-      <span className="x-label">{curve.x_label}</span>
-      <span className="y-label">{curve.y_label}</span>
     </div>
   );
 }
@@ -1150,16 +1190,71 @@ function StackedHistogram({
 }: {
   bins: NonNullable<NonNullable<ModelEvaluationSnapshot["distributions"]>["score_by_actual"]>;
 }) {
-  const maximum = Math.max(1, ...bins.map((bin) => bin.negative_count + bin.positive_count));
+  if (!bins.length) return <div className="catalog-empty">No score distribution is available.</div>;
+  const maximum = Math.max(
+    1,
+    ...bins.flatMap((bin) => [bin.negative_count, bin.positive_count])
+  );
+  const plot = { left: 62, right: 690, top: 28, bottom: 250 };
+  const width = (plot.right - plot.left) / bins.length;
+  const barWidth = Math.max(2, width * 0.36);
+  const yTicks = [0, 0.25, 0.5, 0.75, 1];
+  const scoreTicks = [
+    bins[0].lower,
+    bins[Math.floor(bins.length / 2)].lower,
+    bins.at(-1)!.upper
+  ];
+  const positiveTotal = bins.reduce((sum, bin) => sum + bin.positive_count, 0);
+  const negativeTotal = bins.reduce((sum, bin) => sum + bin.negative_count, 0);
   return (
-    <div className="evaluation-histogram" aria-label="Score distribution by actual class">
-      {bins.map((bin, index) => (
-        <div className="bar-stack" key={index} title={`${bin.lower.toPrecision(3)}–${bin.upper.toPrecision(3)}`}>
-          <i className="positive" style={{ height: `${bin.positive_count / maximum * 100}%` }} />
-          <i className="negative" style={{ height: `${bin.negative_count / maximum * 100}%` }} />
-        </div>
-      ))}
-      <div className="histogram-legend"><span className="positive">Actual positive</span><span className="negative">Actual negative</span></div>
+    <div className="evaluation-histogram-chart" aria-label="Score distribution by actual class">
+      <div className="histogram-summary">
+        <span className="positive">Actual positive <strong>{positiveTotal.toLocaleString()}</strong></span>
+        <span className="negative">Actual negative <strong>{negativeTotal.toLocaleString()}</strong></span>
+      </div>
+      <svg viewBox="0 0 720 300" role="img" aria-label="Score distribution histogram">
+        {yTicks.map((tick) => {
+          const y = plot.bottom - tick * (plot.bottom - plot.top);
+          return <g key={tick}>
+            <line x1={plot.left} y1={y} x2={plot.right} y2={y} className="grid" />
+            <text x={plot.left - 10} y={y + 4} className="tick" textAnchor="end">
+              {Math.round(maximum * tick).toLocaleString()}
+            </text>
+          </g>;
+        })}
+        {bins.map((bin, index) => {
+          const center = plot.left + (index + 0.5) * width;
+          const positiveHeight = bin.positive_count / maximum * (plot.bottom - plot.top);
+          const negativeHeight = bin.negative_count / maximum * (plot.bottom - plot.top);
+          return <g key={index}>
+            <title>
+              {`${bin.lower.toPrecision(3)}–${bin.upper.toPrecision(3)}: `
+                + `${bin.positive_count} positive, ${bin.negative_count} negative`}
+            </title>
+            <rect className="positive" x={center - barWidth}
+              y={plot.bottom - positiveHeight} width={barWidth} height={positiveHeight} />
+            <rect className="negative" x={center}
+              y={plot.bottom - negativeHeight} width={barWidth} height={negativeHeight} />
+          </g>;
+        })}
+        <line x1={plot.left} y1={plot.bottom} x2={plot.right} y2={plot.bottom} className="axis" />
+        <line x1={plot.left} y1={plot.top} x2={plot.left} y2={plot.bottom} className="axis" />
+        {scoreTicks.map((tick, index) => {
+          const ratio = index / (scoreTicks.length - 1);
+          return <text key={`${tick}-${index}`}
+            x={plot.left + ratio * (plot.right - plot.left)}
+            y={plot.bottom + 19} className="tick" textAnchor="middle">
+            {tick.toFixed(2)}
+          </text>;
+        })}
+        <text x={(plot.left + plot.right) / 2} y="292" className="axis-title" textAnchor="middle">
+          Prediction score
+        </text>
+        <text x="16" y={(plot.top + plot.bottom) / 2} className="axis-title"
+          textAnchor="middle" transform={`rotate(-90 16 ${(plot.top + plot.bottom) / 2})`}>
+          Row count
+        </text>
+      </svg>
     </div>
   );
 }
@@ -1203,10 +1298,34 @@ function formatEvaluationMetric(value: number, unit: string) {
   return unit === "ratio" ? `${(value * 100).toFixed(1)}%` : value.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
 
+function formatEvaluationHeadlineMetric(
+  metric: ModelEvaluationSnapshot["metrics"][number]
+) {
+  if (!Number.isFinite(metric.value)) return "—";
+  return metric.value.toLocaleString(undefined, {
+    minimumFractionDigits: 3,
+    maximumFractionDigits: 4
+  });
+}
+
 function evaluationCurveTitle(key: string) {
   return key === "roc" ? "ROC curve" :
     key === "precision_recall" ? "Precision–recall curve" :
       key === "calibration" ? "Calibration" : key.replaceAll("_", " ");
+}
+
+function evaluationCurveMetric(
+  key: string,
+  metrics: Map<string, ModelEvaluationSnapshot["metrics"][number]>
+) {
+  const metricId = key === "roc"
+    ? "roc_auc"
+    : key === "precision_recall"
+      ? "average_precision"
+      : key === "calibration"
+        ? "brier_score"
+        : "";
+  return metricId ? metrics.get(metricId) : undefined;
 }
 
 export function browsableDryRunOutputs(run: PipelineRun): PipelineRun["output_manifest"] {
@@ -1256,6 +1375,9 @@ function dryRunModel(
     model_hash: output.model_hash ?? "",
     training_config: output.training_config ?? {},
     model_parameters: output.model_parameters ?? {},
+    fitted_transform_artifact_id: "",
+    data_engineering_definition: {},
+    feature_engineering_definition: {},
     lineage: {
       pipeline_id: run.pipeline_id,
       pipeline_version_id: run.pipeline_version_id,

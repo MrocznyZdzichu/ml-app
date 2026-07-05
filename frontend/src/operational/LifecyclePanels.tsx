@@ -1,4 +1,4 @@
-import { Brain, Database, Download, Eye, GitBranch, History, Play, Plus, Rocket, Search, Share2, SlidersHorizontal, X } from "lucide-react";
+import { Brain, Download, Eye, GitBranch, History, Play, Plus, Rocket, Search, Share2, SlidersHorizontal, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../api/client";
@@ -12,6 +12,8 @@ import type {
   ScoreResponse
 } from "../api/client";
 import { AssetList } from "../components/AssetList";
+import { ArtifactFilters, pipelineMatches } from "../components/ArtifactFilters";
+import { DatasetLineageList } from "./DatasetLineageList";
 
 type NoticeSetter = (message: string) => void;
 
@@ -30,6 +32,8 @@ export function ModelsPanel({
 }) {
   const [query, setQuery] = useState("");
   const [businessCaseId, setBusinessCaseId] = useState(initialBusinessCaseId);
+  const [purposeFilter, setPurposeFilter] = useState("");
+  const [pipelineFilter, setPipelineFilter] = useState("");
   const [selectedModel, setSelectedModel] = useState<ModelArtifact | null>(null);
   const [historyModel, setHistoryModel] = useState<ModelArtifact | null>(null);
   const businessCaseById = useMemo(
@@ -56,6 +60,7 @@ export function ModelsPanel({
     const normalized = query.trim().toLowerCase();
     return modelFamilies.filter(({ latest, versions }) =>
       (!businessCaseId || latest.business_case_id === businessCaseId)
+      && pipelineMatches(latest.pipeline_id, pipelines, purposeFilter, pipelineFilter)
       && (!normalized || [
         latest.name,
         latest.algorithm,
@@ -63,7 +68,10 @@ export function ModelsPanel({
         ...versions.map((version) => version.version)
       ].some((value) => value.toLowerCase().includes(normalized)))
     );
-  }, [businessCaseId, modelFamilies, query]);
+  }, [businessCaseId, modelFamilies, pipelineFilter, pipelines, purposeFilter, query]);
+  const availablePipelines = businessCaseId
+    ? pipelines.filter((pipeline) => pipeline.business_case_id === businessCaseId)
+    : pipelines;
 
   useEffect(() => setBusinessCaseId(initialBusinessCaseId), [initialBusinessCaseId]);
 
@@ -97,12 +105,22 @@ export function ModelsPanel({
           </label>
           <label>
             <span><SlidersHorizontal size={14} /> Business case</span>
-            <select value={businessCaseId} onChange={(event) => setBusinessCaseId(event.target.value)}>
+            <select value={businessCaseId} onChange={(event) => {
+              setBusinessCaseId(event.target.value);
+              setPipelineFilter("");
+            }}>
               <option value="">All business cases</option>
               {businessCases.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
             </select>
           </label>
         </div>
+        <ArtifactFilters
+          pipelines={availablePipelines}
+          purpose={purposeFilter}
+          pipelineId={pipelineFilter}
+          onPurposeChange={setPurposeFilter}
+          onPipelineChange={setPipelineFilter}
+        />
 
         <div className="model-registry-table" role="table" aria-label="Model registry">
           <div className="model-registry-row head" role="row">
@@ -353,41 +371,6 @@ export function ModelDetailsDialog({
         )}
       </div>
     </div>
-  );
-}
-
-export function DatasetLineageList({
-  items,
-  error,
-  onOpenDataset
-}: {
-  items: DatasetLineageReference[];
-  error?: string;
-  onOpenDataset?: (datasetId: string) => void;
-}) {
-  return (
-    <section className="model-detail-section">
-      <h3><Database size={16} /> Related datasets</h3>
-      {error && <div className="error-banner">{error}</div>}
-      <div className="dataset-lineage-list">
-        {items.map((item) => (
-          <article key={item.artifact_id}>
-            <div>
-              <strong>{item.name} · v{item.version_number}</strong>
-              <span>{item.role.replaceAll("_", " ")} · {item.stage} · {item.row_count?.toLocaleString() ?? "—"} rows</span>
-              <small>{item.pipeline_step_id ? `step ${item.pipeline_step_id}` : "registered source"}</small>
-            </div>
-            {onOpenDataset && (
-              <button className="secondary-button compact-button" type="button"
-                onClick={() => onOpenDataset(item.dataset_id)}>
-                <Eye size={14} /> Open dataset
-              </button>
-            )}
-          </article>
-        ))}
-        {!items.length && !error && <div className="empty-state">No resolved dataset lineage is available.</div>}
-      </div>
-    </section>
   );
 }
 

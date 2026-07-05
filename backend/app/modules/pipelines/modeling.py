@@ -36,8 +36,8 @@ class TrainingDefinition(BaseModel):
         "sgd_regressor",
         "passive_aggressive_regressor",
     ]
-    target_column: str = Field(min_length=1, max_length=255)
-    feature_columns: list[str] = Field(min_length=1, max_length=500)
+    target_column: str = Field(default="", max_length=255)
+    feature_columns: list[str] = Field(default_factory=list, max_length=500)
     feature_selection: Literal["upstream_contract", "explicit"] = "upstream_contract"
     model_name: str = Field(default="Trained model", min_length=1, max_length=200)
     epochs: int = Field(default=5, ge=1, le=100)
@@ -97,17 +97,41 @@ class TrainingDefinition(BaseModel):
                 raise ValueError(f"{non_negative_key} cannot be negative")
         return self
 
+    def validate_executable(self) -> None:
+        if not self.target_column:
+            raise ValueError("Training requires a target column")
+        if not self.feature_columns:
+            raise ValueError("Training requires at least one model feature")
+
 
 class ScoringDefinition(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     contract_version: Literal["1.0"] = "1.0"
-    row_id_column: str = Field(min_length=1, max_length=255)
+    purpose: Literal["test", "batch"] = "test"
+    model_artifact_id: str = Field(default="", max_length=128)
+    row_id_column: str = Field(default="", max_length=255)
     target_column: str = Field(default="", max_length=255)
     prediction_column: str = Field(default="prediction", min_length=1, max_length=255)
     dataset_name: str = Field(default="Model predictions", min_length=1, max_length=200)
     report_name: str = Field(default="Test scoring report", min_length=1, max_length=200)
     batch_size: int = Field(default=10_000, ge=100, le=100_000)
+
+    @model_validator(mode="after")
+    def validate_purpose(self) -> "ScoringDefinition":
+        if self.purpose == "batch":
+            if self.target_column:
+                raise ValueError(
+                    "Batch scoring cannot consume a target column; "
+                    "actuals belong to a monitoring pipeline"
+                )
+        return self
+
+    def validate_executable(self) -> None:
+        if not self.row_id_column:
+            raise ValueError("Scoring requires a row ID column")
+        if self.purpose == "batch" and not self.model_artifact_id:
+            raise ValueError("Batch scoring requires a pinned model_artifact_id")
 
 
 @dataclass(frozen=True)
@@ -453,6 +477,11 @@ class SklearnScoringEngine:
     ) -> ModelingResult:
         model_path = Path(str(model_manifest["location_uri"]).removeprefix("file://")).resolve()
         model_path.relative_to(self.repository_root)
+        expected_model_hash = str(model_manifest.get("model_hash") or "")
+        if expected_model_hash:
+            actual_model_hash = hashlib.sha256(model_path.read_bytes()).hexdigest()
+            if actual_model_hash != expected_model_hash:
+                raise ValueError("Pinned model artifact hash does not match its registry metadata")
         bundle = joblib.load(model_path)
         features = [str(item) for item in bundle["feature_columns"]]
         estimator = bundle["estimator"]
@@ -531,6 +560,22 @@ class SklearnScoringEngine:
             missing = sorted(required - available)
             if missing:
                 raise ValueError(f"Scoring input is missing columns: {', '.join(missing)}")
+            total_rows, null_row_ids, distinct_row_ids = reader.execute(
+                f"SELECT count(*), "
+                f"count(*) FILTER (WHERE {identifier(definition.row_id_column)} IS NULL), "
+                f"count(DISTINCT {identifier(definition.row_id_column)}) "
+                f"FROM {data.sql}"
+            ).fetchone()
+            if int(null_row_ids):
+                raise ValueError(
+                    f"Scoring row ID column '{definition.row_id_column}' "
+                    f"contains {int(null_row_ids)} null values"
+                )
+            if int(distinct_row_ids) != int(total_rows):
+                raise ValueError(
+                    f"Scoring row ID column '{definition.row_id_column}' must be unique; "
+                    f"found {int(distinct_row_ids)} distinct IDs in {int(total_rows)} rows"
+                )
             selected = [definition.row_id_column, *features]
             if definition.target_column:
                 selected.append(definition.target_column)
@@ -612,13 +657,17 @@ class SklearnScoringEngine:
                 f"SELECT * FROM {identifier(table_name)}",
                 output_path,
             )
-            evaluation = ModelEvaluationSnapshotBuilder().build(
-                connection,
-                f"SELECT * FROM {identifier(table_name)}",
-                problem_type=problem_type,
-                target_column=definition.target_column,
-                prediction_column=definition.prediction_column,
-                score_contract=score_contract,
+            evaluation = (
+                ModelEvaluationSnapshotBuilder().build(
+                    connection,
+                    f"SELECT * FROM {identifier(table_name)}",
+                    problem_type=problem_type,
+                    target_column=definition.target_column,
+                    prediction_column=definition.prediction_column,
+                    score_contract=score_contract,
+                )
+                if definition.target_column
+                else None
             )
             metrics: dict[str, Any] = {"scored_row_count": total}
             if definition.target_column:
@@ -629,11 +678,12 @@ class SklearnScoringEngine:
                     })
                 else:
                     metrics["accuracy"] = correct / total
-            metrics.update({
-                str(item["id"]): item["value"]
-                for item in evaluation.get("metrics", [])
-                if isinstance(item, dict) and item.get("id") and item.get("value") is not None
-            })
+            if evaluation is not None:
+                metrics.update({
+                    str(item["id"]): item["value"]
+                    for item in evaluation.get("metrics", [])
+                    if isinstance(item, dict) and item.get("id") and item.get("value") is not None
+                })
             preview_cursor = connection.execute(
                 f"SELECT * FROM read_parquet({sql_literal(str(output_path))}) LIMIT 50"
             )
@@ -657,8 +707,10 @@ class SklearnScoringEngine:
                     "dataset_name": definition.dataset_name,
                     "business_case_role": "scoring_output",
                     "metrics": metrics,
-                    "evaluation": evaluation,
+                    **({"evaluation": evaluation} if evaluation is not None else {}),
                     "score_contract": score_contract,
+                    "row_id_column": definition.row_id_column,
+                    "prediction_column": definition.prediction_column,
                     "data_scope": "full",
                     "is_dry_run": is_dry_run,
                     "preview": {

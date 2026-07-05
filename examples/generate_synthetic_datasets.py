@@ -10,7 +10,9 @@ from pathlib import Path
 
 
 OUTPUT = Path(__file__).resolve().parent / "data"
+IRIS_SOURCE = Path(__file__).resolve().parent / "data" / "iris.csv"
 SEED = 20260624
+IRIS_FEATURES = ("sepal_length", "sepal_width", "petal_length", "petal_width")
 
 
 def write_dynamic_reactor() -> None:
@@ -82,10 +84,111 @@ def write_equipment_clustering() -> None:
     write_csv(path, rows)
 
 
+def write_iris_batch_scoring() -> None:
+    """Create an unlabeled scoring batch plus separately held actuals.
+
+    Each class is sampled from the class-conditional multivariate distribution
+    estimated from the checked-in Iris reference data. Rejection bounds keep the
+    synthetic measurements within a small margin around observed botanical ranges.
+    """
+
+    rng = random.Random(SEED + 2)
+    reference: dict[str, list[list[float]]] = {
+        "versicolor": [],
+        "virginica": [],
+    }
+    with IRIS_SOURCE.open(encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            species = str(row["species"])
+            if species in reference:
+                reference[species].append([float(row[name]) for name in IRIS_FEATURES])
+
+    generated: list[tuple[str, list[float]]] = []
+    for species, samples in reference.items():
+        means = [
+            sum(row[index] for row in samples) / len(samples)
+            for index in range(len(IRIS_FEATURES))
+        ]
+        covariance = sample_covariance(samples, means)
+        factor = cholesky(covariance)
+        lower = [
+            min(row[index] for row in samples)
+            - 0.12 * (max(row[index] for row in samples) - min(row[index] for row in samples))
+            for index in range(len(IRIS_FEATURES))
+        ]
+        upper = [
+            max(row[index] for row in samples)
+            + 0.12 * (max(row[index] for row in samples) - min(row[index] for row in samples))
+            for index in range(len(IRIS_FEATURES))
+        ]
+        class_rows: list[list[float]] = []
+        while len(class_rows) < 5_000:
+            standard = [rng.gauss(0, 1) for _ in IRIS_FEATURES]
+            values = [
+                means[row] + sum(factor[row][column] * standard[column] for column in range(row + 1))
+                for row in range(len(IRIS_FEATURES))
+            ]
+            if not all(lower[index] <= value <= upper[index] for index, value in enumerate(values)):
+                continue
+            if values[2] >= values[0] or values[3] >= values[1] or min(values) <= 0:
+                continue
+            class_rows.append([round(value, 3) for value in values])
+        generated.extend((species, values) for values in class_rows)
+
+    rng.shuffle(generated)
+    scoring_rows: list[dict[str, object]] = []
+    actual_rows: list[dict[str, object]] = []
+    for index, (species, values) in enumerate(generated, start=1):
+        row_id = f"IRIS-SCORE-{index:05d}"
+        scoring_rows.append({
+            "row_id": row_id,
+            **dict(zip(IRIS_FEATURES, values, strict=True)),
+        })
+        actual_rows.append({"row_id": row_id, "species": species})
+
+    write_csv(OUTPUT / "iris-batch-scoring-10k.csv", scoring_rows)
+    write_csv(OUTPUT / "iris-batch-scoring-10k-actuals.csv", actual_rows)
+
+
+def sample_covariance(samples: list[list[float]], means: list[float]) -> list[list[float]]:
+    divisor = len(samples) - 1
+    return [
+        [
+            sum(
+                (sample[row] - means[row]) * (sample[column] - means[column])
+                for sample in samples
+            )
+            / divisor
+            for column in range(len(means))
+        ]
+        for row in range(len(means))
+    ]
+
+
+def cholesky(matrix: list[list[float]]) -> list[list[float]]:
+    size = len(matrix)
+    result = [[0.0] * size for _ in range(size)]
+    for row in range(size):
+        for column in range(row + 1):
+            remainder = matrix[row][column] - sum(
+                result[row][index] * result[column][index]
+                for index in range(column)
+            )
+            if row == column:
+                result[row][column] = math.sqrt(max(remainder, 1e-12))
+            else:
+                result[row][column] = remainder / result[column][column]
+    return result
+
+
 def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=list(rows[0]),
+            lineterminator="\n",
+        )
         writer.writeheader()
         writer.writerows(rows)
 
@@ -93,4 +196,8 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
 if __name__ == "__main__":
     write_dynamic_reactor()
     write_equipment_clustering()
-    print("Generated dynamic-reactor-timeseries.csv and equipment-operating-regimes.csv")
+    write_iris_batch_scoring()
+    print(
+        "Generated dynamic-reactor-timeseries.csv, equipment-operating-regimes.csv, "
+        "iris-batch-scoring-10k.csv and iris-batch-scoring-10k-actuals.csv"
+    )

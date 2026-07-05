@@ -16,6 +16,9 @@ Niniejsze instrukcje obowiązują podczas wszystkich prac w tym repozytorium.
 
 ## Obowiązkowy workflow
 
+- Domyślną gałęzią roboczą zespołu przed pierwszym wydaniem jest `dev`. Nie twórz standardowo osobnych feature branchy, chyba że użytkownik wyraźnie poprosi o wyjątek.
+- Zmiany integrujemy na `dev`, a do `master` przenosimy je okresowo jako świadome podbicie stabilniejszego stanu.
+- Traktuj gałąź `dev` jako gałąź trwałą; nie planuj jej usuwania po merge'ach.
 - Po każdej zmianie w repozytorium uruchom `rebuild-run.bat` i sprawdź, czy zakończył się powodzeniem.
 - Weryfikuj zmiany proporcjonalnie do ryzyka: wykonuj odpowiednie testy, kompilację, kontrolę typów i test działającej aplikacji.
 - Nie uznawaj zadania za zakończone, jeśli aplikacja po zmianach nie została uruchomiona lub istotna ścieżka nie została zweryfikowana.
@@ -217,6 +220,20 @@ Poniższe ustalenia są obowiązującym kierunkiem rozwoju platformy po rozmowie
 - Dry-run nie rejestruje raportu, modelu ani datasetu. Udostepnia tylko tymczasowy podglad tych obiektow.
 - Kontrakt raportu musi pozostac przydatny jako baseline dla przyszlego monitoringu. Porownania produkcyjne powinny bazowac na wersjach raportow, a nie na logice metryk odtworzonej w frontendzie.
 - Nazwa prediction datasetu i nazwa Scoring Report sa niezaleznymi polami konfiguracji kroku scoringowego. Zmiana nazwy raportu nie zmienia logicznej rodziny raportow, ktora nadal wynika z pipeline + stabilnego step_id.
+
+### Batch scoring a monitoring skutecznosci
+
+- Batch scoring i monitoring skutecznosci sa dwoma odrebnymi pipeline'ami.
+- Pipeline `batch_scoring` przyjmuje jawnie wybrana wersje datasetu bez targetu, stosuje inference-safe DE, przypiety fitted state FE i konkretna wersje modelu, a wynikiem jest niemutowalny prediction dataset. Nie tworzy metryk skutecznosci ani Scoring Report.
+- Prediction dataset zachowuje stabilny identyfikator rekordu i lineage do input datasetu, fitted transform, model version, pipeline version oraz runu.
+- Pozniejszy pipeline `monitoring` przyjmuje prediction dataset i actuals, wykonuje jawny join targetow oraz dopiero wtedy wylicza metryki i tworzy raport skutecznosci.
+- Nie modyfikuj prediction datasetu po nadejsciu targetow; target joining tworzy nowy wersjonowany artefakt.
+- DE w automatycznie tworzonym pipeline batch scoringowym zawiera tylko deterministyczne, inference-safe przygotowanie wymagane przez kontrakt modelu. Nie przenos training-only splitow, operacji zaleznych od targetu ani transformacji fitowanych na biezacym batchu.
+- Tworzenie pipeline'u rozroznia `purpose` (metadane/kontekst) od `template` (poczatkowy edytowalny szkielet). UI sugeruje template na podstawie purpose, ale zapisuje wybrany template w parametrach definicji.
+- Pierwsze template'y: `training` = DE, FE, Training, Test Scoring; `batch_scoring` = DE, FE Transform, Batch Scoring. Template monitoringu pokazuj jako planowany, ale nie jako wykonywalny, dopoki nie istnieja handlery target join i KPI report.
+- Batch scoring konfiguruj akcja `Infer from training pipeline`. Sam pipeline i numer jego wersji nie identyfikuja artefaktow, bo wersja moze miec wiele runow. Uzytkownik wybiera pipeline, opublikowana PipelineVersion i konkretny Model Version/run.
+- Inferowany draft przypina konkretny model artifact oraz fitted transform artifact z tego samego runu, kopiuje recepture FE w trybie transform i tylko inference-safe kroki DE. Pominiete kroki training-only komunikuj jawnie; nie wybieraj po cichu `latest`.
+- W pipeline batch scoringowym nie wymagaj recznego wklejania identyfikatora fitted state ani nie pokazuj krokow Training/Test Scoring jako sugerowanych operacji.
 
 ### Dynamiczne cechy i portowe lineage
 

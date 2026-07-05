@@ -9,6 +9,7 @@ from app.modules.models.repository import InMemoryModelRepository, ModelReposito
 from app.modules.models.schemas import PromoteModelRequest, TrainingRequest
 from app.modules.business_cases.domain import Artifact, ArtifactType
 from app.modules.business_cases.repository import PostgresBusinessCaseRepository
+from app.modules.pipelines.domain import PipelineRun, PipelineVersion
 from app.modules.pipelines.repository import PostgresPipelineRepository
 
 
@@ -51,19 +52,51 @@ class ModelService:
         return self.repository.list_training_jobs(principal.user_id)
 
     def list_models(self, principal: Principal) -> list[ModelArtifact]:
-        pipeline_models = []
-        for artifact in self.artifacts.list_artifacts(
-            principal.user_id,
-            ArtifactType.MODEL_VERSION,
-        ):
-            model = self._artifact_model(artifact)
-            if not model.pipeline_id and model.pipeline_run_id:
-                run = self.pipelines.get_run(model.pipeline_run_id)
-                if run is not None and run.owner_id == principal.user_id:
-                    model.pipeline_id = run.pipeline_id
-                    model.lineage = {**model.lineage, "pipeline_id": run.pipeline_id}
+        pipeline_models = [
+            self._artifact_model(artifact)
+            for artifact in self.artifacts.list_artifacts(
+                principal.user_id,
+                ArtifactType.MODEL_VERSION,
+            )
+        ]
+        run_cache: dict[str, PipelineRun | None] = {}
+        for model in pipeline_models:
+            if model.pipeline_id or not model.pipeline_run_id:
+                continue
+            if model.pipeline_run_id not in run_cache:
+                run_cache[model.pipeline_run_id] = self.pipelines.get_run(
+                    model.pipeline_run_id
+                )
+            run = run_cache[model.pipeline_run_id]
+            if run is not None and run.owner_id == principal.user_id:
+                model.pipeline_id = run.pipeline_id
+                model.lineage = {**model.lineage, "pipeline_id": run.pipeline_id}
+
+        fitted_by_run: dict[str, Artifact] = {}
+        if any(model.pipeline_run_id for model in pipeline_models):
+            for artifact in self.artifacts.list_artifacts(
+                principal.user_id,
+                ArtifactType.FEATURE_TRANSFORM,
+            ):
+                run_id = str(
+                    dict(artifact.metadata.get("lineage") or {}).get("pipeline_run_id") or ""
+                )
+                if run_id:
+                    fitted_by_run.setdefault(run_id, artifact)
+
+        pipeline_ids = sorted({
+            model.pipeline_id for model in pipeline_models if model.pipeline_id
+        })
+        versions_by_id = {
+            version.id: version
+            for version in self.pipelines.list_versions_for_pipelines(
+                principal.user_id,
+                pipeline_ids,
+            )
+        }
+        for model in pipeline_models:
+            self._enrich_batch_scoring_contract(model, fitted_by_run, versions_by_id)
             model.logical_id = model.logical_id or self._logical_model_id(model)
-            pipeline_models.append(model)
         known = {item.id for item in pipeline_models}
         models = [
             *pipeline_models,
@@ -120,6 +153,36 @@ class ModelService:
             for version_number, model in enumerate(versions, start=1):
                 model.version_number = version_number
                 model.version = f"v{version_number}"
+
+    @staticmethod
+    def _enrich_batch_scoring_contract(
+        model: ModelArtifact,
+        fitted_by_run: dict[str, Artifact],
+        versions_by_id: dict[str, PipelineVersion],
+    ) -> None:
+        fitted = fitted_by_run.get(model.pipeline_run_id)
+        if fitted is not None:
+            model.fitted_transform_artifact_id = fitted.id
+
+        if not model.pipeline_version_id:
+            return
+        version = versions_by_id.get(model.pipeline_version_id)
+        if version is None or version.owner_id != model.owner_id:
+            return
+        for step in version.definition.get("steps", []):
+            if not isinstance(step, dict):
+                continue
+            config = step.get("config")
+            nested = (
+                config.get("definition")
+                if isinstance(config, dict)
+                and isinstance(config.get("definition"), dict)
+                else {}
+            )
+            if step.get("type") == "data_engineering":
+                model.data_engineering_definition = dict(nested)
+            elif step.get("type") == "feature_engineering":
+                model.feature_engineering_definition = dict(nested)
 
     @staticmethod
     def _artifact_model(artifact: Artifact) -> ModelArtifact:

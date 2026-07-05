@@ -27,7 +27,7 @@ class WorkflowStep(BaseModel):
 
     step_id: str = Field(min_length=1, max_length=128)
     name: str = Field(min_length=1, max_length=200)
-    type: Literal["data_engineering", "feature_engineering", "training", "scoring"]
+    type: Literal["data_engineering", "feature_engineering", "training", "scoring", "monitoring"]
     inputs: list[WorkflowStepInput] = Field(default_factory=list)
     output_port_id: str = Field(default="dataset", min_length=1, max_length=128)
     additional_output_port_ids: list[str] = Field(default_factory=list)
@@ -169,11 +169,25 @@ def validate_workflow_definition(definition: dict[str, Any], executable: bool) -
         raise ValueError("The current workflow supports at most four lifecycle steps")
     if workflow.steps:
         actual_sequence = [step.type for step in workflow.steps]
-        order = {"data_engineering": 0, "feature_engineering": 1, "training": 2, "scoring": 3}
+        order = {
+            "data_engineering": 0,
+            "feature_engineering": 1,
+            "training": 2,
+            "scoring": 3,
+            "monitoring": 4,
+        }
         if actual_sequence != sorted(actual_sequence, key=order.__getitem__):
-            raise ValueError("Workflow steps must follow DE, FE, Training, Scoring lifecycle order")
+            raise ValueError(
+                "Workflow steps must follow DE, FE, Training, Scoring, Monitoring lifecycle order"
+            )
         if len(actual_sequence) != len(set(actual_sequence)):
             raise ValueError("The current workflow supports one step of each lifecycle type")
+        if "monitoring" in actual_sequence:
+            allowed = ["data_engineering", "monitoring"]
+            if actual_sequence != allowed:
+                raise ValueError(
+                    "Monitoring workflow must contain Process & Join followed by Performance Report"
+                )
     for index, step in enumerate(workflow.steps):
         nested_definition = dict(step.config["definition"])
         if step.type == "data_engineering":
@@ -208,28 +222,156 @@ def validate_workflow_definition(definition: dict[str, Any], executable: bool) -
             from app.modules.pipelines.modeling import TrainingDefinition
 
             validated = TrainingDefinition.model_validate(nested_definition)
+            if executable:
+                validated.validate_executable()
             step.config["definition"] = validated.model_dump(mode="json")
             ports = {item.port_id for item in step.inputs}
             if "training" not in ports:
                 raise ValueError("Training requires an explicit 'training' input port")
-            if ports - {"training", "validation"}:
-                raise ValueError("Training accepts only 'training' and optional 'validation' input ports")
+            if ports - {"training", "validation", "fitted_transform"}:
+                raise ValueError(
+                    "Training accepts 'training' and optional 'validation' "
+                    "and 'fitted_transform' input ports"
+                )
             if validated.early_stopping and "validation" not in ports:
                 raise ValueError("Training early stopping requires an explicit 'validation' input port")
             if step.output_port_id != "model":
                 raise ValueError("Training primary output port must be 'model'")
-        else:
+        elif step.type == "scoring":
             from app.modules.pipelines.modeling import ScoringDefinition
 
             validated = ScoringDefinition.model_validate(nested_definition)
+            if executable:
+                validated.validate_executable()
             step.config["definition"] = validated.model_dump(mode="json")
-            if {item.port_id for item in step.inputs} != {"data", "model"}:
-                raise ValueError("Scoring requires exactly 'data' and 'model' input ports")
+            ports = {item.port_id for item in step.inputs}
+            if validated.purpose == "batch":
+                if ports != {"data"}:
+                    raise ValueError(
+                        "Batch scoring requires exactly one 'data' input port; "
+                        "the immutable model is pinned in its definition"
+                    )
+            elif ports != {"data", "model"}:
+                raise ValueError("Test scoring requires exactly 'data' and 'model' input ports")
             if step.output_port_id != "predictions":
                 raise ValueError("Scoring primary output port must be 'predictions'")
+        else:
+            from app.modules.pipelines.monitoring import MonitoringDefinition
+
+            validated = MonitoringDefinition.model_validate(nested_definition)
+            if executable:
+                validated.validate_executable()
+            step.config["definition"] = validated.model_dump(mode="json")
+            ports = {item.port_id for item in step.inputs}
+            if ports != {"data"}:
+                raise ValueError(
+                    "Performance Report requires exactly one 'data' input port"
+                )
+            if step.output_port_id != "performance_report":
+                raise ValueError(
+                    "Monitoring primary output port must be 'performance_report'"
+                )
+    _validate_batch_scoring_preparation(workflow)
+    _validate_monitoring_preparation(workflow)
     if executable and not workflow.outputs:
         raise ValueError("An executable pipeline requires a workflow output")
     return workflow.model_dump(mode="json")
+
+
+def _validate_batch_scoring_preparation(workflow: WorkflowDefinition) -> None:
+    batch_steps = [
+        step
+        for step in workflow.steps
+        if step.type == "scoring"
+        and step.config["definition"].get("purpose") == "batch"
+    ]
+    if not batch_steps:
+        return
+    if any(step.type == "training" for step in workflow.steps):
+        raise ValueError("A batch-scoring workflow cannot contain a Training step")
+    feature = next(
+        (step for step in workflow.steps if step.type == "feature_engineering"),
+        None,
+    )
+    if feature is None or feature.config["definition"].get("mode") != "transform":
+        raise ValueError(
+            "Batch scoring requires Feature Engineering in transform mode "
+            "with a pinned fitted state"
+        )
+    target_column = str(feature.config["definition"].get("target_column") or "")
+    safe_types = {
+        "select_columns",
+        "add_identifier",
+        "rename_columns",
+        "cast_columns",
+        "derive_column",
+        "map_categories",
+    }
+    for step in workflow.steps:
+        if step.type != "data_engineering":
+            continue
+        for operation in step.config["definition"].get("steps", []):
+            operation_type = str(operation.get("type") or "")
+            if operation_type not in safe_types:
+                raise ValueError(
+                    f"Batch-scoring DE operation '{operation_type}' is not inference-safe; "
+                    "keep only deterministic schema and feature preparation"
+                )
+            config = operation.get("config") or {}
+            if operation_type == "add_identifier" and config.get("mode") == "sequence":
+                raise ValueError(
+                    "Batch-scoring record IDs must be stable; sequence identifiers are not allowed"
+                )
+            if target_column and _contains_contract_value(config, target_column):
+                raise ValueError(
+                    f"Batch-scoring DE operation '{operation.get('step_id')}' "
+                    "depends on the target column"
+                )
+
+
+def _validate_monitoring_preparation(workflow: WorkflowDefinition) -> None:
+    report = next(
+        (step for step in workflow.steps if step.type == "monitoring"),
+        None,
+    )
+    if report is None:
+        return
+    process = next(
+        (step for step in workflow.steps if step.type == "data_engineering"),
+        None,
+    )
+    if process is None:
+        raise ValueError("Monitoring requires a Process & Join Data Engineering step")
+    operations = process.config["definition"].get("steps", [])
+    if not any(
+        isinstance(operation, dict) and operation.get("type") == "join"
+        for operation in operations
+    ):
+        raise ValueError("Monitoring Process & Join requires an explicit join operation")
+    data_input = next(
+        (item for item in report.inputs if item.port_id == "data"),
+        None,
+    )
+    if (
+        data_input is None
+        or data_input.source.step_id != process.step_id
+        or data_input.source.port_id != process.output_port_id
+    ):
+        raise ValueError(
+            "Performance Report must consume the Process & Join output port"
+        )
+
+
+def _contains_contract_value(value: Any, expected: str) -> bool:
+    if isinstance(value, dict):
+        return any(
+            _contains_contract_value(key, expected)
+            or _contains_contract_value(item, expected)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_contract_value(item, expected) for item in value)
+    return str(value) == expected
 
 
 def workflow_validation_errors(exc: ValidationError) -> list[dict[str, str]]:

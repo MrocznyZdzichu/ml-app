@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from app.core.security import Principal
 from app.modules.business_cases.service import BusinessCaseService
+from app.modules.business_cases.domain import ArtifactType
 from app.modules.business_cases.repository import (
     BusinessCaseRepository,
     PostgresBusinessCaseRepository,
@@ -77,22 +78,24 @@ class PipelineService:
             updated_by=principal.user_id,
             created_at=now,
             updated_at=now,
+            template=self._definition_template(payload.definition),
+        )
+        definition = validate_definition(payload.definition, executable=False)
+        draft = PipelineVersion(
+            id=str(uuid4()),
+            owner_id=principal.user_id,
+            pipeline_id=pipeline.id,
+            business_case_id=business_case.id,
+            version_number=1,
+            status=PipelineVersionStatus.DRAFT,
+            definition=definition,
+            definition_hash=definition_hash(definition),
+            created_by=principal.user_id,
+            created_at=now,
         )
         self.repository.add_pipeline(pipeline)
-        self.repository.add_version(
-            PipelineVersion(
-                id=str(uuid4()),
-                owner_id=principal.user_id,
-                pipeline_id=pipeline.id,
-                business_case_id=business_case.id,
-                version_number=1,
-                status=PipelineVersionStatus.DRAFT,
-                definition=validate_definition(payload.definition, executable=False),
-                definition_hash=definition_hash(payload.definition),
-                created_by=principal.user_id,
-                created_at=now,
-            )
-        )
+        self.repository.add_version(draft)
+        self._apply_version_summary(pipeline, [draft])
         return pipeline
 
     def list_pipelines(self, principal: Principal, business_case_id: str | None = None) -> list[Pipeline]:
@@ -108,31 +111,64 @@ class PipelineService:
         ):
             versions_by_pipeline.setdefault(version.pipeline_id, []).append(version)
         for pipeline in pipelines:
-            versions = versions_by_pipeline[pipeline.id]
-            published = [
-                version for version in versions
-                if version.status == PipelineVersionStatus.PUBLISHED
-            ]
-            drafts = [
-                version for version in versions
-                if version.status == PipelineVersionStatus.DRAFT
-            ]
-            pipeline.latest_published_version_number = (
-                max(version.version_number for version in published)
-                if published else None
-            )
-            pipeline.published_version_count = len(published)
-            pipeline.draft_version_number = (
-                max(version.version_number for version in drafts)
-                if drafts else None
-            )
+            self._apply_version_summary(pipeline, versions_by_pipeline[pipeline.id])
         return pipelines
 
     def get_pipeline(self, pipeline_id: str, principal: Principal) -> Pipeline:
+        pipeline = self._get_owned_pipeline(pipeline_id, principal)
+        self._apply_version_summary(
+            pipeline,
+            self.repository.list_versions(pipeline.id),
+        )
+        return pipeline
+
+    def _get_owned_pipeline(self, pipeline_id: str, principal: Principal) -> Pipeline:
         pipeline = self.repository.get_pipeline(pipeline_id)
         if not pipeline or pipeline.owner_id != principal.user_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pipeline not found")
         return pipeline
+
+    def _apply_version_summary(
+        self,
+        pipeline: Pipeline,
+        versions: list[PipelineVersion],
+    ) -> None:
+        published = [
+            item for item in versions if item.status == PipelineVersionStatus.PUBLISHED
+        ]
+        drafts = [
+            item for item in versions if item.status == PipelineVersionStatus.DRAFT
+        ]
+        pipeline.latest_published_version_number = (
+            max(item.version_number for item in published) if published else None
+        )
+        pipeline.published_version_count = len(published)
+        pipeline.draft_version_number = (
+            max(item.version_number for item in drafts) if drafts else None
+        )
+        summary_version = (
+            max(published, key=lambda item: item.version_number)
+            if published
+            else max(drafts, key=lambda item: item.version_number, default=None)
+        )
+        pipeline.template = self._definition_template(
+            summary_version.definition if summary_version else {}
+        )
+
+    @staticmethod
+    def _definition_template(definition: dict[str, Any]) -> str:
+        parameters = definition.get("parameters")
+        if isinstance(parameters, dict) and parameters.get("template"):
+            return str(parameters["template"])
+        for step in definition.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            config = step.get("config")
+            nested = config.get("definition") if isinstance(config, dict) else None
+            nested_parameters = nested.get("parameters") if isinstance(nested, dict) else None
+            if isinstance(nested_parameters, dict) and nested_parameters.get("template"):
+                return str(nested_parameters["template"])
+        return "custom"
 
     def update_pipeline(
         self,
@@ -157,7 +193,7 @@ class PipelineService:
         payload: PipelineCopy,
         principal: Principal,
     ) -> Pipeline:
-        source = self.get_pipeline(pipeline_id, principal)
+        source = self._get_owned_pipeline(pipeline_id, principal)
         versions = self.repository.list_versions(source.id)
         draft = next(
             (item for item in reversed(versions) if item.status == PipelineVersionStatus.DRAFT),
@@ -183,27 +219,28 @@ class PipelineService:
             updated_by=principal.user_id,
             created_at=now,
             updated_at=now,
+            template=self._definition_template(source_version.definition),
         )
         definition = normalize_definition(deepcopy(source_version.definition))
-        self.repository.add_pipeline(copied)
-        self.repository.add_version(
-            PipelineVersion(
-                id=str(uuid4()),
-                owner_id=principal.user_id,
-                pipeline_id=copied.id,
-                business_case_id=copied.business_case_id,
-                version_number=1,
-                status=PipelineVersionStatus.DRAFT,
-                definition=definition,
-                definition_hash=definition_hash(definition),
-                created_by=principal.user_id,
-                created_at=now,
-            )
+        draft = PipelineVersion(
+            id=str(uuid4()),
+            owner_id=principal.user_id,
+            pipeline_id=copied.id,
+            business_case_id=copied.business_case_id,
+            version_number=1,
+            status=PipelineVersionStatus.DRAFT,
+            definition=definition,
+            definition_hash=definition_hash(definition),
+            created_by=principal.user_id,
+            created_at=now,
         )
+        self.repository.add_pipeline(copied)
+        self.repository.add_version(draft)
+        self._apply_version_summary(copied, [draft])
         return copied
 
     def delete_pipeline(self, pipeline_id: str, principal: Principal) -> str:
-        pipeline = self.get_pipeline(pipeline_id, principal)
+        pipeline = self._get_owned_pipeline(pipeline_id, principal)
         if self.repository.delete_pipeline_without_runs(pipeline.id):
             return "deleted"
         pipeline.status = PipelineStatus.DEPRECATED
@@ -213,7 +250,7 @@ class PipelineService:
         return "deprecated"
 
     def list_versions(self, pipeline_id: str, principal: Principal) -> list[PipelineVersion]:
-        pipeline = self.get_pipeline(pipeline_id, principal)
+        pipeline = self._get_owned_pipeline(pipeline_id, principal)
         return self.repository.list_versions(pipeline.id)
 
     def update_draft_version(
@@ -222,7 +259,7 @@ class PipelineService:
         payload: PipelineVersionUpdate,
         principal: Principal,
     ) -> PipelineVersion:
-        pipeline = self.get_pipeline(pipeline_id, principal)
+        pipeline = self._get_owned_pipeline(pipeline_id, principal)
         self._require_active_pipeline(pipeline)
         version = self.repository.get_draft_version(pipeline.id)
         if not version:
@@ -238,7 +275,7 @@ class PipelineService:
         return self.repository.update_version(version)
 
     def publish_draft_version(self, pipeline_id: str, principal: Principal) -> PipelineVersion:
-        pipeline = self.get_pipeline(pipeline_id, principal)
+        pipeline = self._get_owned_pipeline(pipeline_id, principal)
         self._require_active_pipeline(pipeline)
         version = self.repository.get_draft_version(pipeline.id)
         if not version:
@@ -247,6 +284,11 @@ class PipelineService:
                 detail="Pipeline has no draft version to publish",
             )
         version.definition = validate_definition(version.definition, executable=True)
+        self._validate_external_artifacts(
+            WorkflowDefinition.model_validate(version.definition),
+            principal,
+            pipeline.business_case_id,
+        )
         version.definition_hash = definition_hash(version.definition)
         now = datetime.now(timezone.utc)
         version.status = PipelineVersionStatus.PUBLISHED
@@ -259,7 +301,7 @@ class PipelineService:
         return self.repository.update_version(version)
 
     def create_next_draft_version(self, pipeline_id: str, principal: Principal) -> PipelineVersion:
-        pipeline = self.get_pipeline(pipeline_id, principal)
+        pipeline = self._get_owned_pipeline(pipeline_id, principal)
         self._require_active_pipeline(pipeline)
         if self.repository.get_draft_version(pipeline.id):
             raise HTTPException(
@@ -288,7 +330,7 @@ class PipelineService:
         return self.repository.add_version(version)
 
     def create_run(self, pipeline_id: str, payload: PipelineRunCreate, principal: Principal) -> PipelineRun:
-        pipeline = self.get_pipeline(pipeline_id, principal)
+        pipeline = self._get_owned_pipeline(pipeline_id, principal)
         self._require_active_pipeline(pipeline)
         version = self._resolve_run_version(pipeline, payload.pipeline_version_id)
         if version.status == PipelineVersionStatus.DRAFT and not payload.is_dry_run:
@@ -298,6 +340,11 @@ class PipelineService:
             )
         version.definition = validate_definition(version.definition, executable=True)
         workflow = WorkflowDefinition.model_validate(version.definition)
+        self._validate_external_artifacts(
+            workflow,
+            principal,
+            pipeline.business_case_id,
+        )
         if payload.step_id and payload.step_id not in {step.step_id for step in workflow.steps}:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -308,6 +355,7 @@ class PipelineService:
             workflow,
             payload.input_versions,
             principal,
+            pipeline.business_case_id,
         )
         runtime_parameters = dict(payload.runtime_parameters)
         runtime_parameters["resolved_input_versions"] = resolved_inputs
@@ -352,8 +400,16 @@ class PipelineService:
         workflow: WorkflowDefinition,
         requested_versions: dict[str, str],
         principal: Principal,
+        business_case_id: str,
     ) -> dict[str, dict[str, Any]]:
         resolved: dict[str, dict[str, Any]] = {}
+        attached_asset_ids = {
+            attachment.data_asset_id
+            for attachment in self.business_cases.list_data_attachments(
+                business_case_id,
+                principal,
+            )
+        }
         for step in workflow.steps:
             definition = step.config.get("definition")
             if not isinstance(definition, dict):
@@ -364,16 +420,21 @@ class PipelineService:
             for raw_input in inputs:
                 if not isinstance(raw_input, dict):
                     continue
+                policy = str(raw_input.get("version_policy") or "latest")
                 logical_id = str(raw_input.get("dataset_id") or "")
-                if not logical_id:
+                if not logical_id and policy != "select_at_run_any":
                     continue
+                pinned_dataset_id = logical_id
                 existing_version = self.datasets.get(logical_id)
-                if existing_version is not None and existing_version.owner_id == principal.user_id:
+                if (
+                    policy != "pinned"
+                    and existing_version is not None
+                    and existing_version.owner_id == principal.user_id
+                ):
                     logical_id = existing_version.logical_id
                 input_id = str(raw_input.get("input_id") or "")
                 binding_key = f"{step.step_id}:{input_id}"
-                policy = str(raw_input.get("version_policy") or "latest")
-                if policy == "select_at_run":
+                if policy in {"select_at_run", "select_at_run_any"}:
                     selected_id = requested_versions.get(binding_key) or requested_versions.get(input_id)
                     if not selected_id:
                         raise HTTPException(
@@ -387,8 +448,11 @@ class PipelineService:
                     if (
                         asset is None
                         or asset.owner_id != principal.user_id
-                        or asset.logical_id != logical_id
                         or asset.status == DataAssetStatus.DELETED
+                        or (
+                            policy == "select_at_run"
+                            and asset.logical_id != logical_id
+                        )
                     ):
                         raise HTTPException(
                             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -397,6 +461,40 @@ class PipelineService:
                                 "input_key": binding_key,
                             },
                         )
+                    if policy == "select_at_run_any":
+                        attached_logical_ids = {
+                            item.logical_id
+                            for item_id in attached_asset_ids
+                            for item in [self.datasets.get(item_id)]
+                            if item is not None
+                        }
+                        if asset.id not in attached_asset_ids and asset.logical_id not in attached_logical_ids:
+                            raise HTTPException(
+                                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                                detail={
+                                    "message": (
+                                        "Selected scoring dataset must be attached "
+                                        "to the pipeline Business Case"
+                                    ),
+                                    "input_key": binding_key,
+                                },
+                            )
+                        logical_id = asset.logical_id
+                elif policy == "pinned":
+                    asset = self.datasets.get(pinned_dataset_id)
+                    if (
+                        asset is None
+                        or asset.owner_id != principal.user_id
+                        or asset.status == DataAssetStatus.DELETED
+                    ):
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            detail={
+                                "message": "Pinned dataset version is not available",
+                                "input_key": binding_key,
+                            },
+                        )
+                    logical_id = asset.logical_id
                 elif policy == "latest":
                     asset = self.datasets.get_latest_version(principal.user_id, logical_id)
                     if asset is None:
@@ -423,8 +521,49 @@ class PipelineService:
                 }
         return resolved
 
+    def _validate_external_artifacts(
+        self,
+        workflow: WorkflowDefinition,
+        principal: Principal,
+        business_case_id: str,
+    ) -> None:
+        references: list[tuple[str, str, ArtifactType]] = []
+        for step in workflow.steps:
+            definition = step.config.get("definition")
+            if not isinstance(definition, dict):
+                continue
+            if step.type == "feature_engineering" and definition.get("mode") == "transform":
+                references.append((
+                    step.step_id,
+                    str(definition.get("fitted_state_artifact_id") or ""),
+                    ArtifactType.FEATURE_TRANSFORM,
+                ))
+            if step.type == "scoring" and definition.get("purpose") == "batch":
+                references.append((
+                    step.step_id,
+                    str(definition.get("model_artifact_id") or ""),
+                    ArtifactType.MODEL_VERSION,
+                ))
+        for step_id, artifact_id, expected_type in references:
+            artifact = self.artifacts.get_artifact(artifact_id)
+            if (
+                artifact is None
+                or artifact.owner_id != principal.user_id
+                or artifact.business_case_id != business_case_id
+                or artifact.type != expected_type
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail={
+                        "message": (
+                            f"Step '{step_id}' references an unavailable "
+                            f"{expected_type.value} artifact"
+                        )
+                    },
+                )
+
     def get_run(self, pipeline_id: str, run_id: str, principal: Principal) -> PipelineRun:
-        pipeline = self.get_pipeline(pipeline_id, principal)
+        pipeline = self._get_owned_pipeline(pipeline_id, principal)
         run = self.repository.get_run(run_id)
         if not run or run.pipeline_id != pipeline.id or run.owner_id != principal.user_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pipeline run not found")
@@ -518,7 +657,7 @@ class PipelineService:
         offset: int = 0,
     ) -> list[PipelineRun]:
         if pipeline_id:
-            pipeline = self.get_pipeline(pipeline_id, principal)
+            pipeline = self._get_owned_pipeline(pipeline_id, principal)
             pipeline_id = pipeline.id
         return self.repository.list_runs(
             pipeline_id,

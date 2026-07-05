@@ -168,6 +168,106 @@ def test_training_and_scoring_process_full_declared_inputs(tmp_path: Path) -> No
     )
 
 
+def test_batch_scoring_creates_predictions_without_performance_report(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    source = repository / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    train_path = source / "train.parquet"
+    scoring_path = source / "scoring.parquet"
+    connection = duckdb.connect()
+    connection.execute(
+        "COPY (SELECT range AS row_id, range::DOUBLE AS x, "
+        "CASE WHEN range >= 20 THEN 1 ELSE 0 END AS target FROM range(40)) "
+        f"TO '{str(train_path).replace(chr(39), chr(39) * 2)}' (FORMAT PARQUET)"
+    )
+    connection.execute(
+        "COPY (SELECT range + 100 AS row_id, range::DOUBLE AS x FROM range(15)) "
+        f"TO '{str(scoring_path).replace(chr(39), chr(39) * 2)}' (FORMAT PARQUET)"
+    )
+    connection.close()
+    trained = SklearnTrainingEngine(repository).execute(
+        TrainingDefinition(
+            problem_type="binary_classification",
+            algorithm="sgd_classifier",
+            target_column="target",
+            feature_columns=["x"],
+            epochs=2,
+            batch_size=100,
+        ),
+        _relation(train_path, 40),
+        None,
+        run_id="batch-run",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+    model = next(item for item in trained.output_manifest if item["output_id"] == "model")
+
+    scored = SklearnScoringEngine(repository).execute(
+        ScoringDefinition(
+            purpose="batch",
+            model_artifact_id="model-artifact-1",
+            row_id_column="row_id",
+            dataset_name="Batch predictions",
+            batch_size=100,
+        ),
+        _relation(scoring_path, 15),
+        model,
+        run_id="batch-run",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    output = scored.output_manifest[0]
+    assert output["row_count"] == 15
+    assert output["metrics"] == {"scored_row_count": 15}
+    assert "evaluation" not in output
+
+
+def test_batch_scoring_rejects_non_unique_record_ids(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    source = repository / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    path = source / "duplicates.parquet"
+    escaped_path = str(path).replace("'", "''")
+    duckdb.connect().execute(
+        "COPY (SELECT range % 2 AS row_id, range::DOUBLE AS x, "
+        "CASE WHEN range >= 2 THEN 1 ELSE 0 END AS target FROM range(4)) "
+        f"TO '{escaped_path}' (FORMAT PARQUET)"
+    ).close()
+    trained = SklearnTrainingEngine(repository).execute(
+        TrainingDefinition(
+            problem_type="binary_classification",
+            algorithm="sgd_classifier",
+            target_column="target",
+            feature_columns=["x"],
+            epochs=1,
+            batch_size=100,
+        ),
+        _relation(path, 4),
+        None,
+        run_id="duplicate-run",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+    model = next(item for item in trained.output_manifest if item["output_id"] == "model")
+
+    with pytest.raises(ValueError, match="must be unique"):
+        SklearnScoringEngine(repository).execute(
+            ScoringDefinition(
+                purpose="batch",
+                model_artifact_id="model-artifact-1",
+                row_id_column="row_id",
+            ),
+            _relation(path, 4),
+            model,
+            run_id="duplicate-run",
+            owner_id="owner-1",
+            is_dry_run=True,
+        )
+
+
 def test_training_early_stopping_uses_explicit_validation_and_best_epoch(
     tmp_path: Path,
 ) -> None:
@@ -360,6 +460,19 @@ def test_training_parameters_are_scoped_to_selected_algorithm() -> None:
         )
 
 
+def test_incomplete_modeling_steps_are_valid_drafts_but_not_executable() -> None:
+    training = TrainingDefinition(
+        problem_type="binary_classification",
+        algorithm="sgd_classifier",
+    )
+    with pytest.raises(ValueError, match="target column"):
+        training.validate_executable()
+
+    scoring = ScoringDefinition(purpose="batch")
+    with pytest.raises(ValueError, match="row ID"):
+        scoring.validate_executable()
+
+
 def test_runtime_input_resolution_does_not_inject_inputs_into_training_definition() -> None:
     definition = {
         "steps": [
@@ -517,3 +630,113 @@ def test_training_and_scoring_workflow_requires_typed_ports() -> None:
     }
     with pytest.raises(ValueError, match="early stopping.*validation"):
         validate_workflow_definition(early_stopping_without_validation, executable=True)
+
+
+def test_batch_scoring_workflow_pins_model_and_has_no_target_or_model_port() -> None:
+    definition = {
+        "contract_version": "2.0",
+        "steps": [
+            {
+                "step_id": "de",
+                "name": "Scoring preparation",
+                "type": "data_engineering",
+                "inputs": [],
+                "output_port_id": "dataset",
+                "additional_output_port_ids": [],
+                "config": {
+                    "definition": {
+                        "contract_version": "1.0",
+                        "inputs": [{
+                            "input_id": "scoring_input",
+                            "dataset_id": "",
+                            "version_policy": "select_at_run_any",
+                        }],
+                        "steps": [],
+                        "outputs": [{
+                            "output_id": "prepared",
+                            "input": {"node_id": "scoring_input", "port_id": "out"},
+                            "materialization": "temporary",
+                            "dataset_name": "Prepared scoring input",
+                            "business_case_role": "scoring_input",
+                        }],
+                    }
+                },
+            },
+            {
+                "step_id": "fe",
+                "name": "Feature transform",
+                "type": "feature_engineering",
+                "inputs": [{
+                    "port_id": "scoring_input",
+                    "source": {"step_id": "de", "port_id": "dataset"},
+                }],
+                "output_port_id": "scoring_input",
+                "additional_output_port_ids": [],
+                "config": {
+                    "definition": {
+                        "contract_version": "1.0",
+                        "mode": "transform",
+                        "inputs": [{
+                            "input_id": "scoring_input",
+                            "role": "scoring_input",
+                        }],
+                        "feature_columns": ["x"],
+                        "row_id_column": "row_id",
+                        "transformations": [],
+                        "outputs": [{
+                            "output_id": "scoring_features",
+                            "input_id": "scoring_input",
+                            "dataset_name": "Scoring features",
+                            "business_case_role": "scoring_input",
+                        }],
+                        "fitted_state_artifact_id": "fitted-1",
+                    }
+                },
+            },
+            {
+                "step_id": "score",
+                "name": "Batch scoring",
+                "type": "scoring",
+                "inputs": [{
+                    "port_id": "data",
+                    "source": {"step_id": "fe", "port_id": "scoring_input"},
+                }],
+                "output_port_id": "predictions",
+                "additional_output_port_ids": [],
+                "config": {
+                    "definition": {
+                        "purpose": "batch",
+                        "model_artifact_id": "model-1",
+                        "row_id_column": "row_id",
+                        "target_column": "",
+                    }
+                },
+            },
+        ],
+        "outputs": [{
+            "output_id": "predictions",
+            "source": {"step_id": "score", "port_id": "predictions"},
+        }],
+    }
+
+    validated = validate_workflow_definition(definition, executable=True)
+    assert validated["steps"][2]["config"]["definition"]["purpose"] == "batch"
+
+    invalid = {
+        **definition,
+        "steps": [
+            definition["steps"][0],
+            definition["steps"][1],
+            {
+                **definition["steps"][2],
+                "config": {
+                    "definition": {
+                        **definition["steps"][2]["config"]["definition"],
+                        "target_column": "target",
+                    }
+                },
+            },
+        ],
+    }
+    with pytest.raises(ValueError, match="cannot consume a target"):
+        validate_workflow_definition(invalid, executable=True)

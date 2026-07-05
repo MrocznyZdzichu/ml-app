@@ -54,6 +54,9 @@ class ModelArtifactRead(BaseModel):
     training_config: dict[str, Any]
     model_parameters: dict[str, Any]
     lineage: dict[str, Any]
+    fitted_transform_artifact_id: str
+    data_engineering_definition: dict[str, Any]
+    feature_engineering_definition: dict[str, Any]
     created_at: datetime
 
 

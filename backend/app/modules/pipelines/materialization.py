@@ -52,7 +52,8 @@ class ScoringReportMaterializer:
         ]
         for prediction in output_manifest:
             if (
-                prediction.get("artifact_type") != ArtifactType.PREDICTION_DATASET.value
+                prediction.get("artifact_type")
+                not in {ArtifactType.PREDICTION_DATASET.value, "report_source"}
                 or not isinstance(prediction.get("evaluation"), dict)
             ):
                 continue
@@ -75,13 +76,21 @@ class ScoringReportMaterializer:
                         f"{run.pipeline_id}:{step_id}"
                     ),
                 ))
-                prediction_artifact_id = str(prediction.get("artifact_id") or "")
+                prediction_artifact_id = str(
+                    prediction.get("prediction_artifact_id")
+                    or prediction.get("artifact_id")
+                    or ""
+                )
                 matching_model = self._model_for_scoring_step(
                     workflow,
                     step_id,
                     model_outputs,
                 )
-                model_artifact_id = str((matching_model or {}).get("artifact_id") or "")
+                model_artifact_id = str(
+                    prediction.get("model_artifact_id")
+                    or (matching_model or {}).get("artifact_id")
+                    or ""
+                )
                 input_artifact_ids = [
                     artifact_id
                     for artifact_id in (model_artifact_id, prediction_artifact_id)
@@ -369,6 +378,7 @@ class PipelineOutputMaterializer:
                     "split_evaluation": dict(item.get("split_evaluation") or {}),
                     "metrics": dict(item.get("metrics") or {}),
                     "score_contract": dict(item.get("score_contract") or {}),
+                    "model_artifact_id": str(item.get("model_artifact_id") or ""),
                     "pipeline_output": {
                         "pipeline_id": run.pipeline_id,
                         "pipeline_step_id": step_id,
