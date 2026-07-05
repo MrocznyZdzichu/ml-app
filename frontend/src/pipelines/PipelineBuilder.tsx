@@ -23,6 +23,10 @@ import {
   inferPipelineOutputColumns,
   inferPipelineStepInputColumns
 } from "./pipelineSchema";
+import {
+  businessCaseDataRoleOptions,
+  datasetVersionPolicyOptions
+} from "./dataContractOptions";
 
 export type {
   PipelineDefinition,
@@ -349,10 +353,9 @@ export function PipelineBuilder({
                 })}
                 disabled={disabled}
               >
-                <option value="latest">Latest at run start</option>
-                <option value="pinned">Pinned exact version</option>
-                <option value="select_at_run">Select at run</option>
-                <option value="select_at_run_any">Select any compatible BC dataset</option>
+                {datasetVersionPolicyOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
               </select></label>
               <label>Stable source ID<input value={input.input_id} disabled /></label>
               {attachmentByDataset.get(input.dataset_id)?.role && (
@@ -393,7 +396,9 @@ export function PipelineBuilder({
               {outputSources.map((source) => <option key={referenceKey(source.reference)} value={referenceKey(source.reference)}>{source.label}</option>)}
             </select></label>
             <label>Business Case role<select value={definition.outputs[0]?.business_case_role ?? "source"} onChange={(event) => update({ outputs: [{ ...datasetOutput(selectedOutput, definition.outputs[0]?.output_id, definition.outputs[0], outputNameSuggestion), business_case_role: event.target.value as PipelineOutputDefinition["business_case_role"] }] })} disabled={disabled || !isExecutable}>
-              {["source", "training", "validation", "test", "scoring_input", "scoring_output", "monitoring_input", "monitoring_actuals", "reference"].map((role) => <option key={role} value={role}>{role.replaceAll("_", " ")}</option>)}
+              {businessCaseDataRoleOptions.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
             </select></label>
             <DataContractEditor
               contract={definition.outputs[0]?.data_contract}

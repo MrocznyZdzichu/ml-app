@@ -86,6 +86,14 @@ import {
   readPipelineWorkingDraft,
   writePipelineWorkingDraft
 } from "./pipelines/pipelineDraftStorage";
+import {
+  businessCaseDataRoleOptions,
+  requiresRuntimeDatasetSelection
+} from "./pipelines/dataContractOptions";
+import {
+  resolvePipelineRunInputs,
+  type PipelineRunInput
+} from "./pipelines/pipelineRunInputs";
 
 type TabId = "overview" | "business-cases" | "data" | "analysis" | "pipelines" | "models" | "scoring-reports" | "serving" | "share";
 
@@ -515,12 +523,7 @@ function BusinessCasesPanel({
   const [bcRunDialog, setBcRunDialog] = useState<{
     pipeline: Pipeline;
     version: PipelineVersion;
-    inputs: Array<{
-      key: string;
-      name: string;
-      logicalId: string;
-      policy: "latest" | "select_at_run" | "select_at_run_any";
-    }>;
+    inputs: PipelineRunInput[];
   } | null>(null);
   const [bcRunSelections, setBcRunSelections] = useState<Record<string, string>>({});
   const [bcRunResult, setBcRunResult] = useState<PipelineRun | null>(null);
@@ -837,30 +840,7 @@ function BusinessCasesPanel({
         normalizeWorkflowDefinition(published.definition),
         datasets
       );
-      const inputs = normalized.steps.flatMap((step) => {
-        const nested = asRecord(asRecord(step.config).definition);
-        return (Array.isArray(nested.inputs) ? nested.inputs : []).flatMap((value) => {
-          const input = asRecord(value);
-          const policy = input.version_policy === "select_at_run_any"
-            ? "select_at_run_any" as const
-            : input.version_policy === "select_at_run"
-              ? "select_at_run" as const
-              : "latest" as const;
-          const logicalId = asString(input.dataset_id);
-          if (!logicalId && policy !== "select_at_run_any") return [];
-          const dataset = datasets.find((item) =>
-            item.logical_id === logicalId || item.id === logicalId
-          );
-          return [{
-            key: `${step.step_id}:${asString(input.input_id)}`,
-            name: policy === "select_at_run_any"
-              ? "Scoring dataset"
-              : dataset?.name ?? (asString(input.input_id) || "Dataset input"),
-            logicalId,
-            policy
-          }];
-        });
-      });
+      const inputs = resolvePipelineRunInputs(normalized, datasets);
       setBcRunSelections({});
       setBcRunResult(null);
       setBcRunDialog({ pipeline, version: published, inputs });
@@ -873,7 +853,8 @@ function BusinessCasesPanel({
     event.preventDefault();
     if (!bcRunDialog) return;
     const missing = bcRunDialog.inputs.find(
-      (input) => input.policy !== "latest" && !bcRunSelections[input.key]
+      (input) => requiresRuntimeDatasetSelection(input.policy)
+        && !bcRunSelections[input.key]
     );
     if (missing) {
       setNotice(`Select a version for ${missing.name}`);
@@ -1233,15 +1214,9 @@ function BusinessCasesPanel({
                 <label>
                   Role
                   <select value={selectedRole} onChange={(event) => setSelectedRole(event.target.value)}>
-                    <option value="source">Source</option>
-                    <option value="training">Training</option>
-                    <option value="validation">Validation</option>
-                    <option value="test">Test</option>
-                    <option value="scoring_input">Scoring input</option>
-                    <option value="scoring_output">Scoring output</option>
-                    <option value="monitoring_input">Monitoring input</option>
-                    <option value="monitoring_actuals">Monitoring actuals</option>
-                    <option value="reference">Reference</option>
+                    {businessCaseDataRoleOptions.map((option) => (
+                      <option key={option.value} value={option.value}>{option.label}</option>
+                    ))}
                   </select>
                 </label>
                 <label>
@@ -1450,13 +1425,15 @@ function BusinessCasesPanel({
                   && (
                     input.policy === "select_at_run_any"
                       ? attachedLogicalIds.has(dataset.logical_id)
-                      : dataset.logical_id === input.logicalId
+                      : input.policy === "pinned"
+                        ? dataset.id === input.datasetId
+                        : dataset.logical_id === input.logicalId
                   )
                 )
                 .sort((left, right) => right.version_number - left.version_number);
               return (
                 <label key={input.key}>{input.name}
-                  {input.policy !== "latest" ? (
+                  {requiresRuntimeDatasetSelection(input.policy) ? (
                     <select value={bcRunSelections[input.key] ?? ""}
                       onChange={(event) => setBcRunSelections((current) => ({
                         ...current,
@@ -1472,7 +1449,7 @@ function BusinessCasesPanel({
                     </select>
                   ) : (
                     <input readOnly value={inputVersions[0]
-                      ? `Latest → v${inputVersions[0].version_number}`
+                      ? `${input.policy === "pinned" ? "Pinned" : "Latest"} → v${inputVersions[0].version_number}`
                       : "No active version"} />
                   )}
                 </label>
@@ -1592,12 +1569,7 @@ function PipelinesPanel({
   const [catalogRunDialog, setCatalogRunDialog] = useState<{
     pipeline: Pipeline;
     version: PipelineVersion;
-    inputs: Array<{
-      key: string;
-      name: string;
-      logicalId: string;
-      policy: "latest" | "select_at_run" | "select_at_run_any";
-    }>;
+    inputs: PipelineRunInput[];
   } | null>(null);
   const [catalogRunSelections, setCatalogRunSelections] = useState<Record<string, string>>({});
   const [isCatalogRunSubmitting, setIsCatalogRunSubmitting] = useState(false);
@@ -1958,29 +1930,7 @@ function PipelinesPanel({
         normalizeWorkflowDefinition(published.definition),
         datasets
       );
-      const inputs = normalized.steps.flatMap((step) => {
-        const nested = asRecord(asRecord(step.config).definition);
-        const rawInputs = Array.isArray(nested.inputs) ? nested.inputs : [];
-        return rawInputs.flatMap((value) => {
-          const input = asRecord(value);
-          const policy = input.version_policy === "select_at_run_any"
-            ? "select_at_run_any" as const
-            : input.version_policy === "select_at_run"
-              ? "select_at_run" as const
-              : "latest" as const;
-          const logicalId = asString(input.dataset_id);
-          if (!logicalId && policy !== "select_at_run_any") return [];
-          const dataset = datasets.find((item) => item.logical_id === logicalId || item.id === logicalId);
-          return [{
-            key: `${step.step_id}:${asString(input.input_id)}`,
-            name: policy === "select_at_run_any"
-              ? "Scoring dataset"
-              : dataset?.name ?? (asString(input.input_id) || "Dataset input"),
-            logicalId,
-            policy
-          }];
-        });
-      });
+      const inputs = resolvePipelineRunInputs(normalized, datasets);
       setCatalogRunSelections({});
       setCatalogRunResult(null);
       setCatalogRunDialog({ pipeline, version: published, inputs });
@@ -1993,7 +1943,8 @@ function PipelinesPanel({
     event.preventDefault();
     if (!catalogRunDialog) return;
     const missing = catalogRunDialog.inputs.find(
-      (input) => input.policy !== "latest" && !catalogRunSelections[input.key]
+      (input) => requiresRuntimeDatasetSelection(input.policy)
+        && !catalogRunSelections[input.key]
     );
     if (missing) {
       setNotice(`Select a version for ${missing.name}`);
@@ -2344,15 +2295,19 @@ function PipelinesPanel({
                     && (
                       input.policy === "select_at_run_any"
                         ? attachedLogicalIds.has(dataset.logical_id)
-                        : dataset.logical_id === input.logicalId
+                        : input.policy === "pinned"
+                          ? dataset.id === input.datasetId
+                          : dataset.logical_id === input.logicalId
                     )
                   )
                   .sort((left, right) => right.version_number - left.version_number);
                 const latest = versionsForInput[0];
                 return (
                   <label key={input.key}>{input.name}
-                    {input.policy === "latest" ? (
-                      <input value={latest ? `Latest → v${latest.version_number}` : "No active version"} readOnly />
+                    {!requiresRuntimeDatasetSelection(input.policy) ? (
+                      <input value={latest
+                        ? `${input.policy === "pinned" ? "Pinned" : "Latest"} → v${latest.version_number}`
+                        : "No active version"} readOnly />
                     ) : (
                       <select
                         value={catalogRunSelections[input.key] ?? ""}
@@ -2371,7 +2326,11 @@ function PipelinesPanel({
                         ))}
                       </select>
                     )}
-                    <small>{input.policy === "latest" ? "Resolved and recorded when the run is created." : "This run requires an explicit immutable version."}</small>
+                    <small>{requiresRuntimeDatasetSelection(input.policy)
+                      ? "This run requires an explicit immutable version."
+                      : input.policy === "pinned"
+                        ? "This exact immutable version is pinned in the pipeline definition."
+                        : "Resolved and recorded when the run is created."}</small>
                   </label>
                 );
               })}
@@ -2648,15 +2607,19 @@ function PipelinesPanel({
                   && (
                     input.policy === "select_at_run_any"
                       ? attachedLogicalIds.has(dataset.logical_id)
-                      : dataset.logical_id === input.logicalId
+                      : input.policy === "pinned"
+                        ? dataset.id === input.datasetId
+                        : dataset.logical_id === input.logicalId
                   )
                 )
                 .sort((left, right) => right.version_number - left.version_number);
               const latest = versionsForInput[0];
               return (
                 <label key={input.key}>{input.name}
-                  {input.policy === "latest" ? (
-                    <input value={latest ? `Latest → v${latest.version_number}` : "No active version"} readOnly />
+                  {!requiresRuntimeDatasetSelection(input.policy) ? (
+                    <input value={latest
+                      ? `${input.policy === "pinned" ? "Pinned" : "Latest"} → v${latest.version_number}`
+                      : "No active version"} readOnly />
                   ) : (
                     <select value={catalogRunSelections[input.key] ?? ""}
                       onChange={(event) => setCatalogRunSelections((current) => ({ ...current, [input.key]: event.target.value }))}
@@ -2670,7 +2633,11 @@ function PipelinesPanel({
                       ))}
                     </select>
                   )}
-                  <small>{input.policy === "latest" ? "Resolved and recorded when the run is created." : "This run requires an explicit immutable version."}</small>
+                  <small>{requiresRuntimeDatasetSelection(input.policy)
+                    ? "This run requires an explicit immutable version."
+                    : input.policy === "pinned"
+                      ? "This exact immutable version is pinned in the pipeline definition."
+                      : "Resolved and recorded when the run is created."}</small>
                 </label>
               );
             })}

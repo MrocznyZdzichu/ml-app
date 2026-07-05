@@ -42,6 +42,13 @@ class PipelineRunTrigger(str, Enum):
     SCHEDULE = "schedule"
 
 
+class DatasetVersionPolicy(str, Enum):
+    LATEST = "latest"
+    PINNED = "pinned"
+    SELECT_AT_RUN = "select_at_run"
+    SELECT_AT_RUN_ANY = "select_at_run_any"
+
+
 class PipelineStepType(str, Enum):
     SELECT_COLUMNS = "select_columns"
     ADD_IDENTIFIER = "add_identifier"
