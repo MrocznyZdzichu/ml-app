@@ -11,6 +11,7 @@ from pathlib import Path
 
 OUTPUT = Path(__file__).resolve().parent / "data"
 IRIS_SOURCE = Path(__file__).resolve().parent / "data" / "iris.csv"
+GENERAL_SOURCE = Path(__file__).resolve().parent / "data" / "general-example.csv"
 SEED = 20260624
 IRIS_FEATURES = ("sepal_length", "sepal_width", "petal_length", "petal_width")
 
@@ -150,6 +151,92 @@ def write_iris_batch_scoring() -> None:
     write_csv(OUTPUT / "iris-batch-scoring-10k-actuals.csv", actual_rows)
 
 
+def write_churn_batch_scoring() -> None:
+    """Create an out-of-time churn scoring cohort and separately held actuals.
+
+    The checked-in training population is used as an empirical, label-stratified
+    population model. Numeric fields are perturbed and a small, documented
+    operational drift is applied, while categorical combinations and the target
+    relationships from the training scenario remain intact.
+    """
+
+    rng = random.Random(SEED + 3)
+    with GENERAL_SOURCE.open(encoding="utf-8", newline="") as handle:
+        training_rows = list(csv.DictReader(handle))
+
+    by_outcome = {
+        outcome: [row for row in training_rows if row["churned"] == outcome]
+        for outcome in ("0", "1")
+    }
+    outcomes = ["1"] * 600 + ["0"] * 9_400
+    rng.shuffle(outcomes)
+    scoring_rows: list[dict[str, object]] = []
+    actual_rows: list[dict[str, object]] = []
+
+    for index, outcome in enumerate(outcomes, start=1):
+        source = rng.choice(by_outcome[outcome])
+        customer_id = f"CHURN-SCORE-{index:05d}"
+        scoring_rows.append({
+            "customer_id": customer_id,
+            "snapshot_month": ("2026-07", "2026-08", "2026-09")[(index - 1) % 3],
+            "region": source["region"],
+            "acquisition_channel": source["acquisition_channel"],
+            "customer_segment": source["customer_segment"],
+            "plan_type": source["plan_type"],
+            "age": round(clamp(float(source["age"]) + rng.gauss(0, 0.8), 18, 85)),
+            "tenure_months": round(
+                clamp(float(source["tenure_months"]) + rng.choice((-1, 0, 1, 2, 3)), 0, 120)
+            ),
+            "household_income": round(
+                clamp(float(source["household_income"]) * math.exp(rng.gauss(0.012, 0.025)), 18_000, 300_000),
+                2,
+            ),
+            "credit_score": round(
+                clamp(float(source["credit_score"]) + rng.gauss(-3, 11), 300, 850)
+            ),
+            "monthly_fee": round(
+                clamp(float(source["monthly_fee"]) * (1.025 + rng.gauss(0, 0.018)), 5, 500),
+                2,
+            ),
+            "avg_monthly_usage_gb": round(
+                clamp(float(source["avg_monthly_usage_gb"]) * (1.07 + rng.gauss(0, 0.035)), 0, 2_000),
+                2,
+            ),
+            "app_sessions_30d": round(
+                clamp(float(source["app_sessions_30d"]) * (1.03 + rng.gauss(0, 0.055)), 0, 1_000)
+            ),
+            "support_tickets_90d": round(
+                clamp(float(source["support_tickets_90d"]) + rng.choice((-1, 0, 0, 0, 1)), 0, 30)
+            ),
+            "late_payments_12m": round(
+                clamp(float(source["late_payments_12m"]) + rng.choice((0, 0, 0, 1)), 0, 12)
+            ),
+            "discount_pct": round(
+                clamp(float(source["discount_pct"]) * (0.92 + rng.gauss(0, 0.025)), 0, 60),
+                2,
+            ),
+            "data_overage_charges": round(
+                clamp(float(source["data_overage_charges"]) * (1.08 + rng.gauss(0, 0.05)), 0, 250),
+                2,
+            ),
+            "competitor_price_index": round(
+                clamp(float(source["competitor_price_index"]) * (0.985 + rng.gauss(0, 0.012)), 0.5, 1.5),
+                3,
+            ),
+            "nps_score": round(
+                clamp(float(source["nps_score"]) + rng.gauss(-2.0, 3.5), -100, 100)
+            ),
+        })
+        actual_rows.append({"customer_id": customer_id, "churned": outcome})
+
+    write_csv(OUTPUT / "general-churn-batch-scoring-10k.csv", scoring_rows)
+    write_csv(OUTPUT / "general-churn-batch-scoring-10k-actuals.csv", actual_rows)
+
+
+def clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
 def sample_covariance(samples: list[list[float]], means: list[float]) -> list[list[float]]:
     divisor = len(samples) - 1
     return [
@@ -197,7 +284,8 @@ if __name__ == "__main__":
     write_dynamic_reactor()
     write_equipment_clustering()
     write_iris_batch_scoring()
+    write_churn_batch_scoring()
     print(
         "Generated dynamic-reactor-timeseries.csv, equipment-operating-regimes.csv, "
-        "iris-batch-scoring-10k.csv and iris-batch-scoring-10k-actuals.csv"
+        "Iris batch-scoring files and churn batch-scoring files"
     )

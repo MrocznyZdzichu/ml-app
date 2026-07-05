@@ -74,3 +74,35 @@ This is a synthetic operational batch, not independent biological evidence. Its
 class balance is intentionally controlled and its distribution is derived from the
 small 100-row, two-class reference subset, so it is suitable for pipeline validation
 but not for estimating real-world prevalence or generalization.
+
+## Customer churn batch scoring and delayed actuals
+
+Business case: a subscription-retention team trained a churn classifier on
+`examples/data/general-example.csv`. At the start of each monthly campaign it
+scores active customers without knowing their future outcome. After the observation
+window closes, the CRM supplies actual churn outcomes for performance monitoring.
+Batch scoring and target joining are deliberately separate workflows.
+
+Files:
+
+- `examples/data/general-churn-batch-scoring-10k.csv`: 10,000 customers from the
+  July-September 2026 scoring cohorts. Its schema matches the training features,
+  including the stable `customer_id`, and deliberately excludes `churned`.
+- `examples/data/general-churn-batch-scoring-10k-actuals.csv`: delayed outcomes
+  containing only `customer_id` and the binary `churned` target. It is the actuals
+  input for a monitoring pipeline, not an input to batch scoring.
+
+The generator uses the complete training file as a label-stratified empirical
+population model, creates new non-overlapping customer identifiers, perturbs every
+numeric observation, and applies mild operational drift: fees and usage increase,
+discounts contract, competitor pricing becomes slightly more attractive, and NPS
+softens. Categorical combinations and target relationships remain grounded in the
+training scenario. The scoring cohort has exactly 600 churners (6.0%), compared
+with 478 (4.78%) in the 10,000-row training dataset, making prevalence drift visible
+without turning the example into an extreme stress test.
+
+There are no missing values or sampled analysis results. The two files join
+one-to-one on `customer_id`; scoring contains 10,000 rows and monitoring actuals
+cover all 10,000. This synthetic batch is intended to validate scoring, lineage,
+target joining, and monitoring behavior. It is not evidence of production model
+quality or real customer prevalence.

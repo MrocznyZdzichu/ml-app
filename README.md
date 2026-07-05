@@ -288,6 +288,8 @@ Use these files for manual testing:
 
 - `examples/data/iris.csv`
 - `examples/data/general-example.csv`
+- `examples/data/general-churn-batch-scoring-10k.csv`
+- `examples/data/general-churn-batch-scoring-10k-actuals.csv`
 - `examples/data/regression-example.csv`
 - `examples/data/dynamic-reactor-timeseries.csv`
 - `examples/data/equipment-operating-regimes.csv`
@@ -295,6 +297,11 @@ Use these files for manual testing:
 `general-example.csv` contains 10,000 synthetic customer-churn-like rows with
 mixed numeric and categorical columns, useful for testing filtering, grouping,
 aggregation, sorting, Custom SQL, and Data Views.
+
+The two `general-churn-batch-scoring` files form an out-of-time scoring cohort
+without the target and a separately held actuals delivery joined by `customer_id`.
+Their business context, controlled drift, and limitations are documented in
+`docs/synthetic-ml-scenarios.md`.
 
 `regression-example.csv` contains 10,000 synthetic real-estate transaction rows
 for a regression task where the target is `sale_price_pln`.

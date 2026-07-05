@@ -11,11 +11,13 @@ def test_synthetic_dataset_generator_is_reproducible_and_preserves_contract(tmp_
     generator.write_dynamic_reactor()
     generator.write_equipment_clustering()
     generator.write_iris_batch_scoring()
+    generator.write_churn_batch_scoring()
     first = {path.name: path.read_bytes() for path in tmp_path.glob("*.csv")}
 
     generator.write_dynamic_reactor()
     generator.write_equipment_clustering()
     generator.write_iris_batch_scoring()
+    generator.write_churn_batch_scoring()
     second = {path.name: path.read_bytes() for path in tmp_path.glob("*.csv")}
     assert first == second
 
@@ -99,6 +101,36 @@ def test_synthetic_dataset_generator_is_reproducible_and_preserves_contract(tmp_
                 [row[right_index] for row in generated[species]],
             )
             assert abs(generated_correlation - reference_correlation) < 0.12
+
+    with (tmp_path / "general-churn-batch-scoring-10k.csv").open(
+        encoding="utf-8", newline=""
+    ) as handle:
+        churn_scoring = list(csv.DictReader(handle))
+    with (tmp_path / "general-churn-batch-scoring-10k-actuals.csv").open(
+        encoding="utf-8", newline=""
+    ) as handle:
+        churn_actuals = list(csv.DictReader(handle))
+    with generator.GENERAL_SOURCE.open(encoding="utf-8", newline="") as handle:
+        churn_training = list(csv.DictReader(handle))
+
+    expected_features = [name for name in churn_training[0] if name != "churned"]
+    assert len(churn_scoring) == len(churn_actuals) == 10_000
+    assert list(churn_scoring[0]) == expected_features
+    assert list(churn_actuals[0]) == ["customer_id", "churned"]
+    assert "churned" not in churn_scoring[0]
+    assert len({row["customer_id"] for row in churn_scoring}) == 10_000
+    assert {row["customer_id"] for row in churn_scoring}.isdisjoint(
+        row["customer_id"] for row in churn_training
+    )
+    assert {row["customer_id"] for row in churn_scoring} == {
+        row["customer_id"] for row in churn_actuals
+    }
+    assert {row["snapshot_month"] for row in churn_scoring} == {
+        "2026-07", "2026-08", "2026-09"
+    }
+    assert sum(row["churned"] == "1" for row in churn_actuals) == 600
+    assert all(18 <= int(row["age"]) <= 85 for row in churn_scoring)
+    assert all(300 <= int(row["credit_score"]) <= 850 for row in churn_scoring)
 
 
 def iris_reference_by_species() -> dict[str, list[list[float]]]:
