@@ -645,6 +645,9 @@ export type PipelineRun = {
     quality_output_kind?: "rejected_records";
     source_output_id?: string;
     evaluation?: ModelEvaluationSnapshot | Record<string, unknown>;
+    score_contract?: Record<string, unknown>;
+    row_id_column?: string;
+    prediction_column?: string;
     split_evaluation?: Record<string, unknown>;
     model_name?: string;
     algorithm?: string;

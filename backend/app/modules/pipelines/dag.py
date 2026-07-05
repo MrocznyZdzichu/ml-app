@@ -19,7 +19,9 @@ class PipelineInput(BaseModel):
     input_id: str = Field(min_length=1, max_length=128)
     dataset_id: str = Field(default="", max_length=128)
     output_port_id: str = Field(default="out", min_length=1, max_length=128)
-    version_policy: Literal["latest", "select_at_run", "select_at_run_any"] = "latest"
+    version_policy: Literal[
+        "latest", "pinned", "select_at_run", "select_at_run_any"
+    ] = "latest"
 
     @model_validator(mode="after")
     def validate_binding(self) -> "PipelineInput":
@@ -78,6 +80,7 @@ class PipelineOutput(BaseModel):
         "test",
         "scoring_input",
         "scoring_output",
+        "monitoring_input",
         "monitoring_actuals",
         "reference",
     ] = "source"

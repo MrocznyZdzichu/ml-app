@@ -875,7 +875,30 @@ textarea {
 .evaluation-chart-grid {
   display: grid;
   gap: 12px;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+}
+
+.evaluation-chart-kpi {
+  align-items: flex-end;
+  background: rgba(46, 163, 154, 0.1);
+  border: 1px solid rgba(46, 163, 154, 0.35);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  min-width: 110px;
+  padding: 7px 10px;
+}
+
+.evaluation-chart-kpi span {
+  color: #71818d;
+  font-size: 9px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.evaluation-chart-kpi strong {
+  color: #2ea39a;
+  font-size: 20px;
 }
 
 .evaluation-class-table,
@@ -926,20 +949,41 @@ textarea {
 }
 
 .evaluation-line-chart {
-  min-height: 190px;
-  padding: 2px 8px 18px 22px;
+  min-height: 300px;
+  padding: 0;
   position: relative;
 }
 
 .evaluation-line-chart svg {
   display: block;
-  height: 190px;
+  height: auto;
+  min-height: 280px;
   width: 100%;
 }
 
 .evaluation-line-chart .axis {
-  stroke: #aebcc4;
+  stroke: #71818d;
+  stroke-width: 1.2;
+}
+
+.evaluation-line-chart .grid,
+.evaluation-histogram-chart .grid {
+  stroke: rgba(113, 129, 141, 0.22);
   stroke-width: 1;
+}
+
+.evaluation-line-chart .tick,
+.evaluation-line-chart .axis-title,
+.evaluation-histogram-chart .tick,
+.evaluation-histogram-chart .axis-title {
+  fill: #71818d;
+  font-size: 11px;
+}
+
+.evaluation-line-chart .axis-title,
+.evaluation-histogram-chart .axis-title {
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .evaluation-line-chart .baseline {
@@ -950,9 +994,62 @@ textarea {
 
 .evaluation-line-chart .series {
   fill: none;
-  stroke: #1e756d;
+  stroke: #2ea39a;
   stroke-linejoin: round;
-  stroke-width: 2.5;
+  stroke-width: 3;
+}
+
+.evaluation-histogram-chart {
+  min-height: 320px;
+}
+
+.evaluation-histogram-chart svg {
+  display: block;
+  height: auto;
+  min-height: 300px;
+  width: 100%;
+}
+
+.evaluation-histogram-chart .axis {
+  stroke: #71818d;
+  stroke-width: 1.2;
+}
+
+.evaluation-histogram-chart rect.positive {
+  fill: #2ea39a;
+}
+
+.evaluation-histogram-chart rect.negative {
+  fill: #d5904b;
+}
+
+.histogram-summary {
+  display: flex;
+  gap: 18px;
+  justify-content: flex-end;
+  margin-bottom: 4px;
+}
+
+.histogram-summary span {
+  color: #71818d;
+  font-size: 11px;
+}
+
+.histogram-summary span::before {
+  border-radius: 2px;
+  content: "";
+  display: inline-block;
+  height: 9px;
+  margin-right: 5px;
+  width: 9px;
+}
+
+.histogram-summary .positive::before {
+  background: #2ea39a;
+}
+
+.histogram-summary .negative::before {
+  background: #d5904b;
 }
 
 .evaluation-line-chart .scatter-point {
@@ -7720,8 +7817,8 @@ textarea {
 }
 
 .scoring-report-dialog {
-  width: min(1180px, calc(100vw - 3rem));
-  max-height: calc(100vh - 3rem);
+  width: min(1540px, calc(100vw - 2rem));
+  max-height: calc(100vh - 2rem);
   overflow: auto;
 }
 

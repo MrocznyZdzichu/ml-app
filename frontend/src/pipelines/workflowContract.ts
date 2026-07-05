@@ -16,6 +16,11 @@ import {
   normalizeTrainingDefinition
 } from "./modelingContract";
 import type { ScoringDefinition, TrainingDefinition } from "./modelingContract";
+import {
+  emptyMonitoringDefinition,
+  normalizeMonitoringDefinition
+} from "./monitoringContract";
+import type { MonitoringDefinition } from "./monitoringContract";
 
 export type DataEngineeringWorkflowStep = {
   step_id: string;
@@ -67,6 +72,15 @@ export type WorkflowStepDefinition =
       output_port_id: "predictions";
       additional_output_port_ids: string[];
       config: { definition: ScoringDefinition };
+    }
+  | {
+      step_id: string;
+      name: string;
+      type: "monitoring";
+      inputs: Array<{ port_id: "data"; source: { step_id: string; port_id: string } }>;
+      output_port_id: "performance_report";
+      additional_output_port_ids: string[];
+      config: { definition: MonitoringDefinition };
     };
 
 export type WorkflowDefinition = {
@@ -82,9 +96,79 @@ export type WorkflowDefinition = {
 export type PipelineTemplate = "training" | "batch_scoring" | "custom" | "monitoring";
 
 export function workflowTemplateDefinition(template: PipelineTemplate): WorkflowDefinition {
-  if (template === "custom" || template === "monitoring") {
+  if (template === "custom") {
     return {
       ...emptyWorkflowDefinition(),
+      parameters: { template }
+    };
+  }
+  if (template === "monitoring") {
+    const processStep: DataEngineeringWorkflowStep = {
+      step_id: "process_join_1",
+      name: "Process & Join",
+      type: "data_engineering",
+      inputs: [],
+      output_port_id: "dataset",
+      additional_output_port_ids: [],
+      config: {
+        definition: {
+          contract_version: "1.0",
+          inputs: [
+            {
+              input_id: "predictions",
+              dataset_id: "",
+              output_port_id: "out",
+              version_policy: "select_at_run_any"
+            },
+            {
+              input_id: "actuals",
+              dataset_id: "",
+              output_port_id: "out",
+              version_policy: "select_at_run_any"
+            }
+          ],
+          steps: [{
+            step_id: "join_predictions_actuals",
+            type: "join",
+            inputs: [
+              { port_id: "left", source: { node_id: "predictions", port_id: "out" } },
+              { port_id: "right", source: { node_id: "actuals", port_id: "out" } }
+            ],
+            output_port_id: "out",
+            config: {
+              join_type: "left",
+              keys: [{ left: "row_id", right: "row_id" }],
+              right_suffix: "_actuals"
+            }
+          }],
+          outputs: [{
+            output_id: "joined_monitoring_data",
+            input: { node_id: "join_predictions_actuals", port_id: "out" },
+            materialization: "dataset",
+            write_mode: "replace",
+            dataset_name: "Predictions with actuals",
+            business_case_role: "monitoring_input"
+          }],
+          parameters: { purpose: "monitoring_process_join" }
+        }
+      }
+    };
+    const monitoringStep: Extract<WorkflowStepDefinition, { type: "monitoring" }> = {
+      step_id: "monitoring_1",
+      name: "Performance Report",
+      type: "monitoring",
+      inputs: [{
+        port_id: "data",
+        source: { step_id: processStep.step_id, port_id: processStep.output_port_id }
+      }],
+      output_port_id: "performance_report",
+      additional_output_port_ids: [],
+      config: { definition: emptyMonitoringDefinition() }
+    };
+    return {
+      contract_version: "2.0",
+      steps: [processStep, monitoringStep],
+      outputs: workflowOutputsForStep(monitoringStep),
       parameters: { template }
     };
   }
@@ -244,6 +328,7 @@ export function canonicalizeWorkflowDatasetIds(
             ...nested,
             inputs: inputs.map((value) => {
               const input = recordValue(value);
+              if (input.version_policy === "pinned") return input;
               const referenced = datasets.find((dataset) => dataset.id === input.dataset_id);
               return referenced ? { ...input, dataset_id: referenced.logical_id } : input;
             })
@@ -333,6 +418,19 @@ export function normalizeWorkflowDefinition(value: unknown): WorkflowDefinition 
             output_port_id: "predictions",
             additional_output_port_ids: [],
             config: { definition: normalizeScoringDefinition(config.definition) }
+          }];
+        }
+        if (step.type === "monitoring") {
+          return [{
+            step_id: String(step.step_id ?? "monitoring_1"),
+            name: String(step.name ?? "Performance Report"),
+            type: "monitoring",
+            inputs: Array.isArray(step.inputs)
+              ? step.inputs as Extract<WorkflowStepDefinition, { type: "monitoring" }>["inputs"]
+              : [],
+            output_port_id: "performance_report",
+            additional_output_port_ids: [],
+            config: { definition: normalizeMonitoringDefinition(config.definition) }
           }];
         }
         return [{

@@ -1,4 +1,5 @@
 import {
+  Activity,
   ArrowRight,
   Brain,
   Calculator,
@@ -57,7 +58,9 @@ export function WorkflowDiagram({
             >
               {step.type === "data_engineering" ? <DatabaseZap size={22} />
                 : step.type === "feature_engineering" ? <Sparkles size={22} />
-                  : step.type === "training" ? <Brain size={22} /> : <Calculator size={22} />}
+                  : step.type === "training" ? <Brain size={22} />
+                    : step.type === "monitoring" ? <Activity size={22} />
+                      : <Calculator size={22} />}
               <span>
                 <small>STEP {index + 1}</small>
                 <strong>{step.name}</strong>
@@ -66,6 +69,8 @@ export function WorkflowDiagram({
                     ? step.config.definition.purpose === "batch"
                       ? "batch prediction"
                       : "holdout evaluation"
+                    : step.type === "monitoring"
+                      ? "target join + KPI"
                     : `${count} transformations`}</em>
               </span>
               <Settings2 size={16} />

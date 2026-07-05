@@ -28,6 +28,7 @@ class DataRole(str, Enum):
     TEST = "test"
     SCORING_INPUT = "scoring_input"
     SCORING_OUTPUT = "scoring_output"
+    MONITORING_INPUT = "monitoring_input"
     MONITORING_ACTUALS = "monitoring_actuals"
     REFERENCE = "reference"
 

@@ -1239,6 +1239,7 @@ function BusinessCasesPanel({
                     <option value="test">Test</option>
                     <option value="scoring_input">Scoring input</option>
                     <option value="scoring_output">Scoring output</option>
+                    <option value="monitoring_input">Monitoring input</option>
                     <option value="monitoring_actuals">Monitoring actuals</option>
                     <option value="reference">Reference</option>
                   </select>
@@ -2203,22 +2204,21 @@ function PipelinesPanel({
                   <option value="custom">Empty custom workflow</option>
                   <option value="training">Training · DE, FE, Training, Test Scoring</option>
                   <option value="batch_scoring">Batch scoring · DE, FE Transform, Batch Scoring</option>
-                  <option value="monitoring" disabled>Monitoring · planned, not executable yet</option>
+                  <option value="monitoring">Monitoring · Target Join, Performance Report</option>
                 </select>
                 <small>
                   Suggested from purpose. The template initializes an editable draft; purpose remains metadata.
                 </small>
               </label>
               {pipelineType === "monitoring" && (
-                <div className="form-warning">
-                  Monitoring requires target joining and KPI-report execution, which are not implemented yet.
+                <div className="form-note">
+                  Creates an editable Target Join and model-performance monitoring workflow.
                 </div>
               )}
               <label>Description<textarea className="compact-textarea" value={description} onChange={(event) => setDescription(event.target.value)} /></label>
               <div className="modal-actions">
                 <button className="secondary-button" type="button" onClick={() => setIsCreatePipelineOpen(false)}>Cancel</button>
-                <button className="primary-button" type="submit"
-                  disabled={pipelineType === "monitoring" || pipelineTemplate === "monitoring"}>
+                <button className="primary-button" type="submit">
                   <Plus size={16} /> Create pipeline
                 </button>
               </div>

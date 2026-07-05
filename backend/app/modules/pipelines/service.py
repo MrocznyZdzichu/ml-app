@@ -424,8 +424,13 @@ class PipelineService:
                 logical_id = str(raw_input.get("dataset_id") or "")
                 if not logical_id and policy != "select_at_run_any":
                     continue
+                pinned_dataset_id = logical_id
                 existing_version = self.datasets.get(logical_id)
-                if existing_version is not None and existing_version.owner_id == principal.user_id:
+                if (
+                    policy != "pinned"
+                    and existing_version is not None
+                    and existing_version.owner_id == principal.user_id
+                ):
                     logical_id = existing_version.logical_id
                 input_id = str(raw_input.get("input_id") or "")
                 binding_key = f"{step.step_id}:{input_id}"
@@ -475,6 +480,21 @@ class PipelineService:
                                 },
                             )
                         logical_id = asset.logical_id
+                elif policy == "pinned":
+                    asset = self.datasets.get(pinned_dataset_id)
+                    if (
+                        asset is None
+                        or asset.owner_id != principal.user_id
+                        or asset.status == DataAssetStatus.DELETED
+                    ):
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                            detail={
+                                "message": "Pinned dataset version is not available",
+                                "input_key": binding_key,
+                            },
+                        )
+                    logical_id = asset.logical_id
                 elif policy == "latest":
                     asset = self.datasets.get_latest_version(principal.user_id, logical_id)
                     if asset is None:

@@ -1,4 +1,4 @@
-import { Braces, Brain, Calculator, DatabaseZap, Plus, Sparkles, Trash2, X } from "lucide-react";
+import { Activity, Braces, Brain, Calculator, DatabaseZap, Plus, Sparkles, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api/client";
@@ -9,6 +9,7 @@ import type {
   DatasetColumn,
   ModelArtifact,
   Pipeline,
+  PipelineRun,
   PipelineVersion
 } from "../api/client";
 import { FeatureEngineeringBuilder, inferFeatureRecipeColumns } from "./FeatureEngineeringBuilder";
@@ -27,6 +28,7 @@ import { datasetColumns, inferPipelineOutputColumns, inputDatasetIds } from "./p
 import type { WorkflowDefinition, WorkflowStepDefinition } from "./workflowContract";
 import { WorkflowDiagram } from "./WorkflowDiagram";
 import { ScoringBuilder, TrainingBuilder } from "./ModelingBuilders";
+import { MonitoringBuilder } from "./MonitoringBuilder";
 import {
   deriveModelingDefaults,
   emptyScoringDefinition,
@@ -36,6 +38,7 @@ import {
 } from "./modelingContract";
 import {
   featureEngineeringOutputPorts,
+  workflowTemplateDefinition,
   workflowOutputsForStep
 } from "./workflowContract";
 
@@ -72,6 +75,13 @@ export function WorkflowEditor({
   const [sourceVersions, setSourceVersions] = useState<PipelineVersion[]>([]);
   const [sourceVersionId, setSourceVersionId] = useState("");
   const [sourceModelId, setSourceModelId] = useState("");
+  const [isMonitoringInferenceOpen, setIsMonitoringInferenceOpen] = useState(false);
+  const [monitoringPipelineId, setMonitoringPipelineId] = useState("");
+  const [monitoringVersions, setMonitoringVersions] = useState<PipelineVersion[]>([]);
+  const [monitoringVersionId, setMonitoringVersionId] = useState("");
+  const [monitoringRuns, setMonitoringRuns] = useState<PipelineRun[]>([]);
+  const [monitoringRunId, setMonitoringRunId] = useState("");
+  const [monitoringDatasetId, setMonitoringDatasetId] = useState("");
   const initializedModelingSteps = useRef(new Set<string>());
   const featureStep = definition.steps.find(
     (step) => step.type === "feature_engineering"
@@ -150,6 +160,29 @@ export function WorkflowEditor({
       model.pipeline_id === sourcePipelineId
       && model.pipeline_version_id === sourceVersionId
   );
+  const monitoringSourcePipelines = pipelines.filter(
+    (pipeline) =>
+      pipeline.business_case_id === businessCase?.id
+      && pipeline.type === "batch_scoring"
+  );
+  const availableMonitoringVersions = monitoringVersions.filter(
+    (version) => version.status === "published"
+  );
+  const availableMonitoringRuns = monitoringRuns.filter(
+    (run) =>
+      run.status === "succeeded"
+      && !run.is_dry_run
+      && run.pipeline_version_id === monitoringVersionId
+      && run.output_manifest.some(
+        (output) => output.artifact_type === "prediction_dataset" && output.dataset_id
+      )
+  );
+  const selectedMonitoringRun = availableMonitoringRuns.find(
+    (run) => run.id === monitoringRunId
+  );
+  const monitoringPredictionOutputs = selectedMonitoringRun?.output_manifest.filter(
+    (output) => output.artifact_type === "prediction_dataset" && output.dataset_id
+  ) ?? [];
 
   useEffect(() => {
     let changed = false;
@@ -433,6 +466,108 @@ export function WorkflowEditor({
     }
   }
 
+  async function selectMonitoringPipeline(pipelineId: string) {
+    setMonitoringPipelineId(pipelineId);
+    setMonitoringVersionId("");
+    setMonitoringRunId("");
+    setMonitoringDatasetId("");
+    try {
+      const [versionItems, runItems] = pipelineId
+        ? await Promise.all([
+            api.listPipelineVersions(pipelineId),
+            api.listPipelineRuns(pipelineId)
+          ])
+        : [[], []];
+      setMonitoringVersions(versionItems);
+      setMonitoringRuns(runItems);
+    } catch {
+      setMonitoringVersions([]);
+      setMonitoringRuns([]);
+    }
+  }
+
+  function configureMonitoringFromRun() {
+    const run = monitoringRuns.find((item) => item.id === monitoringRunId);
+    const prediction = run?.output_manifest.find(
+      (output) =>
+        output.artifact_type === "prediction_dataset"
+        && output.dataset_id === monitoringDatasetId
+    );
+    if (!run || !prediction?.dataset_id) return;
+    const template = workflowTemplateDefinition("monitoring");
+    const process = template.steps.find(
+      (step): step is Extract<WorkflowStepDefinition, { type: "data_engineering" }> =>
+        step.type === "data_engineering"
+    );
+    const report = template.steps.find(
+      (step): step is Extract<WorkflowStepDefinition, { type: "monitoring" }> =>
+        step.type === "monitoring"
+    );
+    if (!process || !report) return;
+    const scoreContract = prediction.score_contract ?? {};
+    const problemType = scoreContract.problem_type === "regression"
+      ? "regression"
+      : Array.isArray(scoreContract.classes) && scoreContract.classes.length > 2
+        ? "multiclass_classification"
+        : "binary_classification";
+    const rowIdColumn = prediction.row_id_column
+      ?? prediction.schema?.find(
+        (column) => ![
+          prediction.prediction_column ?? "prediction",
+          "prediction_score",
+          "positive_class_probability"
+        ].includes(column.name)
+      )?.name
+      ?? "row_id";
+    const predictionColumn = prediction.prediction_column ?? "prediction";
+    const processDefinition = process.config.definition;
+    process.config.definition = {
+      ...processDefinition,
+      inputs: processDefinition.inputs.map((input) =>
+        input.input_id === "predictions"
+          ? {
+              ...input,
+              dataset_id: prediction.dataset_id!,
+              version_policy: "pinned" as const
+            }
+          : input
+      ),
+      steps: processDefinition.steps.map((step) =>
+        step.type === "join"
+          ? {
+              ...step,
+              config: {
+                ...step.config,
+                keys: [{ left: rowIdColumn, right: rowIdColumn }]
+              }
+            }
+          : step
+      )
+    };
+    report.config.definition = {
+      ...report.config.definition,
+      row_id_column: rowIdColumn,
+      prediction_column: predictionColumn,
+      problem_type: problemType
+    };
+    setExpandedStepId(process.step_id);
+    onChange({
+      ...template,
+      steps: [process, report],
+      parameters: {
+        ...template.parameters,
+        inferred_from: {
+          pipeline_id: monitoringPipelineId,
+          pipeline_version_id: monitoringVersionId,
+          pipeline_run_id: run.id,
+          prediction_dataset_id: prediction.dataset_id,
+          prediction_artifact_id: prediction.artifact_id ?? ""
+        }
+      }
+    });
+    setIsMonitoringInferenceOpen(false);
+  }
+
   function updateStep(index: number, step: WorkflowStepDefinition) {
     const steps = definition.steps.map((item, itemIndex) => itemIndex === index ? step : item);
     onChange({
@@ -482,7 +617,7 @@ export function WorkflowEditor({
             {pipelineType === "batch_scoring"
               ? "Infer an editable DE → fitted FE → Batch Scoring workflow from one immutable training result."
               : pipelineType === "monitoring"
-                ? "Monitoring execution is planned but not available yet."
+                ? "Join immutable predictions with actuals and calculate full-scope model performance."
                 : "Build the training lifecycle from Data Engineering through holdout Test Scoring."}
           </p>
         </div>
@@ -491,6 +626,12 @@ export function WorkflowEditor({
             <button className="primary-button" type="button" disabled={disabled}
               onClick={() => setIsInferenceDialogOpen(true)}>
               <Sparkles size={15} /> Infer from training pipeline
+            </button>
+          )}
+          {pipelineType === "monitoring" && (
+            <button className="primary-button" type="button" disabled={disabled}
+              onClick={() => setIsMonitoringInferenceOpen(true)}>
+              <Sparkles size={15} /> Infer from scoring run
             </button>
           )}
           {pipelineType !== "batch_scoring" && pipelineType !== "monitoring" && (
@@ -532,7 +673,9 @@ export function WorkflowEditor({
         disabled={disabled}
         onAddFirstStep={() => pipelineType === "batch_scoring"
           ? setIsInferenceDialogOpen(true)
-          : addDataEngineeringStep()}
+          : pipelineType === "monitoring"
+            ? undefined
+            : addDataEngineeringStep()}
         onSelectStep={setExpandedStepId}
       />
 
@@ -543,7 +686,9 @@ export function WorkflowEditor({
               <div className="workflow-step-icon">
                 {step.type === "data_engineering" ? <DatabaseZap size={20} />
                   : step.type === "feature_engineering" ? <Sparkles size={20} />
-                    : step.type === "training" ? <Brain size={20} /> : <Calculator size={20} />}
+                    : step.type === "training" ? <Brain size={20} />
+                      : step.type === "monitoring" ? <Activity size={20} />
+                        : <Calculator size={20} />}
               </div>
               <div className="workflow-step-copy">
                 <span>SELECTED STEP · {step.step_id}</span>
@@ -556,7 +701,9 @@ export function WorkflowEditor({
                     ? `${step.config.definition.inputs.length} splits · ${step.config.definition.transformations.length} transforms · ${step.config.definition.outputs.length} outputs`
                     : step.type === "training"
                       ? `${step.config.definition.feature_columns.length} features · max ${step.config.definition.epochs} epochs${step.config.definition.early_stopping ? " · early stopping" : ""}`
-                      : `model + data · ${step.config.definition.dataset_name}`}
+                      : step.type === "monitoring"
+                        ? `predictions + actuals · ${step.config.definition.report_name}`
+                        : `model + data · ${step.config.definition.dataset_name}`}
                 </small>
               </div>
               <button className="secondary-button" type="button" onClick={() => setExpandedStepId("")}>
@@ -600,6 +747,14 @@ export function WorkflowEditor({
                     ...step, config: { definition: nextDefinition }
                   })}
                 />
+              ) : step.type === "monitoring" ? (
+                <MonitoringBuilder
+                  definition={step.config.definition}
+                  disabled={disabled}
+                  onChange={(nextDefinition) => updateStep(index, {
+                    ...step, config: { definition: nextDefinition }
+                  })}
+                />
               ) : (
                 <ScoringBuilder
                   definition={step.config.definition}
@@ -633,6 +788,35 @@ export function WorkflowEditor({
           onApply={() => configureBatchScoring(sourceModelId)}
         />
       )}
+      {isMonitoringInferenceOpen && (
+        <MonitoringInferenceDialog
+          pipelines={monitoringSourcePipelines}
+          versions={availableMonitoringVersions}
+          runs={availableMonitoringRuns}
+          outputs={monitoringPredictionOutputs}
+          pipelineId={monitoringPipelineId}
+          versionId={monitoringVersionId}
+          runId={monitoringRunId}
+          datasetId={monitoringDatasetId}
+          onPipelineChange={(pipelineId) => void selectMonitoringPipeline(pipelineId)}
+          onVersionChange={(versionId) => {
+            setMonitoringVersionId(versionId);
+            setMonitoringRunId("");
+            setMonitoringDatasetId("");
+          }}
+          onRunChange={(runId) => {
+            setMonitoringRunId(runId);
+            const run = monitoringRuns.find((item) => item.id === runId);
+            const output = run?.output_manifest.find(
+              (item) => item.artifact_type === "prediction_dataset" && item.dataset_id
+            );
+            setMonitoringDatasetId(output?.dataset_id ?? "");
+          }}
+          onDatasetChange={setMonitoringDatasetId}
+          onClose={() => setIsMonitoringInferenceOpen(false)}
+          onApply={configureMonitoringFromRun}
+        />
+      )}
     </div>
   );
 }
@@ -646,6 +830,111 @@ function previousDataEngineeringDefinition(
     if (step.type === "data_engineering") return step.config.definition;
   }
   return undefined;
+}
+
+function MonitoringInferenceDialog({
+  pipelines,
+  versions,
+  runs,
+  outputs,
+  pipelineId,
+  versionId,
+  runId,
+  datasetId,
+  onPipelineChange,
+  onVersionChange,
+  onRunChange,
+  onDatasetChange,
+  onClose,
+  onApply
+}: {
+  pipelines: Pipeline[];
+  versions: PipelineVersion[];
+  runs: PipelineRun[];
+  outputs: PipelineRun["output_manifest"];
+  pipelineId: string;
+  versionId: string;
+  runId: string;
+  datasetId: string;
+  onPipelineChange: (pipelineId: string) => void;
+  onVersionChange: (versionId: string) => void;
+  onRunChange: (runId: string) => void;
+  onDatasetChange: (datasetId: string) => void;
+  onClose: () => void;
+  onApply: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation"
+      onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="modal-dialog form-panel inference-source-dialog" role="dialog"
+        aria-modal="true" aria-label="Infer Monitoring pipeline"
+        onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <span className="builder-kicker">Monitoring template</span>
+            <h2>Infer from scoring run</h2>
+            <p>Pin one immutable prediction artifact. No “latest” result is selected implicitly.</p>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose}
+            aria-label="Close monitoring inference"><X size={17} /></button>
+        </div>
+        <label>Batch scoring pipeline
+          <select value={pipelineId} onChange={(event) => onPipelineChange(event.target.value)}>
+            <option value="">Choose pipeline…</option>
+            {pipelines.map((pipeline) => (
+              <option key={pipeline.id} value={pipeline.id}>{pipeline.name}</option>
+            ))}
+          </select>
+          {!pipelines.length && (
+            <small>No Batch Scoring pipeline exists in this Business Case.</small>
+          )}
+        </label>
+        <label>Published pipeline version
+          <select value={versionId} disabled={!pipelineId}
+            onChange={(event) => onVersionChange(event.target.value)}>
+            <option value="">Choose version…</option>
+            {versions.map((version) => (
+              <option key={version.id} value={version.id}>
+                v{version.version_number} · {version.definition_hash.slice(0, 10)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>Successful scoring run
+          <select value={runId} disabled={!versionId}
+            onChange={(event) => onRunChange(event.target.value)}>
+            <option value="">Choose run…</option>
+            {runs.map((run) => (
+              <option key={run.id} value={run.id}>
+                {run.id.slice(0, 8)} · {run.output_row_count ?? "?"} rows · {run.finished_at ?? run.created_at}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>Prediction artifact
+          <select value={datasetId} disabled={!runId}
+            onChange={(event) => onDatasetChange(event.target.value)}>
+            <option value="">Choose prediction dataset…</option>
+            {outputs.map((output) => (
+              <option key={output.artifact_id ?? output.dataset_id} value={output.dataset_id}>
+                {output.dataset_name ?? output.output_id} · {output.row_count ?? "?"} rows
+              </option>
+            ))}
+          </select>
+          <small>
+            The exact dataset version, scoring pipeline version and run are saved for audit.
+          </small>
+        </label>
+        <div className="modal-actions">
+          <button className="secondary-button" type="button" onClick={onClose}>Cancel</button>
+          <button className="primary-button" type="button" onClick={onApply}
+            disabled={!pipelineId || !versionId || !runId || !datasetId}>
+            <Sparkles size={15} /> Create monitoring draft
+          </button>
+        </div>
+      </section>
+    </div>
+  );
 }
 
 function BatchInferenceDialog({

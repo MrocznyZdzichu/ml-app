@@ -7,7 +7,7 @@ export type PipelineInputDefinition = {
   input_id: string;
   dataset_id: string;
   output_port_id: string;
-  version_policy: "latest" | "select_at_run" | "select_at_run_any";
+  version_policy: "latest" | "pinned" | "select_at_run" | "select_at_run_any";
 };
 
 export type PipelineStepDefinition = {
@@ -24,7 +24,7 @@ export type PipelineOutputDefinition = {
   materialization: "temporary" | "dataset";
   write_mode: "replace";
   dataset_name: string;
-  business_case_role: "source" | "training" | "validation" | "test" | "scoring_input" | "scoring_output" | "monitoring_actuals" | "reference";
+  business_case_role: "source" | "training" | "validation" | "test" | "scoring_input" | "scoring_output" | "monitoring_input" | "monitoring_actuals" | "reference";
   data_contract?: DataContractDefinition;
 };
 
@@ -84,7 +84,9 @@ export function normalizePipelineDefinition(value: unknown): PipelineDefinition 
           input_id: String(input.input_id ?? "source"),
           dataset_id: String(input.dataset_id ?? ""),
           output_port_id: String(input.output_port_id ?? "out"),
-          version_policy: input.version_policy === "select_at_run_any"
+          version_policy: input.version_policy === "pinned"
+            ? "pinned"
+            : input.version_policy === "select_at_run_any"
             ? "select_at_run_any"
             : input.version_policy === "select_at_run"
               ? "select_at_run"

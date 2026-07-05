@@ -709,6 +709,8 @@ class SklearnScoringEngine:
                     "metrics": metrics,
                     **({"evaluation": evaluation} if evaluation is not None else {}),
                     "score_contract": score_contract,
+                    "row_id_column": definition.row_id_column,
+                    "prediction_column": definition.prediction_column,
                     "data_scope": "full",
                     "is_dry_run": is_dry_run,
                     "preview": {

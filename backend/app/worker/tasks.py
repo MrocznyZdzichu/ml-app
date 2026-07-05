@@ -198,6 +198,9 @@ def execute_pipeline_run(run_id: str) -> dict:
                         "artifact_id": str(output.get("artifact_id") or ""),
                         "business_case_role": str(output.get("business_case_role") or ""),
                         "dataset_name": str(output.get("dataset_name") or ""),
+                        "location_uri": str(output.get("location_uri") or ""),
+                        "score_contract": dict(output.get("score_contract") or {}),
+                        "model_artifact_id": str(output.get("model_artifact_id") or ""),
                     },
                 )
             for port_id, output_id in result.artifact_output_ids.items():
