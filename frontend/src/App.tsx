@@ -381,6 +381,7 @@ export default function App() {
         )}
         {activeTab === "data" && (
           <DataPanel
+            businessCases={businessCases}
             datasets={datasets}
             pipelines={pipelines}
             onAnalyze={openDatasetAnalysis}
@@ -1559,6 +1560,8 @@ function PipelinesPanel({
   const [description, setDescription] = useState("");
   const [pipelineType, setPipelineType] = useState("custom");
   const [pipelineTemplate, setPipelineTemplate] = useState<PipelineTemplate>("custom");
+  const [catalogBusinessCaseFilter, setCatalogBusinessCaseFilter] = useState("");
+  const [catalogPipelineTypeFilter, setCatalogPipelineTypeFilter] = useState("");
   const [selectedPipelineId, setSelectedPipelineId] = useState("");
   const [isCreatePipelineOpen, setIsCreatePipelineOpen] = useState(false);
   const [copyPipelineTarget, setCopyPipelineTarget] = useState<Pipeline | null>(null);
@@ -1603,6 +1606,16 @@ function PipelinesPanel({
   const [pipelineDataAttachments, setPipelineDataAttachments] = useState<BusinessCaseDataAttachment[]>([]);
   const activePipelines = pipelines.filter((item) => item.status !== "deprecated");
   const deprecatedPipelines = pipelines.filter((item) => item.status === "deprecated");
+  const catalogPipelineTypes = useMemo(
+    () => [...new Set(pipelines.map((item) => item.type))].sort((left, right) => left.localeCompare(right)),
+    [pipelines]
+  );
+  const pipelineMatchesCatalogFilters = (item: Pipeline) =>
+    (!catalogBusinessCaseFilter || item.business_case_id === catalogBusinessCaseFilter)
+    && (!catalogPipelineTypeFilter || item.type === catalogPipelineTypeFilter);
+  const filteredActivePipelines = activePipelines.filter(pipelineMatchesCatalogFilters);
+  const filteredDeprecatedPipelines = deprecatedPipelines.filter(pipelineMatchesCatalogFilters);
+  const hasCatalogFilters = Boolean(catalogBusinessCaseFilter || catalogPipelineTypeFilter);
   const selectedPipeline = activePipelines.find((item) => item.id === selectedPipelineId) ?? activePipelines[0];
   const selectedPipelineIdValue = selectedPipeline?.id ?? "";
   const selectedBusinessCaseIdValue = selectedPipeline?.business_case_id ?? "";
@@ -2098,12 +2111,47 @@ function PipelinesPanel({
               </button>
             </div>
           </div>
+          <div className="pipeline-catalog-filters" aria-label="Pipeline filters">
+            <label>
+              <span><Filter size={14} /> Business case</span>
+              <select
+                aria-label="Filter pipelines by Business Case"
+                value={catalogBusinessCaseFilter}
+                onChange={(event) => setCatalogBusinessCaseFilter(event.target.value)}
+              >
+                <option value="">All business cases</option>
+                {businessCases.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+              </select>
+            </label>
+            <label>
+              <span><Filter size={14} /> Pipeline type</span>
+              <select
+                aria-label="Filter pipelines by type"
+                value={catalogPipelineTypeFilter}
+                onChange={(event) => setCatalogPipelineTypeFilter(event.target.value)}
+              >
+                <option value="">All pipeline types</option>
+                {catalogPipelineTypes.map((type) => (
+                  <option key={type} value={type}>{type.replaceAll("_", " ")}</option>
+                ))}
+              </select>
+            </label>
+            <span className="pipeline-filter-summary">
+              {filteredActivePipelines.length} of {activePipelines.length} active workflows
+            </span>
+          </div>
           <div className="pipeline-table" role="table" aria-label="Pipelines">
             <div className="pipeline-table-row head" role="row">
               <span>Name</span><span>Business case</span><span>Purpose</span><span>Version</span><span>Status</span><span>Updated</span><span />
             </div>
-            {activePipelines.map((item) => renderPipelineRow(item))}
-            {!activePipelines.length && <div className="catalog-empty">No active pipelines. Create a workflow or copy one from the deprecated section.</div>}
+            {filteredActivePipelines.map((item) => renderPipelineRow(item))}
+            {!filteredActivePipelines.length && (
+              <div className="catalog-empty">
+                {hasCatalogFilters
+                  ? "No active pipelines match the selected filters."
+                  : "No active pipelines. Create a workflow or copy one from the deprecated section."}
+              </div>
+            )}
           </div>
         </section>
         {deprecatedPipelines.length > 0 && (
@@ -2113,13 +2161,16 @@ function PipelinesPanel({
                 <strong>Deprecated pipelines</strong>
                 <small>Preserved for audit and lineage. They cannot be edited or run.</small>
               </span>
-              <i>{deprecatedPipelines.length}</i>
+              <i>{filteredDeprecatedPipelines.length}</i>
             </summary>
             <div className="pipeline-table" role="table" aria-label="Deprecated pipelines">
               <div className="pipeline-table-row head" role="row">
                 <span>Name</span><span>Business case</span><span>Purpose</span><span>Version</span><span>Status</span><span>Updated</span><span />
               </div>
-              {deprecatedPipelines.map((item) => renderPipelineRow(item, true))}
+              {filteredDeprecatedPipelines.map((item) => renderPipelineRow(item, true))}
+              {!filteredDeprecatedPipelines.length && (
+                <div className="catalog-empty">No deprecated pipelines match the selected filters.</div>
+              )}
             </div>
           </details>
         )}
@@ -2847,12 +2898,14 @@ function DatasetVersionHistoryDialog({
 }
 
 function DataPanel({
+  businessCases,
   datasets,
   pipelines,
   onAnalyze,
   onRefresh,
   setNotice
 }: {
+  businessCases: BusinessCase[];
   datasets: DataAsset[];
   pipelines: Pipeline[];
   onAnalyze: (datasetId: string) => void;
@@ -2867,15 +2920,56 @@ function DataPanel({
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [isUploadingFile, setIsUploadingFile] = useState(false);
   const [uploadLogicalId, setUploadLogicalId] = useState("");
+  const [businessCaseFilter, setBusinessCaseFilter] = useState("");
+  const [businessCaseAttachments, setBusinessCaseAttachments] = useState<BusinessCaseDataAttachment[]>([]);
+  const [isBusinessCaseFilterLoading, setIsBusinessCaseFilterLoading] = useState(false);
   const [purposeFilter, setPurposeFilter] = useState("");
   const [pipelineFilter, setPipelineFilter] = useState("");
   const [uploadedOnly, setUploadedOnly] = useState(false);
+  useEffect(() => {
+    setBusinessCaseAttachments([]);
+    if (!businessCaseFilter) {
+      setIsBusinessCaseFilterLoading(false);
+      return;
+    }
+    let active = true;
+    setIsBusinessCaseFilterLoading(true);
+    api.listBusinessCaseDataAttachments(businessCaseFilter)
+      .then((items) => {
+        if (active) setBusinessCaseAttachments(items);
+      })
+      .catch((error) => {
+        if (active) {
+          setNotice(error instanceof Error ? error.message : "Could not load Business Case datasets");
+        }
+      })
+      .finally(() => {
+        if (active) setIsBusinessCaseFilterLoading(false);
+      });
+    return () => { active = false; };
+  }, [businessCaseFilter, setNotice]);
+  const attachedLogicalIds = useMemo(() => {
+    const datasetById = new Map(datasets.map((dataset) => [dataset.id, dataset]));
+    return new Set(
+      businessCaseAttachments
+        .map((attachment) => datasetById.get(attachment.data_asset_id)?.logical_id)
+        .filter((value): value is string => Boolean(value))
+    );
+  }, [businessCaseAttachments, datasets]);
+  const filterPipelines = businessCaseFilter
+    ? pipelines.filter((pipeline) => pipeline.business_case_id === businessCaseFilter)
+    : pipelines;
   const activeDatasets = datasets.filter((dataset) => {
     if (dataset.status === "deleted" || isDataView(dataset)) return false;
+    if (businessCaseFilter && !attachedLogicalIds.has(dataset.logical_id)) return false;
     if (uploadedOnly) return isUploadedDataset(dataset);
     return pipelineMatches(datasetPipelineId(dataset), pipelines, purposeFilter, pipelineFilter);
   });
-  const dataViews = datasets.filter((dataset) => dataset.status !== "deleted" && isDataView(dataset));
+  const dataViews = datasets.filter((dataset) =>
+    dataset.status !== "deleted"
+    && isDataView(dataset)
+    && (!businessCaseFilter || attachedLogicalIds.has(dataset.logical_id))
+  );
   const deletedDatasets = datasets.filter((dataset) => dataset.status === "deleted");
 
   function selectDatasetFile(nextFile: File | null) {
@@ -3053,23 +3147,44 @@ function DataPanel({
         <div className="panel dataset-catalog-filters">
           <div>
             <h2>Dataset filters</h2>
-            <p>{datasetVersionGroups(activeDatasets).length} dataset families shown</p>
+            <p>
+              {isBusinessCaseFilterLoading
+                ? "Loading Business Case datasets…"
+                : `${datasetVersionGroups(activeDatasets).length} dataset families shown`}
+            </p>
           </div>
-          <ArtifactFilters
-            pipelines={pipelines}
-            purpose={purposeFilter}
-            pipelineId={pipelineFilter}
-            onPurposeChange={setPurposeFilter}
-            onPipelineChange={setPipelineFilter}
-            uploadedOnly={uploadedOnly}
-            onUploadedOnlyChange={(value) => {
-              setUploadedOnly(value);
-              if (value) {
-                setPurposeFilter("");
-                setPipelineFilter("");
-              }
-            }}
-          />
+          <div className="dataset-filter-controls">
+            <label className="dataset-business-case-filter">
+              <span><Filter size={14} /> Business case</span>
+              <select
+                aria-label="Filter datasets by Business Case"
+                value={businessCaseFilter}
+                onChange={(event) => {
+                  setBusinessCaseFilter(event.target.value);
+                  setPurposeFilter("");
+                  setPipelineFilter("");
+                }}
+              >
+                <option value="">All business cases</option>
+                {businessCases.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+              </select>
+            </label>
+            <ArtifactFilters
+              pipelines={filterPipelines}
+              purpose={purposeFilter}
+              pipelineId={pipelineFilter}
+              onPurposeChange={setPurposeFilter}
+              onPipelineChange={setPipelineFilter}
+              uploadedOnly={uploadedOnly}
+              onUploadedOnlyChange={(value) => {
+                setUploadedOnly(value);
+                if (value) {
+                  setPurposeFilter("");
+                  setPipelineFilter("");
+                }
+              }}
+            />
+          </div>
         </div>
         <VersionedDatasetList
           datasets={activeDatasets}

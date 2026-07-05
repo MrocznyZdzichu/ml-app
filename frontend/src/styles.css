@@ -1584,6 +1584,31 @@ textarea {
   margin: 5px 0 0;
 }
 
+.pipeline-catalog-filters {
+  align-items: end;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(220px, 320px)) 1fr;
+}
+
+.pipeline-catalog-filters > label {
+  display: grid;
+  gap: 5px;
+}
+
+.pipeline-catalog-filters > label > span {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
+.pipeline-filter-summary {
+  color: #687987;
+  font-size: 12px;
+  justify-self: end;
+  padding-bottom: 11px;
+}
+
 .run-history-dialog {
   width: min(1180px, calc(100vw - 40px));
   max-width: 1180px;
@@ -1665,6 +1690,16 @@ textarea {
   .catalog-toolbar-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .pipeline-catalog-filters {
+    grid-template-columns: repeat(2, minmax(180px, 1fr));
+  }
+
+  .pipeline-filter-summary {
+    grid-column: 1 / -1;
+    justify-self: start;
+    padding-bottom: 0;
   }
 
   .run-history-filters {
@@ -3600,6 +3635,14 @@ textarea {
     position: static;
   }
 
+  .pipeline-catalog-filters {
+    grid-template-columns: 1fr;
+  }
+
+  .pipeline-filter-summary {
+    grid-column: auto;
+  }
+
   .pipeline-table-row,
   .pipeline-table-row.head {
     grid-template-columns: 1fr auto;
@@ -3906,6 +3949,24 @@ textarea {
 
 .dataset-catalog-filters .artifact-filters {
   margin-bottom: 0;
+}
+
+.dataset-filter-controls {
+  align-items: end;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(220px, 0.55fr) minmax(0, 2fr);
+}
+
+.dataset-business-case-filter {
+  display: grid;
+  gap: 5px;
+}
+
+.dataset-business-case-filter > span {
+  align-items: center;
+  display: flex;
+  gap: 6px;
 }
 
 .model-registry-table {
@@ -7930,6 +7991,7 @@ textarea {
 @media (max-width: 1100px) {
   .pipeline-metadata-editor,
   .analysis-dataset-filters,
+  .dataset-filter-controls,
   .artifact-filters,
   .artifact-filters:has(.artifact-filter-toggle) {
     grid-template-columns: 1fr;
