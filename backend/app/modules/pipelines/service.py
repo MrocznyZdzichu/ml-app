@@ -567,7 +567,7 @@ class PipelineService:
         run = self.repository.get_run(run_id)
         if not run or run.pipeline_id != pipeline.id or run.owner_id != principal.user_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pipeline run not found")
-        return run
+        return self._repair_finished_active_run(run)
 
     def get_run_details(self, pipeline_id: str, run_id: str, principal: Principal) -> dict[str, Any]:
         run = self.get_run(pipeline_id, run_id, principal)
@@ -670,12 +670,13 @@ class PipelineService:
         if pipeline_id:
             pipeline = self._get_owned_pipeline(pipeline_id, principal)
             pipeline_id = pipeline.id
-        return self.repository.list_runs(
+        runs = self.repository.list_runs(
             pipeline_id,
             principal.user_id,
             limit=limit,
             offset=offset,
         )
+        return [self._repair_finished_active_run(run) for run in runs]
 
     def list_step_runs(
         self,
@@ -761,6 +762,50 @@ class PipelineService:
         if draft:
             return draft
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Pipeline has no runnable version")
+
+    def _repair_finished_active_run(self, run: PipelineRun) -> PipelineRun:
+        if run.status not in {PipelineRunStatus.QUEUED, PipelineRunStatus.RUNNING}:
+            return run
+        if run.finished_at is None:
+            return run
+        message = (
+            "Pipeline worker stopped after setting a finish timestamp without a terminal status; "
+            "the run was marked failed during status reconciliation."
+        )
+        run.status = PipelineRunStatus.FAILED
+        run.error_message = run.error_message or message
+        run.warnings = list(dict.fromkeys([*run.warnings, message]))
+        run.events = [
+            *run.events,
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "level": "error",
+                "type": "run.reconciled_failed",
+                "step_id": "",
+                "message": "Pipeline run status reconciled to failed",
+                "details": {"reason": message},
+            },
+        ][-1000:]
+        for step_run in self.repository.list_step_runs(run.id, run.owner_id):
+            if step_run.status not in {PipelineRunStatus.QUEUED, PipelineRunStatus.RUNNING}:
+                continue
+            step_run.status = PipelineRunStatus.FAILED
+            step_run.finished_at = step_run.finished_at or run.finished_at
+            step_run.error_message = step_run.error_message or message
+            step_run.warnings = list(dict.fromkeys([*step_run.warnings, message]))
+            step_run.events = [
+                *step_run.events,
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "level": "error",
+                    "type": "step.reconciled_failed",
+                    "step_id": step_run.pipeline_step_id,
+                    "message": "Pipeline step status reconciled to failed",
+                    "details": {"reason": message},
+                },
+            ][-1000:]
+            self.repository.update_step_run(step_run)
+        return self.repository.update_run(run)
 
 
 def normalize_definition(definition: dict) -> dict:

@@ -492,6 +492,20 @@ def test_training_catalog_exposes_a_broad_executable_algorithm_registry() -> Non
     assert all(item["parameters"] is not None for item in catalog["algorithms"])
 
 
+def test_passive_aggressive_classifier_loss_is_tunable() -> None:
+    catalog = training_catalog()
+    algorithm = next(
+        item for item in catalog["algorithms"]
+        if item["id"] == "passive_aggressive_classifier"
+    )
+    loss = next(item for item in algorithm["parameters"] if item["id"] == "loss")
+
+    assert loss["search"] == {
+        "kind": "categorical",
+        "values": ["hinge", "squared_hinge"],
+    }
+
+
 def test_every_available_catalog_entry_has_an_estimator_factory() -> None:
     built = [
         build_estimator(
@@ -693,6 +707,168 @@ def test_grid_search_uses_user_configured_search_space(tmp_path: Path) -> None:
         for trial in optimization["trials"]
         if trial["status"] == "succeeded"
     }.issubset({0.25, 0.5})
+
+
+def test_grid_search_allows_single_numeric_value_from_range(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    source = repository / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    path = source / "single-grid-value.parquet"
+    escaped_path = str(path).replace("'", "''")
+    duckdb.connect().execute(
+        "COPY (SELECT range AS row_id, range::DOUBLE AS x, "
+        "CASE WHEN range >= 20 THEN 1 ELSE 0 END AS target FROM range(40)) "
+        f"TO '{escaped_path}' (FORMAT PARQUET)"
+    ).close()
+
+    result = SklearnTrainingEngine(repository).execute(
+        TrainingDefinition(
+            problem_type="binary_classification",
+            algorithm="logistic_regression",
+            target_column="target",
+            feature_columns=["x"],
+            optimization={
+                "mode": "grid_search",
+                "validation_strategy": "cross_validation",
+                "primary_metric": "accuracy",
+                "cv_folds": 2,
+                "max_trials": 10,
+                "timeout_seconds": 60,
+                "search_space": {
+                    "C": {"kind": "float", "low": 0.25, "high": 0.5, "points": 1},
+                    "penalty": {"kind": "categorical", "values": ["l2"]},
+                },
+            },
+            resource_limits={"max_memory_mb": 128, "max_parallel_jobs": 1},
+        ),
+        _relation(path, 40),
+        None,
+        run_id="single-grid-value-run",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    optimization = model["metrics"]["optimization"]
+    assert optimization["search_space"]["C"] == [0.25]
+    assert optimization["trial_count"] == optimization["total_candidate_count"]
+    assert {
+        trial["parameters"]["C"]
+        for trial in optimization["trials"]
+        if trial["status"] == "succeeded"
+    } == {0.25}
+
+
+def test_grid_search_appends_real_none_to_numeric_range(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    source = repository / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    path = source / "range-with-none.parquet"
+    escaped_path = str(path).replace("'", "''")
+    duckdb.connect().execute(
+        "COPY (SELECT range AS row_id, range::DOUBLE AS x, "
+        "CASE WHEN range >= 20 THEN 1 ELSE 0 END AS target FROM range(40)) "
+        f"TO '{escaped_path}' (FORMAT PARQUET)"
+    ).close()
+
+    result = SklearnTrainingEngine(repository).execute(
+        TrainingDefinition(
+            problem_type="binary_classification",
+            algorithm="random_forest_classifier",
+            target_column="target",
+            feature_columns=["x"],
+            parameters={"n_estimators": 20},
+            optimization={
+                "mode": "grid_search",
+                "validation_strategy": "cross_validation",
+                "primary_metric": "accuracy",
+                "cv_folds": 2,
+                "max_trials": 10,
+                "timeout_seconds": 60,
+                "search_space": {
+                    "n_estimators": {"kind": "categorical", "values": [20]},
+                    "max_depth": {"kind": "int", "low": 2, "high": 2, "points": 1, "include_null": True},
+                    "min_samples_split": {"kind": "categorical", "values": [2]},
+                    "min_samples_leaf": {"kind": "categorical", "values": [1]},
+                    "max_features": {"kind": "categorical", "values": ["None"]},
+                },
+            },
+            resource_limits={"max_memory_mb": 128, "max_parallel_jobs": 1},
+        ),
+        _relation(path, 40),
+        None,
+        run_id="range-with-none-run",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    optimization = model["metrics"]["optimization"]
+    assert optimization["search_space"]["max_depth"] == [2, None]
+    assert optimization["search_space"]["max_features"] == [None]
+    assert {
+        trial["parameters"]["max_depth"]
+        for trial in optimization["trials"]
+        if trial["status"] == "succeeded"
+    } == {2, None}
+    assert all(
+        trial["parameters"]["max_features"] is None
+        for trial in optimization["trials"]
+        if trial["status"] == "succeeded"
+    )
+
+
+def test_grid_search_ignores_empty_legacy_select_values(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    source = repository / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    path = source / "legacy-empty-select.parquet"
+    escaped_path = str(path).replace("'", "''")
+    duckdb.connect().execute(
+        "COPY (SELECT range AS row_id, range::DOUBLE AS x, "
+        "CASE WHEN range >= 20 THEN 1 ELSE 0 END AS target FROM range(40)) "
+        f"TO '{escaped_path}' (FORMAT PARQUET)"
+    ).close()
+
+    result = SklearnTrainingEngine(repository).execute(
+        TrainingDefinition(
+            problem_type="binary_classification",
+            algorithm="random_forest_classifier",
+            target_column="target",
+            feature_columns=["x"],
+            parameters={"n_estimators": 20},
+            optimization={
+                "mode": "grid_search",
+                "validation_strategy": "cross_validation",
+                "primary_metric": "accuracy",
+                "cv_folds": 2,
+                "max_trials": 10,
+                "timeout_seconds": 60,
+                "search_space": {
+                    "n_estimators": {"kind": "categorical", "values": [20]},
+                    "max_depth": {"kind": "categorical", "values": [2]},
+                    "min_samples_split": {"kind": "categorical", "values": [2]},
+                    "min_samples_leaf": {"kind": "categorical", "values": [1]},
+                    "max_features": {"kind": "categorical", "values": ["", "log2", "sqrt"]},
+                },
+            },
+            resource_limits={"max_memory_mb": 128, "max_parallel_jobs": 1},
+        ),
+        _relation(path, 40),
+        None,
+        run_id="legacy-empty-select-run",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    optimization = model["metrics"]["optimization"]
+    assert optimization["search_space"]["max_features"] == ["log2", "sqrt"]
+    assert {
+        trial["parameters"]["max_features"]
+        for trial in optimization["trials"]
+        if trial["status"] == "succeeded"
+    } == {"log2", "sqrt"}
 
 
 def test_grid_search_allows_large_deterministic_combination_cap() -> None:

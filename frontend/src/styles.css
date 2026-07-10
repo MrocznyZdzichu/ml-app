@@ -2355,6 +2355,15 @@ textarea {
   margin-top: 3px;
 }
 
+.validation-feedback {
+  align-items: flex-start;
+}
+
+.validation-feedback .run-result-icon {
+  flex: 0 0 auto;
+  margin-top: 5px;
+}
+
 .run-spinner {
   animation: run-spin 0.8s linear infinite;
   border: 3px solid rgba(34, 91, 120, 0.2);
@@ -2926,6 +2935,21 @@ textarea {
   font-size: 11px;
 }
 
+.training-validation-warning {
+  align-items: flex-start;
+}
+
+.training-validation-warning span,
+.training-validation-warning strong,
+.training-validation-warning small {
+  display: block;
+}
+
+.training-validation-warning small {
+  color: #85682a;
+  margin-top: 3px;
+}
+
 .algorithm-summary {
   background: #f8fafb;
   border: 1px solid #d9e3e8;
@@ -3080,18 +3104,33 @@ textarea {
   gap: 6px;
 }
 
+.numeric-search-editor {
+  display: grid;
+  gap: 7px;
+}
+
+.search-space-mode-row {
+  align-items: end;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
 .search-space-editor-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .search-space-editor-grid label,
-.search-space-editor {
+.search-space-editor,
+.search-space-mode-row label {
   color: #405563;
   font-size: 10px;
 }
 
 .search-space-editor-grid input,
-.search-space-editor input {
+.search-space-editor-grid select,
+.search-space-editor input,
+.search-space-mode-row select {
   font-size: 11px;
   min-height: 30px;
 }
@@ -3115,6 +3154,88 @@ textarea {
 .categorical-values-list {
   display: grid;
   gap: 5px;
+}
+
+.search-space-multiselect {
+  position: relative;
+}
+
+.search-space-multiselect summary {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #cfdbe1;
+  border-radius: 8px;
+  color: #334855;
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+  list-style: none;
+  min-height: 34px;
+  padding: 7px 9px;
+}
+
+.search-space-multiselect summary::-webkit-details-marker {
+  display: none;
+}
+
+.search-space-multiselect summary::after {
+  color: #71818d;
+  content: "▾";
+  font-size: 12px;
+}
+
+.search-space-multiselect summary span {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-space-multiselect summary small {
+  color: #71818d;
+  flex: 0 0 auto;
+  font-size: 9px;
+}
+
+.search-space-option-list {
+  background: #ffffff;
+  border: 1px solid #dbe5ea;
+  border-radius: 8px;
+  box-shadow: 0 12px 26px rgba(22, 36, 45, 0.16);
+  display: grid;
+  left: 0;
+  margin-top: 4px;
+  max-height: 150px;
+  overflow: auto;
+  position: absolute;
+  right: 0;
+  z-index: 20;
+}
+
+.search-space-option-list label {
+  align-items: center;
+  display: flex;
+  gap: 7px;
+  margin: 0;
+  min-height: 30px;
+  padding: 5px 8px;
+}
+
+.search-space-option-list input {
+  flex: 0 0 auto;
+  min-height: auto;
+  width: auto;
+}
+
+.search-space-option-list label + label {
+  border-top: 1px solid #e4ebef;
+}
+
+.search-space-option-list span {
+  color: #334855;
+  font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 .categorical-value-row {
@@ -3256,6 +3377,7 @@ textarea {
   .training-parameter-grid,
   .optimization-mode-grid,
   .search-space-grid,
+  .search-space-mode-row,
   .automl-candidates > div {
     grid-template-columns: 1fr;
   }
@@ -4865,6 +4987,87 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.search-heatmap-panel {
+  border: 1px solid #dce5ea;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+}
+
+.search-heatmap-controls {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.search-heatmap-controls label {
+  color: #60717e;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.search-heatmap-scroll {
+  overflow: auto;
+}
+
+.search-heatmap-grid {
+  display: grid;
+  min-width: max-content;
+}
+
+.search-heatmap-grid > strong,
+.search-heatmap-row > strong,
+.search-heatmap-corner,
+.search-heatmap-cell {
+  border-bottom: 1px solid #e3e9ed;
+  border-right: 1px solid #e3e9ed;
+  min-height: 38px;
+  min-width: 72px;
+  padding: 8px;
+}
+
+.search-heatmap-grid > strong,
+.search-heatmap-row > strong,
+.search-heatmap-corner {
+  background: #f4f7f9;
+  color: #60717e;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.search-heatmap-cell {
+  align-items: center;
+  color: #10202a;
+  display: flex;
+  font-size: 12px;
+  font-weight: 800;
+  justify-content: center;
+}
+
+.search-heatmap-legend {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: auto minmax(140px, 220px) auto;
+  justify-content: end;
+}
+
+.search-heatmap-legend span {
+  color: #60717e;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.search-heatmap-legend i {
+  background: linear-gradient(90deg, hsl(195, 72%, 92%), hsl(117, 72%, 66%), hsl(40, 72%, 50%));
+  border: 1px solid #dce5ea;
+  border-radius: 999px;
+  display: block;
+  height: 10px;
+}
+
 .trial-status {
   border-radius: 999px;
   font-size: 10px;
@@ -5009,6 +5212,7 @@ textarea {
   .model-registry-filters,
   .model-detail-metrics,
   .model-key-value-grid,
+  .search-heatmap-controls,
   .optimization-trial-table > div {
     grid-template-columns: 1fr;
   }

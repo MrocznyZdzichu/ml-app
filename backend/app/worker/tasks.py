@@ -12,7 +12,7 @@ from app.modules.pipelines.domain import (
     PipelineRunStatus,
     PipelineStepRun,
 )
-from app.modules.pipelines.runtime import SourceRelation, sql_literal
+from app.modules.pipelines.runtime import SourceRelation, json_safe, sql_literal
 from app.modules.pipelines.materialization import (
     PipelineOutputMaterializer,
     ScoringReportMaterializer,
@@ -162,7 +162,7 @@ def execute_pipeline_run(run_id: str) -> dict:
                 repository.update_step_run(active_step_run)
                 active_step_run = None
                 raise PipelineExecutionCancelled("Pipeline run was cancelled")
-            step_output_manifest = list(result.output_manifest)
+            step_output_manifest = json_safe(list(result.output_manifest))
             step_input_artifact_ids = list(dict.fromkeys(
                 [
                     artifact_id
@@ -269,9 +269,9 @@ def execute_pipeline_run(run_id: str) -> dict:
             active_step_run.input_row_count = result.input_row_count
             active_step_run.processed_row_count = result.processed_row_count
             active_step_run.output_row_count = result.output_row_count
-            active_step_run.warnings = result.warnings
-            all_warnings.extend(result.warnings)
-            active_step_run.output_manifest = step_output_manifest
+            active_step_run.warnings = json_safe(list(result.warnings))
+            all_warnings.extend(active_step_run.warnings)
+            active_step_run.output_manifest = json_safe(step_output_manifest)
             active_step_run.status = PipelineRunStatus.SUCCEEDED
             active_step_run.finished_at = datetime.now(timezone.utc)
             emit_event(
@@ -307,9 +307,9 @@ def execute_pipeline_run(run_id: str) -> dict:
             )
             all_output_manifests.extend(report_manifests)
             all_artifact_ids.extend(report_artifact_ids)
-        run.output_manifest = all_output_manifests
+        run.output_manifest = json_safe(all_output_manifests)
         run.output_artifact_ids = list(dict.fromkeys(all_artifact_ids))
-        run.warnings = list(dict.fromkeys(all_warnings))
+        run.warnings = json_safe(list(dict.fromkeys(all_warnings)))
         run.status = PipelineRunStatus.SUCCEEDED
         _append_run_event(
             run,
@@ -496,11 +496,11 @@ def _build_run_event(
         "type": event_type,
         "step_id": step_id,
         "message": str(details.get("message") or event_type),
-        "details": {
+        "details": json_safe({
             key: value
             for key, value in details.items()
             if key != "message"
-        },
+        }),
     }
 
 

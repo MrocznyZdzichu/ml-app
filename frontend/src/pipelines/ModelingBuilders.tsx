@@ -12,7 +12,8 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import {
   classificationAlgorithms,
-  regressionAlgorithms
+  regressionAlgorithms,
+  validateTrainingConfiguration
 } from "./modelingContract";
 import type {
   ModelingDefaults,
@@ -38,6 +39,7 @@ export function TrainingBuilder({ definition, defaults, disabled, onChange }: {
   ) ?? [], [catalog, definition.problem_type]);
   const selectedAlgorithm = algorithms.find((item) => item.id === definition.algorithm)
     ?? catalog?.algorithms.find((item) => item.id === definition.algorithm);
+  const validationIssues = validateTrainingConfiguration(definition);
   const updateAlgorithm = (algorithm: TrainingAlgorithm) => update({
     algorithm,
     parameters: Object.fromEntries(
@@ -88,6 +90,13 @@ export function TrainingBuilder({ definition, defaults, disabled, onChange }: {
         <small>{catalog.algorithm_count} registered across classification and regression</small></span>
     </div>}
     {error && <div className="training-warning"><AlertTriangle size={16} /><span>{error}</span></div>}
+    {validationIssues.length > 0 && <div className="training-warning training-validation-warning">
+      <AlertTriangle size={16} />
+      <span><strong>Model settings need attention</strong>
+        {validationIssues.slice(0, 4).map((issue) => <small key={issue}>{issue}</small>)}
+        {validationIssues.length > 4 && <small>And {validationIssues.length - 4} more validation issue(s).</small>}
+      </span>
+    </div>}
     {selectedAlgorithm && <AlgorithmSummary algorithm={selectedAlgorithm} />}
     <label>Model name<input value={definition.model_name} disabled={disabled}
       onChange={(event) => update({ model_name: event.target.value })} /></label>
@@ -389,34 +398,107 @@ function SearchSpaceEditor({ parameter, search, disabled, onChange }: {
   onChange: (search: Record<string, unknown>) => void;
 }) {
   if (!search) return null;
-  if (search.kind === "categorical") {
-    return <CategoricalSearchEditor search={search} parameter={parameter}
+  if (isNumericSearchParameter(parameter)) {
+    return <NumericSearchEditor search={search} parameter={parameter}
       disabled={disabled} onChange={onChange} />;
   }
-  const isInteger = search.kind === "int" || parameter.kind === "integer";
-  return <div className="search-space-editor-grid">
-    <label>From<input type="number" value={Number(search.low ?? 0)} disabled={disabled}
-      step={isInteger ? 1 : "any"} onChange={(event) => onChange({
-        ...search,
-        low: isInteger ? Math.trunc(Number(event.target.value)) : Number(event.target.value)
-      })} /></label>
-    <label>To<input type="number" value={Number(search.high ?? 0)} disabled={disabled}
-      step={isInteger ? 1 : "any"} onChange={(event) => onChange({
-        ...search,
-        high: isInteger ? Math.trunc(Number(event.target.value)) : Number(event.target.value)
-      })} /></label>
-    <label>Values count<input type="number" value={numericSearchPoints(search)} disabled={disabled}
-      min={2} max={200} step={1} onChange={(event) => {
-        const points = Math.max(2, Math.min(200, Math.trunc(Number(event.target.value) || 2)));
-        const next: Record<string, unknown> = { ...search, points };
-        delete next.step;
-        onChange(next);
-      }} /></label>
-    <label className="search-space-log-toggle">
-      <input type="checkbox" checked={search.log === true} disabled={disabled}
-        onChange={(event) => onChange({ ...search, log: event.target.checked })} />
-      Log scale
-    </label>
+  return <CategoricalSearchEditor search={search} parameter={parameter}
+    disabled={disabled} onChange={onChange} />;
+}
+
+function NumericSearchEditor({ search, parameter, disabled, onChange }: {
+  search: Record<string, unknown>;
+  parameter: TrainingAlgorithmSpec["parameters"][number];
+  disabled: boolean;
+  onChange: (search: Record<string, unknown>) => void;
+}) {
+  const isInteger = parameter.kind === "integer" || search.kind === "int";
+  const rangeSearch = search.kind === "int" || search.kind === "float";
+  const values = numericSearchValues(search, parameter);
+  const includeNone = search.include_null === true
+    || (Array.isArray(search.values) && search.values.some((value) => value == null));
+  const rangeLow = Number(search.low ?? values[0] ?? parameter.default ?? parameter.minimum ?? 0);
+  const rangeHigh = Number(search.high ?? values[values.length - 1] ?? parameter.default ?? parameter.maximum ?? rangeLow);
+  const toNumber = (value: string) => isInteger ? Math.trunc(Number(value)) : Number(value);
+  const updateValues = (nextValues: number[], nextIncludeNone = includeNone) => onChange({
+    kind: "categorical",
+    values: [...(nextIncludeNone ? [null] : []), ...nextValues.map((value) => isInteger ? Math.trunc(value) : value)]
+  });
+  return <div className="numeric-search-editor">
+    <div className="search-space-mode-row">
+      <label>Grid mode<select value={rangeSearch ? "range" : "list"} disabled={disabled}
+        onChange={(event) => {
+          if (event.target.value === "range") {
+            onChange({
+              kind: isInteger ? "int" : "float",
+              low: rangeLow,
+              high: rangeHigh,
+              points: Math.max(1, numericSearchPoints(search)),
+              log: search.log === true,
+              include_null: includeNone
+            });
+          } else {
+            updateValues(values.length ? values : [rangeLow]);
+          }
+        }}>
+        <option value="range">Linear / logarithmic range</option>
+        <option value="list">Explicit value list</option>
+      </select></label>
+      <label className="search-space-log-toggle">
+        <input type="checkbox" checked={includeNone} disabled={disabled || !parameter.nullable}
+          onChange={(event) => {
+            if (rangeSearch) onChange({ ...search, include_null: event.target.checked });
+            else updateValues(values, event.target.checked);
+          }} />
+        Include None / automatic
+      </label>
+    </div>
+    {rangeSearch ? <div className="search-space-editor-grid">
+      <label>From<input type="number" value={rangeLow} disabled={disabled}
+        step={isInteger ? 1 : "any"} onChange={(event) => onChange({
+          ...search,
+          low: toNumber(event.target.value)
+        })} /></label>
+      <label>To<input type="number" value={rangeHigh} disabled={disabled}
+        step={isInteger ? 1 : "any"} onChange={(event) => onChange({
+          ...search,
+          high: toNumber(event.target.value)
+        })} /></label>
+      <label>Values count<input type="number" value={numericSearchPoints(search)} disabled={disabled}
+        min={1} max={200} step={1} onChange={(event) => {
+          const points = Math.max(1, Math.min(200, Math.trunc(Number(event.target.value) || 1)));
+          const next: Record<string, unknown> = { ...search, points };
+          delete next.step;
+          onChange(next);
+        }} /></label>
+      <label>Scale<select value={search.log === true ? "log" : "linear"} disabled={disabled}
+        onChange={(event) => onChange({ ...search, log: event.target.value === "log" })}>
+        <option value="linear">Linear</option>
+        <option value="log">Logarithmic</option>
+      </select></label>
+    </div> : <div className="categorical-search-editor">
+      <div className="categorical-values-list">
+        {values.map((value, index) => <div key={`${String(value)}-${index}`} className="categorical-value-row">
+          <input type="number" value={value} disabled={disabled}
+            step={isInteger ? 1 : "any"}
+            onChange={(event) => {
+              const next = [...values];
+              next[index] = toNumber(event.target.value);
+              updateValues(next);
+            }} />
+          <button type="button" className="link-button danger-link"
+            disabled={disabled || (values.length <= 1 && !includeNone)}
+            onClick={() => updateValues(values.filter((_, itemIndex) => itemIndex !== index))}>
+            Remove
+          </button>
+        </div>)}
+      </div>
+      <button type="button" className="link-button" disabled={disabled}
+        onClick={() => updateValues([...values, values.at(-1) ?? Number(parameter.default ?? parameter.minimum ?? 0)])}>
+        Add value
+      </button>
+      <small>One explicit value is valid when this parameter should not expand the grid.</small>
+    </div>}
   </div>;
 }
 
@@ -431,17 +513,58 @@ function CategoricalSearchEditor({ search, parameter, disabled, onChange }: {
   const nonNullValues = values.filter((value) => value != null);
   const numericLike = parameter.kind === "integer" || parameter.kind === "number"
     || nonNullValues.every((value) => typeof value === "number");
+  const optionValues = parameter.options.length
+    ? parameter.options.filter((value) => value != null)
+    : Array.from(new Map(nonNullValues.map((value) => [serializedOption(value), value])).values());
+  const optionKeys = new Set(optionValues.map(serializedOption));
+  const selectedOptionValues = optionValues.length
+    ? nonNullValues.filter((value) => optionKeys.has(serializedOption(value)))
+    : nonNullValues;
   const updateValues = (nextValues: unknown[]) => onChange({
     ...search,
     values: [...(includeNone ? [null] : []), ...nextValues]
   });
   const setIncludeNone = (checked: boolean) => onChange({
     ...search,
-    values: [...(checked ? [null] : []), ...nonNullValues]
+    values: [...(checked ? [null] : []), ...selectedOptionValues]
   });
+  const toggleOption = (option: unknown, checked: boolean) => {
+    const serialized = serializedOption(option);
+    const next = checked
+      ? [...selectedOptionValues, option]
+      : selectedOptionValues.filter((value) => serializedOption(value) !== serialized);
+    if (!next.length && !includeNone) return;
+    updateValues(next);
+  };
+  if (optionValues.length) {
+    return <div className="categorical-search-editor">
+      <label className="search-space-log-toggle">
+        <input type="checkbox" checked={includeNone} disabled={disabled || !parameter.nullable}
+          onChange={(event) => setIncludeNone(event.target.checked)} />
+        Include None / automatic
+      </label>
+      <details className="search-space-multiselect">
+        <summary>
+          <span>{selectedSearchSummary(selectedOptionValues)}</span>
+          <small>{selectedOptionValues.length} selected</small>
+        </summary>
+        <div className="search-space-option-list">
+          {optionValues.map((option, index) => {
+            const serialized = serializedOption(option);
+            const checked = selectedOptionValues.some((value) => serializedOption(value) === serialized);
+            return <label key={`${parameter.id}-${index}-${serialized}`}>
+              <input type="checkbox" checked={checked} disabled={disabled}
+                onChange={(event) => toggleOption(option, event.target.checked)} />
+              <span>{displaySearchOption(option)}</span>
+            </label>;
+          })}
+        </div>
+      </details>
+    </div>;
+  }
   return <div className="categorical-search-editor">
     <label className="search-space-log-toggle">
-      <input type="checkbox" checked={includeNone} disabled={disabled}
+      <input type="checkbox" checked={includeNone} disabled={disabled || !parameter.nullable}
         onChange={(event) => setIncludeNone(event.target.checked)} />
       Include None / automatic
     </label>
@@ -490,16 +613,57 @@ function formatSearchSpace(search: Record<string, unknown> | null): string {
   const high = search.high == null ? "?" : String(search.high);
   const points = `, ${numericSearchPoints(search)} values`;
   const scale = search.log ? "log" : "linear";
-  return `${low} → ${high}${points}, ${scale}`;
+  const nullable = search.include_null === true ? ", + None" : "";
+  return `${low} → ${high}${points}, ${scale}${nullable}`;
 }
 
 function numericSearchPoints(search: Record<string, unknown>): number {
   const points = Number(search.points);
-  return Number.isFinite(points) && points >= 2 ? Math.trunc(points) : 3;
+  return Number.isFinite(points) && points >= 1 ? Math.trunc(points) : 3;
 }
 
 function formatSearchValue(value: unknown): string {
   return value == null ? "null" : String(value);
+}
+
+function isNumericSearchParameter(parameter: TrainingAlgorithmSpec["parameters"][number]) {
+  return parameter.kind === "integer" || parameter.kind === "number";
+}
+
+function numericSearchValues(
+  search: Record<string, unknown>,
+  parameter: TrainingAlgorithmSpec["parameters"][number],
+): number[] {
+  if (Array.isArray(search.values)) {
+    return search.values
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  }
+  const low = Number(search.low ?? parameter.default ?? parameter.minimum ?? 0);
+  const high = Number(search.high ?? low);
+  const points = Math.max(1, numericSearchPoints(search));
+  if (points === 1) return [parameter.kind === "integer" ? Math.trunc(low) : low];
+  const values = Array.from({ length: points }, (_, index) => {
+    const fraction = index / Math.max(1, points - 1);
+    if (search.log && low > 0 && high > 0) {
+      return Math.exp(Math.log(low) + (Math.log(high) - Math.log(low)) * fraction);
+    }
+    return low + (high - low) * fraction;
+  });
+  return Array.from(new Set(values.map((value) => parameter.kind === "integer" ? Math.round(value) : value)));
+}
+
+function displaySearchOption(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.join(", ")}]`;
+  if (value && typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function selectedSearchSummary(values: unknown[]): string {
+  if (!values.length) return "Choose values";
+  const first = displaySearchOption(values[0]);
+  if (values.length === 1) return first;
+  if (values.length === 2) return `${first} + 1 more`;
+  return `${first} + ${values.length - 1} more`;
 }
 
 function searchSpaceHint(

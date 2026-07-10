@@ -504,6 +504,8 @@ function TrainingConfigSummary({ config }: { config: Record<string, unknown> }) 
 }
 
 function SearchDetailsTab({ optimization }: { optimization: OptimizationSummary | null }) {
+  const [heatmapX, setHeatmapX] = useState("");
+  const [heatmapY, setHeatmapY] = useState("");
   if (!optimization || optimization.mode === "single") {
     return <section className="model-detail-section">
       <h3>Search details</h3>
@@ -511,6 +513,9 @@ function SearchDetailsTab({ optimization }: { optimization: OptimizationSummary 
     </section>;
   }
   const trials = optimization.trials ?? [];
+  const heatmapDimensions = heatmapParameterOptions(trials);
+  const xAxis = heatmapX || heatmapDimensions[0] || "";
+  const yAxis = heatmapY || heatmapDimensions.find((item) => item !== xAxis) || "";
   return <section className="model-detail-section">
     <h3>{searchTabLabel(optimization)}</h3>
     <div className="model-detail-metrics">
@@ -528,6 +533,15 @@ function SearchDetailsTab({ optimization }: { optimization: OptimizationSummary 
     <ParameterList parameters={optimization.best_parameters ?? {}} empty="Best parameters were not recorded." />
     <h4>Search space</h4>
     <SearchSpaceList searchSpace={optimization.search_space} />
+    <h4>Search result heatmap</h4>
+    <SearchHeatmap
+      trials={trials}
+      dimensions={heatmapDimensions}
+      xAxis={xAxis}
+      yAxis={yAxis}
+      onXAxisChange={setHeatmapX}
+      onYAxisChange={setHeatmapY}
+    />
     <h4>Trials</h4>
     <div className="optimization-trial-table">
       <div className="head"><span>#</span><span>Status</span><span>Algorithm</span><span>Score</span><span>Parameters</span><span>Folds</span></div>
@@ -544,6 +558,139 @@ function SearchDetailsTab({ optimization }: { optimization: OptimizationSummary 
       {!trials.length && <div className="catalog-empty">No trial history was recorded.</div>}
     </div>
   </section>;
+}
+
+function SearchHeatmap({
+  trials,
+  dimensions,
+  xAxis,
+  yAxis,
+  onXAxisChange,
+  onYAxisChange
+}: {
+  trials: OptimizationTrial[];
+  dimensions: string[];
+  xAxis: string;
+  yAxis: string;
+  onXAxisChange: (value: string) => void;
+  onYAxisChange: (value: string) => void;
+}) {
+  const heatmap = useMemo(() => buildHeatmap(trials, xAxis, yAxis), [trials, xAxis, yAxis]);
+  if (dimensions.length < 2) {
+    return <div className="empty-state">At least two varied parameters are needed for a heatmap.</div>;
+  }
+  const scores = heatmap.cells.map((cell) => cell.score).filter((value): value is number => typeof value === "number");
+  if (!scores.length) {
+    return <div className="empty-state">No successful trials are available for this heatmap.</div>;
+  }
+  const min = Math.min(...scores);
+  const max = Math.max(...scores);
+  return <div className="search-heatmap-panel">
+    <div className="search-heatmap-controls">
+      <label>X axis<select value={xAxis} onChange={(event) => onXAxisChange(event.target.value)}>
+        {dimensions.map((dimension) => <option key={dimension} value={dimension}>{dimension}</option>)}
+      </select></label>
+      <label>Y axis<select value={yAxis} onChange={(event) => onYAxisChange(event.target.value)}>
+        {dimensions.map((dimension) => <option key={dimension} value={dimension}>{dimension}</option>)}
+      </select></label>
+    </div>
+    {xAxis === yAxis
+      ? <div className="empty-state">Choose two different parameters.</div>
+      : <div className="search-heatmap-scroll">
+        <div className="search-heatmap-grid" style={{
+          gridTemplateColumns: `minmax(88px, auto) repeat(${heatmap.xValues.length}, minmax(72px, 1fr))`
+        }}>
+          <span className="search-heatmap-corner">{yAxis} / {xAxis}</span>
+          {heatmap.xValues.map((xValue) => <strong key={xValue}>{xValue}</strong>)}
+          {heatmap.yValues.map((yValue) => (
+            <div className="search-heatmap-row" style={{ display: "contents" }} key={yValue}>
+              <strong>{yValue}</strong>
+              {heatmap.xValues.map((xValue) => {
+                const cell = heatmap.byKey.get(`${xValue}\u0000${yValue}`);
+                return <span
+                  key={`${xValue}-${yValue}`}
+                  className="search-heatmap-cell"
+                  style={{ background: heatmapColor(cell?.score, min, max) }}
+                  title={cell ? `${formatNumber(cell.score)} across ${cell.count} trial(s)` : "No evaluated trial"}
+                >
+                  {cell ? formatNumber(cell.score) : "-"}
+                </span>;
+              })}
+            </div>
+          ))}
+        </div>
+      </div>}
+    {xAxis !== yAxis && <div className="search-heatmap-legend">
+      <span>{formatNumber(min)}</span>
+      <i aria-hidden="true" />
+      <span>{formatNumber(max)}</span>
+    </div>}
+  </div>;
+}
+
+function heatmapParameterOptions(trials: OptimizationTrial[]) {
+  const valuesByKey = new Map<string, Set<string>>();
+  for (const trial of trials) {
+    if (trial.status !== "succeeded" || typeof trial.score !== "number" || !trial.parameters) continue;
+    for (const [key, value] of Object.entries(trial.parameters)) {
+      const values = valuesByKey.get(key) ?? new Set<string>();
+      values.add(heatmapValue(value));
+      valuesByKey.set(key, values);
+    }
+  }
+  return [...valuesByKey.entries()]
+    .filter(([, values]) => values.size > 1)
+    .map(([key]) => key);
+}
+
+function buildHeatmap(trials: OptimizationTrial[], xAxis: string, yAxis: string) {
+  const aggregate = new Map<string, { x: string; y: string; total: number; count: number }>();
+  const xValues = new Set<string>();
+  const yValues = new Set<string>();
+  for (const trial of trials) {
+    if (trial.status !== "succeeded" || typeof trial.score !== "number" || !trial.parameters) continue;
+    if (!(xAxis in trial.parameters) || !(yAxis in trial.parameters)) continue;
+    const x = heatmapValue(trial.parameters[xAxis]);
+    const y = heatmapValue(trial.parameters[yAxis]);
+    xValues.add(x);
+    yValues.add(y);
+    const key = `${x}\u0000${y}`;
+    const current = aggregate.get(key) ?? { x, y, total: 0, count: 0 };
+    current.total += trial.score;
+    current.count += 1;
+    aggregate.set(key, current);
+  }
+  const byKey = new Map<string, { score: number; count: number }>();
+  for (const [key, value] of aggregate.entries()) {
+    byKey.set(key, { score: value.total / value.count, count: value.count });
+  }
+  return {
+    xValues: sortHeatmapValues([...xValues]),
+    yValues: sortHeatmapValues([...yValues]),
+    cells: [...byKey.values()],
+    byKey
+  };
+}
+
+function heatmapValue(value: unknown) {
+  return value == null ? "None" : displayValue(value);
+}
+
+function sortHeatmapValues(values: string[]) {
+  return values.sort((left, right) => {
+    const leftNumber = Number(left);
+    const rightNumber = Number(right);
+    if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) return leftNumber - rightNumber;
+    return left.localeCompare(right, undefined, { numeric: true });
+  });
+}
+
+function heatmapColor(score: number | undefined, min: number, max: number) {
+  if (score === undefined || !Number.isFinite(score)) return "#f1f5f7";
+  const ratio = max === min ? 0.72 : (score - min) / (max - min);
+  const hue = 195 - ratio * 155;
+  const lightness = 92 - ratio * 42;
+  return `hsl(${hue}, 72%, ${lightness}%)`;
 }
 
 function SearchSpaceList({ searchSpace }: { searchSpace: Record<string, unknown> | undefined }) {

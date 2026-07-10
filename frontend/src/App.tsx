@@ -1,5 +1,6 @@
 import {
   Activity,
+  AlertTriangle,
   BarChart3,
   Brain,
   ChevronDown,
@@ -71,6 +72,7 @@ import {
   canonicalizeWorkflowDatasetIds,
   emptyWorkflowDefinition,
   normalizeWorkflowDefinition,
+  validateWorkflowConfiguration,
   workflowTemplateDefinition
 } from "./pipelines/workflowContract";
 import type { PipelineTemplate, WorkflowDefinition } from "./pipelines/workflowContract";
@@ -1805,6 +1807,7 @@ function PipelinesPanel({
   const [isDefinitionDirty, setIsDefinitionDirty] = useState(false);
   const [workflowDefinition, setWorkflowDefinition] = useState<WorkflowDefinition>(emptyWorkflowDefinition());
   const [definitionText, setDefinitionText] = useState(JSON.stringify(emptyWorkflowDefinition(), null, 2));
+  const [draftValidationError, setDraftValidationError] = useState("");
   const [versions, setVersions] = useState<PipelineVersion[]>([]);
   const [runs, setRuns] = useState<PipelineRun[]>([]);
   const [activeStepRuns, setActiveStepRuns] = useState<PipelineStepRun[]>([]);
@@ -1829,6 +1832,10 @@ function PipelinesPanel({
   const selectedPipeline = activePipelines.find((item) => item.id === selectedPipelineId) ?? activePipelines[0];
   const selectedPipelineIdValue = selectedPipeline?.id ?? "";
   const selectedBusinessCaseIdValue = selectedPipeline?.business_case_id ?? "";
+  const workflowValidationIssues = useMemo(
+    () => validateWorkflowConfiguration(workflowDefinition),
+    [workflowDefinition]
+  );
 
   useEffect(() => {
     if (!businessCaseId && businessCases[0]) {
@@ -1869,6 +1876,7 @@ function PipelinesPanel({
       setRuns([]);
       setActiveStepRuns([]);
       setPipelineDataAttachments([]);
+      setDraftValidationError("");
       return;
     }
     let active = true;
@@ -1899,6 +1907,7 @@ function PipelinesPanel({
           setWorkflowDefinition(normalized);
           setDefinitionText(JSON.stringify(normalized, null, 2));
           setIsDefinitionDirty(Boolean(workingDraft));
+          setDraftValidationError("");
           if (workingDraft) setNotice("Recovered unsaved pipeline changes from this browser tab");
         }
       })
@@ -2027,16 +2036,26 @@ function PipelinesPanel({
     try {
       parsed = JSON.parse(definitionText) as Record<string, unknown>;
     } catch {
-      setNotice("Pipeline definition is not valid JSON");
+      const message = "Pipeline definition is not valid JSON";
+      setDraftValidationError(message);
+      setNotice(message);
       return null;
     }
-    const saved = await api.updateDraftPipelineVersion(selectedPipeline.id, parsed);
-    clearPipelineWorkingDraft(selectedPipeline.id);
-    setIsDefinitionDirty(false);
-    if (showNotice) setNotice("Draft version saved");
-    setVersions(await api.listPipelineVersions(selectedPipeline.id));
-    await onRefresh();
-    return saved;
+    try {
+      const saved = await api.updateDraftPipelineVersion(selectedPipeline.id, parsed);
+      clearPipelineWorkingDraft(selectedPipeline.id);
+      setIsDefinitionDirty(false);
+      setDraftValidationError("");
+      if (showNotice) setNotice("Draft version saved");
+      setVersions(await api.listPipelineVersions(selectedPipeline.id));
+      await onRefresh();
+      return saved;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Draft validation failed";
+      setDraftValidationError(message);
+      if (showNotice) setNotice(message);
+      return null;
+    }
   }
 
   async function saveDraft() {
@@ -2049,10 +2068,17 @@ function PipelinesPanel({
       return;
     }
     if (isDefinitionDirty && !await persistDraft(false)) return;
-    await api.publishDraftPipelineVersion(selectedPipeline.id);
-    setNotice("Draft version published");
-    setVersions(await api.listPipelineVersions(selectedPipeline.id));
-    await onRefresh();
+    try {
+      await api.publishDraftPipelineVersion(selectedPipeline.id);
+      setDraftValidationError("");
+      setNotice("Draft version published");
+      setVersions(await api.listPipelineVersions(selectedPipeline.id));
+      await onRefresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Draft publish validation failed";
+      setDraftValidationError(message);
+      setNotice(message);
+    }
   }
 
   async function createNextDraft() {
@@ -2215,6 +2241,7 @@ function PipelinesPanel({
     setWorkflowDefinition(definition);
     setDefinitionText(JSON.stringify(definition, null, 2));
     setIsDefinitionDirty(true);
+    setDraftValidationError("");
     if (selectedPipeline) writePipelineWorkingDraft(selectedPipeline.id, definition);
   }
 
@@ -2724,6 +2751,26 @@ function PipelinesPanel({
             </button>
           )}
           {!isRunActive && <button className="icon-button" type="button" onClick={() => setRunFeedback(null)} aria-label="Dismiss"><X size={15} /></button>}
+        </div>
+      )}
+      {(draftValidationError || workflowValidationIssues.length > 0) && (
+        <div className="inline-run-feedback failed validation-feedback" role="alert" aria-live="polite">
+          <span className="run-result-icon"><AlertTriangle size={16} /></span>
+          <div>
+            <strong>{draftValidationError ? "Pipeline validation failed" : "Pipeline settings need attention"}</strong>
+            {draftValidationError && <span>{draftValidationError}</span>}
+            {!draftValidationError && workflowValidationIssues.slice(0, 5).map((issue) => (
+              <span key={issue}>{issue}</span>
+            ))}
+            {!draftValidationError && workflowValidationIssues.length > 5 && (
+              <span>And {workflowValidationIssues.length - 5} more validation issue(s).</span>
+            )}
+          </div>
+          {draftValidationError && (
+            <button className="icon-button" type="button" onClick={() => setDraftValidationError("")} aria-label="Dismiss validation message">
+              <X size={15} />
+            </button>
+          )}
         </div>
       )}
       {activeStepRuns.length > 0 && (

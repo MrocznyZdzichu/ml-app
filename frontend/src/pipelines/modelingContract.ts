@@ -374,6 +374,62 @@ export function normalizeScoringDefinition(value: unknown): ScoringDefinition {
   };
 }
 
+export function validateTrainingConfiguration(definition: TrainingDefinition): string[] {
+  const issues: string[] = [];
+  const featureColumns = definition.feature_columns.map((item) => item.trim()).filter(Boolean);
+  const uniqueFeatures = new Set(featureColumns);
+  if (!definition.model_name.trim()) issues.push("Training model name is required.");
+  if (!definition.target_column.trim()) issues.push("Training target column is required before publish or dry-run.");
+  if (definition.target_column && uniqueFeatures.has(definition.target_column)) {
+    issues.push("Training target column cannot also be selected as a model feature.");
+  }
+  if (featureColumns.length !== definition.feature_columns.length) {
+    issues.push("Training feature list contains an empty column name.");
+  }
+  if (uniqueFeatures.size !== featureColumns.length) {
+    issues.push("Training feature columns must be unique.");
+  }
+  if (!featureColumns.length) {
+    issues.push("Training requires at least one model feature before publish or dry-run.");
+  }
+  if (definition.early_stopping && definition.optimization.mode !== "single") {
+    issues.push("Training early stopping cannot be combined with hyperparameter optimization.");
+  }
+  if (definition.optimization.mode === "automl" && definition.optimization.candidate_algorithms.length === 0) {
+    issues.push("AutoML requires at least one candidate algorithm.");
+  }
+  if (definition.optimization.mode !== "single" && definition.optimization.mode !== "automl") {
+    for (const [parameterId, search] of Object.entries(definition.optimization.search_space)) {
+      const kind = String(search.kind ?? "");
+      if (kind === "categorical") {
+        const values = Array.isArray(search.values)
+          ? search.values.filter((value) => !(typeof value === "string" && !value.trim()))
+          : [];
+        if (!values.length) issues.push(`Search space for '${parameterId}' must contain at least one value.`);
+      } else if (kind === "int" || kind === "float") {
+        const low = Number(search.low);
+        const high = Number(search.high);
+        const points = Number(search.points ?? 3);
+        if (!Number.isFinite(low) || !Number.isFinite(high)) {
+          issues.push(`Search space for '${parameterId}' requires numeric From and To values.`);
+        }
+        if (Number.isFinite(low) && Number.isFinite(high) && low > high) {
+          issues.push(`Search space for '${parameterId}' has From greater than To.`);
+        }
+        if (!Number.isFinite(points) || points < 1) {
+          issues.push(`Search space for '${parameterId}' requires at least one value.`);
+        }
+        if (search.log === true && (low <= 0 || high <= 0)) {
+          issues.push(`Search space for '${parameterId}' uses logarithmic scale, so From and To must be greater than zero.`);
+        }
+      } else {
+        issues.push(`Search space for '${parameterId}' has unsupported mode '${kind || "blank"}'.`);
+      }
+    }
+  }
+  return issues;
+}
+
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>

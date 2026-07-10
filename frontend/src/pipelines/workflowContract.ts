@@ -13,7 +13,8 @@ import {
   emptyScoringDefinition,
   emptyTrainingDefinition,
   normalizeScoringDefinition,
-  normalizeTrainingDefinition
+  normalizeTrainingDefinition,
+  validateTrainingConfiguration
 } from "./modelingContract";
 import type { ScoringDefinition, TrainingDefinition } from "./modelingContract";
 import {
@@ -492,6 +493,57 @@ export function workflowOutputsForStep(
       port_id: output.business_case_role
     }
   }));
+}
+
+export function validateWorkflowConfiguration(definition: WorkflowDefinition): string[] {
+  const issues: string[] = [];
+  const stepIds = definition.steps.map((step) => step.step_id);
+  const uniqueStepIds = new Set(stepIds);
+  if (uniqueStepIds.size !== stepIds.length) issues.push("Workflow step IDs must be unique.");
+  const outputIds = definition.outputs.map((output) => output.output_id);
+  if (new Set(outputIds).size !== outputIds.length) issues.push("Workflow output IDs must be unique.");
+  const ports = new Map(definition.steps.map((step) => [
+    step.step_id,
+    new Set([step.output_port_id, ...step.additional_output_port_ids])
+  ]));
+  for (const step of definition.steps) {
+    if (!step.name.trim()) issues.push(`Workflow step '${step.step_id}' requires a name.`);
+    const inputPorts = step.inputs.map((input) => input.port_id);
+    if (new Set(inputPorts).size !== inputPorts.length) {
+      issues.push(`Workflow step '${step.step_id}' has duplicate input ports.`);
+    }
+    for (const input of step.inputs) {
+      if (!ports.get(input.source.step_id)?.has(input.source.port_id)) {
+        issues.push(
+          `Workflow step '${step.step_id}' references missing output '${input.source.step_id}.${input.source.port_id}'.`
+        );
+      }
+    }
+    if (step.type === "training") {
+      issues.push(...validateTrainingConfiguration(step.config.definition));
+      const ports = new Set(step.inputs.map((input) => input.port_id));
+      if (!ports.has("training")) issues.push("Training requires an explicit training input port.");
+      if (step.config.definition.early_stopping && !ports.has("validation")) {
+        issues.push("Training early stopping requires an explicit validation input port.");
+      }
+    }
+    if (step.type === "scoring") {
+      const scoring = step.config.definition;
+      if (!scoring.row_id_column.trim()) issues.push("Scoring requires a row ID column before publish or dry-run.");
+      if (scoring.purpose === "batch" && !scoring.model_artifact_id.trim()) {
+        issues.push("Batch scoring requires a pinned model artifact.");
+      }
+      if (scoring.purpose === "batch" && scoring.target_column.trim()) {
+        issues.push("Batch scoring cannot consume a target column; actuals belong to monitoring.");
+      }
+    }
+  }
+  for (const output of definition.outputs) {
+    if (!ports.get(output.source.step_id)?.has(output.source.port_id)) {
+      issues.push(`Workflow output '${output.output_id}' references missing output '${output.source.step_id}.${output.source.port_id}'.`);
+    }
+  }
+  return Array.from(new Set(issues));
 }
 
 function recordValue(value: unknown): Record<string, unknown> {

@@ -567,7 +567,13 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
             "streaming",
             (
                 C_PARAMETER,
-                _select("loss", "Loss", "hinge", ("hinge", "squared_hinge")),
+                _select(
+                    "loss",
+                    "Loss",
+                    "hinge",
+                    ("hinge", "squared_hinge"),
+                    search={"kind": "categorical", "values": ["hinge", "squared_hinge"]},
+                ),
                 _bool("average", "Average weights", False),
                 FIT_INTERCEPT,
                 CLASS_WEIGHT,

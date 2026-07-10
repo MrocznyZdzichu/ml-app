@@ -773,33 +773,42 @@ class ModelOptimizationEngine:
     @staticmethod
     def _discrete_values(space: dict[str, Any]) -> list[Any]:
         if space["kind"] == "categorical":
-            return list(space["values"])
+            return [
+                None if isinstance(value, str) and value.strip().lower() in {"none", "null"} else value
+                for value in space["values"]
+            ]
         low = space["low"]
         high = space["high"]
         points = int(space.get("points") or 0)
-        if points >= 2:
+        if points >= 1:
             if space.get("log") and float(low) > 0 and float(high) > 0:
                 values = np.geomspace(float(low), float(high), num=points)
             else:
                 values = np.linspace(float(low), float(high), num=points)
             if space["kind"] == "int":
-                return list(dict.fromkeys(int(round(value)) for value in values))
-            return list(dict.fromkeys(float(value) for value in values))
+                result = list(dict.fromkeys(int(round(value)) for value in values))
+            else:
+                result = list(dict.fromkeys(float(value) for value in values))
+            return [*result, *([None] if space.get("include_null") else [])]
         if space["kind"] == "int":
             step = int(space.get("step") or max(1, round((high - low) / 2)))
             middle = int(low + ((high - low) // (2 * step)) * step)
-            return list(dict.fromkeys([int(low), middle, int(high)]))
+            result = list(dict.fromkeys([int(low), middle, int(high)]))
+            return [*result, *([None] if space.get("include_null") else [])]
         if space.get("log") and low > 0:
             middle = math.sqrt(float(low) * float(high))
         else:
             middle = (float(low) + float(high)) / 2
-        return list(dict.fromkeys([float(low), middle, float(high)]))
+        result = list(dict.fromkeys([float(low), middle, float(high)]))
+        return [*result, *([None] if space.get("include_null") else [])]
 
     @staticmethod
     def _resolved_search_space(
         algorithm: str,
         overrides: dict[str, dict[str, Any]],
     ) -> dict[str, dict[str, Any]]:
+        spec = algorithm_spec(algorithm)
+        parameters = {parameter.id: parameter for parameter in spec.parameters}
         curated = curated_search_space(algorithm)
         resolved = {key: dict(value) for key, value in curated.items()}
         allowed = set(curated)
@@ -811,8 +820,51 @@ class ModelOptimizationEngine:
                 else key
             )
             if parameter_id in allowed:
-                resolved[parameter_id] = dict(value)
+                resolved[parameter_id] = ModelOptimizationEngine._normalized_search_space(
+                    parameters[parameter_id],
+                    value,
+                )
         return resolved
+
+    @staticmethod
+    def _normalized_search_space(parameter: Any, space: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(space)
+        if normalized.get("kind") != "categorical" or not isinstance(normalized.get("values"), list):
+            return normalized
+        values = [
+            ModelOptimizationEngine._normalize_categorical_search_value(value)
+            for value in normalized["values"]
+        ]
+        if parameter.kind == "select" and parameter.options:
+            values = [
+                value
+                for value in values
+                if value in parameter.options and not (
+                    value is None and not parameter.nullable
+                )
+            ]
+        deduplicated = []
+        for value in values:
+            if not any(value == existing for existing in deduplicated):
+                deduplicated.append(value)
+        values = deduplicated
+        if not values:
+            raise ValueError(
+                f"Search space for parameter '{parameter.id}' has no supported values"
+            )
+        normalized["values"] = values
+        return normalized
+
+    @staticmethod
+    def _normalize_categorical_search_value(value: Any) -> Any:
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return "__mlapp_unsupported_empty__"
+            if stripped.lower() in {"none", "null"}:
+                return None
+            return stripped
+        return value
 
     @staticmethod
     def _suggest_parameters(
