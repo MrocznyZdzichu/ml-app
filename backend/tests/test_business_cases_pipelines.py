@@ -37,6 +37,22 @@ def _create_business_case(client: TestClient, token: str) -> dict:
     return response.json()
 
 
+def test_model_training_catalog_is_available_to_authenticated_pipeline_editors() -> None:
+    client = TestClient(create_app())
+    token = _register(client, "alice")
+
+    response = client.get(
+        "/api/v1/pipelines/model-training/catalog",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["algorithm_count"] >= 50
+    assert len(body["algorithms"]) == body["algorithm_count"]
+    assert all(item["parameters"] is not None for item in body["algorithms"])
+
+
 def test_business_case_can_exist_without_data_and_owns_data_mappings() -> None:
     client = TestClient(create_app())
     token = _register(client, "alice")

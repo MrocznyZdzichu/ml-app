@@ -614,6 +614,17 @@ class PipelineService:
         run.status = PipelineRunStatus.CANCELLED
         run.finished_at = datetime.now(timezone.utc)
         run.warnings = [*run.warnings, "Cancellation requested; an active DuckDB step stops at the next step boundary"]
+        run.events = [
+            *run.events,
+            {
+                "timestamp": run.finished_at.isoformat(),
+                "level": "warning",
+                "type": "run.cancel_requested",
+                "step_id": "",
+                "message": "Cancellation requested by user",
+                "details": {},
+            },
+        ][-1000:]
         return self.repository.update_run(run)
 
     def retry_run(self, pipeline_id: str, run_id: str, principal: Principal) -> PipelineRun:

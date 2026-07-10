@@ -42,6 +42,10 @@ class PipelineRunTrigger(str, Enum):
     SCHEDULE = "schedule"
 
 
+class PipelineExecutionCancelled(Exception):
+    pass
+
+
 class DatasetVersionPolicy(str, Enum):
     LATEST = "latest"
     PINNED = "pinned"
@@ -125,6 +129,7 @@ class PipelineRun:
     output_row_count: int | None = None
     rejected_row_count: int | None = None
     warnings: list[str] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
     output_artifact_ids: list[str] = field(default_factory=list)
     output_manifest: list[dict[str, Any]] = field(default_factory=list)
     error_message: str = ""
@@ -146,6 +151,7 @@ class PipelineStepRun:
     processed_row_count: int | None = None
     output_row_count: int | None = None
     warnings: list[str] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
     output_manifest: list[dict[str, Any]] = field(default_factory=list)
     error_message: str = ""
     started_at: datetime | None = None

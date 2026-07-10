@@ -95,7 +95,7 @@ import {
   type PipelineRunInput
 } from "./pipelines/pipelineRunInputs";
 
-type TabId = "overview" | "business-cases" | "data" | "analysis" | "pipelines" | "models" | "scoring-reports" | "serving" | "share";
+type TabId = "overview" | "business-cases" | "data" | "analysis" | "pipelines" | "jobs" | "models" | "scoring-reports" | "serving" | "share";
 
 type NavItem = {
   id: TabId;
@@ -109,6 +109,7 @@ const navItems: NavItem[] = [
   { id: "data", label: "Data", icon: Database },
   { id: "analysis", label: "Analysis", icon: BarChart3 },
   { id: "pipelines", label: "Pipelines", icon: Drill },
+  { id: "jobs", label: "Jobs", icon: History },
   { id: "models", label: "Models", icon: Brain },
   { id: "scoring-reports", label: "Scoring Reports", icon: BarChart3 },
   { id: "serving", label: "Serving", icon: Rocket },
@@ -412,6 +413,13 @@ export default function App() {
             onOpenRequestConsumed={() => setPipelineOpenRequest(null)}
             onRefresh={refreshWorkspace}
             onExamineDataset={openDatasetAnalysis}
+            setNotice={setNotice}
+          />
+        )}
+        {activeTab === "jobs" && (
+          <JobsPanel
+            businessCases={businessCases}
+            pipelines={pipelines}
             setNotice={setNotice}
           />
         )}
@@ -1534,6 +1542,207 @@ function BusinessCasesPanel({
   );
 }
 
+function JobsPanel({
+  businessCases,
+  pipelines,
+  setNotice
+}: {
+  businessCases: BusinessCase[];
+  pipelines: Pipeline[];
+  setNotice: (message: string) => void;
+}) {
+  const [runs, setRuns] = useState<PipelineRun[]>([]);
+  const [statusFilter, setStatusFilter] = useState("active");
+  const [scopeFilter, setScopeFilter] = useState("");
+  const [search, setSearch] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [busyRunId, setBusyRunId] = useState<string | null>(null);
+  const [selectedRunDetails, setSelectedRunDetails] = useState<PipelineRun | null>(null);
+
+  const activeRuns = runs.filter((run) => run.status === "queued" || run.status === "running");
+  const failedRuns = runs.filter((run) => run.status === "failed");
+  const dryRuns = runs.filter((run) => run.is_dry_run);
+
+  async function loadRuns() {
+    setIsLoading(true);
+    try {
+      setRuns(await api.listPipelineRunHistory(300));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not load jobs");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadRuns();
+  }, []);
+
+  useEffect(() => {
+    if (!runs.some((run) => run.status === "queued" || run.status === "running")) return;
+    const interval = window.setInterval(() => void loadRuns(), 2500);
+    return () => window.clearInterval(interval);
+  }, [runs]);
+
+  const filteredRuns = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    return runs.filter((run) => {
+      const pipeline = pipelines.find((item) => item.id === run.pipeline_id);
+      const businessCase = businessCases.find((item) => item.id === run.business_case_id);
+      if (scopeFilter && run.business_case_id !== scopeFilter) return false;
+      if (statusFilter === "active" && run.status !== "queued" && run.status !== "running") return false;
+      if (statusFilter === "dry-run" && !run.is_dry_run) return false;
+      if (statusFilter !== "all" && statusFilter !== "active" && statusFilter !== "dry-run" && run.status !== statusFilter) return false;
+      if (!needle) return true;
+      return [
+        run.id,
+        run.status,
+        pipeline?.name,
+        businessCase?.name,
+        run.requested_step_id
+      ].some((value) => String(value ?? "").toLowerCase().includes(needle));
+    });
+  }, [businessCases, pipelines, runs, scopeFilter, search, statusFilter]);
+
+  async function cancelRun(run: PipelineRun) {
+    setBusyRunId(run.id);
+    try {
+      await api.cancelPipelineRun(run.pipeline_id, run.id);
+      await loadRuns();
+      setNotice(`Cancellation requested for job ${shortId(run.id)}.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not cancel job");
+    } finally {
+      setBusyRunId(null);
+    }
+  }
+
+  async function rerun(run: PipelineRun) {
+    setBusyRunId(run.id);
+    try {
+      const retried = await api.retryPipelineRun(run.pipeline_id, run.id);
+      await loadRuns();
+      setNotice(`Rerun queued as job ${shortId(retried.id)}.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not rerun job");
+    } finally {
+      setBusyRunId(null);
+    }
+  }
+
+  return (
+    <section className="section jobs-panel">
+      <div className="section-header">
+        <div>
+          <span>EXECUTION</span>
+          <h2>Jobs</h2>
+          <p>Pipeline runs across the workspace, including dry-runs and step runs.</p>
+        </div>
+        <button className="secondary-button" type="button" onClick={() => void loadRuns()} disabled={isLoading}>
+          <RotateCcw size={16} />
+          {isLoading ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      <div className="job-summary-grid">
+        <Metric icon={History} label="Active" value={activeRuns.length} tone="teal" />
+        <Metric icon={CheckCircle2} label="Dry-runs" value={dryRuns.length} tone="amber" />
+        <Metric icon={X} label="Failed" value={failedRuns.length} tone="rose" />
+      </div>
+
+      <div className="job-filters">
+        <label>
+          Search
+          <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Run, pipeline, Business Case or step" />
+        </label>
+        <label>
+          Status
+          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+            <option value="active">Active</option>
+            <option value="all">All statuses</option>
+            <option value="queued">Queued</option>
+            <option value="running">Running</option>
+            <option value="succeeded">Succeeded</option>
+            <option value="failed">Failed</option>
+            <option value="cancelled">Cancelled</option>
+            <option value="dry-run">Dry-runs</option>
+          </select>
+        </label>
+        <label>
+          Business Case
+          <select value={scopeFilter} onChange={(event) => setScopeFilter(event.target.value)}>
+            <option value="">All Business Cases</option>
+            {businessCases.map((item) => (
+              <option value={item.id} key={item.id}>{item.name}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div className="jobs-table" role="table" aria-label="Jobs">
+        <div className="jobs-row head" role="row">
+          <span>Job</span>
+          <span>Status</span>
+          <span>Pipeline</span>
+          <span>Started</span>
+          <span>Finished</span>
+          <span>Duration</span>
+          <span>Rows</span>
+          <span>Actions</span>
+        </div>
+        {filteredRuns.map((run) => {
+          const canCancel = run.status === "queued" || run.status === "running";
+          const canRerun = run.status === "failed" || run.status === "cancelled";
+          return (
+            <div className="jobs-row" role="row" key={run.id}>
+              <span>
+                <strong>{shortId(run.id)} {run.is_dry_run && <i>dry-run</i>}</strong>
+                <small>{run.requested_step_id ? `step ${run.requested_step_id}` : "full pipeline"} · {run.trigger_type}</small>
+              </span>
+              <span><i className={`pipeline-status ${run.status}`}>{run.status}</i></span>
+              <span>
+                <strong>{pipelineName(pipelines, run.pipeline_id)}</strong>
+                <small>{businessCaseName(businessCases, run.business_case_id)}</small>
+              </span>
+              <span>{run.started_at ? formatDateTime(run.started_at) : "not started"}</span>
+              <span>{run.finished_at ? formatDateTime(run.finished_at) : "in progress"}</span>
+              <span>{durationLabel(run.started_at, run.finished_at)}</span>
+              <span>
+                <strong>{run.processed_row_count ?? 0}</strong>
+                <small>out {run.output_row_count ?? 0} · rejected {run.rejected_row_count ?? 0}</small>
+              </span>
+              <span>
+                <button className="secondary-button" type="button" onClick={() => setSelectedRunDetails(run)}>
+                  <History size={14} /> Logs
+                </button>
+                <button className="secondary-button" type="button" onClick={() => void cancelRun(run)} disabled={!canCancel || busyRunId === run.id}>
+                  <X size={14} /> Cancel
+                </button>
+                <button className="secondary-button" type="button" onClick={() => void rerun(run)} disabled={!canRerun || busyRunId === run.id}>
+                  <RotateCcw size={14} /> Rerun
+                </button>
+              </span>
+            </div>
+          );
+        })}
+        {!filteredRuns.length && (
+          <div className="empty-state">No jobs match the current filters.</div>
+        )}
+      </div>
+
+      {selectedRunDetails && (
+        <PipelineRunDetailsDialog
+          run={selectedRunDetails}
+          onClose={() => setSelectedRunDetails(null)}
+          onChanged={async () => {
+            await loadRuns();
+          }}
+        />
+      )}
+    </section>
+  );
+}
+
 function PipelinesPanel({
   businessCases,
   datasets,
@@ -1600,6 +1809,7 @@ function PipelinesPanel({
   const [runs, setRuns] = useState<PipelineRun[]>([]);
   const [activeStepRuns, setActiveStepRuns] = useState<PipelineStepRun[]>([]);
   const [selectedRunDetails, setSelectedRunDetails] = useState<PipelineRun | null>(null);
+  const [activeRunMonitor, setActiveRunMonitor] = useState<PipelineRun | null>(null);
   const [isRunHistoryOpen, setIsRunHistoryOpen] = useState(false);
   const [versionHistoryPipeline, setVersionHistoryPipeline] = useState<Pipeline | null>(null);
   const [runHistoryRefreshKey, setRunHistoryRefreshKey] = useState(0);
@@ -1877,6 +2087,7 @@ function PipelinesPanel({
       setNotice(detail);
       return;
     }
+    setActiveRunMonitor(null);
     setRunFeedback({ status: "queued", title: `${action} queued`, detail: `Preparing ${target} execution…` });
     if (isDryRun) setDryRunResult(null);
     try {
@@ -1901,30 +2112,36 @@ function PipelinesPanel({
         is_dry_run: isDryRun,
         runtime_parameters: {}
       });
+      setActiveRunMonitor(run);
       setRunFeedback({ status: "running", title: `${action} in progress`, detail: `Worker accepted ${target} run ${shortId(run.id)}.` });
       while (run.status === "queued" || run.status === "running") {
         await new Promise((resolve) => window.setTimeout(resolve, 750));
         run = await api.getPipelineRun(selectedPipeline.id, run.id);
+        setActiveRunMonitor(run);
       }
       setRuns(await api.listPipelineRuns(selectedPipeline.id));
       setActiveStepRuns(await api.listPipelineStepRuns(selectedPipeline.id, run.id));
       const scope = run.output_manifest[0]?.data_scope ?? "unknown";
       const counts = `${run.input_row_count ?? 0} input rows → ${run.output_row_count ?? 0} output rows`;
       const failed = run.status === "failed";
-      const title = failed ? `${action} failed` : `${action} completed`;
+      const cancelled = run.status === "cancelled";
+      const title = failed ? `${action} failed` : cancelled ? `${action} cancelled` : `${action} completed`;
       const fittedTransform = run.output_manifest.find((item) => item.artifact_type === "feature_transform");
       const fittedDetail = fittedTransform?.artifact_id
         ? ` · fitted transform ${fittedTransform.artifact_id}`
         : "";
       const detail = failed
         ? run.error_message
+        : cancelled
+          ? "Run cancellation was accepted; inspect the monitor log for the last completed worker event."
         : `${target} finished successfully · ${scope} scope · ${counts}${fittedDetail}`;
-      setRunFeedback({ status: failed ? "failed" : "succeeded", title, detail });
+      setRunFeedback({ status: failed || cancelled ? "failed" : "succeeded", title, detail });
       setNotice(`${title}: ${detail}`);
-      if (!failed && isDryRun) setDryRunResult(run);
-      if (!failed && !isDryRun) {
+      if (!failed && !cancelled && isDryRun) setDryRunResult(run);
+      if (!failed && !cancelled && !isDryRun) {
         await onRefresh();
       }
+      setActiveRunMonitor(run);
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Pipeline execution could not be started";
       setRunFeedback({ status: "failed", title: `${action} failed`, detail });
@@ -2497,6 +2714,15 @@ function PipelinesPanel({
             {runFeedback.status === "succeeded" ? "✓" : runFeedback.status === "failed" ? "!" : ""}
           </span>
           <div><strong>{runFeedback.title}</strong><span>{runFeedback.detail}</span></div>
+          {activeRunMonitor && (
+            <button
+              className="secondary-button compact-button"
+              type="button"
+              onClick={() => setSelectedRunDetails(activeRunMonitor)}
+            >
+              <Activity size={14} /> Monitor
+            </button>
+          )}
           {!isRunActive && <button className="icon-button" type="button" onClick={() => setRunFeedback(null)} aria-label="Dismiss"><X size={15} /></button>}
         </div>
       )}

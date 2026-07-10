@@ -17,6 +17,7 @@ from app.modules.pipelines.schemas import (
     PipelineVersionUpdate,
 )
 from app.modules.pipelines.service import PipelineService
+from app.modules.pipelines.modeling_catalog import training_catalog
 
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
 service = PipelineService()
@@ -25,6 +26,13 @@ service = PipelineService()
 @router.get("/step-types", response_model=list[PipelineStepTypeRead])
 def list_step_types(principal: Principal = Depends(require_user)) -> list[PipelineStepTypeRead]:
     return [PipelineStepTypeRead.model_validate(item) for item in service.list_step_types()]
+
+
+@router.get("/model-training/catalog")
+def get_model_training_catalog(
+    principal: Principal = Depends(require_user),
+) -> dict:
+    return training_catalog()
 
 
 @router.post("", response_model=PipelineRead, status_code=201)

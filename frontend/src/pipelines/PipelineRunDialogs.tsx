@@ -10,6 +10,7 @@ import type {
   Pipeline,
   PipelineVersion,
   PipelineRun,
+  PipelineRunEvent,
   PipelineRunDetails,
   PipelineRunOutputPreview,
   PipelineRunOutputProfile
@@ -446,6 +447,13 @@ export function PipelineRunDetailsDialog({
 
   useEffect(load, [run.pipeline_id, runId]);
 
+  useEffect(() => {
+    const status = details?.run.status;
+    if (status !== "queued" && status !== "running") return;
+    const interval = window.setInterval(load, 1500);
+    return () => window.clearInterval(interval);
+  }, [details?.run.status, run.pipeline_id, runId]);
+
   async function cancelRun() {
     setBusy(true);
     try {
@@ -533,6 +541,11 @@ export function PipelineRunDetailsDialog({
             </div>
 
             <section>
+              <h3>Execution log</h3>
+              <RunEventTimeline events={runDetailEvents(details)} />
+            </section>
+
+            <section>
               <h3>Step execution</h3>
               <div className="run-step-timeline">
                 {details.steps.map((step) => (
@@ -550,6 +563,7 @@ export function PipelineRunDetailsDialog({
                     {step.warnings.map((warning) => (
                       <p className="warning-text" key={warning}>{warning}</p>
                     ))}
+                    {step.events.length > 0 && <small>{step.events.length} log events captured</small>}
                     {step.error_message && <p className="error-text">{step.error_message}</p>}
                   </article>
                 ))}
@@ -956,6 +970,38 @@ export function DryRunPreview({
         />
       )}
     </section>
+  );
+}
+
+function RunEventTimeline({ events }: { events: PipelineRunEvent[] }) {
+  if (!events.length) {
+    return <div className="empty-state">No worker log events have been captured yet.</div>;
+  }
+  return (
+    <div className="run-event-log" role="log" aria-label="Pipeline worker execution log">
+      {events.slice(-300).map((event, index) => (
+        <article className={`run-event ${event.level}`} key={`${event.timestamp}-${event.type}-${index}`}>
+          <time dateTime={event.timestamp}>{formatDateTimeWithSeconds(event.timestamp)}</time>
+          <div>
+            <strong>{event.message}</strong>
+            <span>
+              {event.type}
+              {event.step_id ? ` · ${event.step_id}` : ""}
+            </span>
+            {eventDetails(event).length > 0 && (
+              <dl>
+                {eventDetails(event).map(([key, value]) => (
+                  <div key={key}>
+                    <dt>{key.replaceAll("_", " ")}</dt>
+                    <dd>{formatEventValue(value)}</dd>
+                  </div>
+                ))}
+              </dl>
+            )}
+          </div>
+        </article>
+      ))}
+    </div>
   );
 }
 
@@ -1421,6 +1467,55 @@ function durationLabel(
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   return `${minutes}m ${seconds % 60}s`;
+}
+
+function formatDateTimeWithSeconds(value: string) {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "short",
+    timeStyle: "medium"
+  }).format(new Date(value));
+}
+
+function runDetailEvents(details: PipelineRunDetails): PipelineRunEvent[] {
+  const seen = new Set<string>();
+  const events = [
+    ...(details.run.events ?? []),
+    ...details.steps.flatMap((step) => step.events ?? [])
+  ];
+  return events
+    .filter((event) => {
+      const key = `${event.timestamp}:${event.type}:${event.step_id}:${event.message}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((left, right) => new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime());
+}
+
+function eventDetails(event: PipelineRunEvent): Array<[string, unknown]> {
+  return Object.entries(event.details ?? {}).filter(([key]) => (
+    !["metrics"].includes(key)
+  )).slice(0, 12);
+}
+
+function formatEventValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "—";
+  if (typeof value === "number") {
+    return Number.isInteger(value)
+      ? value.toLocaleString()
+      : value.toLocaleString(undefined, { maximumFractionDigits: 6 });
+  }
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  if (Array.isArray(value)) {
+    return value.length > 8
+      ? `${value.slice(0, 8).map(formatEventValue).join(", ")} … +${value.length - 8}`
+      : value.map(formatEventValue).join(", ");
+  }
+  if (typeof value === "object") {
+    const json = JSON.stringify(value);
+    return json.length > 320 ? `${json.slice(0, 320)}…` : json;
+  }
+  return String(value);
 }
 
 function shortId(value: string) {

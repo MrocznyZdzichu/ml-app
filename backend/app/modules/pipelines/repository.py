@@ -73,6 +73,7 @@ pipeline_runs_table = Table(
     Column("output_row_count", Integer, nullable=True),
     Column("rejected_row_count", Integer, nullable=True),
     Column("warnings", JSON, nullable=False, default=list),
+    Column("events", JSON, nullable=False, default=list),
     Column("output_artifact_ids", JSON, nullable=False, default=list),
     Column("output_manifest", JSON, nullable=False, default=list),
     Column("error_message", Text, nullable=False, default=""),
@@ -106,6 +107,7 @@ pipeline_step_runs_table = Table(
     Column("processed_row_count", Integer, nullable=True),
     Column("output_row_count", Integer, nullable=True),
     Column("warnings", JSON, nullable=False, default=list),
+    Column("events", JSON, nullable=False, default=list),
     Column("output_manifest", JSON, nullable=False, default=list),
     Column("error_message", Text, nullable=False, default=""),
     Column("started_at", DateTime(timezone=True), nullable=True),
@@ -505,6 +507,14 @@ class PostgresPipelineRepository:
         with self.engine.begin() as connection:
             connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {PIPELINE_SCHEMA}"))
             metadata.create_all(connection)
+            connection.execute(text(
+                f"ALTER TABLE {PIPELINE_SCHEMA}.pipeline_runs "
+                "ADD COLUMN IF NOT EXISTS events JSON NOT NULL DEFAULT '[]'"
+            ))
+            connection.execute(text(
+                f"ALTER TABLE {PIPELINE_SCHEMA}.pipeline_step_runs "
+                "ADD COLUMN IF NOT EXISTS events JSON NOT NULL DEFAULT '[]'"
+            ))
         self._initialized = True
 
     def _pipeline_to_record(self, pipeline: Pipeline) -> dict[str, object]:
@@ -586,6 +596,7 @@ class PostgresPipelineRepository:
             "output_row_count": run.output_row_count,
             "rejected_row_count": run.rejected_row_count,
             "warnings": run.warnings,
+            "events": run.events,
             "output_artifact_ids": run.output_artifact_ids,
             "output_manifest": run.output_manifest,
             "error_message": run.error_message,
@@ -612,6 +623,7 @@ class PostgresPipelineRepository:
             output_row_count=record["output_row_count"],
             rejected_row_count=record["rejected_row_count"],
             warnings=list(record["warnings"] or []),
+            events=list(record.get("events") or []),
             output_artifact_ids=list(record["output_artifact_ids"] or []),
             output_manifest=list(record["output_manifest"] or []),
             error_message=record["error_message"] or "",
@@ -634,6 +646,7 @@ class PostgresPipelineRepository:
             "processed_row_count": step_run.processed_row_count,
             "output_row_count": step_run.output_row_count,
             "warnings": step_run.warnings,
+            "events": step_run.events,
             "output_manifest": step_run.output_manifest,
             "error_message": step_run.error_message,
             "started_at": step_run.started_at,
@@ -653,6 +666,7 @@ class PostgresPipelineRepository:
             processed_row_count=record["processed_row_count"],
             output_row_count=record["output_row_count"],
             warnings=list(record["warnings"] or []),
+            events=list(record.get("events") or []),
             output_manifest=list(record["output_manifest"] or []),
             error_message=record["error_message"] or "",
             started_at=record["started_at"],

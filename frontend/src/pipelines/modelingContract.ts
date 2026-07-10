@@ -16,14 +16,70 @@ export type TrainingDefinition = {
   batch_size: number;
   random_seed: number;
   parameters: Record<string, unknown>;
+  optimization: TrainingOptimization;
+  resource_limits: TrainingResourceLimits;
 };
 
-export type TrainingAlgorithm =
-  | "sgd_classifier"
-  | "passive_aggressive_classifier"
-  | "perceptron_classifier"
-  | "sgd_regressor"
-  | "passive_aggressive_regressor";
+export type TrainingAlgorithm = string;
+
+export type TrainingOptimization = {
+  mode: "single" | "grid_search" | "random_search" | "optuna" | "automl";
+  validation_strategy: "auto" | "holdout" | "cross_validation";
+  primary_metric: string;
+  cv_folds: number;
+  max_trials: number;
+  timeout_seconds: number;
+  candidate_algorithms: string[];
+  search_space: Record<string, Record<string, unknown>>;
+};
+
+export type TrainingResourceLimits = {
+  max_memory_mb: number;
+  max_parallel_jobs: number;
+};
+
+export type TrainingParameterSpec = {
+  id: string;
+  label: string;
+  kind: "integer" | "number" | "boolean" | "select" | "integer_list";
+  default: unknown;
+  description: string;
+  minimum: number | null;
+  maximum: number | null;
+  step: number | null;
+  options: unknown[];
+  nullable: boolean;
+  search: Record<string, unknown> | null;
+};
+
+export type TrainingAlgorithmSpec = {
+  id: string;
+  label: string;
+  family: string;
+  problem_types: TrainingDefinition["problem_type"][];
+  description: string;
+  execution_mode: "incremental" | "in_memory";
+  scale_profile: "streaming" | "large" | "medium" | "small";
+  dependency: string;
+  available: boolean;
+  supports_probability: boolean;
+  supports_early_stopping: boolean;
+  automl_default: boolean;
+  notes: string[];
+  parameters: TrainingParameterSpec[];
+};
+
+export type TrainingCatalog = {
+  contract_version: "1.0";
+  algorithm_count: number;
+  algorithms: TrainingAlgorithmSpec[];
+  optimization_modes: Array<{ id: TrainingOptimization["mode"]; label: string; description: string }>;
+  metrics: Record<TrainingDefinition["problem_type"], Array<{
+    id: string;
+    label: string;
+    direction: "maximize" | "minimize";
+  }>>;
+};
 
 export const classificationAlgorithms: TrainingAlgorithm[] = [
   "sgd_classifier",
@@ -62,7 +118,21 @@ export const emptyTrainingDefinition = (): TrainingDefinition => ({
   early_stopping_min_delta: 0.0001,
   batch_size: 10000,
   random_seed: 42,
-  parameters: defaultTrainingParameters("sgd_classifier")
+  parameters: defaultTrainingParameters("sgd_classifier"),
+  optimization: {
+    mode: "single",
+    validation_strategy: "auto",
+    primary_metric: "auto",
+    cv_folds: 5,
+    max_trials: 30,
+    timeout_seconds: 3600,
+    candidate_algorithms: [],
+    search_space: {}
+  },
+  resource_limits: {
+    max_memory_mb: 2048,
+    max_parallel_jobs: 1
+  }
 });
 
 export const emptyScoringDefinition = (): ScoringDefinition => ({
@@ -85,6 +155,9 @@ export type ModelingDefaults = {
   available_columns: string[];
   model_name: string;
   has_validation: boolean;
+  has_fitted_transformations: boolean;
+  has_cv_plan: boolean;
+  cv_folds: number;
 };
 
 export function deriveModelingDefaults({
@@ -135,7 +208,10 @@ export function deriveModelingDefaults({
     feature_columns,
     available_columns,
     model_name: `${baseName} model`,
-    has_validation: hasValidation
+    has_validation: hasValidation,
+    has_fitted_transformations: Boolean(featureDefinition?.transformations.length),
+    has_cv_plan: Boolean(featureDefinition?.evaluation.cross_validation.enabled),
+    cv_folds: featureDefinition?.evaluation.cross_validation.folds ?? 5
   };
 }
 
@@ -145,12 +221,9 @@ export function trainingWithDefaults(
 ): TrainingDefinition {
   const unconfigured = !current.target_column && current.feature_columns.length === 0;
   const problem_type = unconfigured ? defaults.problem_type : current.problem_type;
-  const allowedAlgorithms = problem_type === "regression"
-    ? regressionAlgorithms
-    : classificationAlgorithms;
-  const algorithm = allowedAlgorithms.includes(current.algorithm)
-    ? current.algorithm
-    : allowedAlgorithms[0];
+  const algorithm = current.algorithm || (problem_type === "regression"
+    ? regressionAlgorithms[0]
+    : classificationAlgorithms[0]);
   return {
     ...current,
     problem_type,
@@ -196,11 +269,10 @@ export function normalizeTrainingDefinition(value: unknown): TrainingDefinition 
     : raw.problem_type === "multiclass_classification"
       ? "multiclass_classification"
       : "binary_classification";
-  const allowedAlgorithms = problem === "regression" ? regressionAlgorithms : classificationAlgorithms;
   const requestedAlgorithm = String(raw.algorithm ?? "");
-  const algorithm = allowedAlgorithms.includes(requestedAlgorithm as TrainingAlgorithm)
-    ? requestedAlgorithm as TrainingAlgorithm
-    : allowedAlgorithms[0];
+  const algorithm = requestedAlgorithm || (
+    problem === "regression" ? regressionAlgorithms[0] : classificationAlgorithms[0]
+  );
   return {
     contract_version: "1.0",
     problem_type: problem,
@@ -217,7 +289,46 @@ export function normalizeTrainingDefinition(value: unknown): TrainingDefinition 
     random_seed: boundedNumber(raw.random_seed, 42, -2147483648, 2147483647),
     parameters: Object.keys(record(raw.parameters)).length
       ? record(raw.parameters)
-      : defaultTrainingParameters(algorithm)
+      : defaultTrainingParameters(algorithm),
+    optimization: normalizeOptimization(raw.optimization),
+    resource_limits: normalizeResourceLimits(raw.resource_limits)
+  };
+}
+
+function normalizeOptimization(value: unknown): TrainingOptimization {
+  const raw = record(value);
+  const mode = ["grid_search", "random_search", "optuna", "automl"].includes(String(raw.mode))
+    ? raw.mode as TrainingOptimization["mode"]
+    : "single";
+  const validation = ["holdout", "cross_validation"].includes(String(raw.validation_strategy))
+    ? raw.validation_strategy as TrainingOptimization["validation_strategy"]
+    : "auto";
+  return {
+    mode,
+    validation_strategy: validation,
+    primary_metric: String(raw.primary_metric ?? "auto"),
+    cv_folds: boundedNumber(raw.cv_folds, 5, 2, 20),
+    max_trials: boundedNumber(raw.max_trials, 30, 1, mode === "grid_search" ? 100000 : 1000),
+    timeout_seconds: boundedNumber(raw.timeout_seconds, 3600, 10, 604800),
+    candidate_algorithms: Array.isArray(raw.candidate_algorithms)
+      ? raw.candidate_algorithms.map(String)
+      : [],
+    search_space: normalizeSearchSpace(raw.search_space)
+  };
+}
+
+function normalizeSearchSpace(value: unknown): Record<string, Record<string, unknown>> {
+  const raw = record(value);
+  return Object.fromEntries(Object.entries(raw)
+    .filter(([key, spec]) => key && spec && typeof spec === "object" && !Array.isArray(spec))
+    .map(([key, spec]) => [key, record(spec)]));
+}
+
+function normalizeResourceLimits(value: unknown): TrainingResourceLimits {
+  const raw = record(value);
+  return {
+    max_memory_mb: boundedNumber(raw.max_memory_mb, 2048, 128, 262144),
+    max_parallel_jobs: boundedNumber(raw.max_parallel_jobs, 1, 1, 64)
   };
 }
 
@@ -237,12 +348,15 @@ export function defaultTrainingParameters(algorithm: TrainingAlgorithm): Record<
   if (algorithm === "perceptron_classifier") {
     return { alpha: 0.0001, penalty: null, eta0: 1, fit_intercept: true };
   }
-  return {
-    alpha: 0.0001,
-    penalty: "l2",
-    learning_rate: "optimal",
-    fit_intercept: true
-  };
+  if (algorithm === "sgd_classifier" || algorithm === "sgd_regressor") {
+    return {
+      alpha: 0.0001,
+      penalty: "l2",
+      learning_rate: "optimal",
+      fit_intercept: true
+    };
+  }
+  return {};
 }
 
 export function normalizeScoringDefinition(value: unknown): ScoringDefinition {

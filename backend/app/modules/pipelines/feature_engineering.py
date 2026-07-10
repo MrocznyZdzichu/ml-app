@@ -1061,6 +1061,8 @@ class DuckDbFeatureEngineeringEngine:
             ).hexdigest(),
             "feature_manifest": state.get("feature_manifest", []),
             "split_evaluation": evaluation_manifest,
+            "fitted_transform_count": len(state.get("transforms", {})),
+            "feature_recipe_hash": _recipe_hash(definition),
             "data_scope": "full",
             "is_dry_run": is_dry_run,
             "dataset_name": output.dataset_name,

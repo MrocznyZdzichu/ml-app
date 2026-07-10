@@ -131,6 +131,7 @@ class PipelineRunRead(BaseModel):
     output_row_count: int | None
     rejected_row_count: int | None
     warnings: list[str]
+    events: list[dict[str, Any]]
     output_artifact_ids: list[str]
     output_manifest: list[dict[str, Any]]
     error_message: str
@@ -162,6 +163,7 @@ class PipelineStepRunRead(BaseModel):
     processed_row_count: int | None
     output_row_count: int | None
     warnings: list[str]
+    events: list[dict[str, Any]]
     output_manifest: list[dict[str, Any]]
     error_message: str
     started_at: datetime | None

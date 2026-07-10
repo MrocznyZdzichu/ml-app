@@ -390,7 +390,7 @@ export type ModelArtifact = {
   algorithm: string;
   stage: string;
   artifact_uri: string;
-  metrics: Record<string, number>;
+  metrics: Record<string, unknown>;
   business_case_id: string;
   pipeline_id: string;
   pipeline_version_id: string;
@@ -621,6 +621,7 @@ export type PipelineRun = {
   output_row_count: number | null;
   rejected_row_count: number | null;
   warnings: string[];
+  events: PipelineRunEvent[];
   output_artifact_ids: string[];
   output_manifest: Array<{
     output_id: string;
@@ -698,10 +699,20 @@ export type PipelineStepRun = {
   processed_row_count: number | null;
   output_row_count: number | null;
   warnings: string[];
+  events: PipelineRunEvent[];
   output_manifest: PipelineRun["output_manifest"];
   error_message: string;
   started_at: string | null;
   finished_at: string | null;
+};
+
+export type PipelineRunEvent = {
+  timestamp: string;
+  level: "info" | "warning" | "error" | string;
+  type: string;
+  step_id: string;
+  message: string;
+  details: Record<string, unknown>;
 };
 
 export type PipelineRunDetails = {
@@ -805,6 +816,8 @@ export const api = {
     }),
   listPipelines: (businessCaseId?: string) =>
     request<Pipeline[]>(businessCaseId ? `/pipelines?business_case_id=${encodeURIComponent(businessCaseId)}` : "/pipelines"),
+  getModelTrainingCatalog: <T = unknown>() =>
+    request<T>("/pipelines/model-training/catalog"),
   createPipeline: (payload: Record<string, unknown>) =>
     request<Pipeline>("/pipelines", {
       method: "POST",

@@ -267,10 +267,11 @@ export function ModelDetailsDialog({
   onClose: () => void;
   onOpenDataset?: (datasetId: string) => void;
 }) {
-  const [tab, setTab] = useState<"overview" | "training" | "parameters" | "lineage">("overview");
+  const [tab, setTab] = useState<"overview" | "training" | "search" | "parameters" | "lineage">("overview");
   const [dataLineage, setDataLineage] = useState<DatasetLineageReference[]>([]);
   const [lineageError, setLineageError] = useState("");
   const weights = model.model_parameters.weights ?? [];
+  const optimization = optimizationSummary(model.metrics);
   useEffect(() => {
     if (model.id.startsWith("dry-run:")) {
       setDataLineage([]);
@@ -296,9 +297,9 @@ export function ModelDetailsDialog({
           <button className="icon-button" type="button" onClick={onClose} aria-label="Close model details"><X size={18} /></button>
         </div>
         <div className="model-detail-tabs" role="tablist">
-          {(["overview", "training", "parameters", "lineage"] as const).map((item) => (
+          {(["overview", "training", "search", "parameters", "lineage"] as const).map((item) => (
             <button className={tab === item ? "active" : ""} type="button" key={item} onClick={() => setTab(item)}>
-              {item}
+              {item === "search" ? searchTabLabel(optimization) : item}
             </button>
           ))}
         </div>
@@ -312,8 +313,9 @@ export function ModelDetailsDialog({
             </div>
             <section className="model-detail-section">
               <h3>Evaluation metrics</h3>
-              <KeyValueGrid values={model.metrics} empty="No evaluation metrics recorded." />
+              <MetricsGrid metrics={model.metrics} />
             </section>
+            {optimization && <OptimizationWinner optimization={optimization} />}
             <section className="model-detail-section">
               <h3>Feature contract</h3>
               <div className="model-feature-list">{model.feature_columns.map((item) => <code key={item}>{item}</code>)}</div>
@@ -328,8 +330,11 @@ export function ModelDetailsDialog({
         {tab === "training" && (
           <section className="model-detail-section">
             <h3>Training configuration and hyperparameters</h3>
-            <KeyValueGrid values={model.training_config} empty="Training configuration was not recorded for this model." />
+            <TrainingConfigSummary config={model.training_config} />
           </section>
+        )}
+        {tab === "search" && (
+          <SearchDetailsTab optimization={optimization} />
         )}
         {tab === "parameters" && (
           <section className="model-detail-section">
@@ -378,6 +383,190 @@ function DetailMetric({ label, value }: { label: string; value: string }) {
   return <div><span>{label}</span><strong>{value}</strong></div>;
 }
 
+type OptimizationTrial = {
+  number?: number;
+  status?: string;
+  algorithm?: string;
+  score?: number | null;
+  fold_scores?: number[];
+  parameters?: Record<string, unknown>;
+  error?: string;
+};
+
+type OptimizationSummary = {
+  mode?: string;
+  primary_metric?: string;
+  validation_strategy?: string;
+  random_seed?: number;
+  trial_count?: number;
+  planned_trial_count?: number;
+  total_candidate_count?: number;
+  max_trials?: number;
+  successful_trial_count?: number;
+  failed_trial_count?: number;
+  best_score?: number | null;
+  best_algorithm?: string;
+  best_parameters?: Record<string, unknown>;
+  search_space?: Record<string, unknown>;
+  trials?: OptimizationTrial[];
+  timed_out?: boolean;
+  stopped_by_max_trials?: boolean;
+  elapsed_seconds?: number;
+  timeout_seconds?: number;
+  cv_fold_source?: string;
+};
+
+function optimizationSummary(metrics: Record<string, unknown>): OptimizationSummary | null {
+  const value = metrics.optimization;
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as OptimizationSummary
+    : null;
+}
+
+function searchTabLabel(optimization: OptimizationSummary | null) {
+  if (!optimization?.mode || optimization.mode === "single") return "Search details";
+  if (optimization.mode === "grid_search") return "Grid search details";
+  if (optimization.mode === "random_search") return "Random search details";
+  if (optimization.mode === "optuna") return "Optuna details";
+  if (optimization.mode === "automl") return "AutoML details";
+  return "Search details";
+}
+
+function MetricsGrid({ metrics }: { metrics: Record<string, unknown> }) {
+  const entries = Object.entries(metrics)
+    .filter(([key, value]) => key !== "optimization" && value !== "" && value !== undefined && value !== null);
+  if (!entries.length) return <div className="empty-state">No evaluation metrics recorded.</div>;
+  return <div className="model-key-value-grid">
+    {entries.map(([key, value]) => (
+      <div key={key}><span>{key.replaceAll("_", " ")}</span><code>{displayValue(value)}</code></div>
+    ))}
+  </div>;
+}
+
+function OptimizationWinner({ optimization }: { optimization: OptimizationSummary }) {
+  return <section className="model-detail-section optimization-winner">
+    <h3>{searchTabLabel(optimization)}</h3>
+    <div className="model-detail-metrics">
+      <DetailMetric label="Winning model" value={optimization.best_algorithm || "not recorded"} />
+      <DetailMetric label="Best score" value={optimization.best_score == null ? "—" : formatNumber(optimization.best_score)} />
+      <DetailMetric label="Primary metric" value={optimization.primary_metric || "auto"} />
+      <DetailMetric label="Trials" value={`${optimization.successful_trial_count ?? 0}/${optimization.trial_count ?? 0} succeeded`} />
+    </div>
+    {optimization.best_parameters && (
+      <div className="parameter-chip-list">
+        {Object.entries(optimization.best_parameters).map(([key, value]) => (
+          <span key={key}><strong>{key}</strong>{displayValue(value)}</span>
+        ))}
+      </div>
+    )}
+  </section>;
+}
+
+function TrainingConfigSummary({ config }: { config: Record<string, unknown> }) {
+  if (!Object.keys(config).length) {
+    return <div className="empty-state">Training configuration was not recorded for this model.</div>;
+  }
+  const parameters = objectValue(config.parameters);
+  const optimization = objectValue(config.optimization);
+  const resourceLimits = objectValue(config.resource_limits);
+  const basic = {
+    algorithm: config.algorithm,
+    problem_type: config.problem_type,
+    target_column: config.target_column,
+    random_seed: config.random_seed,
+    batch_size: config.batch_size,
+    epochs: config.epochs,
+    early_stopping: config.early_stopping,
+  };
+  return <div className="training-config-readable">
+    <KeyValueGrid values={basic} empty="No basic training configuration recorded." />
+    <section>
+      <h4>Fixed parameters</h4>
+      <ParameterList parameters={parameters} empty="No fixed parameters recorded." />
+    </section>
+    <section>
+      <h4>Optimization setup</h4>
+      <KeyValueGrid values={{
+        mode: optimization.mode,
+        validation_strategy: optimization.validation_strategy,
+        primary_metric: optimization.primary_metric,
+        cv_folds: optimization.cv_folds,
+        max_trials: optimization.max_trials,
+        timeout_seconds: optimization.timeout_seconds,
+        candidate_algorithms: optimization.candidate_algorithms,
+      }} empty="No optimization settings recorded." />
+    </section>
+    <section>
+      <h4>Resource limits</h4>
+      <KeyValueGrid values={resourceLimits} empty="No resource limits recorded." />
+    </section>
+  </div>;
+}
+
+function SearchDetailsTab({ optimization }: { optimization: OptimizationSummary | null }) {
+  if (!optimization || optimization.mode === "single") {
+    return <section className="model-detail-section">
+      <h3>Search details</h3>
+      <div className="empty-state">This model was trained as a single fit, without hyperparameter search.</div>
+    </section>;
+  }
+  const trials = optimization.trials ?? [];
+  return <section className="model-detail-section">
+    <h3>{searchTabLabel(optimization)}</h3>
+    <div className="model-detail-metrics">
+      <DetailMetric label="Mode" value={displayMode(optimization.mode)} />
+      <DetailMetric label="Validation" value={optimization.validation_strategy || "not recorded"} />
+      <DetailMetric label="Candidates evaluated" value={candidateProgress(optimization)} />
+      <DetailMetric label="CV folds source" value={optimization.cv_fold_source || "not recorded"} />
+      <DetailMetric label="Elapsed / timeout" value={`${formatMaybeNumber(optimization.elapsed_seconds)} / ${formatMaybeNumber(optimization.timeout_seconds)} s`} />
+    </div>
+    {optimization.stopped_by_max_trials && <div className="training-warning">
+      This grid was capped by Maximum trials = {optimization.max_trials}. Increase the cap to evaluate more
+      combinations, or narrow the search space.
+    </div>}
+    <h4>Winning trial</h4>
+    <ParameterList parameters={optimization.best_parameters ?? {}} empty="Best parameters were not recorded." />
+    <h4>Search space</h4>
+    <SearchSpaceList searchSpace={optimization.search_space} />
+    <h4>Trials</h4>
+    <div className="optimization-trial-table">
+      <div className="head"><span>#</span><span>Status</span><span>Algorithm</span><span>Score</span><span>Parameters</span><span>Folds</span></div>
+      {trials.map((trial, index) => (
+        <div key={`${trial.number ?? index}-${trial.algorithm ?? "trial"}`}>
+          <span>{(trial.number ?? index) + 1}</span>
+          <span className={`trial-status ${trial.status ?? "unknown"}`}>{trial.status ?? "unknown"}</span>
+          <code>{trial.algorithm ?? optimization.best_algorithm ?? "—"}</code>
+          <strong>{trial.score == null ? "—" : formatNumber(trial.score)}</strong>
+          <span>{compactParameters(trial.parameters)}</span>
+          <span>{trial.fold_scores?.length ? trial.fold_scores.map(formatNumber).join(", ") : "—"}</span>
+        </div>
+      ))}
+      {!trials.length && <div className="catalog-empty">No trial history was recorded.</div>}
+    </div>
+  </section>;
+}
+
+function SearchSpaceList({ searchSpace }: { searchSpace: Record<string, unknown> | undefined }) {
+  if (!searchSpace || !Object.keys(searchSpace).length) {
+    return <div className="empty-state">Search space was not recorded.</div>;
+  }
+  return <div className="parameter-chip-list">
+    {Object.entries(searchSpace).map(([key, value]) => (
+      <span key={key}><strong>{key}</strong>{displaySearchSpaceValue(value)}</span>
+    ))}
+  </div>;
+}
+
+function ParameterList({ parameters, empty }: { parameters: Record<string, unknown>; empty: string }) {
+  const entries = Object.entries(parameters).filter(([, value]) => value !== undefined);
+  if (!entries.length) return <div className="empty-state">{empty}</div>;
+  return <div className="parameter-chip-list">
+    {entries.map(([key, value]) => (
+      <span key={key}><strong>{key}</strong>{displayValue(value)}</span>
+    ))}
+  </div>;
+}
+
 function KeyValueGrid({ values, empty }: { values: Record<string, unknown>; empty: string }) {
   const entries = Object.entries(values).filter(([, value]) => value !== "" && value !== undefined);
   if (!entries.length) return <div className="empty-state">{empty}</div>;
@@ -395,6 +584,51 @@ function displayValue(value: unknown) {
   if (value && typeof value === "object") return JSON.stringify(value);
   if (typeof value === "number") return formatNumber(value);
   return String(value);
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function compactParameters(parameters: Record<string, unknown> | undefined) {
+  if (!parameters || !Object.keys(parameters).length) return "—";
+  return Object.entries(parameters)
+    .map(([key, value]) => `${key}=${displayValue(value)}`)
+    .join(" · ");
+}
+
+function displaySearchSpaceValue(value: unknown) {
+  if (Array.isArray(value)) return value.map(displayValue).join(" · ");
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (Array.isArray(record.values)) return record.values.map(displayValue).join(" · ");
+    if (record.low !== undefined || record.high !== undefined) {
+      return `${displayValue(record.low)} → ${displayValue(record.high)}${record.points ? ` · ${record.points} values` : ""}${record.log ? " · log" : ""}`;
+    }
+  }
+  return displayValue(value);
+}
+
+function displayMode(value: string | undefined) {
+  return value ? value.replaceAll("_", " ") : "not recorded";
+}
+
+function formatMaybeNumber(value: unknown) {
+  return typeof value === "number" ? formatNumber(value) : "—";
+}
+
+function candidateProgress(optimization: OptimizationSummary) {
+  const evaluated = optimization.trial_count ?? 0;
+  const total = optimization.total_candidate_count;
+  if (typeof total === "number" && total > 0) {
+    return `${evaluated} / ${total}`;
+  }
+  const planned = optimization.planned_trial_count;
+  return typeof planned === "number" && planned > 0
+    ? `${evaluated} / ${planned}`
+    : String(evaluated);
 }
 
 function formatNumber(value: number) {

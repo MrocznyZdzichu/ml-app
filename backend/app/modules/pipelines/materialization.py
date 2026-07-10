@@ -374,6 +374,8 @@ class PipelineOutputMaterializer:
                     "lineage": lineage,
                     "schema_hash": item.get("schema_hash", ""),
                     "feature_manifest": list(item.get("feature_manifest") or []),
+                    "fitted_transform_count": int(item.get("fitted_transform_count") or 0),
+                    "feature_recipe_hash": str(item.get("feature_recipe_hash") or ""),
                     "evaluation": dict(item.get("evaluation") or {}),
                     "split_evaluation": dict(item.get("split_evaluation") or {}),
                     "metrics": dict(item.get("metrics") or {}),

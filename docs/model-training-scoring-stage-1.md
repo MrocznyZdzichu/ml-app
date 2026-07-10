@@ -1,5 +1,8 @@
 # Model Training and Test Scoring — Stage 1
 
+The expanded workbench replacing the provisional estimator catalog is
+documented in [model-training-workbench.md](model-training-workbench.md).
+
 This increment adds two executable high-level steps:
 
 ```text

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Any, Callable, Protocol
 
 from app.modules.pipelines.dag import PipelineDefinition
 from app.modules.pipelines.execution import DuckDbPipelineExecutionEngine
@@ -32,6 +32,8 @@ class StepExecutionContext:
     is_dry_run: bool
     upstream_relations: dict[tuple[str, str], SourceRelation]
     upstream_artifacts: dict[tuple[str, str], dict] = field(default_factory=dict)
+    emit_event: Callable[[str, dict[str, Any]], None] | None = None
+    is_cancel_requested: Callable[[], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -201,6 +203,8 @@ class TrainingStepHandler:
             run_id=context.run_id,
             owner_id=context.owner_id,
             is_dry_run=context.is_dry_run,
+            emit_event=context.emit_event,
+            is_cancel_requested=context.is_cancel_requested,
         )
         return HandledStepResult(
             input_row_count=result.input_row_count,
