@@ -232,9 +232,14 @@ export function trainingWithDefaults(
     target_column: current.target_column || defaults.target_column,
     feature_columns: current.feature_columns.length ? current.feature_columns : defaults.feature_columns,
     epochs: unconfigured && current.epochs === 5 ? 50 : current.epochs,
-    early_stopping: unconfigured && defaults.has_validation
+    // Step-level early stopping is a single-estimator control. AutoML and
+    // other search modes evaluate multiple candidates and must not inherit it
+    // merely because an FE validation split exists.
+    early_stopping: unconfigured && defaults.has_validation && current.optimization.mode === "single"
       ? true
-      : current.early_stopping && defaults.has_validation,
+      : current.early_stopping
+        && defaults.has_validation
+        && current.optimization.mode === "single",
     parameters: current.parameters && Object.keys(current.parameters).length
       ? current.parameters
       : defaultTrainingParameters(algorithm),
@@ -274,6 +279,7 @@ export function normalizeTrainingDefinition(value: unknown): TrainingDefinition 
   const algorithm = requestedAlgorithm || (
     problem === "regression" ? regressionAlgorithms[0] : classificationAlgorithms[0]
   );
+  const optimization = normalizeOptimization(raw.optimization);
   return {
     contract_version: "1.0",
     problem_type: problem,
@@ -283,7 +289,9 @@ export function normalizeTrainingDefinition(value: unknown): TrainingDefinition 
     feature_selection: raw.feature_selection === "explicit" ? "explicit" : "upstream_contract",
     model_name: String(raw.model_name ?? "Trained model"),
     epochs: boundedNumber(raw.epochs, 50, 1, 100),
-    early_stopping: raw.early_stopping === true,
+    // Recover older AutoML/search drafts that stored this single-estimator
+    // setting. It is not applicable while candidates are being optimized.
+    early_stopping: raw.early_stopping === true && optimization.mode === "single",
     early_stopping_patience: boundedNumber(raw.early_stopping_patience, 5, 1, 50),
     early_stopping_min_delta: boundedNumber(raw.early_stopping_min_delta, 0.0001, 0, 1),
     batch_size: boundedNumber(raw.batch_size, 10000, 100, 100000),
@@ -291,7 +299,7 @@ export function normalizeTrainingDefinition(value: unknown): TrainingDefinition 
     parameters: Object.keys(record(raw.parameters)).length
       ? record(raw.parameters)
       : defaultTrainingParameters(algorithm),
-    optimization: normalizeOptimization(raw.optimization),
+    optimization,
     resource_limits: normalizeResourceLimits(raw.resource_limits)
   };
 }

@@ -75,6 +75,37 @@ class balance is intentionally controlled and its distribution is derived from t
 small 100-row, two-class reference subset, so it is suitable for pipeline validation
 but not for estimating real-world prevalence or generalization.
 
+## Iris three-class scoring performance cohort
+
+Business case: stress-test the complete three-class batch-scoring and delayed-
+actuals path on a sizable but locally practical cohort. It is intended for the
+`Iris Species Recognition` Business Case, including a 3-class AutoML model.
+
+Files:
+
+- `examples/data/iris-3class-batch-scoring-200k.parquet`: exactly 200,000
+  scoring records with `row_id`, `sepal_length`, `sepal_width`, `petal_length`
+  and `petal_width`. It deliberately contains no `species` column.
+- `examples/data/iris-3class-batch-scoring-200k-actuals.parquet`: 200,000
+  delayed labels with `row_id`, `species` and `actual_observed_at`.
+
+Use `row_id` as the stable key in scoring and target joining. `species` is the
+actual target. The input contains 60,000 Setosa (30%), 72,000 Versicolor (36%)
+and 68,000 Virginica (34%) observations, so prevalence differs from the balanced
+reference set. Each species is generated from the full empirical four-dimensional
+covariance of `iris.csv`; measurements keep the original cross-feature
+correlations and botanical constraints. Four collection waves add a small bounded
+covariate drift (stronger in length measurements), while labels become available
+28, 35, 42 or 49 days after scoring. There are no missing values and actuals join
+one-to-one with inputs. This is a deterministic synthetic benchmark (seed
+`20260624`), not biological evidence or a real-world prevalence estimate.
+
+The files are Parquet compressed with Zstandard. The generator streams CSV staging
+rows and converts them with DuckDB, so generation does not materialize the 200k
+cohort as a Python object graph. A generator contract test verifies schema,
+counts, class allocation, key coverage and deterministic regenerated values on a
+smaller 4,000-row instance.
+
 ## Customer churn batch scoring and delayed actuals
 
 Business case: a subscription-retention team trained a churn classifier on

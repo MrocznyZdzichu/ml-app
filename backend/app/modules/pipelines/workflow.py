@@ -224,6 +224,15 @@ def validate_workflow_definition(definition: dict[str, Any], executable: bool) -
         elif step.type in {"training", "automl"}:
             from app.modules.pipelines.modeling import TrainingDefinition
 
+            # Older AutoML drafts could inherit step-level early stopping from
+            # the editor after a validation port was added. That control is
+            # invalid for any hyperparameter search; normalize the legacy
+            # value rather than making a saved draft impossible to recover.
+            if (
+                step.type == "automl"
+                and dict(nested_definition.get("optimization") or {}).get("mode") == "automl"
+            ):
+                nested_definition["early_stopping"] = False
             validated = TrainingDefinition.model_validate(nested_definition)
             if step.type == "automl" and validated.optimization.mode != "automl":
                 raise ValueError("AutoML step requires optimization mode 'automl'")

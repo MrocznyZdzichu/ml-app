@@ -107,6 +107,19 @@ export type DataAsset = {
   updated_at: string;
 };
 
+export type ArtifactDependency = {
+  direction: "upstream" | "downstream";
+  role: string;
+  artifact_id: string;
+  artifact_type: string;
+  reference_id: string;
+  business_case_id: string;
+  pipeline_id: string;
+  pipeline_version_id: string;
+  pipeline_run_id: string;
+  pipeline_step_id: string;
+};
+
 export function temporaryPipelineOutputId(runId: string, outputId: string, pipelineStepId = "") {
   const parts = [encodeURIComponent(runId)];
   if (pipelineStepId) parts.push(encodeURIComponent(pipelineStepId));
@@ -954,6 +967,10 @@ export const api = {
     request<ScoringReport[]>(`/scoring-reports/${encodeURIComponent(logicalId)}/versions`),
   getScoringReportDataLineage: (reportId: string) =>
     request<DatasetLineageReference[]>(`/scoring-reports/${encodeURIComponent(reportId)}/data-lineage`),
+  getArtifactDependencies: (referenceId: string, artifactType: string) =>
+    request<ArtifactDependency[]>(
+      `/business-cases/dependencies/${encodeURIComponent(referenceId)}?artifact_type=${encodeURIComponent(artifactType)}`
+    ),
   createDeployment: (payload: Record<string, unknown>) =>
     request<Deployment>("/serving/deployments", {
       method: "POST",

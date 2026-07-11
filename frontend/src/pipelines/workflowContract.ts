@@ -105,7 +105,10 @@ export type WorkflowDefinition = {
 
 export type PipelineTemplate = "training" | "automl" | "batch_scoring" | "custom" | "monitoring";
 
-export function workflowTemplateDefinition(template: PipelineTemplate): WorkflowDefinition {
+export function workflowTemplateDefinition(
+  template: PipelineTemplate,
+  targetColumn = "target"
+): WorkflowDefinition {
   if (template === "custom") {
     return {
       ...emptyWorkflowDefinition(),
@@ -198,6 +201,9 @@ export function workflowTemplateDefinition(template: PipelineTemplate): Workflow
       evaluation: {
         ...featureBase.evaluation,
         split_strategy: "stratified",
+        // Keep the initial draft structurally valid. The user can still choose a
+        // different target/strategy once the upstream schema is configured.
+        stratify_column: targetColumn.trim() || "target",
         validation_size: 0.1,
         test_size: 0.2
       },

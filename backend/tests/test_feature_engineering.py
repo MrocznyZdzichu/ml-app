@@ -35,6 +35,22 @@ def _asset(asset_id: str, owner_id: str, path: Path, rows: int) -> DataAsset:
     )
 
 
+def test_stratified_draft_can_be_saved_before_a_stable_row_id_is_configured() -> None:
+    definition = FeatureEngineeringDefinition.model_validate({
+        "inputs": [{"input_id": "training", "role": "training"}],
+        "target_column": "species",
+        "evaluation": {"split_strategy": "stratified", "stratify_column": "species"},
+        "outputs": [
+            {"output_id": "train", "input_id": "training", "dataset_name": "Train", "business_case_role": "training"},
+            {"output_id": "validation", "input_id": "validation", "dataset_name": "Validation", "business_case_role": "validation"},
+            {"output_id": "test", "input_id": "test", "dataset_name": "Test", "business_case_role": "test"},
+        ],
+    })
+
+    with pytest.raises(ValueError, match="row_id_column"):
+        definition.validate_executable()
+
+
 def _definition(handle_unknown: str = "other") -> FeatureEngineeringDefinition:
     return FeatureEngineeringDefinition.model_validate({
         "contract_version": "1.0",

@@ -80,6 +80,15 @@ def test_automl_workflow_contract_accepts_de_to_automl() -> None:
     assert validated["steps"][1]["config"]["definition"]["optimization"]["mode"] == "automl"
 
 
+def test_automl_workflow_recovers_a_legacy_early_stopping_value() -> None:
+    workflow = automl_workflow()
+    workflow["steps"][1]["config"]["definition"]["early_stopping"] = True
+
+    validated = validate_workflow_definition(workflow, executable=False)
+
+    assert validated["steps"][1]["config"]["definition"]["early_stopping"] is False
+
+
 def test_automl_workflow_rejects_non_automl_optimization_mode() -> None:
     with pytest.raises(ValueError, match="requires optimization mode 'automl'"):
         validate_workflow_definition(automl_workflow(mode="optuna"), executable=False)

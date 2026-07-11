@@ -11,6 +11,7 @@ import {
   Drill,
   Filter,
   History,
+  GitBranch,
   ListChecks,
   LogOut,
   Pencil,
@@ -46,6 +47,7 @@ import type {
   UserProfile
 } from "./api/client";
 import { AssetList } from "./components/AssetList";
+import { ArtifactDependenciesDialog } from "./operational/ArtifactDependenciesDialog";
 import {
   ArtifactFilters,
   datasetPipelineId,
@@ -549,6 +551,7 @@ function BusinessCasesPanel({
   const [bcModelPipelineFilter, setBcModelPipelineFilter] = useState("");
   const [bcReportPurposeFilter, setBcReportPurposeFilter] = useState("");
   const [bcReportPipelineFilter, setBcReportPipelineFilter] = useState("");
+  const [dependencyTarget, setDependencyTarget] = useState<{ referenceId: string; artifactType: string; title: string } | null>(null);
 
   const selectedBusinessCase = businessCases.find((item) => item.id === selectedBusinessCaseId);
   const datasetById = useMemo(
@@ -1174,6 +1177,12 @@ function BusinessCasesPanel({
                             <History size={14} /> Versions
                           </button>
                         )}
+                        {attachedDataset(item.data_asset_id) && (
+                          <button className="secondary-button compact-button" type="button"
+                            onClick={() => setDependencyTarget({ referenceId: attachedDataset(item.data_asset_id)!.id, artifactType: "dataset", title: assetName })}>
+                            <GitBranch size={14} /> Dependencies
+                          </button>
+                        )}
                         <button
                           className="secondary-button compact-button"
                           type="button"
@@ -1317,6 +1326,11 @@ function BusinessCasesPanel({
                 label: "Edit",
                 icon: "edit",
                 onClick: () => onEditPipeline(item.id)
+              },
+              {
+                label: "Dependencies",
+                icon: "dependencies",
+                onClick: () => setDependencyTarget({ referenceId: item.id, artifactType: "pipeline", title: item.name })
               }
             ]
           }))} />
@@ -1343,7 +1357,8 @@ function BusinessCasesPanel({
               status: item.stage,
               actions: [
                 { label: "Versions", icon: "versions", onClick: () => setBcModelHistory(item) },
-                { label: "View", icon: "view", onClick: () => setSelectedBcModel(item) }
+                { label: "View", icon: "view", onClick: () => setSelectedBcModel(item) },
+                { label: "Dependencies", icon: "dependencies", onClick: () => setDependencyTarget({ referenceId: item.id, artifactType: "model_version", title: item.name }) }
               ]
             }))} />
           </div>
@@ -1369,7 +1384,8 @@ function BusinessCasesPanel({
               status: "ready",
               actions: [
                 { label: "Versions", icon: "versions", onClick: () => setBcReportHistory(item) },
-                { label: "View", icon: "view", onClick: () => setSelectedBcReport(item) }
+                { label: "View", icon: "view", onClick: () => setSelectedBcReport(item) },
+                { label: "Dependencies", icon: "dependencies", onClick: () => setDependencyTarget({ referenceId: item.id, artifactType: "report", title: item.name }) }
               ]
             }))} />
           </div>
@@ -1405,6 +1421,13 @@ function BusinessCasesPanel({
             setBcDatasetHistory(null);
             onOpenDataset(datasetId);
           }}
+        />
+      )}
+      {dependencyTarget && (
+        <ArtifactDependenciesDialog
+          {...dependencyTarget}
+          onClose={() => setDependencyTarget(null)}
+          onOpenDataset={onOpenDataset}
         />
       )}
       {bcModelHistory && (
@@ -1997,7 +2020,10 @@ function PipelinesPanel({
         name,
         description,
         type: pipelineType,
-        definition: workflowTemplateDefinition(pipelineTemplate)
+        definition: workflowTemplateDefinition(
+          pipelineTemplate,
+          businessCases.find((item) => item.id === businessCaseId)?.target_column ?? ""
+        )
       });
       setNotice(`Pipeline created: ${created.name}`);
       setSelectedPipelineId(created.id);

@@ -3,6 +3,8 @@ import math
 import statistics
 from pathlib import Path
 
+import duckdb
+
 from examples import generate_synthetic_datasets as generator
 
 
@@ -101,6 +103,37 @@ def test_synthetic_dataset_generator_is_reproducible_and_preserves_contract(tmp_
                 [row[right_index] for row in generated[species]],
             )
             assert abs(generated_correlation - reference_correlation) < 0.12
+
+    generator.write_iris_three_class_scoring_large(row_count=4_000)
+    large_scoring_path = tmp_path / "iris-3class-batch-scoring-200k.parquet"
+    large_actuals_path = tmp_path / "iris-3class-batch-scoring-200k-actuals.parquet"
+    connection = duckdb.connect()
+    try:
+        large_scoring = connection.execute(
+            f"SELECT * FROM read_parquet('{str(large_scoring_path).replace(chr(39), chr(39) * 2)}') ORDER BY row_id"
+        ).fetchall()
+        large_actuals = connection.execute(
+            f"SELECT * FROM read_parquet('{str(large_actuals_path).replace(chr(39), chr(39) * 2)}') ORDER BY row_id"
+        ).fetchall()
+    finally:
+        connection.close()
+    assert len(large_scoring) == len(large_actuals) == 4_000
+    assert len({row[0] for row in large_scoring}) == 4_000
+    assert {row[1] for row in large_actuals} == {"setosa", "versicolor", "virginica"}
+    assert [row[1] for row in large_actuals].count("setosa") == 1_200
+    assert [row[1] for row in large_actuals].count("versicolor") == 1_440
+    assert [row[1] for row in large_actuals].count("virginica") == 1_360
+    assert all(row[2] for row in large_actuals)
+    assert all(len(row) == 5 for row in large_scoring)
+    generator.write_iris_three_class_scoring_large(row_count=4_000)
+    connection = duckdb.connect()
+    try:
+        regenerated = connection.execute(
+            f"SELECT * FROM read_parquet('{str(large_scoring_path).replace(chr(39), chr(39) * 2)}') ORDER BY row_id"
+        ).fetchall()
+    finally:
+        connection.close()
+    assert large_scoring == regenerated
 
     with (tmp_path / "general-churn-batch-scoring-10k.csv").open(
         encoding="utf-8", newline=""

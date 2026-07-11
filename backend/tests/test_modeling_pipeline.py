@@ -593,6 +593,16 @@ def test_multiclass_scoring_persists_per_class_probabilities(tmp_path: Path) -> 
     assert [item["label"] for item in output["score_contract"]["classes"]] == [0, 1, 2]
 
 
+def test_scoring_normalizes_multiclass_predict_matrices_to_labels() -> None:
+    predictions = SklearnScoringEngine._prediction_vector(
+        np.asarray([[0.1, 0.8, 0.1], [0.7, 0.2, 0.1]]),
+        problem_type="multiclass_classification",
+        class_labels=["setosa", "versicolor", "virginica"],
+    )
+
+    assert predictions.tolist() == ["versicolor", "setosa"]
+
+
 def test_training_parameters_are_scoped_to_selected_algorithm() -> None:
     with pytest.raises(ValueError, match="Unsupported training parameters"):
         TrainingDefinition(

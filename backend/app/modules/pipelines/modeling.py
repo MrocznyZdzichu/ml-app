@@ -991,7 +991,11 @@ class SklearnScoringEngine:
                 x = frame[features].to_numpy(dtype=np.float64)
                 if not np.isfinite(x).all():
                     raise ValueError("Scoring features contain null, NaN or infinite values")
-                predictions = estimator.predict(x)
+                predictions = self._prediction_vector(
+                    estimator.predict(x),
+                    problem_type=problem_type,
+                    class_labels=class_labels,
+                )
                 output = pd.DataFrame({
                     definition.row_id_column: frame[definition.row_id_column],
                     definition.prediction_column: predictions,
@@ -1125,3 +1129,35 @@ class SklearnScoringEngine:
         finally:
             reader.close()
             connection.close()
+
+    @staticmethod
+    def _prediction_vector(
+        values: Any,
+        *,
+        problem_type: str,
+        class_labels: list[Any],
+    ) -> np.ndarray:
+        """Normalize estimator output to the one prediction column contract.
+
+        A few third-party multiclass estimators return a score/probability
+        matrix from ``predict``. The scoring artifact stores those values in
+        explicit per-class columns, while its prediction column must contain
+        exactly one chosen class per input row.
+        """
+        predictions = np.asarray(values)
+        if predictions.ndim == 1:
+            return predictions
+        if predictions.ndim == 2 and predictions.shape[1] == 1:
+            return predictions[:, 0]
+        if (
+            problem_type != "regression"
+            and predictions.ndim == 2
+            and class_labels
+            and predictions.shape[1] == len(class_labels)
+        ):
+            labels = np.asarray(class_labels, dtype=object)
+            return labels[np.argmax(predictions, axis=1)]
+        raise ValueError(
+            "Model predict() returned a matrix that cannot be represented as "
+            "one prediction per row"
+        )

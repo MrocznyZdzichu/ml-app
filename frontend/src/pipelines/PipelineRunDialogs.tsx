@@ -1,8 +1,9 @@
-import { BarChart3, Box, Brain, Check, ChevronLeft, ChevronRight, Clipboard, Database, Download, Eye, RotateCcw, Search, X } from "lucide-react";
+import { BarChart3, Box, Brain, Check, ChevronLeft, ChevronRight, Clipboard, Database, Download, Eye, GitBranch, RotateCcw, Search, X } from "lucide-react";
 import type { CSSProperties } from "react";
 import { lazy, Suspense, useEffect, useState } from "react";
 
 import { api } from "../api/client";
+import { ArtifactDependenciesDialog } from "../operational/ArtifactDependenciesDialog";
 import type {
   BusinessCase,
   ModelArtifact,
@@ -196,6 +197,7 @@ export function PipelineRunHistoryDialog({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [artifactsRun, setArtifactsRun] = useState<PipelineRun | null>(null);
+  const [dependenciesRun, setDependenciesRun] = useState<PipelineRun | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -333,6 +335,13 @@ export function PipelineRunHistoryDialog({
                       >
                         Details
                       </button>
+                      <button
+                        className="secondary-button compact-button"
+                        type="button"
+                        onClick={() => setDependenciesRun(run)}
+                      >
+                        <GitBranch size={14} /> Dependencies
+                      </button>
                     </div>
                   </span>
                 </div>
@@ -349,6 +358,19 @@ export function PipelineRunHistoryDialog({
             onClose={() => setArtifactsRun(null)}
             onExamineDataset={(datasetId) => {
               setArtifactsRun(null);
+              onClose();
+              onExamineDataset(datasetId);
+            }}
+          />
+        )}
+        {dependenciesRun && (
+          <ArtifactDependenciesDialog
+            referenceId={dependenciesRun.id}
+            artifactType="pipeline_run"
+            title={`Run ${shortId(dependenciesRun.id)}`}
+            onClose={() => setDependenciesRun(null)}
+            onOpenDataset={(datasetId) => {
+              setDependenciesRun(null);
               onClose();
               onExamineDataset(datasetId);
             }}
@@ -1456,7 +1478,7 @@ function isScoringReportOutput(
 ): boolean {
   const evaluation = output.evaluation as ModelEvaluationSnapshot | undefined;
   return (
-    output.artifact_type === "prediction_dataset"
+    ["prediction_dataset", "report_source"].includes(output.artifact_type ?? "")
     && evaluation?.kind === "model_performance"
   );
 }

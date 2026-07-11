@@ -360,7 +360,7 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
               : "Add an explicit validation output in Feature Engineering to enable this."}</small>
           </span>
         </label>}
-      {algorithm?.execution_mode === "incremental" && definition.early_stopping
+      {algorithm?.execution_mode === "incremental" && optimization.mode === "single" && definition.early_stopping
         && defaults.has_validation && <div className="step-grid">
         <label>Patience (epochs)<input type="number" min={1} max={50}
           value={definition.early_stopping_patience} disabled={disabled}

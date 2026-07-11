@@ -14,6 +14,7 @@ IRIS_SOURCE = Path(__file__).resolve().parent / "data" / "iris.csv"
 GENERAL_SOURCE = Path(__file__).resolve().parent / "data" / "general-example.csv"
 SEED = 20260624
 IRIS_FEATURES = ("sepal_length", "sepal_width", "petal_length", "petal_width")
+IRIS_THREE_CLASS_SCORING_ROWS = 200_000
 
 
 def write_dynamic_reactor() -> None:
@@ -151,6 +152,135 @@ def write_iris_batch_scoring() -> None:
     write_csv(OUTPUT / "iris-batch-scoring-10k-actuals.csv", actual_rows)
 
 
+def write_iris_three_class_scoring_large(row_count: int = IRIS_THREE_CLASS_SCORING_ROWS) -> None:
+    """Generate a realistic large three-class Iris scoring cohort and delayed actuals.
+
+    The input and actuals are written separately as Parquet because this is a
+    performance-test scenario. Class-specific multivariate sampling preserves
+    the empirical covariance structure of the reference Iris data. Four scoring
+    waves introduce a small covariate shift without exposing a time feature to
+    the model, and the class allocation intentionally differs from the balanced
+    reference population to make prevalence drift visible in monitoring.
+    """
+    if row_count < 3 or row_count % 4:
+        raise ValueError("row_count must be at least 3 and divisible by four")
+
+    rng = random.Random(SEED + 4)
+    reference = iris_reference_by_species()
+    species_order = ("setosa", "versicolor", "virginica")
+    # 30% / 36% / 34%: plausible field prevalence, distinct from the reference
+    # set's equal class count. The final class absorbs rounding.
+    counts = {
+        "setosa": round(row_count * 0.30),
+        "versicolor": round(row_count * 0.36),
+    }
+    counts["virginica"] = row_count - counts["setosa"] - counts["versicolor"]
+    distributions = {
+        species: iris_distribution(reference[species])
+        for species in species_order
+    }
+
+    generated: list[tuple[str, list[float]]] = []
+    for species in species_order:
+        distribution = distributions[species]
+        for sequence in range(counts[species]):
+            wave = sequence % 4
+            values = correlated_iris_measurement(rng, distribution, wave)
+            generated.append((species, values))
+    rng.shuffle(generated)
+
+    scoring_path = OUTPUT / "iris-3class-batch-scoring-200k.parquet"
+    actuals_path = OUTPUT / "iris-3class-batch-scoring-200k-actuals.parquet"
+    scoring_csv = scoring_path.with_suffix(".staging.csv")
+    actuals_csv = actuals_path.with_suffix(".staging.csv")
+    try:
+        with scoring_csv.open("w", newline="", encoding="utf-8") as scoring_handle, actuals_csv.open(
+            "w", newline="", encoding="utf-8"
+        ) as actuals_handle:
+            scoring_writer = csv.DictWriter(scoring_handle, fieldnames=("row_id", *IRIS_FEATURES), lineterminator="\n")
+            actuals_writer = csv.DictWriter(actuals_handle, fieldnames=("row_id", "species", "actual_observed_at"), lineterminator="\n")
+            scoring_writer.writeheader()
+            actuals_writer.writeheader()
+            observation_start = datetime(2026, 10, 1, tzinfo=UTC)
+            for index, (species, values) in enumerate(generated, start=1):
+                row_id = f"IRIS-3C-SCORE-{index:06d}"
+                scoring_writer.writerow({"row_id": row_id, **dict(zip(IRIS_FEATURES, values, strict=True))})
+                # Target availability occurs 28–49 days after scoring in four waves.
+                observed_at = observation_start + timedelta(days=28 + ((index - 1) % 4) * 7)
+                actuals_writer.writerow({
+                    "row_id": row_id,
+                    "species": species,
+                    "actual_observed_at": observed_at.date().isoformat(),
+                })
+        csv_to_parquet(scoring_csv, scoring_path)
+        csv_to_parquet(actuals_csv, actuals_path)
+    finally:
+        scoring_csv.unlink(missing_ok=True)
+        actuals_csv.unlink(missing_ok=True)
+
+
+def iris_reference_by_species() -> dict[str, list[list[float]]]:
+    result = {species: [] for species in ("setosa", "versicolor", "virginica")}
+    with IRIS_SOURCE.open(encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            result[str(row["species"])].append([float(row[name]) for name in IRIS_FEATURES])
+    return result
+
+
+def iris_distribution(samples: list[list[float]]) -> dict[str, list[list[float]] | list[float]]:
+    means = [sum(row[index] for row in samples) / len(samples) for index in range(len(IRIS_FEATURES))]
+    ranges = [
+        (min(row[index] for row in samples), max(row[index] for row in samples))
+        for index in range(len(IRIS_FEATURES))
+    ]
+    return {"means": means, "factor": cholesky(sample_covariance(samples, means)), "ranges": ranges}
+
+
+def correlated_iris_measurement(
+    rng: random.Random,
+    distribution: dict[str, list[list[float]] | list[float]],
+    wave: int,
+) -> list[float]:
+    means = distribution["means"]
+    factor = distribution["factor"]
+    ranges = distribution["ranges"]
+    assert isinstance(means, list) and isinstance(factor, list) and isinstance(ranges, list)
+    # Small shared seasonal/method drift, strongest for lengths, still bounded
+    # to botanical ranges with a 20% margin.
+    drift = (-0.035, -0.012, 0.018, 0.042)[wave]
+    while True:
+        standard = [rng.gauss(0, 1) for _ in IRIS_FEATURES]
+        values = [
+            float(means[row]) + sum(float(factor[row][column]) * standard[column] for column in range(row + 1))
+            + drift * (1.0 if row in {0, 2} else 0.45)
+            for row in range(len(IRIS_FEATURES))
+        ]
+        lower = [float(bounds[0]) - 0.20 * (float(bounds[1]) - float(bounds[0])) for bounds in ranges]
+        upper = [float(bounds[1]) + 0.20 * (float(bounds[1]) - float(bounds[0])) for bounds in ranges]
+        if (
+            all(lower[index] <= value <= upper[index] for index, value in enumerate(values))
+            and values[2] < values[0]
+            and values[3] < values[1]
+            and min(values) > 0
+        ):
+            return [round(value, 3) for value in values]
+
+
+def csv_to_parquet(csv_path: Path, parquet_path: Path) -> None:
+    import duckdb
+
+    connection = duckdb.connect()
+    try:
+        escaped_csv = str(csv_path).replace("'", "''")
+        escaped_parquet = str(parquet_path).replace("'", "''")
+        connection.execute(
+            f"COPY (SELECT * FROM read_csv_auto('{escaped_csv}', header=true)) "
+            f"TO '{escaped_parquet}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+        )
+    finally:
+        connection.close()
+
+
 def write_churn_batch_scoring() -> None:
     """Create an out-of-time churn scoring cohort and separately held actuals.
 
@@ -284,8 +414,9 @@ if __name__ == "__main__":
     write_dynamic_reactor()
     write_equipment_clustering()
     write_iris_batch_scoring()
+    write_iris_three_class_scoring_large()
     write_churn_batch_scoring()
     print(
         "Generated dynamic-reactor-timeseries.csv, equipment-operating-regimes.csv, "
-        "Iris batch-scoring files and churn batch-scoring files"
+        "Iris batch-scoring files, the 200k Iris three-class performance cohort, and churn batch-scoring files"
     )
