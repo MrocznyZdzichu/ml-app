@@ -526,22 +526,25 @@ function SearchDetailsTab({ optimization }: { optimization: OptimizationSummary 
       <DetailMetric label="Elapsed / timeout" value={`${formatMaybeNumber(optimization.elapsed_seconds)} / ${formatMaybeNumber(optimization.timeout_seconds)} s`} />
     </div>
     {optimization.stopped_by_max_trials && <div className="training-warning">
-      This grid was capped by Maximum trials = {optimization.max_trials}. Increase the cap to evaluate more
+      This search was capped by Maximum trials = {optimization.max_trials}. Increase the cap to evaluate more
       combinations, or narrow the search space.
     </div>}
     <h4>Winning trial</h4>
     <ParameterList parameters={optimization.best_parameters ?? {}} empty="Best parameters were not recorded." />
     <h4>Search space</h4>
     <SearchSpaceList searchSpace={optimization.search_space} />
-    <h4>Search result heatmap</h4>
-    <SearchHeatmap
-      trials={trials}
-      dimensions={heatmapDimensions}
-      xAxis={xAxis}
-      yAxis={yAxis}
-      onXAxisChange={setHeatmapX}
-      onYAxisChange={setHeatmapY}
-    />
+    {optimization.mode === "grid_search" ? <>
+      <h4>Search result heatmap</h4>
+      <SearchHeatmap
+        trials={trials}
+        dimensions={heatmapDimensions}
+        xAxis={xAxis}
+        yAxis={yAxis}
+        onXAxisChange={setHeatmapX}
+        onYAxisChange={setHeatmapY}
+      />
+    </> : optimization.mode === "random_search" ? <RandomSearchInsights trials={trials} />
+      : <OptunaInsights trials={trials} />}
     <h4>Trials</h4>
     <div className="optimization-trial-table">
       <div className="head"><span>#</span><span>Status</span><span>Algorithm</span><span>Score</span><span>Parameters</span><span>Folds</span></div>
@@ -558,6 +561,205 @@ function SearchDetailsTab({ optimization }: { optimization: OptimizationSummary 
       {!trials.length && <div className="catalog-empty">No trial history was recorded.</div>}
     </div>
   </section>;
+}
+
+type ScoredTrial = OptimizationTrial & { score: number; parameters: Record<string, unknown>; index: number };
+
+function successfulTrials(trials: OptimizationTrial[]): ScoredTrial[] {
+  return trials.flatMap((trial, index) => typeof trial.score === "number" && Number.isFinite(trial.score)
+    && trial.status === "succeeded" && trial.parameters
+    ? [{ ...trial, score: trial.score, parameters: trial.parameters, index }]
+    : []);
+}
+
+function RandomSearchInsights({ trials }: { trials: OptimizationTrial[] }) {
+  const successful = useMemo(() => successfulTrials(trials), [trials]);
+  const dimensions = useMemo(() => heatmapParameterOptions(trials), [trials]);
+  return <div className="search-insights">
+    <div className="search-insights-heading">
+      <h4>Random Search sample map</h4>
+      <small>Each point is one sampled configuration. Point color represents the trial score.</small>
+    </div>
+    <ScoreDistribution trials={successful} />
+    <PairwiseScatter trials={successful} dimensions={dimensions} mode="random" />
+  </div>;
+}
+
+function OptunaInsights({ trials }: { trials: OptimizationTrial[] }) {
+  const successful = useMemo(() => successfulTrials(trials), [trials]);
+  const dimensions = useMemo(() => heatmapParameterOptions(trials), [trials]);
+  return <div className="search-insights">
+    <div className="search-insights-heading">
+      <h4>Optuna study insights</h4>
+      <small>Read how the study improved, which parameters show the strongest observed signal, and where high-scoring trials concentrate.</small>
+    </div>
+    <OptimizationHistory trials={successful} />
+    <ObservedParameterSignals trials={successful} dimensions={dimensions} />
+    <SlicePlot trials={successful} dimensions={dimensions} />
+    <PairwiseScatter trials={successful} dimensions={dimensions} mode="optuna" />
+  </div>;
+}
+
+function OptimizationHistory({ trials }: { trials: ScoredTrial[] }) {
+  if (!trials.length) return <div className="empty-state">No successful trials are available for optimization history.</div>;
+  const min = Math.min(...trials.map((trial) => trial.score));
+  const max = Math.max(...trials.map((trial) => trial.score));
+  let best = -Infinity;
+  const points = trials.map((trial, index) => {
+    best = Math.max(best, trial.score);
+    return { x: chartX(index, trials.length), y: chartY(best, min, max) };
+  });
+  return <section className="search-chart-card history-chart-card">
+    <header><strong>Optimization history</strong><small>Dots are trial scores; the line is the best score reached so far.</small></header>
+    <svg className="search-svg" viewBox="0 0 720 240" role="img" aria-label="Optuna optimization history">
+      <ChartGrid min={min} max={max} />
+      <polyline className="best-so-far-line" points={points.map((point) => `${point.x},${point.y}`).join(" ")} />
+      {trials.map((trial, index) => <circle key={`${trial.number ?? index}`} className="trial-dot"
+        cx={chartX(index, trials.length)} cy={chartY(trial.score, min, max)} r="4"
+        fill={scoreColor(trial.score, min, max)}><title>Trial {(trial.number ?? index) + 1}: {formatNumber(trial.score)}</title></circle>)}
+      <text className="chart-axis-label" x="360" y="232">Trial</text>
+      <text className="chart-axis-label" x="12" y="26">score</text>
+    </svg>
+  </section>;
+}
+
+function ScoreDistribution({ trials }: { trials: ScoredTrial[] }) {
+  if (!trials.length) return <div className="empty-state">No successful trials are available for score distribution.</div>;
+  const min = Math.min(...trials.map((trial) => trial.score));
+  const max = Math.max(...trials.map((trial) => trial.score));
+  const bins = Math.min(10, Math.max(4, Math.ceil(Math.sqrt(trials.length))));
+  const counts = Array.from({ length: bins }, () => 0);
+  for (const trial of trials) {
+    const position = max === min ? 0 : Math.min(bins - 1, Math.floor(((trial.score - min) / (max - min)) * bins));
+    counts[position] += 1;
+  }
+  const ceiling = Math.max(...counts, 1);
+  return <section className="search-chart-card score-distribution-card">
+    <header><strong>Sampled score distribution</strong><small>{trials.length} successful random samples; higher score is better.</small></header>
+    <div className="score-histogram" aria-label="Random Search score distribution">
+      {counts.map((count, index) => <div key={index} title={`${count} trial(s)`}>
+        <i style={{ height: `${Math.max(5, (count / ceiling) * 100)}%` }} />
+        <span>{formatNumber(min + ((index + 0.5) / bins) * (max - min))}</span>
+      </div>)}
+    </div>
+  </section>;
+}
+
+function ObservedParameterSignals({ trials, dimensions }: { trials: ScoredTrial[]; dimensions: string[] }) {
+  const signals = useMemo(() => dimensions.map((parameter) => ({ parameter, signal: parameterSignal(trials, parameter) }))
+    .filter((item) => item.signal > 0).sort((left, right) => right.signal - left.signal).slice(0, 6), [trials, dimensions]);
+  if (!signals.length) return <div className="empty-state">At least two observed values per parameter are needed to estimate parameter signal.</div>;
+  const maximum = Math.max(...signals.map((item) => item.signal));
+  return <section className="search-chart-card parameter-signal-card">
+    <header><strong>Observed parameter signal</strong><small>Score spread between value groups. It is an exploratory hint, not causal feature importance.</small></header>
+    <div className="parameter-signal-bars">
+      {signals.map(({ parameter, signal }) => <div key={parameter}>
+        <code>{parameter}</code><span><i style={{ width: `${(signal / maximum) * 100}%` }} /></span><strong>{formatNumber(signal)}</strong>
+      </div>)}
+    </div>
+  </section>;
+}
+
+function SlicePlot({ trials, dimensions }: { trials: ScoredTrial[]; dimensions: string[] }) {
+  const [parameter, setParameter] = useState("");
+  const selected = parameter || dimensions[0] || "";
+  const points = trials.filter((trial) => selected in trial.parameters);
+  if (!selected || !points.length) return <div className="empty-state">No parameter values are available for a slice plot.</div>;
+  const scale = parameterScale(points, selected);
+  const min = Math.min(...points.map((trial) => trial.score));
+  const max = Math.max(...points.map((trial) => trial.score));
+  return <section className="search-chart-card slice-chart-card">
+    <header><strong>Parameter slice</strong><label>Parameter<select value={selected} onChange={(event) => setParameter(event.target.value)}>
+      {dimensions.map((item) => <option key={item} value={item}>{item}</option>)}</select></label></header>
+    <small>Each dot is a completed trial. The horizontal position is this parameter; the vertical position is the trial score.</small>
+    <svg className="search-svg" viewBox="0 0 720 240" role="img" aria-label={`Parameter slice for ${selected}`}>
+      <ChartGrid min={min} max={max} />
+      {points.map((trial, index) => <circle key={`${trial.number ?? index}`} className="trial-dot"
+        cx={parameterX(trial.parameters[selected], scale)} cy={chartY(trial.score, min, max)} r="4"
+        fill={scoreColor(trial.score, min, max)}><title>{selected}: {displayValue(trial.parameters[selected])}; score: {formatNumber(trial.score)}</title></circle>)}
+      <text className="chart-axis-label" x="360" y="232">{selected}{scale.log ? " (log scale)" : ""}</text>
+      <text className="chart-axis-label" x="12" y="26">score</text>
+    </svg>
+  </section>;
+}
+
+function PairwiseScatter({ trials, dimensions, mode }: { trials: ScoredTrial[]; dimensions: string[]; mode: "random" | "optuna" }) {
+  const [xChoice, setXChoice] = useState("");
+  const [yChoice, setYChoice] = useState("");
+  const xAxis = xChoice || dimensions[0] || "";
+  const yAxis = yChoice || dimensions.find((item) => item !== xAxis) || "";
+  const points = trials.filter((trial) => xAxis in trial.parameters && yAxis in trial.parameters);
+  if (!xAxis || !yAxis || !points.length) return <div className="empty-state">Choose two varied parameters to inspect sampled interactions.</div>;
+  const xScale = parameterScale(points, xAxis);
+  const yScale = parameterScale(points, yAxis);
+  const min = Math.min(...points.map((trial) => trial.score));
+  const max = Math.max(...points.map((trial) => trial.score));
+  return <section className="search-chart-card pairwise-chart-card">
+    <header><strong>{mode === "optuna" ? "Optuna parameter interaction" : "Random Search sampled interaction"}</strong>
+      <div className="search-chart-controls"><label>X<select value={xAxis} onChange={(event) => setXChoice(event.target.value)}>{dimensions.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
+      <label>Y<select value={yAxis} onChange={(event) => setYChoice(event.target.value)}>{dimensions.map((item) => <option key={item} value={item}>{item}</option>)}</select></label></div></header>
+    <small>Each point is a trial. Color represents score; unlike an exact-value heatmap, continuous values stay readable.</small>
+    {xAxis === yAxis ? <div className="empty-state">Choose two different parameters.</div> : <svg className="search-svg" viewBox="0 0 720 240" role="img" aria-label={`Interaction of ${xAxis} and ${yAxis}`}>
+      <ScatterGrid />
+      {points.map((trial, index) => <circle key={`${trial.number ?? index}`} className="trial-dot"
+        cx={parameterX(trial.parameters[xAxis], xScale)} cy={parameterY(trial.parameters[yAxis], yScale)} r="5"
+        fill={scoreColor(trial.score, min, max)}><title>{xAxis}: {displayValue(trial.parameters[xAxis])}; {yAxis}: {displayValue(trial.parameters[yAxis])}; score: {formatNumber(trial.score)}</title></circle>)}
+      <text className="chart-axis-label" x="360" y="232">{xAxis}{xScale.log ? " (log scale)" : ""}</text>
+      <text className="chart-axis-label" x="12" y="26">{yAxis}{yScale.log ? " (log scale)" : ""}</text>
+    </svg>}
+  </section>;
+}
+
+type ParameterScale = { numeric: boolean; log: boolean; minimum: number; maximum: number; categories: string[] };
+
+function parameterScale(trials: ScoredTrial[], parameter: string): ParameterScale {
+  const values = trials.map((trial) => trial.parameters[parameter]);
+  const numbers = values.map(Number);
+  const numeric = numbers.every(Number.isFinite);
+  if (!numeric) return { numeric: false, log: false, minimum: 0, maximum: 1, categories: sortHeatmapValues([...new Set(values.map(heatmapValue))]) };
+  const minimum = Math.min(...numbers);
+  const maximum = Math.max(...numbers);
+  return { numeric: true, log: minimum > 0 && maximum / minimum >= 50, minimum, maximum, categories: [] };
+}
+
+function parameterPosition(value: unknown, scale: ParameterScale) {
+  if (!scale.numeric) return scale.categories.length <= 1 ? 0.5 : scale.categories.indexOf(heatmapValue(value)) / (scale.categories.length - 1);
+  const numeric = Number(value);
+  if (scale.maximum === scale.minimum) return 0.5;
+  if (scale.log) return (Math.log(numeric) - Math.log(scale.minimum)) / (Math.log(scale.maximum) - Math.log(scale.minimum));
+  return (numeric - scale.minimum) / (scale.maximum - scale.minimum);
+}
+
+function parameterX(value: unknown, scale: ParameterScale) { return 52 + parameterPosition(value, scale) * 640; }
+function parameterY(value: unknown, scale: ParameterScale) { return 202 - parameterPosition(value, scale) * 168; }
+function chartX(index: number, count: number) { return count <= 1 ? 372 : 52 + (index / (count - 1)) * 640; }
+function chartY(value: number, minimum: number, maximum: number) { return maximum === minimum ? 118 : 202 - ((value - minimum) / (maximum - minimum)) * 168; }
+function scoreColor(score: number, minimum: number, maximum: number) { return heatmapColor(score, minimum, maximum); }
+
+function parameterSignal(trials: ScoredTrial[], parameter: string) {
+  const scale = parameterScale(trials.filter((trial) => parameter in trial.parameters), parameter);
+  const groups = new Map<string, number[]>();
+  for (const trial of trials) {
+    if (!(parameter in trial.parameters)) continue;
+    const position = parameterPosition(trial.parameters[parameter], scale);
+    const group = scale.numeric ? `bin-${Math.min(3, Math.floor(position * 4))}` : heatmapValue(trial.parameters[parameter]);
+    groups.set(group, [...(groups.get(group) ?? []), trial.score]);
+  }
+  const means = [...groups.values()].filter((items) => items.length > 0).map((items) => items.reduce((sum, item) => sum + item, 0) / items.length);
+  return means.length > 1 ? Math.max(...means) - Math.min(...means) : 0;
+}
+
+function ChartGrid({ min, max }: { min: number; max: number }) {
+  return <>
+    {[34, 76, 118, 160, 202].map((y) => <line key={y} className="chart-grid-line" x1="52" x2="692" y1={y} y2={y} />)}
+    <text className="chart-value-label" x="18" y="38">{formatNumber(max)}</text>
+    <text className="chart-value-label" x="18" y="206">{formatNumber(min)}</text>
+  </>;
+}
+
+function ScatterGrid() {
+  return <>{[52, 212, 372, 532, 692].map((x) => <line key={`x-${x}`} className="chart-grid-line" x1={x} x2={x} y1="34" y2="202" />)}
+    {[34, 76, 118, 160, 202].map((y) => <line key={`y-${y}`} className="chart-grid-line" x1="52" x2="692" y1={y} y2={y} />)}</>;
 }
 
 function SearchHeatmap({

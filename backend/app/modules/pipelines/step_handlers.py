@@ -218,6 +218,18 @@ class TrainingStepHandler:
         )
 
 
+class AutoMLStepHandler(TrainingStepHandler):
+    """Governed AutoML entry point backed by the current native optimization engine."""
+
+    step_type = "automl"
+
+    def execute(self, step: WorkflowStep, context: StepExecutionContext) -> HandledStepResult:
+        definition = TrainingDefinition.model_validate(step.config["definition"])
+        if definition.optimization.mode != "automl":
+            raise ValueError("AutoML step requires optimization mode 'automl'")
+        return super().execute(step, context)
+
+
 class ScoringStepHandler:
     step_type = "scoring"
 
@@ -339,6 +351,7 @@ class PipelineStepHandlerRegistry:
             DataEngineeringStepHandler(),
             FeatureEngineeringStepHandler(),
             TrainingStepHandler(),
+            AutoMLStepHandler(),
             ScoringStepHandler(),
             MonitoringStepHandler(),
         ]

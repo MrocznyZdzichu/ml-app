@@ -102,6 +102,7 @@ export function ArtifactFilters({
 
 function pipelinePurposeLabel(value: string) {
   if (value === "training") return "Training";
+  if (value === "automl") return "AutoML";
   if (value === "batch_scoring") return "Batch scoring";
   if (value === "monitoring") return "Monitoring";
   if (value === "custom") return "Custom";

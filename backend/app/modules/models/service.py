@@ -197,11 +197,7 @@ class ModelService:
             algorithm=str(metadata.get("algorithm") or "unknown"),
             artifact_uri=str(metadata.get("location_uri") or ""),
             logical_id=str(metadata.get("logical_model_id") or ""),
-            metrics={
-                str(key): float(value)
-                for key, value in dict(metadata.get("metrics") or {}).items()
-                if isinstance(value, (int, float))
-            },
+            metrics=dict(metadata.get("metrics") or {}),
             business_case_id=artifact.business_case_id or "",
             pipeline_id=str(lineage.get("pipeline_id") or ""),
             pipeline_version_id=str(lineage.get("pipeline_version_id") or ""),

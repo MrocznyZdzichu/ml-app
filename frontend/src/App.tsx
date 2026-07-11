@@ -539,6 +539,9 @@ function BusinessCasesPanel({
   const [bcRunSelections, setBcRunSelections] = useState<Record<string, string>>({});
   const [bcRunResult, setBcRunResult] = useState<PipelineRun | null>(null);
   const [bcRunSubmitting, setBcRunSubmitting] = useState(false);
+  const [bcSelectedRunDetails, setBcSelectedRunDetails] = useState<PipelineRun | null>(null);
+  const [bcRunsPipelineId, setBcRunsPipelineId] = useState<string | null>(null);
+  const [bcRunsRefreshKey, setBcRunsRefreshKey] = useState(0);
   const [bcDataPurposeFilter, setBcDataPurposeFilter] = useState("");
   const [bcDataPipelineFilter, setBcDataPipelineFilter] = useState("");
   const [bcUploadedOnly, setBcUploadedOnly] = useState(false);
@@ -977,6 +980,12 @@ function BusinessCasesPanel({
                   <Share2 size={14} />
                   Pipelines
                 </button>
+                <button className="secondary-button compact-button" type="button" onClick={() => {
+                  setSelectedBusinessCaseId(item.id);
+                  setBcRunsPipelineId("all");
+                }}>
+                  <History size={14} /> Runs
+                </button>
                 <button
                   className="secondary-button compact-button"
                   type="button"
@@ -1029,6 +1038,9 @@ function BusinessCasesPanel({
               <button className={`secondary-button compact-button${activeWorkspace === "pipelines" ? " active" : ""}`} type="button" onClick={() => setActiveWorkspace("pipelines")}>
                 <Share2 size={14} />
                 Pipelines
+              </button>
+              <button className="secondary-button compact-button" type="button" onClick={() => setBcRunsPipelineId("all")}>
+                <History size={14} /> Runs
               </button>
               <button className={`secondary-button compact-button${activeWorkspace === "models" ? " active" : ""}`} type="button" onClick={() => setActiveWorkspace("models")}>
                 <Brain size={14} />
@@ -1271,7 +1283,15 @@ function BusinessCasesPanel({
         )}
 
         {selectedBusinessCase && activeWorkspace === "pipelines" && (
-          <AssetList title="Mapped pipelines" assets={selectedBusinessCasePipelines.map((item) => ({
+          <div className="panel">
+            <div className="panel-header">
+              <div><h2>Mapped pipelines</h2><p>Published workflows and their official execution history.</p></div>
+              <button className="secondary-button compact-button" type="button"
+                onClick={() => setBcRunsPipelineId("all")}>
+                <History size={15} /> Runs
+              </button>
+            </div>
+          <AssetList title="" assets={selectedBusinessCasePipelines.map((item) => ({
             id: item.id,
             name: item.name,
             meta: `${item.type} / ${businessCaseName(businessCases, item.business_case_id)}`,
@@ -1281,6 +1301,11 @@ function BusinessCasesPanel({
                 label: "Versions",
                 icon: "versions",
                 onClick: () => setBcPipelineHistory(item)
+              },
+              {
+                label: "Runs",
+                icon: "versions",
+                onClick: () => setBcRunsPipelineId(item.id)
               },
               {
                 label: "Run",
@@ -1295,6 +1320,7 @@ function BusinessCasesPanel({
               }
             ]
           }))} />
+          </div>
         )}
         {selectedBusinessCase && activeWorkspace === "models" && (
           <div className="panel">
@@ -1414,14 +1440,28 @@ function BusinessCasesPanel({
           onClose={() => setBcPipelineHistory(null)}
         />
       )}
+      {bcRunsPipelineId && selectedBusinessCase && (
+        <PipelineRunHistoryDialog
+          pipelines={selectedBusinessCasePipelines}
+          businessCases={businessCases}
+          refreshKey={bcRunsRefreshKey}
+          includeDryRuns={false}
+          initialPipelineId={bcRunsPipelineId}
+          title={`${selectedBusinessCase.name} runs`}
+          description="Official pipeline runs in this business case. Dry-runs remain available in Jobs and the pipeline editor."
+          onClose={() => setBcRunsPipelineId(null)}
+          onDetails={setBcSelectedRunDetails}
+          onExamineDataset={onOpenDataset}
+        />
+      )}
       {bcRunDialog && (
         <div className="modal-backdrop" role="presentation"
-          onMouseDown={(event) => event.target === event.currentTarget && !bcRunSubmitting && setBcRunDialog(null)}>
+          onMouseDown={(event) => event.target === event.currentTarget && setBcRunDialog(null)}>
           <form className="modal-dialog form-panel" onSubmit={submitBcPipelineRun}>
             <div className="modal-header">
               <div><span className="builder-kicker">Business Case manual run</span>
                 <h2>{bcRunDialog.pipeline.name}</h2></div>
-              <button className="icon-button" type="button" disabled={bcRunSubmitting}
+              <button className="icon-button" type="button"
                 onClick={() => setBcRunDialog(null)} aria-label="Close run dialog"><X size={17} /></button>
             </div>
             {bcRunDialog.inputs.map((input) => {
@@ -1472,9 +1512,14 @@ function BusinessCasesPanel({
                   <span>Run {shortId(bcRunResult.id)} · {bcRunResult.processed_row_count ?? 0} processed rows</span></div>
               </div>
             )}
+            {bcRunResult && (
+              <button className="secondary-button" type="button" onClick={() => setBcSelectedRunDetails(bcRunResult)}>
+                <History size={15} /> Logs, details and cancel
+              </button>
+            )}
             <div className="modal-actions">
-              <button className="secondary-button" type="button" disabled={bcRunSubmitting}
-                onClick={() => setBcRunDialog(null)}>Close</button>
+              <button className="secondary-button" type="button"
+                onClick={() => setBcRunDialog(null)}>{bcRunSubmitting ? "Run in background" : "Close"}</button>
               {!bcRunResult && (
                 <button className="primary-button" type="submit" disabled={bcRunSubmitting}>
                   <Play size={15} /> {bcRunSubmitting ? "Running…" : "Run published version"}
@@ -1483,6 +1528,16 @@ function BusinessCasesPanel({
             </div>
           </form>
         </div>
+      )}
+      {bcSelectedRunDetails && (
+        <PipelineRunDetailsDialog
+          run={bcSelectedRunDetails}
+          onClose={() => setBcSelectedRunDetails(null)}
+          onChanged={async () => {
+            setBcRunsRefreshKey((current) => current + 1);
+            await onRefresh();
+          }}
+        />
       )}
 
       {isCreateOpen && (
@@ -1771,6 +1826,8 @@ function PipelinesPanel({
   const [description, setDescription] = useState("");
   const [pipelineType, setPipelineType] = useState("custom");
   const [pipelineTemplate, setPipelineTemplate] = useState<PipelineTemplate>("custom");
+  const [createPipelineError, setCreatePipelineError] = useState("");
+  const [isCreatingPipeline, setIsCreatingPipeline] = useState(false);
   const [catalogBusinessCaseFilter, setCatalogBusinessCaseFilter] = useState("");
   const [catalogPipelineTypeFilter, setCatalogPipelineTypeFilter] = useState("");
   const [selectedPipelineId, setSelectedPipelineId] = useState("");
@@ -1814,6 +1871,7 @@ function PipelinesPanel({
   const [selectedRunDetails, setSelectedRunDetails] = useState<PipelineRun | null>(null);
   const [activeRunMonitor, setActiveRunMonitor] = useState<PipelineRun | null>(null);
   const [isRunHistoryOpen, setIsRunHistoryOpen] = useState(false);
+  const [runHistoryPipelineId, setRunHistoryPipelineId] = useState("all");
   const [versionHistoryPipeline, setVersionHistoryPipeline] = useState<Pipeline | null>(null);
   const [runHistoryRefreshKey, setRunHistoryRefreshKey] = useState(0);
   const [pipelineDataAttachments, setPipelineDataAttachments] = useState<BusinessCaseDataAttachment[]>([]);
@@ -1927,25 +1985,33 @@ function PipelinesPanel({
 
   async function createPipeline(event: FormEvent) {
     event.preventDefault();
+    setCreatePipelineError("");
     if (!businessCaseId) {
-      setNotice("Create or select a business case first");
+      setCreatePipelineError("Create or select a business case first");
       return;
     }
-    const created = await api.createPipeline({
-      business_case_id: businessCaseId,
-      name,
-      description,
-      type: pipelineType,
-      definition: workflowTemplateDefinition(pipelineTemplate)
-    });
-    setNotice(`Pipeline created: ${created.name}`);
-    setSelectedPipelineId(created.id);
-    setIsCreatePipelineOpen(false);
-    setIsPipelineEditorOpen(true);
-    setName("");
-    setDescription("");
-    setPipelineTemplate(suggestedPipelineTemplate(pipelineType));
-    await onRefresh();
+    setIsCreatingPipeline(true);
+    try {
+      const created = await api.createPipeline({
+        business_case_id: businessCaseId,
+        name,
+        description,
+        type: pipelineType,
+        definition: workflowTemplateDefinition(pipelineTemplate)
+      });
+      setNotice(`Pipeline created: ${created.name}`);
+      setSelectedPipelineId(created.id);
+      setIsCreatePipelineOpen(false);
+      setIsPipelineEditorOpen(true);
+      setName("");
+      setDescription("");
+      setPipelineTemplate(suggestedPipelineTemplate(pipelineType));
+      await onRefresh();
+    } catch (error) {
+      setCreatePipelineError(error instanceof Error ? error.message : "Could not create pipeline");
+    } finally {
+      setIsCreatingPipeline(false);
+    }
   }
 
   async function renamePipeline(event: FormEvent) {
@@ -2289,6 +2355,12 @@ function PipelinesPanel({
           >
             <History size={14} /> Versions
           </button>
+          <button className="secondary-button compact-button" type="button" onClick={() => {
+            setRunHistoryPipelineId(item.id);
+            setIsRunHistoryOpen(true);
+          }}>
+            <History size={14} /> Runs
+          </button>
           {!isDeprecated && (
             <button
               className="primary-button compact-button"
@@ -2347,10 +2419,16 @@ function PipelinesPanel({
               <p>Create, inspect and open versioned workflows assigned to your Business Cases.</p>
             </div>
             <div className="catalog-toolbar-actions">
-              <button className="secondary-button" type="button" onClick={() => setIsRunHistoryOpen(true)}>
+              <button className="secondary-button" type="button" onClick={() => {
+                setRunHistoryPipelineId("all");
+                setIsRunHistoryOpen(true);
+              }}>
                 <History size={16} /> Runs history
               </button>
-              <button className="primary-button" type="button" onClick={() => setIsCreatePipelineOpen(true)}>
+              <button className="primary-button" type="button" onClick={() => {
+                setCreatePipelineError("");
+                setIsCreatePipelineOpen(true);
+              }}>
                 <Plus size={16} /> New pipeline
               </button>
             </div>
@@ -2440,6 +2518,7 @@ function PipelinesPanel({
                 }}>
                   <option value="custom">Custom workflow</option>
                   <option value="training">Training workflow</option>
+                  <option value="automl">AutoML workflow</option>
                   <option value="batch_scoring">Batch scoring</option>
                   <option value="monitoring">Monitoring workflow</option>
                 </select>
@@ -2449,6 +2528,7 @@ function PipelinesPanel({
                   onChange={(event) => setPipelineTemplate(event.target.value as PipelineTemplate)}>
                   <option value="custom">Empty custom workflow</option>
                   <option value="training">Training · DE, FE, Training, Test Scoring</option>
+                  <option value="automl">AutoML · DE, model-aware search and champion</option>
                   <option value="batch_scoring">Batch scoring · DE, FE Transform, Batch Scoring</option>
                   <option value="monitoring">Monitoring · Target Join, Performance Report</option>
                 </select>
@@ -2462,10 +2542,11 @@ function PipelinesPanel({
                 </div>
               )}
               <label>Description<textarea className="compact-textarea" value={description} onChange={(event) => setDescription(event.target.value)} /></label>
+              {createPipelineError && <div className="form-warning" role="alert">{createPipelineError}</div>}
               <div className="modal-actions">
-                <button className="secondary-button" type="button" onClick={() => setIsCreatePipelineOpen(false)}>Cancel</button>
-                <button className="primary-button" type="submit">
-                  <Plus size={16} /> Create pipeline
+                <button className="secondary-button" type="button" disabled={isCreatingPipeline} onClick={() => setIsCreatePipelineOpen(false)}>Cancel</button>
+                <button className="primary-button" type="submit" disabled={isCreatingPipeline}>
+                  <Plus size={16} /> {isCreatingPipeline ? "Creating…" : "Create pipeline"}
                 </button>
               </div>
             </form>
@@ -2526,6 +2607,7 @@ function PipelinesPanel({
             pipelines={pipelines}
             businessCases={businessCases}
             refreshKey={runHistoryRefreshKey}
+            initialPipelineId={runHistoryPipelineId}
             onClose={() => setIsRunHistoryOpen(false)}
             onDetails={setSelectedRunDetails}
             onExamineDataset={onExamineDataset}
@@ -2719,6 +2801,7 @@ function PipelinesPanel({
               <option value="data_preparation">Data preparation</option>
               <option value="feature_engineering">Feature engineering</option>
               <option value="training">Training</option>
+              <option value="automl">AutoML</option>
               <option value="batch_scoring">Batch scoring</option>
               <option value="monitoring">Monitoring</option>
               <option value="custom">Custom</option>
@@ -3100,6 +3183,7 @@ function pipelineName(pipelines: Pipeline[], pipelineId: string) {
 
 function suggestedPipelineTemplate(purpose: string): PipelineTemplate {
   if (purpose === "training") return "training";
+  if (purpose === "automl") return "automl";
   if (purpose === "batch_scoring") return "batch_scoring";
   if (purpose === "monitoring") return "monitoring";
   return "custom";

@@ -14,9 +14,13 @@ from app.modules.pipelines.modeling import (
 )
 from app.modules.pipelines.modeling_catalog import (
     ALGORITHM_SPECS,
+    LabelEncodedClassifier,
     build_estimator,
+    curated_search_space,
     training_catalog,
+    validate_algorithm_parameters,
 )
+from app.modules.pipelines.model_training import ModelOptimizationEngine
 from app.modules.pipelines.runtime import SourceRelation
 from app.modules.pipelines.step_handlers import StepExecutionContext, TrainingStepHandler
 from app.modules.pipelines.workflow import WorkflowStep, validate_workflow_definition
@@ -26,6 +30,141 @@ from app.worker.tasks import _definition_with_resolved_inputs
 def _relation(path: Path, rows: int) -> SourceRelation:
     escaped = str(path).replace("'", "''")
     return SourceRelation(sql=f"read_parquet('{escaped}')", row_count=rows)
+
+
+def test_catalog_exposes_conditional_tuning_for_perceptron_and_sgd() -> None:
+    catalog = training_catalog()
+    algorithms = {item["id"]: item for item in catalog["algorithms"]}
+    perceptron = {item["id"]: item for item in algorithms["perceptron_classifier"]["parameters"]}
+    sgd = {item["id"]: item for item in algorithms["sgd_classifier"]["parameters"]}
+
+    assert perceptron["penalty"]["search"]["values"] == [None, "l2", "l1", "elasticnet"]
+    assert perceptron["eta0"]["search"] is not None
+    assert perceptron["l1_ratio"]["active_when"] == {"penalty": ["elasticnet"]}
+    assert sgd["eta0"]["active_when"] == {
+        "learning_rate": ["constant", "invscaling", "adaptive"]
+    }
+    assert sgd["power_t"]["active_when"] == {"learning_rate": ["invscaling"]}
+
+
+def test_conditional_search_space_does_not_expand_inactive_sgd_parameters() -> None:
+    engine = ModelOptimizationEngine()
+    raw_space = curated_search_space("sgd_classifier")
+    space = {key: engine._discrete_values(value) for key, value in raw_space.items()}
+    candidates = list(
+        engine._iter_conditional_candidates(
+            "sgd_classifier",
+            space,
+            {},
+            limit=10_000,
+        )
+    )
+
+    assert len(candidates) == engine._conditional_candidate_count(
+        "sgd_classifier",
+        space,
+        {},
+    )
+    assert all(
+        ("l1_ratio" in candidate) == (candidate["penalty"] == "elasticnet")
+        for candidate in candidates
+    )
+    assert all(
+        ("eta0" in candidate)
+        == (candidate["learning_rate"] in {"constant", "invscaling", "adaptive"})
+        for candidate in candidates
+    )
+    assert all(
+        ("power_t" in candidate) == (candidate["learning_rate"] == "invscaling")
+        for candidate in candidates
+    )
+
+
+def test_inactive_parameters_are_removed_before_estimator_construction() -> None:
+    normalized = validate_algorithm_parameters(
+        "sgd_classifier",
+        "binary_classification",
+        {
+            "penalty": "l2",
+            "l1_ratio": 0.9,
+            "learning_rate": "optimal",
+            "eta0": 0.5,
+            "power_t": 0.7,
+        },
+    )
+
+    assert normalized["penalty"] == "l2"
+    assert "l1_ratio" not in normalized
+    assert "eta0" not in normalized
+    assert "power_t" not in normalized
+
+
+def test_optuna_suggests_only_active_sgd_parameters() -> None:
+    class Trial:
+        def suggest_categorical(self, name, choices):
+            if name == "penalty":
+                return "l2"
+            if name == "learning_rate":
+                return "optimal"
+            return choices[0]
+
+        def suggest_int(self, name, low, high, *, step, log):
+            return low
+
+        def suggest_float(self, name, low, high, *, step, log):
+            return low
+
+    suggested = ModelOptimizationEngine._suggest_parameters(
+        Trial(),
+        "sgd_classifier",
+        search_space={},
+        base_parameters={},
+        prefix="",
+    )
+
+    assert suggested["penalty"] == "l2"
+    assert suggested["learning_rate"] == "optimal"
+    assert "l1_ratio" not in suggested
+    assert "eta0" not in suggested
+    assert "power_t" not in suggested
+
+
+def test_automl_ignores_unscoped_search_overrides_from_another_algorithm() -> None:
+    resolved = ModelOptimizationEngine._resolved_search_space(
+        "sgd_classifier",
+        {
+            "learning_rate": {"kind": "float", "low": 0.005, "high": 0.3, "log": True},
+            "sgd_classifier__learning_rate": {
+                "kind": "categorical", "values": ["optimal", "adaptive"]
+            },
+        },
+        allow_unscoped_overrides=False,
+    )
+
+    assert resolved["learning_rate"] == {
+        "kind": "categorical", "values": ["optimal", "adaptive"]
+    }
+
+
+def test_label_encoded_classifier_falls_back_to_probability_scores() -> None:
+    class ProbabilityOnlyClassifier:
+        def fit(self, x, y):
+            return self
+
+        def predict(self, x):
+            return np.ones(len(x), dtype=int)
+
+        def predict_proba(self, x):
+            return np.column_stack((np.full(len(x), 0.2), np.full(len(x), 0.8)))
+
+    classifier = LabelEncodedClassifier(ProbabilityOnlyClassifier()).fit(
+        np.array([[0.0], [1.0]]), np.array(["no", "yes"])
+    )
+
+    np.testing.assert_allclose(
+        classifier.decision_function(np.array([[2.0], [3.0]])),
+        np.array([0.8, 0.8]),
+    )
 
 
 def test_training_resolves_dynamic_one_hot_features_from_upstream_contract() -> None:

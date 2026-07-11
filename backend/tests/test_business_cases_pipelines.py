@@ -53,6 +53,25 @@ def test_model_training_catalog_is_available_to_authenticated_pipeline_editors()
     assert all(item["parameters"] is not None for item in body["algorithms"])
 
 
+def test_automl_pipeline_purpose_is_accepted_by_create_api() -> None:
+    client = TestClient(create_app())
+    token = _register(client, "automl-create")
+    business_case = _create_business_case(client, token)
+
+    response = client.post(
+        "/api/v1/pipelines",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "business_case_id": business_case["id"],
+            "name": "Iris AutoML",
+            "type": "automl",
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["type"] == "automl"
+
+
 def test_business_case_can_exist_without_data_and_owns_data_mappings() -> None:
     client = TestClient(create_app())
     token = _register(client, "alice")

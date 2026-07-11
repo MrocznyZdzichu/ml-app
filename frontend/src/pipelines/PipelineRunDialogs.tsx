@@ -20,6 +20,11 @@ const ModelDetailsDialog = lazy(() =>
     default: module.ModelDetailsDialog
   }))
 );
+const ScoringReportDialog = lazy(() =>
+  import("../operational/ScoringReportsPanel").then((module) => ({
+    default: module.ScoringReportDialog
+  }))
+);
 
 export function PipelineVersionHistoryDialog({
   pipeline,
@@ -165,6 +170,10 @@ export function PipelineRunHistoryDialog({
   pipelines,
   businessCases,
   refreshKey,
+  includeDryRuns = true,
+  initialPipelineId = "all",
+  title = "Pipeline runs",
+  description = "Latest 200 runs across your available pipelines.",
   onClose,
   onDetails,
   onExamineDataset
@@ -172,12 +181,16 @@ export function PipelineRunHistoryDialog({
   pipelines: Pipeline[];
   businessCases: BusinessCase[];
   refreshKey: number;
+  includeDryRuns?: boolean;
+  initialPipelineId?: string;
+  title?: string;
+  description?: string;
   onClose: () => void;
   onDetails: (run: PipelineRun) => void;
   onExamineDataset: (datasetId: string) => void;
 }) {
   const [historyRuns, setHistoryRuns] = useState<PipelineRun[]>([]);
-  const [pipelineFilter, setPipelineFilter] = useState("all");
+  const [pipelineFilter, setPipelineFilter] = useState(initialPipelineId);
   const [statusFilter, setStatusFilter] = useState("all");
   const [reloadKey, setReloadKey] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -205,8 +218,11 @@ export function PipelineRunHistoryDialog({
     };
   }, [refreshKey, reloadKey]);
 
+  const allowedPipelineIds = new Set(pipelines.map((pipeline) => pipeline.id));
   const visibleRuns = historyRuns.filter((run) =>
-    (pipelineFilter === "all" || run.pipeline_id === pipelineFilter)
+    allowedPipelineIds.has(run.pipeline_id)
+    && (includeDryRuns || !run.is_dry_run)
+    && (pipelineFilter === "all" || run.pipeline_id === pipelineFilter)
     && (statusFilter === "all" || run.status === statusFilter)
   );
   const pipelineById = new Map(pipelines.map((pipeline) => [pipeline.id, pipeline]));
@@ -226,8 +242,8 @@ export function PipelineRunHistoryDialog({
         <div className="modal-header">
           <div>
             <span className="builder-kicker">Execution history</span>
-            <h2>Pipeline runs</h2>
-            <p>Latest 200 runs across your available pipelines.</p>
+            <h2>{title}</h2>
+            <p>{description}</p>
           </div>
           <div className="run-details-actions">
             <button
@@ -354,6 +370,9 @@ function GeneratedArtifactsDialog({
 }) {
   const [details, setDetails] = useState<PipelineRunDetails | null>(null);
   const [error, setError] = useState("");
+  const [selectedModel, setSelectedModel] = useState<ModelArtifact | null>(null);
+  const [selectedReport, setSelectedReport] = useState<import("../api/client").ScoringReport | null>(null);
+  const [openingArtifactId, setOpeningArtifactId] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -368,6 +387,26 @@ function GeneratedArtifactsDialog({
   const artifactByReference = new Map(
     (details?.lineage ?? []).map((item) => [item.reference_id, item])
   );
+
+  async function openDomainArtifact(artifactId: string, artifactType: string) {
+    setOpeningArtifactId(artifactId);
+    setError("");
+    try {
+      if (artifactType === "model_version") {
+        const model = (await api.listModels()).find((item) => item.id === artifactId);
+        if (!model) throw new Error("The registered model could not be found");
+        setSelectedModel(model);
+      } else if (artifactType === "report") {
+        const report = (await api.listScoringReports(run.business_case_id)).find((item) => item.id === artifactId);
+        if (!report) throw new Error("The registered scoring report could not be found");
+        setSelectedReport(report);
+      }
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Could not open artifact");
+    } finally {
+      setOpeningArtifactId("");
+    }
+  }
   return (
     <div className="modal-backdrop nested-modal" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <div className="modal-dialog generated-artifacts-dialog" role="dialog" aria-modal="true" aria-label="Generated artifacts">
@@ -387,6 +426,7 @@ function GeneratedArtifactsDialog({
               const lineage = details.lineage.find((item) => item.artifact_id === output.artifact_id)
                 ?? artifactByReference.get(output.dataset_id ?? "");
               const isDataset = ["dataset", "prediction_dataset"].includes(output.artifact_type ?? "");
+              const isBrowsableDomainArtifact = ["model_version", "report"].includes(output.artifact_type ?? "");
               return (
                 <article key={`${output.pipeline_step_id}:${output.output_id}`}>
                   <div className="generated-artifact-icon">
@@ -409,6 +449,13 @@ function GeneratedArtifactsDialog({
                       <Eye size={14} /> Examine
                     </button>
                   )}
+                  {isBrowsableDomainArtifact && output.artifact_id && (
+                    <button className="primary-button compact-button" type="button"
+                      disabled={openingArtifactId === output.artifact_id}
+                      onClick={() => void openDomainArtifact(output.artifact_id!, output.artifact_type!)}>
+                      <Eye size={14} /> {openingArtifactId === output.artifact_id ? "Opening…" : "View"}
+                    </button>
+                  )}
                 </article>
               );
             })}
@@ -416,6 +463,26 @@ function GeneratedArtifactsDialog({
               <div className="empty-state">This run did not register persistent output artifacts.</div>
             )}
           </div>
+        )}
+        {selectedModel && (
+          <Suspense fallback={null}>
+            <ModelDetailsDialog
+              model={selectedModel}
+              businessCaseName={`Business Case ${shortId(run.business_case_id)}`}
+              pipelineName={`Pipeline ${shortId(run.pipeline_id)}`}
+              onOpenDataset={onExamineDataset}
+              onClose={() => setSelectedModel(null)}
+            />
+          </Suspense>
+        )}
+        {selectedReport && (
+          <Suspense fallback={null}>
+            <ScoringReportDialog
+              report={selectedReport}
+              onOpenDataset={onExamineDataset}
+              onClose={() => setSelectedReport(null)}
+            />
+          </Suspense>
         )}
       </div>
     </div>

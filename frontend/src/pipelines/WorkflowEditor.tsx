@@ -187,7 +187,7 @@ export function WorkflowEditor({
   useEffect(() => {
     let changed = false;
     const steps = definition.steps.map((step) => {
-      if (step.type === "training") {
+      if (step.type === "training" || step.type === "automl") {
         const initialize = !initializedModelingSteps.current.has(step.step_id);
         initializedModelingSteps.current.add(step.step_id);
         const defaulted = initialize
@@ -686,7 +686,7 @@ export function WorkflowEditor({
               <div className="workflow-step-icon">
                 {step.type === "data_engineering" ? <DatabaseZap size={20} />
                   : step.type === "feature_engineering" ? <Sparkles size={20} />
-                    : step.type === "training" ? <Brain size={20} />
+                    : step.type === "training" || step.type === "automl" ? <Brain size={20} />
                       : step.type === "monitoring" ? <Activity size={20} />
                         : <Calculator size={20} />}
               </div>
@@ -699,8 +699,10 @@ export function WorkflowEditor({
                   ? `${step.config.definition.inputs.length} sources · ${step.config.definition.steps.length} blocks · ${step.config.definition.outputs.length} outputs`
                   : step.type === "feature_engineering"
                     ? `${step.config.definition.inputs.length} splits · ${step.config.definition.transformations.length} transforms · ${step.config.definition.outputs.length} outputs`
-                    : step.type === "training"
-                      ? `${step.config.definition.feature_columns.length} features · max ${step.config.definition.epochs} epochs${step.config.definition.early_stopping ? " · early stopping" : ""}`
+                    : step.type === "training" || step.type === "automl"
+                      ? step.type === "automl"
+                        ? `${step.config.definition.optimization.candidate_algorithms.length || "curated"} candidate families · max ${step.config.definition.optimization.max_trials} trials`
+                        : `${step.config.definition.feature_columns.length} features · max ${step.config.definition.epochs} epochs${step.config.definition.early_stopping ? " · early stopping" : ""}`
                       : step.type === "monitoring"
                         ? `predictions + actuals · ${step.config.definition.report_name}`
                         : `model + data · ${step.config.definition.dataset_name}`}
@@ -738,13 +740,15 @@ export function WorkflowEditor({
                   disabled={disabled}
                   onChange={(nextDefinition) => updateFeatureStep(index, step, nextDefinition)}
                 />
-              ) : step.type === "training" ? (
+              ) : step.type === "training" || step.type === "automl" ? (
                 <TrainingBuilder
                   definition={step.config.definition}
                   defaults={modelingDefaults}
                   disabled={disabled}
                   onChange={(nextDefinition) => updateStep(index, {
-                    ...step, config: { definition: nextDefinition }
+                    ...step, config: { definition: step.type === "automl"
+                      ? { ...nextDefinition, optimization: { ...nextDefinition.optimization, mode: "automl" } }
+                      : nextDefinition }
                   })}
                 />
               ) : step.type === "monitoring" ? (

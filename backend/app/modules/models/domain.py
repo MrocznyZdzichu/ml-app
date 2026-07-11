@@ -42,7 +42,7 @@ class ModelArtifact:
     artifact_uri: str
     logical_id: str = ""
     version_number: int = 1
-    metrics: dict[str, float] = field(default_factory=dict)
+    metrics: dict[str, Any] = field(default_factory=dict)
     stage: ModelStage = ModelStage.CANDIDATE
     business_case_id: str = ""
     pipeline_id: str = ""

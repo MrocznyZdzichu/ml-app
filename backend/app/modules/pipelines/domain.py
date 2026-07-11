@@ -8,6 +8,7 @@ class PipelineType(str, Enum):
     DATA_PREPARATION = "data_preparation"
     FEATURE_ENGINEERING = "feature_engineering"
     TRAINING = "training"
+    AUTOML = "automl"
     BATCH_SCORING = "batch_scoring"
     MONITORING = "monitoring"
     CUSTOM = "custom"

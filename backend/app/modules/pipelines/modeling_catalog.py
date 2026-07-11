@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Literal
 
 from sklearn.base import BaseEstimator, ClassifierMixin
@@ -66,6 +66,7 @@ class ParameterSpec:
     options: tuple[Any, ...] = ()
     nullable: bool = False
     search: dict[str, Any] | None = None
+    active_when: dict[str, tuple[Any, ...]] | None = None
 
     def public_dict(self) -> dict[str, Any]:
         return {
@@ -80,6 +81,11 @@ class ParameterSpec:
             "options": list(self.options),
             "nullable": self.nullable,
             "search": self.search,
+            "active_when": (
+                {key: list(values) for key, values in self.active_when.items()}
+                if self.active_when
+                else None
+            ),
         }
 
 
@@ -140,6 +146,7 @@ def _int(
     step: int = 1,
     nullable: bool = False,
     search: dict[str, Any] | None = None,
+    active_when: dict[str, tuple[Any, ...]] | None = None,
     description: str = "",
 ) -> ParameterSpec:
     return ParameterSpec(
@@ -152,6 +159,7 @@ def _int(
         step=step,
         nullable=nullable,
         search=search,
+        active_when=active_when,
         description=description,
     )
 
@@ -165,6 +173,7 @@ def _float(
     *,
     step: float | None = None,
     search: dict[str, Any] | None = None,
+    active_when: dict[str, tuple[Any, ...]] | None = None,
     description: str = "",
 ) -> ParameterSpec:
     return ParameterSpec(
@@ -176,17 +185,28 @@ def _float(
         maximum=maximum,
         step=step,
         search=search,
+        active_when=active_when,
         description=description,
     )
 
 
-def _bool(id: str, label: str, default: bool, description: str = "") -> ParameterSpec:
+def _bool(
+    id: str,
+    label: str,
+    default: bool,
+    description: str = "",
+    *,
+    search: dict[str, Any] | None = None,
+    active_when: dict[str, tuple[Any, ...]] | None = None,
+) -> ParameterSpec:
     return ParameterSpec(
         id=id,
         label=label,
         kind="boolean",
         default=default,
         description=description,
+        search=search,
+        active_when=active_when,
     )
 
 
@@ -198,6 +218,7 @@ def _select(
     *,
     nullable: bool = False,
     search: dict[str, Any] | None = None,
+    active_when: dict[str, tuple[Any, ...]] | None = None,
     description: str = "",
 ) -> ParameterSpec:
     return ParameterSpec(
@@ -208,8 +229,14 @@ def _select(
         options=options,
         nullable=nullable,
         search=search,
+        active_when=active_when,
         description=description,
     )
+
+
+def _when(parameter: ParameterSpec, **conditions: tuple[Any, ...]) -> ParameterSpec:
+    """Mark a parameter as meaningful only for matching controller values."""
+    return replace(parameter, active_when=conditions)
 
 
 CLASSIFICATION = ("binary_classification", "multiclass_classification")
@@ -300,31 +327,61 @@ SGD_CLASSIFIER_PARAMETERS = (
         ("log_loss", "modified_huber", "hinge", "squared_hinge", "perceptron"),
         search={"kind": "categorical", "values": ["log_loss", "modified_huber", "hinge"]},
     ),
-    ALPHA,
     _select(
         "penalty",
         "Penalty",
         "l2",
         (None, "l2", "l1", "elasticnet"),
         nullable=True,
-        search={"kind": "categorical", "values": ["l2", "l1", "elasticnet"]},
+        search={"kind": "categorical", "values": [None, "l2", "l1", "elasticnet"]},
     ),
-    _float(
-        "l1_ratio",
-        "Elastic-net L1 ratio",
-        0.15,
-        0.0,
-        1.0,
-        step=0.05,
-        search={"kind": "float", "low": 0.0, "high": 1.0},
+    _when(ALPHA, penalty=("l2", "l1", "elasticnet")),
+    _when(
+        _float(
+            "l1_ratio",
+            "Elastic-net L1 ratio",
+            0.15,
+            0.0,
+            1.0,
+            step=0.05,
+            search={"kind": "float", "low": 0.0, "high": 1.0},
+        ),
+        penalty=("elasticnet",),
     ),
     _select(
         "learning_rate",
         "Learning-rate schedule",
         "optimal",
         ("optimal", "constant", "invscaling", "adaptive"),
+        search={
+            "kind": "categorical",
+            "values": ["optimal", "constant", "invscaling", "adaptive"],
+        },
     ),
-    _float("eta0", "Initial learning rate", 0.01, 1e-7, 10.0, step=0.001),
+    _when(
+        _float(
+            "eta0",
+            "Initial learning rate",
+            0.01,
+            1e-7,
+            10.0,
+            step=0.001,
+            search={"kind": "float", "low": 1e-5, "high": 1.0, "log": True},
+        ),
+        learning_rate=("constant", "invscaling", "adaptive"),
+    ),
+    _when(
+        _float(
+            "power_t",
+            "Inverse-scaling exponent",
+            0.25,
+            0.0,
+            1.0,
+            step=0.05,
+            search={"kind": "float", "low": 0.1, "high": 0.9},
+        ),
+        learning_rate=("invscaling",),
+    ),
     FIT_INTERCEPT,
     CLASS_WEIGHT,
 )
@@ -336,8 +393,19 @@ SGD_REGRESSOR_PARAMETERS = (
         ("squared_error", "huber", "epsilon_insensitive", "squared_epsilon_insensitive"),
         search={"kind": "categorical", "values": ["squared_error", "huber", "epsilon_insensitive"]},
     ),
-    *SGD_CLASSIFIER_PARAMETERS[1:7],
-    _float("epsilon", "Epsilon", 0.1, 0.0, 1000.0, step=0.01),
+    *SGD_CLASSIFIER_PARAMETERS[1:8],
+    _when(
+        _float(
+            "epsilon",
+            "Epsilon",
+            0.1,
+            0.0,
+            1000.0,
+            step=0.01,
+            search={"kind": "float", "low": 1e-3, "high": 1.0, "log": True},
+        ),
+        loss=("huber", "epsilon_insensitive", "squared_epsilon_insensitive"),
+    ),
 )
 MLP_PARAMETERS = (
     ParameterSpec(
@@ -358,7 +426,13 @@ MLP_PARAMETERS = (
         ("relu", "tanh", "logistic"),
         search={"kind": "categorical", "values": ["relu", "tanh"]},
     ),
-    _select("solver", "Optimizer", "adam", ("adam", "sgd", "lbfgs")),
+    _select(
+        "solver",
+        "Optimizer",
+        "adam",
+        ("adam", "sgd", "lbfgs"),
+        search={"kind": "categorical", "values": ["adam", "sgd", "lbfgs"]},
+    ),
     _float(
         "alpha",
         "L2 regularization",
@@ -367,16 +441,27 @@ MLP_PARAMETERS = (
         100.0,
         search={"kind": "float", "low": 1e-7, "high": 1e-1, "log": True},
     ),
-    _float(
-        "learning_rate_init",
-        "Initial learning rate",
-        0.001,
-        1e-6,
-        1.0,
-        search={"kind": "float", "low": 1e-5, "high": 1e-1, "log": True},
+    _when(
+        _float(
+            "learning_rate_init",
+            "Initial learning rate",
+            0.001,
+            1e-6,
+            1.0,
+            search={"kind": "float", "low": 1e-5, "high": 1e-1, "log": True},
+        ),
+        solver=("adam", "sgd"),
     ),
     _int("max_iter", "Maximum iterations", 300, 10, 5000, step=10),
-    _bool("early_stopping", "Internal early stopping", True),
+    _when(
+        _bool(
+            "early_stopping",
+            "Internal early stopping",
+            True,
+            search={"kind": "categorical", "values": [True, False]},
+        ),
+        solver=("adam", "sgd"),
+    ),
 )
 FOREST_PARAMETERS = (
     N_ESTIMATORS,
@@ -384,7 +469,12 @@ FOREST_PARAMETERS = (
     MIN_SAMPLES_SPLIT,
     MIN_SAMPLES_LEAF,
     MAX_FEATURES,
-    _bool("bootstrap", "Bootstrap rows", True),
+    _bool(
+        "bootstrap",
+        "Bootstrap rows",
+        True,
+        search={"kind": "categorical", "values": [True, False]},
+    ),
 )
 BOOST_PARAMETERS = (
     N_ESTIMATORS,
@@ -514,7 +604,18 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
                     ("l2", "l1", "elasticnet"),
                     search={"kind": "categorical", "values": ["l2", "l1", "elasticnet"]},
                 ),
-                _float("l1_ratio", "Elastic-net L1 ratio", 0.5, 0.0, 1.0, step=0.05),
+                _when(
+                    _float(
+                        "l1_ratio",
+                        "Elastic-net L1 ratio",
+                        0.5,
+                        0.0,
+                        1.0,
+                        step=0.05,
+                        search={"kind": "float", "low": 0.0, "high": 1.0},
+                    ),
+                    penalty=("elasticnet",),
+                ),
                 _int("max_iter", "Maximum iterations", 1000, 50, 10000, step=50),
                 CLASS_WEIGHT,
                 FIT_INTERCEPT,
@@ -574,7 +675,12 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
                     ("hinge", "squared_hinge"),
                     search={"kind": "categorical", "values": ["hinge", "squared_hinge"]},
                 ),
-                _bool("average", "Average weights", False),
+                _bool(
+                    "average",
+                    "Average weights",
+                    False,
+                    search={"kind": "categorical", "values": [False, True]},
+                ),
                 FIT_INTERCEPT,
                 CLASS_WEIGHT,
             ),
@@ -589,9 +695,36 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
             "incremental",
             "streaming",
             (
-                ALPHA,
-                _select("penalty", "Penalty", None, (None, "l2", "l1", "elasticnet"), nullable=True),
-                _float("eta0", "Learning rate", 1.0, 1e-6, 1000.0, step=0.1),
+                _select(
+                    "penalty",
+                    "Penalty",
+                    None,
+                    (None, "l2", "l1", "elasticnet"),
+                    nullable=True,
+                    search={"kind": "categorical", "values": [None, "l2", "l1", "elasticnet"]},
+                ),
+                _when(ALPHA, penalty=("l2", "l1", "elasticnet")),
+                _when(
+                    _float(
+                        "l1_ratio",
+                        "Elastic-net L1 ratio",
+                        0.15,
+                        0.0,
+                        1.0,
+                        step=0.05,
+                        search={"kind": "float", "low": 0.0, "high": 1.0},
+                    ),
+                    penalty=("elasticnet",),
+                ),
+                _float(
+                    "eta0",
+                    "Learning rate",
+                    1.0,
+                    1e-6,
+                    1000.0,
+                    step=0.1,
+                    search={"kind": "float", "low": 1e-4, "high": 10.0, "log": True},
+                ),
                 FIT_INTERCEPT,
                 CLASS_WEIGHT,
             ),
@@ -623,6 +756,7 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
                     "Kernel gamma",
                     "scale",
                     ("scale", "auto"),
+                    search={"kind": "categorical", "values": ["scale", "auto"]},
                 ),
                 _bool("probability", "Probability calibration", True),
                 CLASS_WEIGHT,
@@ -640,8 +774,21 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
             "small",
             (
                 C_PARAMETER,
-                _int("degree", "Polynomial degree", 3, 2, 10),
-                _select("gamma", "Kernel gamma", "scale", ("scale", "auto")),
+                _int(
+                    "degree",
+                    "Polynomial degree",
+                    3,
+                    2,
+                    10,
+                    search={"kind": "int", "low": 2, "high": 6},
+                ),
+                _select(
+                    "gamma",
+                    "Kernel gamma",
+                    "scale",
+                    ("scale", "auto"),
+                    search={"kind": "categorical", "values": ["scale", "auto"]},
+                ),
                 _bool("probability", "Probability calibration", True),
                 CLASS_WEIGHT,
             ),
@@ -667,7 +814,13 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
                     search={"kind": "float", "low": 0.05, "high": 0.9},
                 ),
                 _select("kernel", "Kernel", "rbf", ("rbf", "poly", "sigmoid")),
-                _select("gamma", "Kernel gamma", "scale", ("scale", "auto")),
+                _select(
+                    "gamma",
+                    "Kernel gamma",
+                    "scale",
+                    ("scale", "auto"),
+                    search={"kind": "categorical", "values": ["scale", "auto"]},
+                ),
                 _bool("probability", "Probability calibration", True),
                 CLASS_WEIGHT,
             ),
@@ -683,7 +836,13 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
             "in_memory",
             "medium",
             (
-                _select("criterion", "Split criterion", "gini", ("gini", "entropy", "log_loss")),
+                _select(
+                    "criterion",
+                    "Split criterion",
+                    "gini",
+                    ("gini", "entropy", "log_loss"),
+                    search={"kind": "categorical", "values": ["gini", "entropy", "log_loss"]},
+                ),
                 MAX_DEPTH,
                 MIN_SAMPLES_SPLIT,
                 MIN_SAMPLES_LEAF,
@@ -735,7 +894,17 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
             "Histogram-based boosting optimized for larger tabular datasets.",
             "in_memory",
             "large",
-            (*HIST_PARAMETERS, _select("class_weight", "Class weighting", None, (None, "balanced"), nullable=True)),
+            (
+                *HIST_PARAMETERS,
+                _select(
+                    "class_weight",
+                    "Class weighting",
+                    None,
+                    (None, "balanced"),
+                    nullable=True,
+                    search={"kind": "categorical", "values": [None, "balanced"]},
+                ),
+            ),
             supports_probability=True,
             supports_early_stopping=True,
             automl_default=True,
@@ -768,8 +937,20 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
                     1000,
                     search={"kind": "int", "low": 3, "high": 51, "step": 2},
                 ),
-                _select("weights", "Neighbour weighting", "uniform", ("uniform", "distance")),
-                _select("p", "Minkowski power", 2, (1, 2)),
+                _select(
+                    "weights",
+                    "Neighbour weighting",
+                    "uniform",
+                    ("uniform", "distance"),
+                    search={"kind": "categorical", "values": ["uniform", "distance"]},
+                ),
+                _select(
+                    "p",
+                    "Minkowski power",
+                    2,
+                    (1, 2),
+                    search={"kind": "categorical", "values": [1, 2]},
+                ),
             ),
             supports_probability=True,
         ),
@@ -811,8 +992,20 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
                     1000.0,
                     search={"kind": "float", "low": 1e-4, "high": 100.0, "log": True},
                 ),
-                _float("binarize", "Binarization threshold", 0.0, -1e6, 1e6),
-                _bool("fit_prior", "Learn class prior", True),
+                _float(
+                    "binarize",
+                    "Binarization threshold",
+                    0.0,
+                    -1e6,
+                    1e6,
+                    search={"kind": "float", "low": -1.0, "high": 1.0},
+                ),
+                _bool(
+                    "fit_prior",
+                    "Learn class prior",
+                    True,
+                    search={"kind": "categorical", "values": [True, False]},
+                ),
             ),
             supports_probability=True,
         ),
@@ -833,7 +1026,12 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
                     1000.0,
                     search={"kind": "float", "low": 1e-4, "high": 100.0, "log": True},
                 ),
-                _bool("norm", "Normalize weights", False),
+                _bool(
+                    "norm",
+                    "Normalize weights",
+                    False,
+                    search={"kind": "categorical", "values": [False, True]},
+                ),
             ),
             supports_probability=True,
             notes=("All feature values must be non-negative.",),
@@ -847,8 +1045,24 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
             "in_memory",
             "medium",
             (
-                _select("solver", "Solver", "svd", ("svd", "lsqr", "eigen")),
-                _select("shrinkage", "Covariance shrinkage", None, (None, "auto"), nullable=True),
+                _select(
+                    "solver",
+                    "Solver",
+                    "svd",
+                    ("svd", "lsqr", "eigen"),
+                    search={"kind": "categorical", "values": ["svd", "lsqr", "eigen"]},
+                ),
+                _when(
+                    _select(
+                        "shrinkage",
+                        "Covariance shrinkage",
+                        None,
+                        (None, "auto"),
+                        nullable=True,
+                        search={"kind": "categorical", "values": [None, "auto"]},
+                    ),
+                    solver=("lsqr", "eigen"),
+                ),
             ),
             supports_probability=True,
         ),
@@ -1095,14 +1309,31 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
             "streaming",
             (
                 C_PARAMETER,
-                _float("epsilon", "Epsilon", 0.1, 0.0, 1000.0, step=0.01),
+                _float(
+                    "epsilon",
+                    "Epsilon",
+                    0.1,
+                    0.0,
+                    1000.0,
+                    step=0.01,
+                    search={"kind": "float", "low": 1e-3, "high": 1.0, "log": True},
+                ),
                 _select(
                     "loss",
                     "Loss",
                     "epsilon_insensitive",
                     ("epsilon_insensitive", "squared_epsilon_insensitive"),
+                    search={
+                        "kind": "categorical",
+                        "values": ["epsilon_insensitive", "squared_epsilon_insensitive"],
+                    },
                 ),
-                _bool("average", "Average weights", False),
+                _bool(
+                    "average",
+                    "Average weights",
+                    False,
+                    search={"kind": "categorical", "values": [False, True]},
+                ),
                 FIT_INTERCEPT,
             ),
             supports_early_stopping=True,
@@ -1240,7 +1471,13 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
                     1e6,
                     search={"kind": "float", "low": 1e-4, "high": 1.0, "log": True},
                 ),
-                _select("gamma", "Kernel gamma", "scale", ("scale", "auto")),
+                _select(
+                    "gamma",
+                    "Kernel gamma",
+                    "scale",
+                    ("scale", "auto"),
+                    search={"kind": "categorical", "values": ["scale", "auto"]},
+                ),
             ),
             notes=("Training cost grows super-linearly and can become cubic.",),
         ),
@@ -1254,9 +1491,29 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
             "small",
             (
                 C_PARAMETER,
-                _float("epsilon", "Epsilon tube", 0.1, 0.0, 1e6),
-                _int("degree", "Polynomial degree", 3, 2, 10),
-                _select("gamma", "Kernel gamma", "scale", ("scale", "auto")),
+                _float(
+                    "epsilon",
+                    "Epsilon tube",
+                    0.1,
+                    0.0,
+                    1e6,
+                    search={"kind": "float", "low": 1e-4, "high": 1.0, "log": True},
+                ),
+                _int(
+                    "degree",
+                    "Polynomial degree",
+                    3,
+                    2,
+                    10,
+                    search={"kind": "int", "low": 2, "high": 6},
+                ),
+                _select(
+                    "gamma",
+                    "Kernel gamma",
+                    "scale",
+                    ("scale", "auto"),
+                    search={"kind": "categorical", "values": ["scale", "auto"]},
+                ),
             ),
             notes=("Training cost grows super-linearly and can become cubic.",),
         ),
@@ -1280,7 +1537,13 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
                     search={"kind": "float", "low": 0.05, "high": 0.9},
                 ),
                 _select("kernel", "Kernel", "rbf", ("rbf", "poly", "sigmoid")),
-                _select("gamma", "Kernel gamma", "scale", ("scale", "auto")),
+                _select(
+                    "gamma",
+                    "Kernel gamma",
+                    "scale",
+                    ("scale", "auto"),
+                    search={"kind": "categorical", "values": ["scale", "auto"]},
+                ),
             ),
             notes=("Training cost grows super-linearly and can become cubic.",),
         ),
@@ -1298,6 +1561,10 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
                     "Split criterion",
                     "squared_error",
                     ("squared_error", "friedman_mse", "absolute_error", "poisson"),
+                    search={
+                        "kind": "categorical",
+                        "values": ["squared_error", "friedman_mse", "absolute_error", "poisson"],
+                    },
                 ),
                 MAX_DEPTH,
                 MIN_SAMPLES_SPLIT,
@@ -1337,7 +1604,16 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
             "medium",
             (
                 *BOOST_PARAMETERS,
-                _select("loss", "Loss", "squared_error", ("squared_error", "absolute_error", "huber", "quantile")),
+                _select(
+                    "loss",
+                    "Loss",
+                    "squared_error",
+                    ("squared_error", "absolute_error", "huber", "quantile"),
+                    search={
+                        "kind": "categorical",
+                        "values": ["squared_error", "absolute_error", "huber", "quantile"],
+                    },
+                ),
             ),
         ),
         AlgorithmSpec(
@@ -1355,6 +1631,10 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
                     "Loss",
                     "squared_error",
                     ("squared_error", "absolute_error", "gamma", "poisson", "quantile"),
+                    search={
+                        "kind": "categorical",
+                        "values": ["squared_error", "absolute_error", "gamma", "poisson", "quantile"],
+                    },
                 ),
             ),
             supports_early_stopping=True,
@@ -1371,7 +1651,13 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
             (
                 N_ESTIMATORS,
                 LEARNING_RATE,
-                _select("loss", "Loss", "linear", ("linear", "square", "exponential")),
+                _select(
+                    "loss",
+                    "Loss",
+                    "linear",
+                    ("linear", "square", "exponential"),
+                    search={"kind": "categorical", "values": ["linear", "square", "exponential"]},
+                ),
             ),
         ),
         AlgorithmSpec(
@@ -1391,8 +1677,20 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
                     1000,
                     search={"kind": "int", "low": 3, "high": 51, "step": 2},
                 ),
-                _select("weights", "Neighbour weighting", "uniform", ("uniform", "distance")),
-                _select("p", "Minkowski power", 2, (1, 2)),
+                _select(
+                    "weights",
+                    "Neighbour weighting",
+                    "uniform",
+                    ("uniform", "distance"),
+                    search={"kind": "categorical", "values": ["uniform", "distance"]},
+                ),
+                _select(
+                    "p",
+                    "Minkowski power",
+                    2,
+                    (1, 2),
+                    search={"kind": "categorical", "values": [1, 2]},
+                ),
             ),
         ),
         AlgorithmSpec(
@@ -1563,6 +1861,14 @@ def algorithm_spec(algorithm: str) -> AlgorithmSpec:
         raise ValueError(f"Unknown training algorithm '{algorithm}'") from exc
 
 
+def parameter_is_active(parameter: ParameterSpec, values: dict[str, Any]) -> bool:
+    """Return whether a parameter applies to a concrete estimator configuration."""
+    return not parameter.active_when or all(
+        values.get(controller) in accepted_values
+        for controller, accepted_values in parameter.active_when.items()
+    )
+
+
 def validate_algorithm_parameters(
     algorithm: str,
     problem_type: ProblemType,
@@ -1583,11 +1889,15 @@ def validate_algorithm_parameters(
         raise ValueError(
             f"Unsupported training parameters for '{algorithm}': "
             f"{', '.join(unsupported)}"
-        )
+    )
     normalized = spec.defaults()
     normalized.update(parameters)
-    for parameter_id, value in normalized.items():
-        parameter = by_id[parameter_id]
+    for parameter in spec.parameters:
+        parameter_id = parameter.id
+        if not parameter_is_active(parameter, normalized):
+            normalized.pop(parameter_id, None)
+            continue
+        value = normalized[parameter_id]
         if value is None:
             if not parameter.nullable:
                 raise ValueError(f"Parameter '{parameter_id}' cannot be null")
@@ -1627,12 +1937,6 @@ def validate_algorithm_parameters(
                 raise ValueError(
                     f"Parameter '{parameter_id}' must be at most {parameter.maximum}"
                 )
-    if algorithm == "logistic_regression" and normalized["penalty"] != "elasticnet":
-        normalized.pop("l1_ratio", None)
-    if algorithm == "lda_classifier":
-        solver = normalized["solver"]
-        if solver == "svd":
-            normalized["shrinkage"] = None
     return normalized
 
 
@@ -1656,7 +1960,13 @@ class LabelEncodedClassifier(ClassifierMixin, BaseEstimator):
         return self.estimator.predict_proba(x)
 
     def decision_function(self, x: Any) -> Any:
-        return self.estimator.decision_function(x)
+        decision = getattr(self.estimator, "decision_function", None)
+        if callable(decision):
+            return decision(x)
+        probabilities = self.predict_proba(x)
+        if probabilities.ndim == 2 and probabilities.shape[1] == 2:
+            return probabilities[:, 1]
+        return probabilities
 
 
 def build_estimator(

@@ -27,7 +27,7 @@ class WorkflowStep(BaseModel):
 
     step_id: str = Field(min_length=1, max_length=128)
     name: str = Field(min_length=1, max_length=200)
-    type: Literal["data_engineering", "feature_engineering", "training", "scoring", "monitoring"]
+    type: Literal["data_engineering", "feature_engineering", "training", "automl", "scoring", "monitoring"]
     inputs: list[WorkflowStepInput] = Field(default_factory=list)
     output_port_id: str = Field(default="dataset", min_length=1, max_length=128)
     additional_output_port_ids: list[str] = Field(default_factory=list)
@@ -173,6 +173,7 @@ def validate_workflow_definition(definition: dict[str, Any], executable: bool) -
             "data_engineering": 0,
             "feature_engineering": 1,
             "training": 2,
+            "automl": 2,
             "scoring": 3,
             "monitoring": 4,
         }
@@ -182,6 +183,8 @@ def validate_workflow_definition(definition: dict[str, Any], executable: bool) -
             )
         if len(actual_sequence) != len(set(actual_sequence)):
             raise ValueError("The current workflow supports one step of each lifecycle type")
+        if "training" in actual_sequence and "automl" in actual_sequence:
+            raise ValueError("A workflow must choose either Training or AutoML, not both")
         if "monitoring" in actual_sequence:
             allowed = ["data_engineering", "monitoring"]
             if actual_sequence != allowed:
@@ -218,25 +221,27 @@ def validate_workflow_definition(definition: dict[str, Any], executable: bool) -
                 )
             if index > 0 and not step.inputs:
                 raise ValueError("Feature Engineering after Data Engineering requires an upstream input")
-        elif step.type == "training":
+        elif step.type in {"training", "automl"}:
             from app.modules.pipelines.modeling import TrainingDefinition
 
             validated = TrainingDefinition.model_validate(nested_definition)
+            if step.type == "automl" and validated.optimization.mode != "automl":
+                raise ValueError("AutoML step requires optimization mode 'automl'")
             if executable:
                 validated.validate_executable()
             step.config["definition"] = validated.model_dump(mode="json")
             ports = {item.port_id for item in step.inputs}
             if "training" not in ports:
-                raise ValueError("Training requires an explicit 'training' input port")
+                raise ValueError(f"{step.type.title()} requires an explicit 'training' input port")
             if ports - {"training", "validation", "fitted_transform"}:
                 raise ValueError(
-                    "Training accepts 'training' and optional 'validation' "
+                    f"{step.type.title()} accepts 'training' and optional 'validation' "
                     "and 'fitted_transform' input ports"
                 )
             if validated.early_stopping and "validation" not in ports:
                 raise ValueError("Training early stopping requires an explicit 'validation' input port")
             if step.output_port_id != "model":
-                raise ValueError("Training primary output port must be 'model'")
+                raise ValueError(f"{step.type.title()} primary output port must be 'model'")
         elif step.type == "scoring":
             from app.modules.pipelines.modeling import ScoringDefinition
 
@@ -287,7 +292,7 @@ def _validate_batch_scoring_preparation(workflow: WorkflowDefinition) -> None:
     ]
     if not batch_steps:
         return
-    if any(step.type == "training" for step in workflow.steps):
+    if any(step.type in {"training", "automl"} for step in workflow.steps):
         raise ValueError("A batch-scoring workflow cannot contain a Training step")
     feature = next(
         (step for step in workflow.steps if step.type == "feature_engineering"),

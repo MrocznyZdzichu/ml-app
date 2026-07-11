@@ -26,7 +26,15 @@ def test_pipeline_model_registry_exposes_governance_metadata_and_bounded_paramet
             "target_column": "churn",
             "feature_columns": ["tenure", "balance"],
             "model_hash": "sha256-value",
-            "metrics": {"f1": 0.82, "note": "not numeric"},
+            "metrics": {
+                "f1": 0.82,
+                "note": "registry-safe metadata",
+                "optimization": {
+                    "mode": "automl",
+                    "best_algorithm": "ridge_classifier",
+                    "trials": [{"number": 0, "score": 0.81}],
+                },
+            },
             "training_config": {
                 "epochs": 10,
                 "batch_size": 10_000,
@@ -60,7 +68,9 @@ def test_pipeline_model_registry_exposes_governance_metadata_and_bounded_paramet
     assert response.pipeline_id == "pipeline-1"
     assert response.pipeline_run_id == "run-1"
     assert response.feature_columns == ["tenure", "balance"]
-    assert response.metrics == {"f1": 0.82}
+    assert response.metrics["f1"] == 0.82
+    assert response.metrics["optimization"]["mode"] == "automl"
+    assert response.metrics["optimization"]["trials"][0]["score"] == 0.81
     assert response.training_config["parameters"] == {"alpha": 0.0001}
     assert response.model_parameters["weights"][0]["feature"] == "tenure"
     assert response.lineage["input_artifact_ids"] == ["training-data-1"]

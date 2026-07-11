@@ -50,6 +50,7 @@ export type TrainingParameterSpec = {
   options: unknown[];
   nullable: boolean;
   search: Record<string, unknown> | null;
+  active_when: Record<string, unknown[]> | null;
 };
 
 export type TrainingAlgorithmSpec = {
@@ -395,9 +396,6 @@ export function validateTrainingConfiguration(definition: TrainingDefinition): s
   if (definition.early_stopping && definition.optimization.mode !== "single") {
     issues.push("Training early stopping cannot be combined with hyperparameter optimization.");
   }
-  if (definition.optimization.mode === "automl" && definition.optimization.candidate_algorithms.length === 0) {
-    issues.push("AutoML requires at least one candidate algorithm.");
-  }
   if (definition.optimization.mode !== "single" && definition.optimization.mode !== "automl") {
     for (const [parameterId, search] of Object.entries(definition.optimization.search_space)) {
       const kind = String(search.kind ?? "");
@@ -410,6 +408,7 @@ export function validateTrainingConfiguration(definition: TrainingDefinition): s
         const low = Number(search.low);
         const high = Number(search.high);
         const points = Number(search.points ?? 3);
+        const step = search.step == null ? null : Number(search.step);
         if (!Number.isFinite(low) || !Number.isFinite(high)) {
           issues.push(`Search space for '${parameterId}' requires numeric From and To values.`);
         }
@@ -421,6 +420,12 @@ export function validateTrainingConfiguration(definition: TrainingDefinition): s
         }
         if (search.log === true && (low <= 0 || high <= 0)) {
           issues.push(`Search space for '${parameterId}' uses logarithmic scale, so From and To must be greater than zero.`);
+        }
+        if (step != null && (!Number.isFinite(step) || step <= 0)) {
+          issues.push(`Search space for '${parameterId}' uses a step that must be greater than zero.`);
+        }
+        if (step != null && search.log === true) {
+          issues.push(`Search space for '${parameterId}' cannot combine a step with logarithmic scale.`);
         }
       } else {
         issues.push(`Search space for '${parameterId}' has unsupported mode '${kind || "blank"}'.`);

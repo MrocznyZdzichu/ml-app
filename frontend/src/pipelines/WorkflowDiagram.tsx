@@ -43,7 +43,7 @@ export function WorkflowDiagram({
           ? step.config.definition.steps.length
           : step.type === "feature_engineering"
             ? step.config.definition.transformations.length
-            : step.type === "training"
+            : step.type === "training" || step.type === "automl"
               ? step.config.definition.feature_columns.length
               : 1;
         return (
@@ -58,13 +58,14 @@ export function WorkflowDiagram({
             >
               {step.type === "data_engineering" ? <DatabaseZap size={22} />
                 : step.type === "feature_engineering" ? <Sparkles size={22} />
-                  : step.type === "training" ? <Brain size={22} />
+                  : step.type === "training" || step.type === "automl" ? <Brain size={22} />
                     : step.type === "monitoring" ? <Activity size={22} />
                       : <Calculator size={22} />}
               <span>
                 <small>STEP {index + 1}</small>
                 <strong>{step.name}</strong>
-                <em>{step.type === "training" ? `${count} features`
+                <em>{step.type === "automl" ? `${step.config.definition.optimization.max_trials} trials max`
+                  : step.type === "training" ? `${count} features`
                   : step.type === "scoring"
                     ? step.config.definition.purpose === "batch"
                       ? "batch prediction"

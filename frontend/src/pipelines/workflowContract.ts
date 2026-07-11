@@ -68,6 +68,15 @@ export type WorkflowStepDefinition =
   | {
       step_id: string;
       name: string;
+      type: "automl";
+      inputs: Array<{ port_id: string; source: { step_id: string; port_id: string } }>;
+      output_port_id: "model";
+      additional_output_port_ids: string[];
+      config: { definition: TrainingDefinition };
+    }
+  | {
+      step_id: string;
+      name: string;
       type: "scoring";
       inputs: Array<{ port_id: string; source: { step_id: string; port_id: string } }>;
       output_port_id: "predictions";
@@ -94,7 +103,7 @@ export type WorkflowDefinition = {
   parameters: Record<string, unknown>;
 };
 
-export type PipelineTemplate = "training" | "batch_scoring" | "custom" | "monitoring";
+export type PipelineTemplate = "training" | "automl" | "batch_scoring" | "custom" | "monitoring";
 
 export function workflowTemplateDefinition(template: PipelineTemplate): WorkflowDefinition {
   if (template === "custom") {
@@ -175,13 +184,80 @@ export function workflowTemplateDefinition(template: PipelineTemplate): Workflow
   }
   const deStep: DataEngineeringWorkflowStep = {
     step_id: "de_1",
-    name: template === "training" ? "Data Engineering" : "Scoring Data Engineering",
+    name: template === "training" || template === "automl" ? "Data Engineering" : "Scoring Data Engineering",
     type: "data_engineering",
     inputs: [],
     output_port_id: "dataset",
     additional_output_port_ids: [],
     config: { definition: emptyPipelineDefinition() }
   };
+  if (template === "automl") {
+    const featureBase = emptyFeatureEngineeringDefinition();
+    const featureDefinition: FeatureEngineeringDefinition = {
+      ...featureBase,
+      evaluation: {
+        ...featureBase.evaluation,
+        split_strategy: "stratified",
+        validation_size: 0.1,
+        test_size: 0.2
+      },
+      outputs: [
+        { output_id: "training_features", input_id: "training", dataset_name: "AutoML training", business_case_role: "training" },
+        { output_id: "validation_features", input_id: "validation", dataset_name: "AutoML validation", business_case_role: "validation" },
+        { output_id: "test_features", input_id: "test", dataset_name: "AutoML holdout test", business_case_role: "test" }
+      ]
+    };
+    const featureStep: FeatureEngineeringWorkflowStep = {
+      step_id: "fe_1",
+      name: "Evaluation Split",
+      type: "feature_engineering",
+      inputs: [{ port_id: "training", source: { step_id: deStep.step_id, port_id: deStep.output_port_id } }],
+      output_port_id: "training",
+      additional_output_port_ids: ["validation", "test", "fitted_transform"],
+      config: { definition: featureDefinition }
+    };
+    const automlDefinition: TrainingDefinition = {
+      ...emptyTrainingDefinition(),
+      model_name: "AutoML champion",
+      optimization: {
+        ...emptyTrainingDefinition().optimization,
+        mode: "automl",
+        max_trials: 50,
+        timeout_seconds: 3600
+      }
+    };
+    const automlStep: Extract<WorkflowStepDefinition, { type: "automl" }> = {
+      step_id: "automl_1",
+      name: "AutoML",
+      type: "automl",
+      inputs: [
+        { port_id: "training", source: { step_id: featureStep.step_id, port_id: "training" } },
+        { port_id: "validation", source: { step_id: featureStep.step_id, port_id: "validation" } },
+        { port_id: "fitted_transform", source: { step_id: featureStep.step_id, port_id: "fitted_transform" } }
+      ],
+      output_port_id: "model",
+      additional_output_port_ids: ["metrics"],
+      config: { definition: automlDefinition }
+    };
+    const scoringStep: Extract<WorkflowStepDefinition, { type: "scoring" }> = {
+      step_id: "scoring_1",
+      name: "Holdout Test Scoring",
+      type: "scoring",
+      inputs: [
+        { port_id: "data", source: { step_id: featureStep.step_id, port_id: "test" } },
+        { port_id: "model", source: { step_id: automlStep.step_id, port_id: "model" } }
+      ],
+      output_port_id: "predictions",
+      additional_output_port_ids: [],
+      config: { definition: { ...emptyScoringDefinition(), report_name: "AutoML holdout report" } }
+    };
+    return {
+      contract_version: "2.0",
+      steps: [deStep, featureStep, automlStep, scoringStep],
+      outputs: workflowOutputsForStep(scoringStep),
+      parameters: { template }
+    };
+  }
   if (template === "batch_scoring") {
     const featureDefinition: FeatureEngineeringDefinition = {
       ...emptyFeatureEngineeringDefinition(),
@@ -318,7 +394,7 @@ export function canonicalizeWorkflowDatasetIds(
   return normalizeWorkflowDefinition({
     ...definition,
     steps: definition.steps.map((step) => {
-      if (step.type === "training" || step.type === "scoring") return step;
+      if (step.type === "training" || step.type === "automl" || step.type === "scoring") return step;
       const nested = recordValue(step.config.definition);
       const inputs = Array.isArray(nested.inputs) ? nested.inputs : [];
       return {
@@ -395,13 +471,13 @@ export function normalizeWorkflowDefinition(value: unknown): WorkflowDefinition 
             config: { definition: featureDefinition }
           }];
         }
-        if (step.type === "training") {
+        if (step.type === "training" || step.type === "automl") {
           return [{
-            step_id: String(step.step_id ?? "training_1"),
-            name: String(step.name ?? "Model Training"),
-            type: "training",
+            step_id: String(step.step_id ?? (step.type === "automl" ? "automl_1" : "training_1")),
+            name: String(step.name ?? (step.type === "automl" ? "AutoML" : "Model Training")),
+            type: step.type,
             inputs: Array.isArray(step.inputs)
-              ? step.inputs as Extract<WorkflowStepDefinition, { type: "training" }>["inputs"]
+              ? step.inputs as Extract<WorkflowStepDefinition, { type: "training" | "automl" }>["inputs"]
               : [],
             output_port_id: "model",
             additional_output_port_ids: ["metrics"],
@@ -519,10 +595,13 @@ export function validateWorkflowConfiguration(definition: WorkflowDefinition): s
         );
       }
     }
-    if (step.type === "training") {
+    if (step.type === "training" || step.type === "automl") {
       issues.push(...validateTrainingConfiguration(step.config.definition));
       const ports = new Set(step.inputs.map((input) => input.port_id));
-      if (!ports.has("training")) issues.push("Training requires an explicit training input port.");
+      if (!ports.has("training")) issues.push(`${step.type === "automl" ? "AutoML" : "Training"} requires an explicit training input port.`);
+      if (step.type === "automl" && step.config.definition.optimization.mode !== "automl") {
+        issues.push("AutoML step requires AutoML optimization mode.");
+      }
       if (step.config.definition.early_stopping && !ports.has("validation")) {
         issues.push("Training early stopping requires an explicit validation input port.");
       }

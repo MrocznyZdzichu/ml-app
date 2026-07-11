@@ -40,7 +40,7 @@ class ModelArtifactRead(BaseModel):
     version_number: int
     algorithm: str
     artifact_uri: str
-    metrics: dict[str, float]
+    metrics: dict[str, Any]
     stage: ModelStage
     business_case_id: str
     pipeline_id: str

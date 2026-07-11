@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import json
+import random
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -12,8 +13,6 @@ from sklearn.base import clone
 from sklearn.metrics import get_scorer
 from sklearn.model_selection import (
     KFold,
-    ParameterGrid,
-    ParameterSampler,
     PredefinedSplit,
     StratifiedKFold,
     cross_val_score,
@@ -25,6 +24,7 @@ from app.modules.pipelines.modeling_catalog import (
     automl_algorithms,
     build_estimator,
     curated_search_space,
+    parameter_is_active,
     validate_algorithm_parameters,
 )
 from app.modules.pipelines.domain import PipelineExecutionCancelled
@@ -222,20 +222,32 @@ class ModelOptimizationEngine:
             raise ValueError(
                 f"Algorithm '{algorithm}' has no curated hyperparameter search space"
             )
+        total_candidate_count = self._conditional_candidate_count(
+            algorithm,
+            space,
+            base_parameters,
+        )
         if mode == "grid_search":
-            all_candidates = list(ParameterGrid(space))
-            total_candidate_count = len(all_candidates)
-            candidates = all_candidates[:max_trials]
-        else:
-            total = math.prod(len(values) for values in space.values())
-            total_candidate_count = total
             candidates = list(
-                ParameterSampler(
+                self._iter_conditional_candidates(
+                    algorithm,
                     space,
-                    n_iter=min(max_trials, total),
-                    random_state=random_seed,
+                    base_parameters,
+                    limit=max_trials,
                 )
             )
+        else:
+            sample_size = min(max_trials, total_candidate_count)
+            indices = sorted(random.Random(random_seed).sample(range(total_candidate_count), sample_size))
+            candidates = [
+                self._conditional_candidate_at(
+                    algorithm,
+                    space,
+                    base_parameters,
+                    index,
+                )
+                for index in indices
+            ]
         started = time.monotonic()
         if emit_event:
             emit_event(
@@ -494,7 +506,9 @@ class ModelOptimizationEngine:
                 trial,
                 selected,
                 search_space=search_space,
+                base_parameters=base,
                 prefix=f"{selected}__" if mode == "automl" else "",
+                allow_unscoped_overrides=mode != "automl",
             )
             merged = {**base, **suggested}
             trial.set_user_attr("algorithm", selected)
@@ -771,6 +785,170 @@ class ModelOptimizationEngine:
         return float(np.mean(scores)), [float(value) for value in scores]
 
     @staticmethod
+    def _ordered_search_parameter_ids(
+        algorithm: str,
+        space: dict[str, dict[str, Any]],
+    ) -> list[str]:
+        parameters = {parameter.id: parameter for parameter in algorithm_spec(algorithm).parameters}
+        ordered: list[str] = []
+        visiting: set[str] = set()
+
+        def visit(parameter_id: str) -> None:
+            if parameter_id in ordered:
+                return
+            if parameter_id in visiting:
+                raise ValueError(
+                    f"Conditional search parameters for '{algorithm}' contain a cycle"
+                )
+            visiting.add(parameter_id)
+            parameter = parameters[parameter_id]
+            for controller in (parameter.active_when or {}):
+                if controller in space:
+                    visit(controller)
+            visiting.remove(parameter_id)
+            ordered.append(parameter_id)
+
+        for parameter_id in space:
+            visit(parameter_id)
+        return ordered
+
+    @classmethod
+    def _conditional_candidate_counter(
+        cls,
+        algorithm: str,
+        space: dict[str, list[Any]],
+        base_parameters: dict[str, Any],
+    ) -> tuple[list[str], dict[str, Any], tuple[str, ...], Callable[[int, tuple[tuple[str, Any], ...]], int]]:
+        spec = algorithm_spec(algorithm)
+        parameters = {parameter.id: parameter for parameter in spec.parameters}
+        ordered = cls._ordered_search_parameter_ids(algorithm, space)
+        base_values = spec.defaults()
+        base_values.update(base_parameters)
+        controller_ids = tuple(sorted({
+            controller
+            for parameter_id in ordered
+            for controller in (parameters[parameter_id].active_when or {})
+            if controller in space
+        }))
+        cache: dict[tuple[int, tuple[tuple[str, Any], ...]], int] = {}
+
+        def count(index: int, selected: tuple[tuple[str, Any], ...]) -> int:
+            key = (index, selected)
+            if key in cache:
+                return cache[key]
+            if index == len(ordered):
+                return 1
+            parameter_id = ordered[index]
+            context = {**base_values, **dict(selected)}
+            parameter = parameters[parameter_id]
+            if not parameter_is_active(parameter, context):
+                result = count(index + 1, selected)
+            elif parameter_id not in controller_ids:
+                result = len(space[parameter_id]) * count(index + 1, selected)
+            else:
+                result = sum(
+                    count(
+                        index + 1,
+                        tuple(
+                            (controller, value if controller == parameter_id else context[controller])
+                            for controller in controller_ids
+                            if controller == parameter_id or controller in context
+                        ),
+                    )
+                    for value in space[parameter_id]
+                )
+            cache[key] = result
+            return result
+
+        return ordered, base_values, controller_ids, count
+
+    @classmethod
+    def _conditional_candidate_count(
+        cls,
+        algorithm: str,
+        space: dict[str, list[Any]],
+        base_parameters: dict[str, Any],
+    ) -> int:
+        _, _, _, count = cls._conditional_candidate_counter(algorithm, space, base_parameters)
+        return count(0, ())
+
+    @classmethod
+    def _iter_conditional_candidates(
+        cls,
+        algorithm: str,
+        space: dict[str, list[Any]],
+        base_parameters: dict[str, Any],
+        *,
+        limit: int,
+    ) -> Any:
+        spec = algorithm_spec(algorithm)
+        parameters = {parameter.id: parameter for parameter in spec.parameters}
+        ordered = cls._ordered_search_parameter_ids(algorithm, space)
+        context = spec.defaults()
+        context.update(base_parameters)
+        emitted = 0
+
+        def visit(index: int, selected: dict[str, Any], values: dict[str, Any]) -> Any:
+            nonlocal emitted
+            if emitted >= limit:
+                return
+            if index == len(ordered):
+                emitted += 1
+                yield dict(selected)
+                return
+            parameter_id = ordered[index]
+            parameter = parameters[parameter_id]
+            if not parameter_is_active(parameter, values):
+                yield from visit(index + 1, selected, values)
+                return
+            for value in space[parameter_id]:
+                if emitted >= limit:
+                    return
+                next_selected = {**selected, parameter_id: value}
+                yield from visit(index + 1, next_selected, {**values, parameter_id: value})
+
+        yield from visit(0, {}, context)
+
+    @classmethod
+    def _conditional_candidate_at(
+        cls,
+        algorithm: str,
+        space: dict[str, list[Any]],
+        base_parameters: dict[str, Any],
+        target: int,
+    ) -> dict[str, Any]:
+        spec = algorithm_spec(algorithm)
+        parameters = {parameter.id: parameter for parameter in spec.parameters}
+        ordered, base_values, controller_ids, count = cls._conditional_candidate_counter(
+            algorithm,
+            space,
+            base_parameters,
+        )
+        selected: dict[str, Any] = {}
+        values = dict(base_values)
+        for index, parameter_id in enumerate(ordered):
+            parameter = parameters[parameter_id]
+            if not parameter_is_active(parameter, values):
+                continue
+            for value in space[parameter_id]:
+                next_values = {**values, parameter_id: value}
+                next_selected = {**selected, parameter_id: value}
+                controller_state = tuple(
+                    (controller, next_values[controller])
+                    for controller in controller_ids
+                    if controller in next_values
+                )
+                branch_size = count(index + 1, controller_state)
+                if target < branch_size:
+                    selected = next_selected
+                    values = next_values
+                    break
+                target -= branch_size
+            else:
+                raise ValueError("Conditional candidate index is outside the search space")
+        return selected
+
+    @staticmethod
     def _discrete_values(space: dict[str, Any]) -> list[Any]:
         if space["kind"] == "categorical":
             return [
@@ -806,6 +984,8 @@ class ModelOptimizationEngine:
     def _resolved_search_space(
         algorithm: str,
         overrides: dict[str, dict[str, Any]],
+        *,
+        allow_unscoped_overrides: bool = True,
     ) -> dict[str, dict[str, Any]]:
         spec = algorithm_spec(algorithm)
         parameters = {parameter.id: parameter for parameter in spec.parameters}
@@ -814,11 +994,12 @@ class ModelOptimizationEngine:
         allowed = set(curated)
         scoped_prefix = f"{algorithm}__"
         for key, value in overrides.items():
-            parameter_id = (
-                key.removeprefix(scoped_prefix)
-                if key.startswith(scoped_prefix)
-                else key
-            )
+            if key.startswith(scoped_prefix):
+                parameter_id = key.removeprefix(scoped_prefix)
+            elif allow_unscoped_overrides:
+                parameter_id = key
+            else:
+                continue
             if parameter_id in allowed:
                 resolved[parameter_id] = ModelOptimizationEngine._normalized_search_space(
                     parameters[parameter_id],
@@ -872,13 +1053,28 @@ class ModelOptimizationEngine:
         algorithm: str,
         *,
         search_space: dict[str, dict[str, Any]],
+        base_parameters: dict[str, Any],
         prefix: str,
+        allow_unscoped_overrides: bool = True,
     ) -> dict[str, Any]:
         values: dict[str, Any] = {}
-        for parameter_id, space in ModelOptimizationEngine._resolved_search_space(
+        spec = algorithm_spec(algorithm)
+        parameters = {parameter.id: parameter for parameter in spec.parameters}
+        resolved = ModelOptimizationEngine._resolved_search_space(
             algorithm,
             search_space,
-        ).items():
+            allow_unscoped_overrides=allow_unscoped_overrides,
+        )
+        context = spec.defaults()
+        context.update(base_parameters)
+        for parameter_id in ModelOptimizationEngine._ordered_search_parameter_ids(
+            algorithm,
+            resolved,
+        ):
+            parameter = parameters[parameter_id]
+            if not parameter_is_active(parameter, context):
+                continue
+            space = resolved[parameter_id]
             name = f"{prefix}{parameter_id}"
             if space["kind"] == "categorical":
                 candidates = list(space["values"])
@@ -898,28 +1094,38 @@ class ModelOptimizationEngine:
                     decoded[value] = item
                 selected = trial.suggest_categorical(name, encoded)
                 values[parameter_id] = decoded[selected]
-            elif space["kind"] == "int":
-                step = int(space.get("step", 1))
-                if space.get("points") and not space.get("log", False):
-                    low = int(space["low"])
-                    high = int(space["high"])
-                    points = max(2, int(space["points"]))
-                    step = max(1, round((high - low) / max(1, points - 1)))
-                values[parameter_id] = trial.suggest_int(
-                    name,
-                    int(space["low"]),
-                    int(space["high"]),
-                    step=step,
-                    log=bool(space.get("log", False)),
-                )
             else:
-                values[parameter_id] = trial.suggest_float(
-                    name,
-                    float(space["low"]),
-                    float(space["high"]),
-                    step=space.get("step"),
-                    log=bool(space.get("log", False)),
-                )
+                use_none = bool(space.get("include_null")) and trial.suggest_categorical(
+                    f"{name}__mode",
+                    ["value", "none"],
+                ) == "none"
+                if use_none:
+                    values[parameter_id] = None
+                elif space["kind"] == "int":
+                    step = space.get("step")
+                    if step is None:
+                        step = 1
+                        if space.get("points") and not space.get("log", False):
+                            low = int(space["low"])
+                            high = int(space["high"])
+                            points = max(2, int(space["points"]))
+                            step = max(1, round((high - low) / max(1, points - 1)))
+                    values[parameter_id] = trial.suggest_int(
+                        name,
+                        int(space["low"]),
+                        int(space["high"]),
+                        step=int(step),
+                        log=bool(space.get("log", False)),
+                    )
+                else:
+                    values[parameter_id] = trial.suggest_float(
+                        name,
+                        float(space["low"]),
+                        float(space["high"]),
+                        step=space.get("step"),
+                        log=bool(space.get("log", False)),
+                    )
+            context[parameter_id] = values[parameter_id]
         return values
 
     @staticmethod
