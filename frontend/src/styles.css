@@ -4571,7 +4571,7 @@ textarea {
   border-top: 1px solid #e2e8ed;
   display: grid;
   gap: 12px;
-  grid-template-columns: minmax(220px, 1.7fr) minmax(140px, 1fr) minmax(110px, 0.8fr) minmax(100px, 0.8fr) 88px minmax(350px, auto);
+  grid-template-columns: minmax(220px, 1.7fr) minmax(140px, 1fr) minmax(110px, 0.8fr) minmax(100px, 0.8fr) 88px 470px;
   min-height: 64px;
   padding: 10px 12px;
 }
@@ -5569,7 +5569,7 @@ textarea {
 
 @media (max-width: 1050px) {
   .bc-table-row {
-    grid-template-columns: minmax(180px, 1.5fr) minmax(130px, 1fr) 90px minmax(250px, auto);
+    grid-template-columns: minmax(180px, 1.5fr) minmax(130px, 1fr) 90px 470px;
   }
 
   .bc-table-row > span:nth-child(3),
