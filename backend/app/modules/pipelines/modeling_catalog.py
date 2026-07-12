@@ -117,6 +117,37 @@ class AlgorithmSpec:
     def defaults(self) -> dict[str, Any]:
         return {parameter.id: parameter.default for parameter in self.parameters}
 
+    @property
+    def feature_engineering_profile(self) -> Literal[
+        "scaled_dense", "tree_unscaled", "non_negative"
+    ]:
+        algorithm = self.id.lower()
+        if any(token in algorithm for token in (
+            "naive_bayes", "multinomial_nb", "complement_nb", "bernoulli_nb",
+        )):
+            return "non_negative"
+        if any(token in algorithm for token in (
+            "tree", "forest", "boosting", "xgboost", "lightgbm", "catboost", "adaboost",
+        )):
+            return "tree_unscaled"
+        return "scaled_dense"
+
+    @property
+    def feature_capabilities(self) -> dict[str, Any]:
+        profile = self.feature_engineering_profile
+        return {
+            "profile": profile,
+            "numeric_scaling": {
+                "scaled_dense": "standard",
+                "tree_unscaled": "none",
+                "non_negative": "minmax",
+            }[profile],
+            "requires_numeric_matrix": True,
+            "requires_non_negative_features": profile == "non_negative",
+            "supports_native_categorical": False,
+            "categorical_strategy": "bounded_one_hot_then_frequency",
+        }
+
     def public_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -131,6 +162,7 @@ class AlgorithmSpec:
             "supports_probability": self.supports_probability,
             "supports_early_stopping": self.supports_early_stopping,
             "automl_default": self.automl_default,
+            "feature_capabilities": self.feature_capabilities,
             "notes": list(self.notes),
             "parameters": [parameter.public_dict() for parameter in self.parameters],
         }

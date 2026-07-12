@@ -29,6 +29,7 @@ import type { WorkflowDefinition, WorkflowStepDefinition } from "./workflowContr
 import { WorkflowDiagram } from "./WorkflowDiagram";
 import { ScoringBuilder, TrainingBuilder } from "./ModelingBuilders";
 import { MonitoringBuilder } from "./MonitoringBuilder";
+import { emptyMonitoringDefinition } from "./monitoringContract";
 import {
   deriveModelingDefaults,
   emptyScoringDefinition,
@@ -38,6 +39,7 @@ import {
 } from "./modelingContract";
 import {
   featureEngineeringOutputPorts,
+  normalizeWorkflowDefinition,
   workflowTemplateDefinition,
   workflowOutputsForStep
 } from "./workflowContract";
@@ -52,6 +54,7 @@ export function WorkflowEditor({
   models,
   pipelines,
   dataAttachments,
+  pipelineId,
   pipelineType,
   outputNameSuggestion,
   disabled,
@@ -63,6 +66,7 @@ export function WorkflowEditor({
   models: ModelArtifact[];
   pipelines: Pipeline[];
   dataAttachments: BusinessCaseDataAttachment[];
+  pipelineId?: string;
   pipelineType: string;
   outputNameSuggestion?: string;
   disabled: boolean;
@@ -82,6 +86,10 @@ export function WorkflowEditor({
   const [monitoringRuns, setMonitoringRuns] = useState<PipelineRun[]>([]);
   const [monitoringRunId, setMonitoringRunId] = useState("");
   const [monitoringDatasetId, setMonitoringDatasetId] = useState("");
+  const [isDataEngineeringInferenceOpen, setIsDataEngineeringInferenceOpen] = useState(false);
+  const [dataEngineeringSourcePipelineId, setDataEngineeringSourcePipelineId] = useState("");
+  const [dataEngineeringSourceVersions, setDataEngineeringSourceVersions] = useState<PipelineVersion[]>([]);
+  const [dataEngineeringSourceVersionId, setDataEngineeringSourceVersionId] = useState("");
   const initializedModelingSteps = useRef(new Set<string>());
   const featureStep = definition.steps.find(
     (step) => step.type === "feature_engineering"
@@ -98,6 +106,7 @@ export function WorkflowEditor({
     definition.steps,
     definition.steps.length
   );
+  const isAutoMLTemplate = definition.parameters.template === "automl" || pipelineType === "automl";
   const schemaDatasetIds = useMemo(() => Array.from(new Set([
     ...inputDatasetIds(dataEngineeringDefinition),
     ...(featureDefinition?.inputs.map((input) => input.dataset_id).filter(Boolean) ?? [])
@@ -145,6 +154,17 @@ export function WorkflowEditor({
     (pipeline) =>
       pipeline.business_case_id === businessCase?.id
       && scoringModels.some((model) => model.pipeline_id === pipeline.id)
+  );
+  const dataEngineeringSourcePipelines = pipelines.filter(
+    (pipeline) =>
+      pipeline.business_case_id === businessCase?.id
+      && pipeline.type === "training"
+      && pipeline.id !== pipelineId
+  );
+  const availableDataEngineeringSourceVersions = dataEngineeringSourceVersions.filter(
+    (version) =>
+      version.business_case_id === businessCase?.id
+      && Boolean(dataEngineeringStepFromVersion(version))
   );
   const availableSourceVersions = sourceVersions.filter(
     (version) =>
@@ -245,6 +265,7 @@ export function WorkflowEditor({
   function addFeatureEngineeringStep() {
     if (definition.steps.some((step) => step.type === "feature_engineering")) return;
     const upstream = definition.steps.at(-1);
+    if (!upstream || upstream.type !== "data_engineering") return;
     const step: WorkflowStepDefinition = {
       step_id: "fe_1",
       name: "Feature Engineering",
@@ -266,13 +287,22 @@ export function WorkflowEditor({
   }
 
   function addTrainingStep() {
-    if (definition.steps.some((step) => step.type === "training")) return;
+    addModelingStep("training");
+  }
+
+  function addAutoMLStep() {
+    addModelingStep("automl");
+  }
+
+  function addModelingStep(type: "training" | "automl") {
+    if (definition.steps.some((step) => step.type === "training" || step.type === "automl")) return;
     const feature = [...definition.steps].reverse().find((step) => step.type === "feature_engineering");
-    if (!feature) return;
+    if (!feature || definition.steps.at(-1)?.step_id !== feature.step_id) return;
+    const trainingDefinition = trainingWithDefaults(modelingDefaults, emptyTrainingDefinition());
     const step: WorkflowStepDefinition = {
-      step_id: "training_1",
-      name: "Model Training",
-      type: "training",
+      step_id: type === "automl" ? "automl_1" : "training_1",
+      name: type === "automl" ? "AutoML" : "Model Training",
+      type,
       inputs: [
         { port_id: "training", source: { step_id: feature.step_id, port_id: "training" } },
         ...(feature.additional_output_port_ids.includes("fitted_transform")
@@ -290,8 +320,14 @@ export function WorkflowEditor({
       ],
       output_port_id: "model",
       additional_output_port_ids: ["metrics"],
-      config: { definition: trainingWithDefaults(modelingDefaults, emptyTrainingDefinition()) }
-    };
+      config: { definition: type === "automl"
+        ? {
+            ...trainingDefinition,
+            early_stopping: false,
+            optimization: { ...trainingDefinition.optimization, mode: "automl" }
+          }
+        : trainingDefinition }
+    } as WorkflowStepDefinition;
     setExpandedStepId(step.step_id);
     onChange({ ...definition, steps: [...definition.steps, step], outputs: workflowOutputsForStep(step) });
   }
@@ -299,8 +335,10 @@ export function WorkflowEditor({
   function addScoringStep() {
     if (definition.steps.some((step) => step.type === "scoring")) return;
     const feature = definition.steps.find((step) => step.type === "feature_engineering");
-    const training = definition.steps.find((step) => step.type === "training");
-    if (!feature || !training) return;
+    const training = definition.steps.find(
+      (step) => step.type === "training" || step.type === "automl"
+    );
+    if (!feature || !training || definition.steps.at(-1)?.step_id !== training.step_id) return;
     const dataPort = feature.additional_output_port_ids.includes("test") ? "test" : feature.output_port_id;
     const step: WorkflowStepDefinition = {
       step_id: "scoring_1",
@@ -313,6 +351,36 @@ export function WorkflowEditor({
       output_port_id: "predictions",
       additional_output_port_ids: [],
       config: { definition: scoringWithDefaults(modelingDefaults, emptyScoringDefinition()) }
+    };
+    setExpandedStepId(step.step_id);
+    onChange({ ...definition, steps: [...definition.steps, step], outputs: workflowOutputsForStep(step) });
+  }
+
+  function addMonitoringStep() {
+    if (definition.steps.some((step) => step.type === "monitoring")) return;
+    const scoring = definition.steps.find((step) => step.type === "scoring");
+    if (!scoring || definition.steps.at(-1)?.step_id !== scoring.step_id) return;
+    const scoringDefinition = scoring.config.definition;
+    const step: WorkflowStepDefinition = {
+      step_id: "monitoring_1",
+      name: "Model Monitoring",
+      type: "monitoring",
+      inputs: [{
+        port_id: "data",
+        source: { step_id: scoring.step_id, port_id: scoring.output_port_id }
+      }],
+      output_port_id: "performance_report",
+      additional_output_port_ids: [],
+      config: {
+        definition: {
+          ...emptyMonitoringDefinition(),
+          row_id_column: scoringDefinition.row_id_column || modelingDefaults.row_id_column || "row_id",
+          target_column: scoringDefinition.target_column || modelingDefaults.target_column || "target",
+          prediction_column: scoringDefinition.prediction_column,
+          problem_type: modelingDefaults.problem_type,
+          report_name: `${scoringDefinition.report_name || "Model"} monitoring`
+        }
+      }
     };
     setExpandedStepId(step.step_id);
     onChange({ ...definition, steps: [...definition.steps, step], outputs: workflowOutputsForStep(step) });
@@ -466,6 +534,59 @@ export function WorkflowEditor({
     }
   }
 
+  async function selectDataEngineeringSourcePipeline(pipelineId: string) {
+    setDataEngineeringSourcePipelineId(pipelineId);
+    setDataEngineeringSourceVersionId("");
+    try {
+      setDataEngineeringSourceVersions(
+        pipelineId
+          ? await api.listPipelineVersions(pipelineId)
+          : []
+      );
+    } catch {
+      setDataEngineeringSourceVersions([]);
+    }
+  }
+
+  function inferDataEngineering() {
+    const sourcePipeline = dataEngineeringSourcePipelines.find(
+      (pipeline) => pipeline.id === dataEngineeringSourcePipelineId
+    );
+    const sourceVersion = availableDataEngineeringSourceVersions.find(
+      (version) => version.id === dataEngineeringSourceVersionId
+    );
+    const sourceStep = sourceVersion ? dataEngineeringStepFromVersion(sourceVersion) : undefined;
+    const targetIndex = definition.steps.findIndex((step) => step.type === "data_engineering");
+    if (!sourcePipeline || !sourceVersion || !sourceStep || targetIndex < 0) return;
+    const targetStep = definition.steps[targetIndex];
+    if (targetStep.type !== "data_engineering") return;
+    const nextStep: WorkflowStepDefinition = {
+      ...targetStep,
+      config: {
+        definition: normalizePipelineDefinition(sourceStep.config.definition)
+      }
+    };
+    const steps = definition.steps.map((step, index) => index === targetIndex ? nextStep : step);
+    setExpandedStepId(targetStep.step_id);
+    onChange({
+      ...definition,
+      steps,
+      parameters: {
+        ...definition.parameters,
+        data_engineering_inferred_from: {
+          pipeline_id: sourcePipeline.id,
+          pipeline_name: sourcePipeline.name,
+          pipeline_version_id: sourceVersion.id,
+          pipeline_version_number: sourceVersion.version_number,
+          pipeline_version_status: sourceVersion.status,
+          definition_hash: sourceVersion.definition_hash,
+          source_step_id: sourceStep.step_id
+        }
+      }
+    });
+    setIsDataEngineeringInferenceOpen(false);
+  }
+
   async function selectMonitoringPipeline(pipelineId: string) {
     setMonitoringPipelineId(pipelineId);
     setMonitoringVersionId("");
@@ -607,6 +728,33 @@ export function WorkflowEditor({
     });
   }
 
+  const lastStep = definition.steps.at(-1);
+  const hasDataEngineering = definition.steps.some((step) => step.type === "data_engineering");
+  const hasFeatureEngineering = definition.steps.some((step) => step.type === "feature_engineering");
+  const hasModeling = definition.steps.some(
+    (step) => step.type === "training" || step.type === "automl"
+  );
+  const hasScoring = definition.steps.some((step) => step.type === "scoring");
+  const hasMonitoring = definition.steps.some((step) => step.type === "monitoring");
+  const canAddDataEngineering = definition.steps.length === 0;
+  const canAddFeatureEngineering = lastStep?.type === "data_engineering" && !hasFeatureEngineering;
+  const canAddModeling = lastStep?.type === "feature_engineering" && !hasModeling;
+  const canAddScoring = (lastStep?.type === "training" || lastStep?.type === "automl") && !hasScoring;
+  const canAddMonitoring = lastStep?.type === "scoring" && !hasMonitoring;
+  const recommendedStep: WorkflowStepDefinition["type"] | null = !hasDataEngineering
+    ? "data_engineering"
+    : !hasFeatureEngineering
+      ? "feature_engineering"
+      : !hasModeling
+        ? (isAutoMLTemplate ? "automl" : "training")
+        : !hasScoring
+          ? "scoring"
+          : !hasMonitoring
+            ? "monitoring"
+            : null;
+  const buttonClass = (type: WorkflowStepDefinition["type"]) =>
+    recommendedStep === type ? "primary-button" : "secondary-button";
+
   return (
     <div className="workflow-editor">
       <div className="workflow-editor-heading">
@@ -618,10 +766,18 @@ export function WorkflowEditor({
               ? "Infer an editable DE → fitted FE → Batch Scoring workflow from one immutable training result."
               : pipelineType === "monitoring"
                 ? "Join immutable predictions with actuals and calculate full-scope model performance."
-                : "Build the training lifecycle from Data Engineering through holdout Test Scoring."}
+                : pipelineType === "custom"
+                  ? "Compose the standard MLOps lifecycle: DE → FE → Training or AutoML → Scoring → Monitoring."
+                  : "Build the training lifecycle from Data Engineering through holdout Test Scoring."}
           </p>
         </div>
         <div className="inline-actions">
+          {isAutoMLTemplate && (
+            <button className="primary-button" type="button" disabled={disabled}
+              onClick={() => setIsDataEngineeringInferenceOpen(true)}>
+              <DatabaseZap size={15} /> Infer Data Engineering
+            </button>
+          )}
           {pipelineType === "batch_scoring" && (
             <button className="primary-button" type="button" disabled={disabled}
               onClick={() => setIsInferenceDialogOpen(true)}>
@@ -636,23 +792,29 @@ export function WorkflowEditor({
           )}
           {pipelineType !== "batch_scoring" && pipelineType !== "monitoring" && (
             <>
-              <button className="secondary-button" type="button" onClick={addDataEngineeringStep}
-                disabled={disabled || definition.steps.length > 0}>
+              <button className={buttonClass("data_engineering")} type="button" onClick={addDataEngineeringStep}
+                disabled={disabled || !canAddDataEngineering}>
                 <Plus size={15} /> Add Data Engineering
               </button>
-              <button className="primary-button" type="button" onClick={addFeatureEngineeringStep}
-                disabled={disabled || definition.steps.some((step) => step.type === "feature_engineering")}>
+              <button className={buttonClass("feature_engineering")} type="button" onClick={addFeatureEngineeringStep}
+                disabled={disabled || !canAddFeatureEngineering}>
                 <Plus size={15} /> Add Feature Engineering
               </button>
-              <button className="secondary-button" type="button" onClick={addTrainingStep}
-                disabled={disabled || !definition.steps.some((step) => step.type === "feature_engineering")
-                  || definition.steps.some((step) => step.type === "training")}>
+              <button className={buttonClass("training")} type="button" onClick={addTrainingStep}
+                disabled={disabled || !canAddModeling}>
                 <Plus size={15} /> Add Training
               </button>
-              <button className="secondary-button" type="button" onClick={addScoringStep}
-                disabled={disabled || !definition.steps.some((step) => step.type === "training")
-                  || definition.steps.some((step) => step.type === "scoring")}>
+              <button className={buttonClass("automl")} type="button" onClick={addAutoMLStep}
+                disabled={disabled || !canAddModeling}>
+                <Plus size={15} /> Add AutoML
+              </button>
+              <button className={buttonClass("scoring")} type="button" onClick={addScoringStep}
+                disabled={disabled || !canAddScoring}>
                 <Plus size={15} /> Add Test Scoring
+              </button>
+              <button className={buttonClass("monitoring")} type="button" onClick={addMonitoringStep}
+                disabled={disabled || !canAddMonitoring}>
+                <Plus size={15} /> Add Monitoring
               </button>
             </>
           )}
@@ -666,6 +828,16 @@ export function WorkflowEditor({
             Use “Infer from training pipeline” to replace it with DE, fitted FE and Batch Scoring.
           </div>
         )}
+
+      {isAutoMLTemplate && Boolean(definition.parameters.data_engineering_inferred_from) && (
+        <div className="form-note">
+          Data Engineering was copied from {String(
+            recordValue(definition.parameters.data_engineering_inferred_from).pipeline_name ?? "a training pipeline"
+          )}, v{String(
+            recordValue(definition.parameters.data_engineering_inferred_from).pipeline_version_number ?? "?"
+          )}. The copied step is independent and remains fully editable.
+        </div>
+      )}
 
       <WorkflowDiagram
         definition={definition}
@@ -821,6 +993,106 @@ export function WorkflowEditor({
           onApply={configureMonitoringFromRun}
         />
       )}
+      {isDataEngineeringInferenceOpen && (
+        <DataEngineeringInferenceDialog
+          pipelines={dataEngineeringSourcePipelines}
+          versions={availableDataEngineeringSourceVersions}
+          pipelineId={dataEngineeringSourcePipelineId}
+          versionId={dataEngineeringSourceVersionId}
+          onPipelineChange={(pipelineId) => void selectDataEngineeringSourcePipeline(pipelineId)}
+          onVersionChange={setDataEngineeringSourceVersionId}
+          onClose={() => setIsDataEngineeringInferenceOpen(false)}
+          onApply={inferDataEngineering}
+        />
+      )}
+    </div>
+  );
+}
+
+function dataEngineeringStepFromVersion(version: PipelineVersion) {
+  return normalizeWorkflowDefinition(version.definition).steps.find(
+    (step): step is Extract<WorkflowStepDefinition, { type: "data_engineering" }> =>
+      step.type === "data_engineering"
+  );
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function DataEngineeringInferenceDialog({
+  pipelines,
+  versions,
+  pipelineId,
+  versionId,
+  onPipelineChange,
+  onVersionChange,
+  onClose,
+  onApply
+}: {
+  pipelines: Pipeline[];
+  versions: PipelineVersion[];
+  pipelineId: string;
+  versionId: string;
+  onPipelineChange: (pipelineId: string) => void;
+  onVersionChange: (versionId: string) => void;
+  onClose: () => void;
+  onApply: () => void;
+}) {
+  return (
+    <div className="modal-backdrop" role="presentation"
+      onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="modal-dialog form-panel inference-source-dialog" role="dialog"
+        aria-modal="true" aria-label="Infer Data Engineering"
+        onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <span className="builder-kicker">AutoML template</span>
+            <h2>Infer Data Engineering</h2>
+            <p>Copy the DE definition from one explicit version of another training pipeline in this Business Case.</p>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose}
+            aria-label="Close Data Engineering inference"><X size={17} /></button>
+        </div>
+        <label>Training pipeline
+          <select value={pipelineId} onChange={(event) => onPipelineChange(event.target.value)}>
+            <option value="">Choose pipeline…</option>
+            {pipelines.map((pipeline) => (
+              <option key={pipeline.id} value={pipeline.id}>{pipeline.name}</option>
+            ))}
+          </select>
+          {!pipelines.length && (
+            <small>No pipeline with purpose “training” exists in this Business Case.</small>
+          )}
+        </label>
+        <label>Pipeline version
+          <select value={versionId} disabled={!pipelineId}
+            onChange={(event) => onVersionChange(event.target.value)}>
+            <option value="">Choose version…</option>
+            {versions.map((version) => (
+              <option key={version.id} value={version.id}>
+                v{version.version_number} · {version.status} · {version.definition_hash.slice(0, 10)}
+              </option>
+            ))}
+          </select>
+          {pipelineId && !versions.length && (
+            <small>No version of this pipeline contains a Data Engineering step.</small>
+          )}
+        </label>
+        <div className="form-warning">
+          The current AutoML Data Engineering configuration will be replaced. Downstream step IDs and connections
+          stay unchanged, and the copied definition can be edited immediately afterward.
+        </div>
+        <div className="modal-actions">
+          <button className="secondary-button" type="button" onClick={onClose}>Cancel</button>
+          <button className="primary-button" type="button" onClick={onApply}
+            disabled={!pipelineId || !versionId}>
+            <DatabaseZap size={15} /> Copy Data Engineering
+          </button>
+        </div>
+      </section>
     </div>
   );
 }

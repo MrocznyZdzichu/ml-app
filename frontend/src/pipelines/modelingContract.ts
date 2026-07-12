@@ -18,6 +18,24 @@ export type TrainingDefinition = {
   parameters: Record<string, unknown>;
   optimization: TrainingOptimization;
   resource_limits: TrainingResourceLimits;
+  auto_feature_engineering: AutoFeatureEngineeringDefinition;
+};
+
+export type AutoFeatureEngineeringDefinition = {
+  enabled: boolean;
+  strategy: "balanced";
+  joint_search_enabled: boolean;
+  max_recipe_candidates: number;
+  row_id_column: string;
+  excluded_columns: string[];
+  validation_size: number;
+  numeric_scaling: "none" | "standard" | "minmax" | "robust";
+  add_missing_indicators: boolean;
+  include_datetime_features: boolean;
+  detect_identifier_columns: boolean;
+  min_category_frequency: number;
+  max_one_hot_categories: number;
+  max_frequency_categories: number;
 };
 
 export type TrainingAlgorithm = string;
@@ -66,6 +84,14 @@ export type TrainingAlgorithmSpec = {
   supports_probability: boolean;
   supports_early_stopping: boolean;
   automl_default: boolean;
+  feature_capabilities: {
+    profile: "scaled_dense" | "tree_unscaled" | "non_negative";
+    numeric_scaling: "standard" | "none" | "minmax";
+    requires_numeric_matrix: boolean;
+    requires_non_negative_features: boolean;
+    supports_native_categorical: boolean;
+    categorical_strategy: string;
+  };
   notes: string[];
   parameters: TrainingParameterSpec[];
 };
@@ -133,6 +159,22 @@ export const emptyTrainingDefinition = (): TrainingDefinition => ({
   resource_limits: {
     max_memory_mb: 2048,
     max_parallel_jobs: 1
+  },
+  auto_feature_engineering: {
+    enabled: false,
+    strategy: "balanced",
+    joint_search_enabled: true,
+    max_recipe_candidates: 3,
+    row_id_column: "",
+    excluded_columns: [],
+    validation_size: 0.2,
+    numeric_scaling: "standard",
+    add_missing_indicators: true,
+    include_datetime_features: true,
+    detect_identifier_columns: true,
+    min_category_frequency: 2,
+    max_one_hot_categories: 32,
+    max_frequency_categories: 500
   }
 });
 
@@ -300,7 +342,35 @@ export function normalizeTrainingDefinition(value: unknown): TrainingDefinition 
       ? record(raw.parameters)
       : defaultTrainingParameters(algorithm),
     optimization,
-    resource_limits: normalizeResourceLimits(raw.resource_limits)
+    resource_limits: normalizeResourceLimits(raw.resource_limits),
+    auto_feature_engineering: normalizeAutoFeatureEngineering(raw.auto_feature_engineering)
+  };
+}
+
+function normalizeAutoFeatureEngineering(value: unknown): AutoFeatureEngineeringDefinition {
+  const raw = record(value);
+  const scaling = ["none", "standard", "minmax", "robust"].includes(String(raw.numeric_scaling))
+    ? raw.numeric_scaling as AutoFeatureEngineeringDefinition["numeric_scaling"]
+    : "standard";
+  const oneHot = boundedNumber(raw.max_one_hot_categories, 32, 2, 500);
+  return {
+    enabled: raw.enabled === true,
+    strategy: "balanced",
+    joint_search_enabled: raw.joint_search_enabled !== false,
+    max_recipe_candidates: boundedNumber(raw.max_recipe_candidates, 3, 1, 3),
+    row_id_column: String(raw.row_id_column ?? ""),
+    excluded_columns: Array.isArray(raw.excluded_columns) ? raw.excluded_columns.map(String) : [],
+    validation_size: boundedNumber(raw.validation_size, 0.2, 0.01, 0.49),
+    numeric_scaling: scaling,
+    add_missing_indicators: raw.add_missing_indicators !== false,
+    include_datetime_features: raw.include_datetime_features !== false,
+    detect_identifier_columns: raw.detect_identifier_columns !== false,
+    min_category_frequency: boundedNumber(raw.min_category_frequency, 2, 1, 1000000),
+    max_one_hot_categories: oneHot,
+    max_frequency_categories: Math.max(
+      oneHot,
+      boundedNumber(raw.max_frequency_categories, 500, 2, 500)
+    )
   };
 }
 
@@ -398,8 +468,15 @@ export function validateTrainingConfiguration(definition: TrainingDefinition): s
   if (uniqueFeatures.size !== featureColumns.length) {
     issues.push("Training feature columns must be unique.");
   }
-  if (!featureColumns.length) {
+  if (!featureColumns.length && !definition.auto_feature_engineering.enabled) {
     issues.push("Training requires at least one model feature before publish or dry-run.");
+  }
+  if (definition.auto_feature_engineering.enabled && definition.optimization.mode !== "automl") {
+    issues.push("AutoFE is available only with AutoML optimization.");
+  }
+  if (definition.auto_feature_engineering.enabled
+    && definition.optimization.validation_strategy === "cross_validation") {
+    issues.push("AutoFE v1 requires holdout validation until fold-local preprocessing is available.");
   }
   if (definition.early_stopping && definition.optimization.mode !== "single") {
     issues.push("Training early stopping cannot be combined with hyperparameter optimization.");

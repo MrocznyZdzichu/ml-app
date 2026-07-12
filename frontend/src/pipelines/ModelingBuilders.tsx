@@ -123,6 +123,12 @@ export function TrainingBuilder({ definition, defaults, disabled, onChange }: {
       <option value="upstream_contract">Use upstream Feature Engineering contract</option>
       <option value="explicit">Select columns manually</option>
     </select></label>
+    {isAutoML && definition.auto_feature_engineering.enabled && <div className="fe-suggestion">
+      <Sparkles size={17} />
+      <span><strong>AutoFE owns the estimator feature contract</strong><br />
+        Empty feature selection means that the planner evaluates every supported non-target column.
+        A manual list acts as an allow-list before automatic transformations.</span>
+    </div>}
     {definition.feature_selection === "upstream_contract" && (
       <div className="fe-suggestion">
         <Sparkles size={17} />
@@ -198,6 +204,9 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
   const updateLimits = (patch: Partial<TrainingDefinition["resource_limits"]>) => update({
     resource_limits: { ...definition.resource_limits, ...patch }
   });
+  const updateAutoFE = (patch: Partial<TrainingDefinition["auto_feature_engineering"]>) => update({
+    auto_feature_engineering: { ...definition.auto_feature_engineering, ...patch }
+  });
   const optimization = definition.optimization;
   const metrics = catalog?.metrics[definition.problem_type] ?? [];
   const autoMlCandidates = catalog?.algorithms.filter((item) =>
@@ -208,9 +217,11 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
     : autoMlCandidates.map((item) => item.id);
   const tunableParameters = algorithm?.parameters.filter((parameter) => parameter.search) ?? [];
   const fixedParameters = algorithm?.parameters.filter((parameter) => !parameter.search) ?? [];
+  const autoFEHasHoldout = definition.auto_feature_engineering.enabled
+    && (defaults.has_validation || Boolean(definition.auto_feature_engineering.row_id_column));
   const optimizationUsesCrossValidation = optimization.mode !== "single"
     && (optimization.validation_strategy === "cross_validation"
-      || (optimization.validation_strategy === "auto" && !defaults.has_validation));
+      || (optimization.validation_strategy === "auto" && !defaults.has_validation && !autoFEHasHoldout));
   const usesUpstreamFoldPlan = optimizationUsesCrossValidation && defaults.has_cv_plan;
   return <div className="modeling-modal-content">
     <section className="training-config-section">
@@ -245,8 +256,10 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
             validation_strategy: event.target.value as typeof optimization.validation_strategy
           })}>
           <option value="auto">Auto — holdout if present, otherwise CV</option>
-          <option value="holdout" disabled={!defaults.has_validation}>Explicit validation holdout</option>
-          <option value="cross_validation">Cross-validation on training data</option>
+          <option value="holdout" disabled={!defaults.has_validation && !autoFEHasHoldout}>Validation holdout</option>
+          <option value="cross_validation" disabled={definition.auto_feature_engineering.enabled}>
+            Cross-validation on training data
+          </option>
         </select></label>
         <label>Primary metric<select value={optimization.primary_metric} disabled={disabled}
           onChange={(event) => updateOptimization({ primary_metric: event.target.value })}>
@@ -286,7 +299,7 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
               updateOptimization({ candidate_algorithms: next });
             }} />
           <span><strong>{candidate.label}</strong>
-            <small>{candidate.family} · {candidate.scale_profile}</small></span>
+            <small>{candidate.family} · {candidate.scale_profile} · FE {candidate.feature_capabilities.profile}</small></span>
         </label>)}</div>
       </fieldset>}
     </section>
@@ -330,6 +343,72 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
           the selected algorithm, best parameters, trial history and exact search space used by the backend.
         </span>
       </div>
+      <label className="fe-toggle">
+        <input type="checkbox" checked={definition.auto_feature_engineering.enabled}
+          disabled={disabled}
+          onChange={(event) => update({
+            auto_feature_engineering: {
+              ...definition.auto_feature_engineering,
+              enabled: event.target.checked
+            },
+            optimization: {
+              ...definition.optimization,
+              validation_strategy: event.target.checked ? "auto" : definition.optimization.validation_strategy
+            }
+          })} />
+        <span><strong>Intelligent AutoFE</strong>
+          <small>Profile the full training scope, fit preprocessing only on train, and reuse its state on validation.</small>
+        </span>
+      </label>
+      {definition.auto_feature_engineering.enabled && <>
+        <label className="fe-toggle">
+          <input type="checkbox" checked={definition.auto_feature_engineering.joint_search_enabled}
+            disabled={disabled}
+            onChange={(event) => updateAutoFE({ joint_search_enabled: event.target.checked })} />
+          <span><strong>Joint FE + model search</strong>
+            <small>Compare complete model-aware FE recipe and algorithm pairs on the same leakage-safe holdout.</small>
+          </span>
+        </label>
+        <div className="step-grid">
+          <ColumnSelect label="Stable row ID for generated holdout"
+            value={definition.auto_feature_engineering.row_id_column}
+            columns={defaults.available_columns.filter((item) => item !== definition.target_column)}
+            disabled={disabled || defaults.has_validation}
+            onChange={(row_id_column) => updateAutoFE({ row_id_column })} />
+          <label>Validation share<input type="number" min={0.01} max={0.49} step={0.01}
+            value={definition.auto_feature_engineering.validation_size}
+            disabled={disabled || defaults.has_validation}
+            onChange={(event) => updateAutoFE({ validation_size: Number(event.target.value) })} /></label>
+          <label>Numeric scaling<select value={definition.auto_feature_engineering.numeric_scaling}
+            disabled={disabled}
+            onChange={(event) => updateAutoFE({
+              numeric_scaling: event.target.value as TrainingDefinition["auto_feature_engineering"]["numeric_scaling"]
+            })}>
+            <option value="standard">Standard</option>
+            <option value="robust">Robust</option>
+            <option value="minmax">Min-max</option>
+            <option value="none">None</option>
+          </select></label>
+          <label>One-hot cardinality limit<input type="number" min={2} max={500}
+            value={definition.auto_feature_engineering.max_one_hot_categories} disabled={disabled}
+            onChange={(event) => updateAutoFE({ max_one_hot_categories: Number(event.target.value) })} /></label>
+          <label>Minimum category frequency<input type="number" min={1} max={1000000}
+            value={definition.auto_feature_engineering.min_category_frequency} disabled={disabled}
+            onChange={(event) => updateAutoFE({ min_category_frequency: Number(event.target.value) })} /></label>
+          <label>Maximum FE recipe candidates<input type="number" min={1} max={3}
+            value={definition.auto_feature_engineering.max_recipe_candidates}
+            disabled={disabled || !definition.auto_feature_engineering.joint_search_enabled}
+            onChange={(event) => updateAutoFE({ max_recipe_candidates: Number(event.target.value) })} /></label>
+        </div>
+        {!defaults.has_validation && !definition.auto_feature_engineering.row_id_column
+          && <div className="training-warning"><AlertTriangle size={16} /><span>
+            Choose a stable row ID so AutoFE can create a deterministic leakage-safe holdout.
+          </span></div>}
+        <div className="training-help"><strong>Model-aware AutoFE scope</strong><span>
+          Classification and regression only. Joint search coordinates scaling and bounded categorical preparation
+          with estimator capabilities, then refits the winning recipe and model. Fold-local CV remains a later stage.
+        </span></div>
+      </>}
     </section>}
     <section className="training-config-section">
       <header><div><strong>Execution and resources</strong>

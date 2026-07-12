@@ -1,13 +1,18 @@
 from types import SimpleNamespace
 
+import duckdb
 import pytest
 
-from app.modules.pipelines.runtime import SourceRelation
+from app.modules.pipelines.runtime import SourceRelation, sql_literal
+from app.modules.pipelines.autofe import DuckDbAutoFEPlanner, model_aware_autofe_plans
+from app.modules.pipelines.feature_engineering import DuckDbFeatureEngineeringEngine
+from app.modules.pipelines.feature_engineering import empty_feature_engineering_definition
+from app.modules.pipelines.modeling import SklearnTrainingEngine, TrainingDefinition
 from app.modules.pipelines.step_handlers import AutoMLStepHandler, StepExecutionContext
 from app.modules.pipelines.workflow import WorkflowStep, validate_workflow_definition
 
 
-def automl_definition(*, mode: str = "automl") -> dict:
+def automl_definition(*, mode: str = "automl", autofe: bool = False) -> dict:
     return {
         "contract_version": "1.0",
         "problem_type": "binary_classification",
@@ -34,6 +39,20 @@ def automl_definition(*, mode: str = "automl") -> dict:
             "search_space": {},
         },
         "resource_limits": {"max_memory_mb": 512, "max_parallel_jobs": 1},
+        "auto_feature_engineering": {
+            "enabled": autofe,
+            "strategy": "balanced",
+            "row_id_column": "row_id" if autofe else "",
+            "excluded_columns": [],
+            "validation_size": 0.2,
+            "numeric_scaling": "standard",
+            "add_missing_indicators": True,
+            "include_datetime_features": True,
+            "detect_identifier_columns": True,
+            "min_category_frequency": 2,
+            "max_one_hot_categories": 32,
+            "max_frequency_categories": 500,
+        },
     }
 
 
@@ -78,6 +97,124 @@ def test_automl_workflow_contract_accepts_de_to_automl() -> None:
     validated = validate_workflow_definition(automl_workflow(), executable=False)
     assert [step["type"] for step in validated["steps"]] == ["data_engineering", "automl"]
     assert validated["steps"][1]["config"]["definition"]["optimization"]["mode"] == "automl"
+
+
+def test_automl_workflow_preserves_inferred_data_engineering_provenance() -> None:
+    workflow = automl_workflow()
+    workflow["steps"][0]["config"]["definition"] = {
+        "contract_version": "1.0",
+        "inputs": [{
+            "input_id": "source",
+            "dataset_id": "",
+            "output_port_id": "out",
+            "version_policy": "select_at_run_any",
+        }],
+        "steps": [],
+        "outputs": [{
+            "output_id": "prepared",
+            "input": {"node_id": "source", "port_id": "out"},
+            "materialization": "temporary",
+            "write_mode": "replace",
+            "dataset_name": "",
+            "business_case_role": "training",
+        }],
+        "parameters": {},
+    }
+    workflow["parameters"]["data_engineering_inferred_from"] = {
+        "pipeline_id": "training-pipeline",
+        "pipeline_version_id": "training-v3",
+        "pipeline_version_number": 3,
+        "pipeline_version_status": "published",
+        "definition_hash": "abc123",
+        "source_step_id": "source_de",
+    }
+
+    validated = validate_workflow_definition(workflow, executable=False)
+
+    assert validated["steps"][0]["config"]["definition"]["outputs"][0]["output_id"] == "prepared"
+    assert validated["parameters"]["data_engineering_inferred_from"] == {
+        "pipeline_id": "training-pipeline",
+        "pipeline_version_id": "training-v3",
+        "pipeline_version_number": 3,
+        "pipeline_version_status": "published",
+        "definition_hash": "abc123",
+        "source_step_id": "source_de",
+    }
+
+
+def test_custom_lifecycle_accepts_de_fe_automl_scoring_and_monitoring() -> None:
+    workflow = automl_workflow()
+    feature_definition = empty_feature_engineering_definition()
+    feature_step = {
+        "step_id": "fe_1",
+        "name": "Feature Engineering",
+        "type": "feature_engineering",
+        "inputs": [{
+            "port_id": "training",
+            "source": {"step_id": "de_1", "port_id": "dataset"},
+        }],
+        "output_port_id": "training",
+        "additional_output_port_ids": ["fitted_transform"],
+        "config": {"definition": feature_definition},
+    }
+    workflow["steps"].insert(1, feature_step)
+    workflow["steps"][2]["inputs"] = [
+        {"port_id": "training", "source": {"step_id": "fe_1", "port_id": "training"}},
+        {"port_id": "fitted_transform", "source": {"step_id": "fe_1", "port_id": "fitted_transform"}},
+    ]
+    workflow["steps"].extend([
+        {
+            "step_id": "scoring_1",
+            "name": "Test Scoring",
+            "type": "scoring",
+            "inputs": [
+                {"port_id": "data", "source": {"step_id": "fe_1", "port_id": "training"}},
+                {"port_id": "model", "source": {"step_id": "automl_1", "port_id": "model"}},
+            ],
+            "output_port_id": "predictions",
+            "additional_output_port_ids": [],
+            "config": {"definition": {
+                "contract_version": "1.0",
+                "purpose": "test",
+                "model_artifact_id": "",
+                "row_id_column": "row_id",
+                "target_column": "target",
+                "prediction_column": "prediction",
+                "dataset_name": "Predictions",
+                "report_name": "Test report",
+                "batch_size": 1000,
+            }},
+        },
+        {
+            "step_id": "monitoring_1",
+            "name": "Monitoring",
+            "type": "monitoring",
+            "inputs": [{
+                "port_id": "data",
+                "source": {"step_id": "scoring_1", "port_id": "predictions"},
+            }],
+            "output_port_id": "performance_report",
+            "additional_output_port_ids": [],
+            "config": {"definition": {
+                "contract_version": "2.0",
+                "row_id_column": "row_id",
+                "target_column": "target",
+                "prediction_column": "prediction",
+                "problem_type": "binary_classification",
+                "report_name": "Model monitoring",
+            }},
+        },
+    ])
+    workflow["outputs"] = [{
+        "output_id": "performance_report",
+        "source": {"step_id": "monitoring_1", "port_id": "performance_report"},
+    }]
+
+    validated = validate_workflow_definition(workflow, executable=False)
+
+    assert [step["type"] for step in validated["steps"]] == [
+        "data_engineering", "feature_engineering", "automl", "scoring", "monitoring"
+    ]
 
 
 def test_automl_workflow_recovers_a_legacy_early_stopping_value() -> None:
@@ -125,3 +262,380 @@ def test_automl_handler_executes_through_native_training_engine() -> None:
     )
     assert result.processed_row_count == 100
     assert result.artifact_output_ids == {"model": "model", "metrics": "training_metrics"}
+
+
+def test_autofe_planner_profiles_full_scope_and_builds_bounded_recipe(tmp_path) -> None:
+    definition = TrainingDefinition.model_validate({
+        **automl_definition(autofe=True),
+        "feature_columns": [],
+        "feature_selection": "upstream_contract",
+    })
+    source = SourceRelation(
+        sql=(
+            "(SELECT i AS row_id, CAST(i % 2 AS INTEGER) AS target, "
+            "CASE WHEN i = 3 THEN NULL ELSE CAST(i AS DOUBLE) END AS amount, "
+            "CASE WHEN i % 3 = 0 THEN 'a' ELSE 'b' END AS segment, "
+            "'customer_' || CAST(i AS VARCHAR) AS customer_id FROM range(100) t(i))"
+        ),
+        row_count=100,
+    )
+
+    plan = DuckDbAutoFEPlanner(tmp_path).plan(
+        training=source,
+        validation=None,
+        test=None,
+        training_definition=definition,
+        run_id="run-plan",
+        owner_id="owner",
+    )
+
+    assert plan.provenance["profiled_row_count"] == 100
+    assert plan.provenance["data_scope"] == "full"
+    assert plan.provenance["cardinality_is_approximate"] is True
+    assert plan.provenance["validation_source"] == "generated_stratified_holdout"
+    decisions = {item["column"]: item for item in plan.provenance["column_decisions"]}
+    assert decisions["customer_id"]["action"] == "exclude"
+    assert decisions["segment"]["action"] == "one_hot"
+    assert [item.type for item in plan.definition.transformations] == [
+        "impute", "scale_numeric", "encode_categorical"
+    ]
+    assert {item.business_case_role for item in plan.definition.outputs} == {
+        "training", "validation"
+    }
+
+    model_aware = model_aware_autofe_plans(
+        plan,
+        ["logistic_regression", "random_forest_classifier", "complement_nb"],
+    )
+    assert [item.provenance["recipe_id"] for item in model_aware] == [
+        "scaled_dense", "tree_unscaled", "non_negative"
+    ]
+    scaling = {
+        item.provenance["recipe_id"]: [
+            transform.config.get("method")
+            for transform in item.definition.transformations
+            if transform.type == "scale_numeric"
+        ]
+        for item in model_aware
+    }
+    assert scaling == {
+        "scaled_dense": ["standard"],
+        "tree_unscaled": [],
+        "non_negative": ["minmax"],
+    }
+
+
+def test_autofe_planner_accepts_parquet_table_function_relation(tmp_path) -> None:
+    """Feature Engineering publishes its outputs as a raw read_parquet relation."""
+    parquet_path = tmp_path / "fe-training_features.parquet"
+    connection = duckdb.connect()
+    try:
+        connection.execute(
+            "COPY (SELECT i AS row_id, CAST(i % 2 AS INTEGER) AS target, "
+            "CAST(i AS DOUBLE) AS amount FROM range(100) t(i)) TO ? (FORMAT PARQUET)",
+            [str(parquet_path)],
+        )
+    finally:
+        connection.close()
+
+    definition = TrainingDefinition.model_validate({
+        **automl_definition(autofe=True),
+        "feature_columns": [],
+        "feature_selection": "upstream_contract",
+    })
+    source = SourceRelation(
+        sql=f"read_parquet({sql_literal(str(parquet_path))})",
+        row_count=100,
+    )
+
+    plan = DuckDbAutoFEPlanner(tmp_path).plan(
+        training=source,
+        validation=None,
+        test=None,
+        training_definition=definition,
+        run_id="run-parquet-relation",
+        owner_id="owner",
+    )
+
+    assert plan.provenance["profiled_row_count"] == 100
+    assert {item["column"] for item in plan.provenance["column_decisions"]} == {"amount"}
+
+
+def test_autofe_planner_inherits_upstream_row_id_contract(tmp_path) -> None:
+    definition = TrainingDefinition.model_validate({
+        **automl_definition(autofe=True),
+        "feature_columns": [],
+        "feature_selection": "upstream_contract",
+        "auto_feature_engineering": {
+            **automl_definition(autofe=True)["auto_feature_engineering"],
+            "row_id_column": "",
+        },
+    })
+    source = SourceRelation(
+        sql=(
+            "(SELECT 'customer_' || CAST(i AS VARCHAR) AS customer_id, "
+            "CAST(i % 2 AS INTEGER) AS target, CAST(i AS DOUBLE) AS amount "
+            "FROM range(100) t(i))"
+        ),
+        row_count=100,
+        metadata={"feature_manifest": [{"name": "customer_id", "role": "row_id"}]},
+    )
+
+    plan = DuckDbAutoFEPlanner(tmp_path).plan(
+        training=source,
+        validation=source,
+        test=None,
+        training_definition=definition,
+        run_id="run-inherited-row-id",
+        owner_id="owner",
+    )
+
+    assert plan.definition.row_id_column == "customer_id"
+    assert plan.provenance["inherited_row_id_column"] == "customer_id"
+    assert "customer_id" not in plan.definition.feature_columns
+
+
+def test_automl_handler_applies_autofe_before_model_search(tmp_path) -> None:
+    calls = []
+
+    class Engine:
+        def execute(self, definition, training, validation, **kwargs):
+            assert validation is not None
+            assert definition.feature_selection == "explicit"
+            assert "row_id" not in definition.feature_columns
+            assert "target" not in definition.feature_columns
+            assert "amount__scaled" in definition.feature_columns
+            assert any(name.startswith("segment__") for name in definition.feature_columns)
+            calls.append(definition)
+            is_candidate = definition.optimization.mode == "automl"
+            optimization = {
+                "mode": definition.optimization.mode,
+                "primary_metric": "roc_auc",
+                "validation_strategy": "holdout",
+                "trial_count": definition.optimization.max_trials if is_candidate else 1,
+                "best_score": 0.91 if is_candidate else None,
+                "best_algorithm": "sgd_classifier",
+                "best_parameters": {},
+                "trials": [],
+            }
+            return SimpleNamespace(
+                input_row_count=training.row_count,
+                processed_row_count=training.row_count,
+                output_row_count=1,
+                warnings=[],
+                output_manifest=[
+                    {
+                        "output_id": "model",
+                        "artifact_type": "model_version",
+                        "materialization": "temporary",
+                        "algorithm": "sgd_classifier",
+                        "metrics": {"optimization": optimization},
+                        "training_config": {},
+                    },
+                    {
+                        "output_id": "training_metrics",
+                        "artifact_type": "metrics",
+                        "materialization": "temporary",
+                        "metrics": {"optimization": optimization},
+                    },
+                ],
+            )
+
+    step_payload = automl_workflow()
+    handler_definition = {
+        **automl_definition(autofe=True),
+        "feature_columns": [],
+        "feature_selection": "upstream_contract",
+    }
+    handler_definition["optimization"] = {
+        **handler_definition["optimization"],
+        "candidate_algorithms": ["sgd_classifier", "random_forest_classifier"],
+    }
+    handler_definition["auto_feature_engineering"] = {
+        **handler_definition["auto_feature_engineering"],
+        "max_recipe_candidates": 1,
+    }
+    step_payload["steps"][1]["config"]["definition"] = handler_definition
+    step_payload["steps"][1]["inputs"].append({
+        "port_id": "validation",
+        "source": {"step_id": "fe_1", "port_id": "validation"},
+    })
+    step_payload["steps"][1]["inputs"].append({
+        "port_id": "test",
+        "source": {"step_id": "fe_1", "port_id": "test"},
+    })
+    step = WorkflowStep.model_validate(step_payload["steps"][1])
+    source = SourceRelation(
+        sql=(
+            "(SELECT i AS row_id, CAST(i % 2 AS INTEGER) AS target, "
+            "CAST(i AS DOUBLE) AS amount, "
+            "CASE WHEN i % 3 = 0 THEN 'a' ELSE 'b' END AS segment "
+            "FROM range(100) t(i))"
+        ),
+        row_count=100,
+        metadata={"scope": "full"},
+    )
+    feature_engine = DuckDbFeatureEngineeringEngine(repository_root=tmp_path)
+    validation_source = SourceRelation(
+        sql=(
+            "(SELECT i + 500 AS row_id, CAST(i % 2 AS INTEGER) AS target, "
+            "CAST(i AS DOUBLE) AS amount, "
+            "CASE WHEN i % 3 = 0 THEN 'a' ELSE 'b' END AS segment "
+            "FROM range(20) t(i))"
+        ),
+        row_count=20,
+        metadata={"scope": "full"},
+    )
+    test_source = SourceRelation(
+        sql=(
+            "(SELECT i + 1000 AS row_id, CAST(i % 2 AS INTEGER) AS target, "
+            "CAST(i AS DOUBLE) AS amount, "
+            "CASE WHEN i % 3 = 0 THEN 'new_segment' ELSE 'b' END AS segment "
+            "FROM range(20) t(i))"
+        ),
+        row_count=20,
+        metadata={"scope": "full"},
+    )
+    result = AutoMLStepHandler(
+        Engine(),
+        feature_engine=feature_engine,
+        planner=DuckDbAutoFEPlanner(tmp_path),
+    ).execute(
+        step,
+        StepExecutionContext(
+            run_id="run-autofe",
+            owner_id="owner",
+            is_dry_run=True,
+            upstream_relations={
+                ("de_1", "dataset"): source,
+                ("fe_1", "validation"): validation_source,
+                ("fe_1", "test"): test_source,
+            },
+        ),
+    )
+
+    assert result.output_row_count == 1
+    assert result.artifact_output_ids["fitted_transform"] == "fitted_transform"
+    assert result.relation_output_ids == {"test": "autofe_test"}
+    transformed_test = next(item for item in result.output_manifest if item["output_id"] == "autofe_test")
+    assert transformed_test["row_count"] == 20
+    assert any(item["name"] == "amount__scaled" for item in transformed_test["feature_manifest"])
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    assert len(calls) == 2
+    assert calls[0].auto_feature_engineering.enabled is True
+    assert calls[0].optimization.mode == "automl"
+    assert calls[1].auto_feature_engineering.enabled is False
+    assert calls[1].optimization.mode == "single"
+    assert model["auto_feature_engineering"]["recipe_search_mode"] == "joint_model_aware_holdout"
+    assert model["auto_feature_engineering"]["joint_study"]["selected_recipe_id"] == "scaled_dense"
+    assert model["auto_feature_engineering"]["joint_study"]["skipped_algorithms"] == [
+        "random_forest_classifier"
+    ]
+    assert any("random_forest_classifier" in warning for warning in result.warnings)
+
+
+def test_integrated_autofe_and_automl_train_a_real_classification_model(tmp_path) -> None:
+    step_payload = automl_workflow()
+    definition = {
+        **automl_definition(autofe=True),
+        "feature_columns": [],
+        "feature_selection": "upstream_contract",
+    }
+    definition["optimization"] = {
+        **definition["optimization"],
+        "validation_strategy": "auto",
+        "max_trials": 2,
+    }
+    step_payload["steps"][1]["config"]["definition"] = definition
+    step = WorkflowStep.model_validate(step_payload["steps"][1])
+    source = SourceRelation(
+        sql=(
+            "(SELECT i AS row_id, CAST(i % 2 AS INTEGER) AS target, "
+            "CAST(i AS DOUBLE) AS amount, "
+            "CASE WHEN i % 4 < 2 THEN 'retail' ELSE 'business' END AS segment "
+            "FROM range(120) t(i))"
+        ),
+        row_count=120,
+        metadata={"scope": "full"},
+    )
+    feature_engine = DuckDbFeatureEngineeringEngine(repository_root=tmp_path)
+
+    result = AutoMLStepHandler(
+        SklearnTrainingEngine(repository_root=tmp_path),
+        feature_engine=feature_engine,
+        planner=DuckDbAutoFEPlanner(tmp_path),
+    ).execute(
+        step,
+        StepExecutionContext(
+            run_id="run-real-autofe",
+            owner_id="owner",
+            is_dry_run=True,
+            upstream_relations={("de_1", "dataset"): source},
+        ),
+    )
+
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    assert model["algorithm"] == "sgd_classifier"
+    assert model["metrics"]["optimization"]["trial_count"] == 1
+    assert model["auto_feature_engineering"]["profiled_row_count"] == 120
+    assert model["auto_feature_engineering"]["resolved_feature_count"] >= 3
+    assert model["auto_feature_engineering"]["joint_study"]["candidates"][0]["trial_count"] == 2
+
+
+def test_joint_autofe_compares_model_specific_recipes_on_one_holdout(tmp_path) -> None:
+    step_payload = automl_workflow()
+    definition = {
+        **automl_definition(autofe=True),
+        "problem_type": "regression",
+        "algorithm": "ridge_regression",
+        "parameters": {},
+        "feature_columns": [],
+        "feature_selection": "upstream_contract",
+    }
+    definition["optimization"] = {
+        **definition["optimization"],
+        "validation_strategy": "auto",
+        "primary_metric": "neg_root_mean_squared_error",
+        "max_trials": 4,
+        "candidate_algorithms": ["ridge_regression", "decision_tree_regressor"],
+    }
+    step_payload["steps"][1]["config"]["definition"] = definition
+    step = WorkflowStep.model_validate(step_payload["steps"][1])
+    source = SourceRelation(
+        sql=(
+            "(SELECT i AS row_id, CAST(i AS DOUBLE) AS amount, "
+            "CASE WHEN i % 3 = 0 THEN 'a' ELSE 'b' END AS segment, "
+            "power(CAST(i AS DOUBLE), 2) + sin(CAST(i AS DOUBLE)) AS target "
+            "FROM range(160) t(i))"
+        ),
+        row_count=160,
+        metadata={"scope": "full"},
+    )
+    feature_engine = DuckDbFeatureEngineeringEngine(repository_root=tmp_path)
+
+    result = AutoMLStepHandler(
+        SklearnTrainingEngine(repository_root=tmp_path),
+        feature_engine=feature_engine,
+        planner=DuckDbAutoFEPlanner(tmp_path),
+    ).execute(
+        step,
+        StepExecutionContext(
+            run_id="run-joint-autofe",
+            owner_id="owner",
+            is_dry_run=True,
+            upstream_relations={("de_1", "dataset"): source},
+        ),
+    )
+
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    study = model["auto_feature_engineering"]["joint_study"]
+    assert study["recipe_candidate_count"] == 2
+    assert study["successful_recipe_count"] == 2
+    assert {item["recipe_id"] for item in study["candidates"]} == {
+        "scaled_dense", "tree_unscaled"
+    }
+    assert sum(item["trial_count"] for item in study["candidates"]) == 4
+    assert study["selected_recipe_id"] in {"scaled_dense", "tree_unscaled"}
+    assert study["selected_algorithm"] in {
+        "ridge_regression", "decision_tree_regressor"
+    }

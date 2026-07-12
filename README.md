@@ -360,6 +360,7 @@ separate from the placeholder deployment records in the application UI.
 - [Analysis and Data Browser reference](docs/analysis-data-browser-reference.md)
 - [Descriptive profiling performance](docs/descriptive-profiling-performance.md)
 - [Feature Engineering Stage 1](docs/feature-engineering-stage-1.md)
+- [AutoML + AutoFE Stage 1](docs/automl-autofe-stage-1.md)
 
 ## Git Notes
 

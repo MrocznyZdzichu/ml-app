@@ -239,10 +239,11 @@ export function workflowTemplateDefinition(
       inputs: [
         { port_id: "training", source: { step_id: featureStep.step_id, port_id: "training" } },
         { port_id: "validation", source: { step_id: featureStep.step_id, port_id: "validation" } },
+        { port_id: "test", source: { step_id: featureStep.step_id, port_id: "test" } },
         { port_id: "fitted_transform", source: { step_id: featureStep.step_id, port_id: "fitted_transform" } }
       ],
       output_port_id: "model",
-      additional_output_port_ids: ["metrics"],
+      additional_output_port_ids: ["metrics", "test"],
       config: { definition: automlDefinition }
     };
     const scoringStep: Extract<WorkflowStepDefinition, { type: "scoring" }> = {
@@ -250,7 +251,7 @@ export function workflowTemplateDefinition(
       name: "Holdout Test Scoring",
       type: "scoring",
       inputs: [
-        { port_id: "data", source: { step_id: featureStep.step_id, port_id: "test" } },
+        { port_id: "data", source: { step_id: automlStep.step_id, port_id: "test" } },
         { port_id: "model", source: { step_id: automlStep.step_id, port_id: "model" } }
       ],
       output_port_id: "predictions",
@@ -531,13 +532,14 @@ export function normalizeWorkflowDefinition(value: unknown): WorkflowDefinition 
         }];
       })
     : [];
+  const migratedSteps = migrateAutoMLTestScoring(steps);
   const rawOutputs = Array.isArray(raw.outputs)
     ? raw.outputs as WorkflowDefinition["outputs"]
     : [];
-  const lastStep = steps.at(-1);
+  const lastStep = migratedSteps.at(-1);
   return {
     contract_version: "2.0",
-    steps,
+    steps: migratedSteps,
     outputs: lastStep?.type === "feature_engineering"
       ? workflowOutputsForStep(lastStep)
       : rawOutputs,
@@ -545,6 +547,31 @@ export function normalizeWorkflowDefinition(value: unknown): WorkflowDefinition 
       ? raw.parameters as Record<string, unknown>
       : {}
   };
+}
+
+function migrateAutoMLTestScoring(steps: WorkflowStepDefinition[]): WorkflowStepDefinition[] {
+  const automl = steps.find((step) => step.type === "automl");
+  const scoring = steps.find((step) => step.type === "scoring" && step.config.definition.purpose === "test");
+  if (!automl || !scoring || !automl.config.definition.auto_feature_engineering.enabled) return steps;
+  const rawTest = scoring.inputs.find((input) => input.port_id === "data" && input.source.port_id === "test");
+  if (!rawTest) return steps;
+  const automlInputs = automl.inputs.some((input) => input.port_id === "test")
+    ? automl.inputs
+    : [...automl.inputs, { port_id: "test", source: rawTest.source }];
+  const migratedAutoML = {
+    ...automl,
+    inputs: automlInputs,
+    additional_output_port_ids: Array.from(new Set([...automl.additional_output_port_ids, "test"]))
+  } as WorkflowStepDefinition;
+  const migratedScoring = {
+    ...scoring,
+    inputs: scoring.inputs.map((input) => input.port_id === "data"
+      ? { ...input, source: { step_id: automl.step_id, port_id: "test" } }
+      : input)
+  } as WorkflowStepDefinition;
+  return steps.map((step) => step.step_id === automl.step_id
+    ? migratedAutoML
+    : step.step_id === scoring.step_id ? migratedScoring : step);
 }
 
 export function featureEngineeringOutputPorts(definition: FeatureEngineeringDefinition) {

@@ -2945,6 +2945,7 @@ function PipelinesPanel({
               const dataset = datasets.find((item) => item.id === attachment.data_asset_id);
               return dataset ? { ...attachment, data_asset_id: dataset.logical_id } : attachment;
             })}
+            pipelineId={selectedPipeline?.id}
             outputNameSuggestion={selectedPipeline?.name ?? "result"}
             pipelineType={selectedPipeline?.type ?? pipelineTypeDraft}
             onChange={updateWorkflowDefinition}

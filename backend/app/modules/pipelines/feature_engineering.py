@@ -72,7 +72,7 @@ class FeatureTransformation(BaseModel):
             raise ValueError(f"Feature transform '{self.transform_id}' requires columns")
         allowed: dict[str, set[str]] = {
             "impute": {"method", "value", "add_indicator"},
-            "scale_numeric": {"method", "output_suffix"},
+            "scale_numeric": {"method", "output_suffix", "drop_original"},
             "encode_categorical": {
                 "method", "min_frequency", "max_categories", "handle_unknown",
                 "drop_original", "output_suffix",
@@ -178,7 +178,7 @@ class EvaluationConfig(BaseModel):
 
     split_strategy: Literal["predefined", "random", "stratified", "group", "time"] = "predefined"
     validation_size: float = Field(default=0.1, ge=0, lt=1)
-    test_size: float = Field(default=0.2, gt=0, lt=1)
+    test_size: float = Field(default=0.2, ge=0, lt=1)
     seed: int = 42
     stratify_column: str = ""
     group_column: str = ""
@@ -189,6 +189,12 @@ class EvaluationConfig(BaseModel):
     def validate_evaluation(self) -> EvaluationConfig:
         if self.split_strategy != "predefined" and self.validation_size + self.test_size >= 1:
             raise ValueError("Validation and test shares must leave a non-empty training share")
+        if (
+            self.split_strategy != "predefined"
+            and self.validation_size == 0
+            and self.test_size == 0
+        ):
+            raise ValueError("Generated split requires a validation or test share")
         if self.split_strategy == "stratified" and not self.stratify_column:
             raise ValueError("Stratified split requires stratify_column")
         if self.split_strategy == "group" and not self.group_column:
@@ -279,11 +285,15 @@ class FeatureEngineeringDefinition(BaseModel):
             if len(self.inputs) != 1 or self.inputs[0].role != "training":
                 raise ValueError("Generated splits require one source input with the training role")
             output_inputs = {item.input_id for item in self.outputs}
-            required = {"training", "test"}
+            required = {"training"}
             if self.evaluation.validation_size > 0:
                 required.add("validation")
+            if self.evaluation.test_size > 0:
+                required.add("test")
             if not required.issubset(output_inputs):
-                raise ValueError("Generated split outputs must include training, test and optional validation")
+                raise ValueError(
+                    "Generated split outputs must include training and every configured holdout"
+                )
 
 
 @dataclass(frozen=True)
@@ -455,6 +465,8 @@ class DuckDbFeatureEngineeringEngine:
             for role, predicate in predicates.items():
                 if role == "validation" and evaluation.validation_size == 0:
                     continue
+                if role == "test" and evaluation.test_size == 0:
+                    continue
                 view = f"__mlapp_fe_split_{role}_{uuid4().hex[:8]}"
                 connection.execute(
                     f"CREATE TEMP VIEW {identifier(view)} AS "
@@ -484,10 +496,17 @@ class DuckDbFeatureEngineeringEngine:
             ).fetchone()[0])
             for role, view in prepared.items()
         }
-        if evaluation.split_strategy != "predefined" and (
-            split_counts.get("training", 0) == 0 or split_counts.get("test", 0) == 0
-        ):
-            raise ValueError("Generated split produced an empty training or test partition")
+        if evaluation.split_strategy != "predefined":
+            required_roles = ["training"]
+            if evaluation.validation_size > 0:
+                required_roles.append("validation")
+            if evaluation.test_size > 0:
+                required_roles.append("test")
+            empty_roles = [role for role in required_roles if split_counts.get(role, 0) == 0]
+            if empty_roles:
+                raise ValueError(
+                    "Generated split produced empty partitions: " + ", ".join(empty_roles)
+                )
         fold_counts: list[dict[str, int]] = []
         if evaluation.cross_validation.enabled:
             fold_counts = [
@@ -864,6 +883,10 @@ class DuckDbFeatureEngineeringEngine:
                     )
         elif transform.type == "scale_numeric":
             suffix = str(transform.config.get("output_suffix", "__scaled"))
+            if bool(transform.config.get("drop_original", False)):
+                selection = [
+                    identifier(column) for column in columns if column not in transform.columns
+                ]
             for column in transform.columns:
                 params = fitted["columns"][column]
                 selection.append(
@@ -905,9 +928,8 @@ class DuckDbFeatureEngineeringEngine:
                         f"WHEN {identifier(column)} = {sql_literal(category)} THEN {index}"
                         for index, category in enumerate(categories)
                     )
-                    selection.append(
-                        f"CASE {cases} ELSE -1 END AS {identifier(column + suffix + '__ordinal')}"
-                    )
+                    expression = f"CASE {cases} ELSE -1 END" if cases else "-1"
+                    selection.append(f"{expression} AS {identifier(column + suffix + '__ordinal')}")
                 else:
                     total = max(int(info["training_row_count"]), 1)
                     cases = " ".join(
@@ -915,9 +937,8 @@ class DuckDbFeatureEngineeringEngine:
                         f"THEN {sql_literal(info['frequencies'][str(category)] / total)}"
                         for category in categories
                     )
-                    selection.append(
-                        f"CASE {cases} ELSE 0.0 END AS {identifier(column + suffix + '__frequency')}"
-                    )
+                    expression = f"CASE {cases} ELSE 0.0 END" if cases else "0.0"
+                    selection.append(f"{expression} AS {identifier(column + suffix + '__frequency')}")
         elif transform.type == "datetime_features":
             parts = transform.config.get("features", ["year", "month", "day_of_week"])
             drop_original = bool(transform.config.get("drop_original", False))

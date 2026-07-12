@@ -61,3 +61,18 @@ mapping so later analysis does not have to infer semantics from column names.
 Deployment, online endpoints, arbitrary Python, AutoML and distributed
 training are outside this increment. Leakage-safe refitting of Feature
 Engineering inside every cross-validation fold also remains future work.
+
+## Custom lifecycle composition
+
+The custom workflow editor exposes every currently executable lifecycle block:
+Data Engineering, Feature Engineering, Training, AutoML, Test Scoring, and
+Monitoring. Training and AutoML are mutually exclusive alternatives. The
+recommended action follows the current DAG rather than a fixed visual style:
+
+`DE -> FE -> Training or AutoML -> Test Scoring -> Monitoring`
+
+An empty workflow therefore recommends Data Engineering. Test Scoring keeps
+the actual target in its prediction dataset, so an optional Monitoring step may
+consume that output directly and produce a full-scope performance report in the
+same run. Production monitoring with delayed actuals remains a separate
+workflow with an explicit target join.

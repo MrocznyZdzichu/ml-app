@@ -191,6 +191,54 @@ def test_feature_engineering_unknown_error_reports_input_and_count(tmp_path: Pat
         )
 
 
+def test_frequency_encoding_with_no_retained_categories_outputs_zero(tmp_path: Path) -> None:
+    repository_root = tmp_path / "repository"
+    source = repository_root / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    train_path = source / "train.csv"
+    validation_path = source / "validation.csv"
+    train_path.write_text(
+        "id,age,city,target\n1,10,A,0\n2,20,B,1\n3,30,C,0\n",
+        encoding="utf-8",
+    )
+    validation_path.write_text("id,age,city,target\n4,40,D,1\n", encoding="utf-8")
+    repository = InMemoryDatasetRepository()
+    repository.add(_asset("train", "owner-1", train_path, 3))
+    repository.add(_asset("validation", "owner-1", validation_path, 1))
+    payload = _definition().model_dump(mode="json")
+    payload["transformations"] = [{
+        "transform_id": "encode_city_frequency",
+        "type": "encode_categorical",
+        "columns": ["city"],
+        "config": {
+            "method": "frequency",
+            "min_frequency": 2,
+            "max_categories": 10,
+            "handle_unknown": "other",
+            "drop_original": True,
+        },
+    }]
+    definition = FeatureEngineeringDefinition.model_validate(payload)
+    engine = DuckDbFeatureEngineeringEngine(
+        input_adapter=CsvDatasetInputAdapter(repository, repository_root),
+        repository_root=repository_root,
+    )
+
+    result = engine.execute(
+        definition=definition,
+        run_id="run-frequency-without-categories",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    validation = next(item for item in result.output_manifest if item["output_id"] == "validation_features")
+    values = duckdb.connect().execute(
+        "SELECT city__frequency FROM read_parquet(?)",
+        [validation["location_uri"].removeprefix("file://")],
+    ).fetchall()
+    assert values == [(0.0,)]
+
+
 def test_transform_mode_reuses_pinned_state_without_refitting(tmp_path: Path) -> None:
     repository_root = tmp_path / "repository"
     source = repository_root / "users" / "owner-1" / "source"

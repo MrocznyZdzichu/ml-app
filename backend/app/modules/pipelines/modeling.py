@@ -61,6 +61,35 @@ class TrainingResourceLimits(BaseModel):
     max_parallel_jobs: int = Field(default=1, ge=1, le=64)
 
 
+class AutoFeatureEngineeringDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    strategy: Literal["balanced"] = "balanced"
+    joint_search_enabled: bool = True
+    max_recipe_candidates: int = Field(default=3, ge=1, le=3)
+    row_id_column: str = Field(default="", max_length=255)
+    excluded_columns: list[str] = Field(default_factory=list, max_length=500)
+    validation_size: float = Field(default=0.2, gt=0, lt=0.5)
+    numeric_scaling: Literal["none", "standard", "minmax", "robust"] = "standard"
+    add_missing_indicators: bool = True
+    include_datetime_features: bool = True
+    detect_identifier_columns: bool = True
+    min_category_frequency: int = Field(default=2, ge=1, le=1_000_000)
+    max_one_hot_categories: int = Field(default=32, ge=2, le=500)
+    max_frequency_categories: int = Field(default=500, ge=2, le=500)
+
+    @model_validator(mode="after")
+    def validate_columns_and_bounds(self) -> "AutoFeatureEngineeringDefinition":
+        if len(self.excluded_columns) != len(set(self.excluded_columns)):
+            raise ValueError("AutoFE excluded columns must be unique")
+        if self.max_frequency_categories < self.max_one_hot_categories:
+            raise ValueError(
+                "AutoFE max_frequency_categories cannot be lower than max_one_hot_categories"
+            )
+        return self
+
+
 class TrainingDefinition(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -80,6 +109,9 @@ class TrainingDefinition(BaseModel):
     parameters: dict[str, Any] = Field(default_factory=dict)
     optimization: OptimizationDefinition = Field(default_factory=OptimizationDefinition)
     resource_limits: TrainingResourceLimits = Field(default_factory=TrainingResourceLimits)
+    auto_feature_engineering: AutoFeatureEngineeringDefinition = Field(
+        default_factory=AutoFeatureEngineeringDefinition
+    )
 
     @model_validator(mode="after")
     def validate_algorithm(self) -> TrainingDefinition:
@@ -110,12 +142,27 @@ class TrainingDefinition(BaseModel):
                         f"AutoML candidate '{candidate}' does not support "
                         f"{self.problem_type}"
                     )
+        if self.auto_feature_engineering.enabled and self.optimization.mode != "automl":
+            raise ValueError("AutoFE can currently be enabled only for AutoML optimization")
+        if (
+            self.auto_feature_engineering.enabled
+            and self.optimization.validation_strategy == "cross_validation"
+        ):
+            raise ValueError(
+                "AutoFE v1 uses leakage-safe holdout validation; fold-local AutoFE is required "
+                "before cross-validation can be enabled"
+            )
+        if (
+            self.auto_feature_engineering.row_id_column
+            and self.auto_feature_engineering.row_id_column == self.target_column
+        ):
+            raise ValueError("AutoFE row ID column cannot be the target column")
         return self
 
     def validate_executable(self) -> None:
         if not self.target_column:
             raise ValueError("Training requires a target column")
-        if not self.feature_columns:
+        if not self.feature_columns and not self.auto_feature_engineering.enabled:
             raise ValueError("Training requires at least one model feature")
 
 

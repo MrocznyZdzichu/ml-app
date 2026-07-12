@@ -5,6 +5,7 @@ from unittest.mock import Mock
 from app.core.security import Principal
 from app.modules.business_cases.domain import Artifact, ArtifactOrigin, ArtifactType
 from app.modules.models.repository import InMemoryModelRepository
+from app.modules.models.domain import ModelArtifact
 from app.modules.models.schemas import ModelArtifactRead
 from app.modules.models.service import ModelService
 
@@ -135,3 +136,118 @@ def test_pipeline_runs_are_presented_as_versions_of_one_logical_model() -> None:
         "model-1",
         "model-2",
     ]
+
+
+def test_batch_scoring_contract_prefers_autofe_recipe_and_matching_step_state() -> None:
+    automl_recipe = {
+        "contract_version": "1.0",
+        "feature_columns": ["amount", "segment"],
+        "target_column": "churned",
+        "row_id_column": "customer_id",
+        "transformations": [{"transform_id": "one_hot", "type": "encode_categorical"}],
+    }
+    source_feature_definition = {
+        "contract_version": "1.0",
+        "feature_columns": [],
+        "target_column": "churned",
+        "row_id_column": "customer_id",
+        "transformations": [],
+    }
+    version = SimpleNamespace(
+        id="version-1",
+        owner_id="owner-1",
+        definition={
+            "steps": [
+                {"type": "data_engineering", "config": {"definition": {"steps": ["safe"]}}},
+                {"type": "feature_engineering", "config": {"definition": source_feature_definition}},
+            ]
+        },
+    )
+    model = ModelArtifact(
+        id="automl-model",
+        owner_id="owner-1",
+        training_job_id="",
+        name="AutoML churn",
+        version="v1",
+        algorithm="sgd_classifier",
+        artifact_uri="file:///model.joblib",
+        pipeline_version_id="version-1",
+        pipeline_run_id="run-1",
+        pipeline_step_id="automl_1",
+        training_config={"auto_feature_engineering": {"resolved_recipe": automl_recipe}},
+    )
+    split_state = Artifact(
+        id="split-state",
+        owner_id="owner-1",
+        type=ArtifactType.FEATURE_TRANSFORM,
+        reference_id="split-ref",
+        origin=ArtifactOrigin.PLATFORM_GENERATED,
+        metadata={"lineage": {"pipeline_run_id": "run-1", "pipeline_step_id": "fe_1"}},
+    )
+    automl_state = Artifact(
+        id="automl-state",
+        owner_id="owner-1",
+        type=ArtifactType.FEATURE_TRANSFORM,
+        reference_id="automl-ref",
+        origin=ArtifactOrigin.PLATFORM_GENERATED,
+        metadata={"lineage": {"pipeline_run_id": "run-1", "pipeline_step_id": "automl_1"}},
+    )
+
+    ModelService._enrich_batch_scoring_contract(
+        model,
+        {("run-1", "fe_1"): split_state, ("run-1", "automl_1"): automl_state},
+        {"version-1": version},
+    )
+
+    assert model.fitted_transform_artifact_id == "automl-state"
+    assert model.feature_engineering_definition == automl_recipe
+    assert model.data_engineering_definition == {"steps": ["safe"]}
+
+
+def test_batch_scoring_contract_keeps_pipeline_fe_for_traditional_model() -> None:
+    feature_definition = {
+        "contract_version": "1.0",
+        "feature_columns": ["amount"],
+        "target_column": "churned",
+        "row_id_column": "customer_id",
+        "transformations": [{"transform_id": "scale", "type": "scale_numeric"}],
+    }
+    version = SimpleNamespace(
+        id="version-1",
+        owner_id="owner-1",
+        definition={"steps": [
+            {"step_id": "fe_1", "type": "feature_engineering", "config": {"definition": feature_definition}},
+            {"step_id": "training_1", "type": "training", "inputs": [
+                {"port_id": "training", "source": {"step_id": "fe_1", "port_id": "training"}},
+            ]},
+        ]},
+    )
+    model = ModelArtifact(
+        id="training-model",
+        owner_id="owner-1",
+        training_job_id="",
+        name="Traditional churn",
+        version="v1",
+        algorithm="sgd_classifier",
+        artifact_uri="file:///model.joblib",
+        pipeline_version_id="version-1",
+        pipeline_run_id="run-1",
+        pipeline_step_id="training_1",
+    )
+    state = Artifact(
+        id="training-state",
+        owner_id="owner-1",
+        type=ArtifactType.FEATURE_TRANSFORM,
+        reference_id="training-ref",
+        origin=ArtifactOrigin.PLATFORM_GENERATED,
+        metadata={"lineage": {"pipeline_run_id": "run-1", "pipeline_step_id": "training_1"}},
+    )
+
+    ModelService._enrich_batch_scoring_contract(
+        model,
+        {("run-1", "fe_1"): state},
+        {"version-1": version},
+    )
+
+    assert model.fitted_transform_artifact_id == "training-state"
+    assert model.feature_engineering_definition == feature_definition
