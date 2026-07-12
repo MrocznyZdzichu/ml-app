@@ -114,7 +114,7 @@ Poniższe ustalenia są obowiązującym kierunkiem rozwoju platformy po rozmowie
 
 - Nie tworz osobnego bytu `ETL Job` konkurujacego z `Pipeline`. Data Engineering jest rodzina wykonywalnych pipeline'ow i korzysta z tego samego wersjonowania, runow, audytu, artifact registry oraz lineage.
 - Pipeline'y typu `data_preparation` i `feature_engineering` sa pierwszym zakresem DE. W przyszlosci katalog moze zostac rozszerzony o wyspecjalizowane typy `ingestion` i `data_quality`, bez tworzenia drugiego silnika orkiestracji.
-- Pierwszym realnie wspieranym typem wejscia jest dataset CSV juz zaladowany do platformy.
+- Aktualnie wspierane plikowe wejścia pipeline'ów to datasety CSV i Parquet już załadowane do platformy oraz materializowane Data Views. Kolejne źródła dodawaj przez adaptery.
 - Projektuj warstwe danych przez adaptery zrodel i materializacji. Architektura nie moze zakladac, ze wszystkie przyszle assety sa plikami; musi pozwolic pozniej dodac Parquet, tabele bazodanowe, object storage i query pushdown bez zmiany kontraktu definicji pipeline'u.
 - CSV jest poczatkowym formatem wejscia, a Parquet preferowanym formatem materializowanego outputu. PostgreSQL i inne bazy maja byc pozniej obslugiwane przez adaptery i pushdown, a nie przez kopiowanie calych tabel do procesu aplikacji.
 - Pierwszy execution engine powinien wykorzystywac DuckDB do kolumnowych transformacji plikow oraz zapisu Parquet. Ukryj silnik za kontraktem wykonawczym, aby w przyszlosci mozna bylo dodac wykonanie bazodanowe lub rozproszone bez zmiany API pipeline'ow.
@@ -137,17 +137,19 @@ Poniższe ustalenia są obowiązującym kierunkiem rozwoju platformy po rozmowie
 - Harmonogramy nie naleza do pierwszej dzialajacej wersji DE. Najpierw zapewnij poprawne reczne runy, powtarzalnosc, liczniki, logi, walidacje i artefakty wynikowe; kontrakt `trigger_type` nadal zachowuje przyszle `api` i `schedule`.
 - Zapisany pipeline feature engineering nie jest jeszcze feature store'em. Na tym etapie buduj wersjonowane feature pipelines i feature datasets.
 - Feature store wymaga osobnego przyszlego zakresu: encji, event time, point-in-time correctness, offline/online store, definicji cech oraz spojnosci training-serving.
-- Transformacje uczone na danych, np. imputacja, encoding i scaling, musza w przyszlosci zapisywac fitted state jako wersjonowany artefakt i byc fitowane tylko na danych treningowych. Nie dopuszczaj data leakage przez ponowne dopasowanie na validation, test lub scoring input.
+- Transformacje uczone na danych, np. imputacja, encoding, scaling i PCA, zapisują fitted state jako wersjonowany `feature_transform` artifact i są fitowane tylko na danych treningowych. Rozszerzając katalog zachowuj ten kontrakt; nie dopuszczaj refitu na validation, test ani scoring input.
 - Nie dodawaj osobnej glownej sekcji `Data Engineering` na pierwszym etapie. Rozwijaj globalna sekcje `Pipelines` o widoki definicji i runow, a pozniej harmonogramow i connectorow. Typ/szablon pipeline'u steruje katalogiem operacji i walidacjami UI.
 
-### Kolejnosc wdrazania Data Engineering
+### Historyczna kolejność wdrażania Data Engineering
+
+Poniższe etapy opisują pierwotny plan. Etapy 1-3 oraz część etapu 4 zostały już w dużej mierze wdrożone; przed wyborem kolejnego zakresu sprawdzaj bieżący kod, testy i sekcje „Aktualny status”.
 
 - Etap 1: formalny kontrakt DAG i walidacja definicji, adapter wejscia CSV, execution engine DuckDB, podstawowe operacje, wiele wejsc i join, reczny run oraz tymczasowy test run.
 - Etap 2: materializacja Parquet/DataView, artifact i lineage, data contracts, polityki `fail/warn/reject`, rejected records, liczniki i diagnostyka runu.
 - Etap 3: wygodny edytor krokow zsynchronizowany z JSON, custom SQL z ograniczeniami, podglad schematu i planu wykonania.
 - Etap 4: operacje szeregow czasowych, fitted transformations dla FE oraz ponowne wykorzystanie opublikowanej wersji w treningu i scoringu.
 - Etap 5: adaptery baz danych i pushdown, zapisy `append`/`incremental`/`merge`, harmonogramy i connector management. Dodawaj je dopiero wraz z konkretnymi wymaganiami dotyczacymi kluczy, watermarkow, sekretow i idempotencji.
-- Po szkielecie BC/Pipelines kolejnym funkcjonalnym zakresem jest Etap 1 Data Engineering. Nie przechodz do realnego treningu i servingu przed ustaleniem wykonywalnego, wersjonowanego przeplywu przygotowania danych.
+- Wykonywalny, wersjonowany przepływ DE istnieje, a realne FE, Training, AutoML, Test Scoring i Monitoring zostały już nad nim zbudowane. Nie cofaj projektu do etapu szkieletu; dalszy rozwój zachowuje te kontrakty.
 
 ### PipelineVersion
 
@@ -194,7 +196,7 @@ Poniższe ustalenia są obowiązującym kierunkiem rozwoju platformy po rozmowie
 
 - Model należy do Business Case.
 - Eksperymenty ML są osobnym bytem między BC a modelem: `Business Case -> Experiment -> Model Version`.
-- Na start wystarczy metadata-only model registry jako placeholder, bez realnego treningu.
+- Registry modeli obsługuje realne, niemutowalne model artifacts tworzone przez pipeline Training/AutoML, wersje logicznych rodzin, metryki i lineage. Legacy standalone training pozostaje prototypem metadata-only i nie jest właściwą ścieżką treningu.
 - Statusy modelu: `candidate`, `validated`, `rejected`, `promoted`, `archived`.
 - Statusy deploymentu: `draft`, `active`, `shadow`, `paused`, `retired`.
 - Dla jednego BC dopuszczaj tylko jeden champion/produkcyjny deployment i tylko jeden shadow deployment, ale dowolną liczbę challengerów/kandydatów.
@@ -230,7 +232,7 @@ Poniższe ustalenia są obowiązującym kierunkiem rozwoju platformy po rozmowie
 - Nie modyfikuj prediction datasetu po nadejsciu targetow; target joining tworzy nowy wersjonowany artefakt.
 - DE w automatycznie tworzonym pipeline batch scoringowym zawiera tylko deterministyczne, inference-safe przygotowanie wymagane przez kontrakt modelu. Nie przenos training-only splitow, operacji zaleznych od targetu ani transformacji fitowanych na biezacym batchu.
 - Tworzenie pipeline'u rozroznia `purpose` (metadane/kontekst) od `template` (poczatkowy edytowalny szkielet). UI sugeruje template na podstawie purpose, ale zapisuje wybrany template w parametrach definicji.
-- Pierwsze template'y: `training` = DE, FE, Training, Test Scoring; `batch_scoring` = DE, FE Transform, Batch Scoring. Template monitoringu pokazuj jako planowany, ale nie jako wykonywalny, dopoki nie istnieja handlery target join i KPI report.
+- Dostępne szablony obejmują `training`, `automl`, `batch_scoring`, `custom` i `monitoring`. Monitoring ma wykonywalne kroki jawnego Process & Join/Target Join oraz KPI report; nie przedstawiaj go jako samego placeholdera. Batch scoring i monitoring skuteczności pozostają odrębnymi pipeline'ami.
 - Batch scoring konfiguruj akcja `Infer from training pipeline`. Sam pipeline i numer jego wersji nie identyfikuja artefaktow, bo wersja moze miec wiele runow. Uzytkownik wybiera pipeline, opublikowana PipelineVersion i konkretny Model Version/run.
 - Inferowany draft przypina konkretny model artifact oraz fitted transform artifact z tego samego runu, kopiuje recepture FE w trybie transform i tylko inference-safe kroki DE. Pominiete kroki training-only komunikuj jawnie; nie wybieraj po cichu `latest`.
 - W pipeline batch scoringowym nie wymagaj recznego wklejania identyfikatora fitted state ani nie pokazuj krokow Training/Test Scoring jako sugerowanych operacji.
@@ -248,10 +250,12 @@ Poniższe ustalenia są obowiązującym kierunkiem rozwoju platformy po rozmowie
 - W przyszłości aplikacja ma mieć model uprawnień, udostępnianie obiektów oraz globalnego admina/kontrolera.
 - Właściciel BC jest domyślnym właścicielem pipeline'ów w BC, ale właściciel biznesowy nie zawsze jest twórcą lub modyfikującym. Audyt `created_by` i `updated_by` jest obowiązkowy.
 
-### Pierwszy zakres implementacyjny
+### Historyczny pierwszy zakres implementacyjny
 
-- Pierwszy skeleton powinien obejmować minimalne `Business Cases` + `Pipelines` + endpointy API + frontend placeholder.
-- Nie zaczynaj od trenowania modeli. Modele i operacjonalizacja są następną warstwą po stabilnym szkielecie: pipeline, version, run, artifact, lineage.
+Ten zakres został przekroczony i pozostaje wyłącznie kontekstem decyzji architektonicznych.
+
+- Szkielet `Business Cases` + `Pipelines`, endpointy API i frontend są wdrożone.
+- Realny trening, AutoML, Test Scoring, model/metrics artifacts i monitoring są wdrożone jako kroki pipeline'u. Rozwijaj je przyrostowo na istniejącym `PipelineVersion`, `PipelineRun`, `PipelineStepRun`, Artifact i lineage.
 - Nie dodawaj mockowanych danych demonstracyjnych tylko po to, aby zapełnić UI. Aplikacja ma już przygotowane datasety pokrywające standardowe przypadki ML i to na nich użytkownik będzie testował kolejne etapy.
 
 ### Aktualne ustalenia: pipeline wysokopoziomowy i kroki
@@ -264,20 +268,20 @@ Poniższe ustalenia są obowiązującym kierunkiem rozwoju platformy po rozmowie
   - wewnętrzny klocek operacyjny danego kroku, np. `select_columns`, `filter_rows`, `join` lub `custom_sql` wewnątrz kroku Data Engineering.
 - Backendowa definicja pipeline'u pozostaje DAG-iem ze stabilnymi identyfikatorami kroków i portów, nawet jeśli pierwsze UI prezentuje prostą sekwencję.
 - Pipeline'y wymieniają dane przez wersjonowane artefakty, datasety, modele i deploymenty. Nie twórz bezpośrednich zależności wykonawczych między odrębnymi pipeline'ami.
-- Manualnie użytkownik ma docelowo móc uruchomić cały pipeline oraz pojedynczy krok. Uruchomienie kroku musi jawnie wskazywać inputy albo artefakty z konkretnego wcześniejszego runu; nie wybieraj po cichu „najnowszego” wyniku.
+- Użytkownik może uruchomić cały pipeline oraz krok wraz z wymaganymi przodkami; każdy wykonany krok ma `PipelineStepRun`. Dalsze tryby uruchamiania pojedynczego kroku muszą jawnie wskazywać inputy lub artefakty z konkretnego runu; nie wybieraj po cichu „najnowszego” wyniku.
 - Operationalization/deployment ma być poprzedzony osobnym ręcznym `Approval Gate`. PipelineRun oczekujący na decyzję nie jest zakończony ani failed; docelowo ma status oczekiwania i po zatwierdzeniu wznawia ten sam run.
-- Każdy krok wykonywanego workflow powinien docelowo mieć osobny `StepRun`, status, logi, liczniki i artefakty.
-- Rozwijaj funkcjonalność przyrostowo. Pierwszy prototyp wysokopoziomowego pipeline'u obsługuje jeden wykonywalny krok `Data Engineering`; kolejne typy kroków dodawaj dopiero w następnych zakresach i nie pokazuj niewykonywalnych kroków jako gotowych funkcji.
+- Każdy wykonywany krok workflow ma osobny `PipelineStepRun`, status, czasy, liczniki, warnings, output manifest i izolowany błąd; zachowuj i rozwijaj ten kontrakt.
+- Wykonywalne kroki wysokopoziomowe obejmują obecnie Data Engineering, Feature Engineering, Training, AutoML, Test/Batch Scoring i Monitoring. Dodając kolejne typy nie pokazuj funkcji bez działającego backendu jako gotowych.
 - Edytor DE jest zagnieżdżoną konfiguracją kroku Data Engineering. Wewnątrz obsługuje źródła danych, standardowe klocki transformacji oraz kontrolowany `User Written SQL`; nie eksponuj operacji DE jako kroków wysokopoziomowego lifecycle.
 - Dry-run kroku DE tworzy wyłącznie tymczasowy Parquet i jawnie ograniczony preview. Zwykły run opublikowanej wersji tworzy trwały dataset Parquet, Artifact, minimalny lineage i przypięcie do Business Case.
 - Pierwsze UI ma rozdzielać listę/tworzenie pipeline'ów od edytora wybranego pipeline'u. Edytor pokazuje DAG kroków wysokopoziomowych, a konfiguracja wybranego kroku otwiera właściwy edytor domenowy.
 
-### Aktualne ustalenia: AutoML i AutoFE
+### Ustalenia architektoniczne: AutoML i AutoFE
 
-- Najbliższy zakres AutoML + AutoFE obejmuje klasyfikację binarną, klasyfikację wieloklasową i regresję dla danych tabelarycznych. Klasteryzację i szeregi czasowe pomijamy do osobnych przyszłych etapów.
+- Bieżący zakres AutoML + AutoFE obejmuje klasyfikację binarną, klasyfikację wieloklasową i regresję dla danych tabelarycznych. Klasteryzację i szeregi czasowe pomijamy do osobnych przyszłych etapów.
 - AutoML ma docelowo optymalizować spójną ścieżkę Feature Engineering -> selekcja cech -> model -> walidacja, a nie wyłącznie rodzinę estymatora i hiperparametry.
 - Zachowuj osobne, audytowalne artefakty receptury FE, fitted transform, Feature Manifest, modelu i metryk. Automatyzacja nie może ukrywać finalnej konfiguracji potrzebnej do odtworzenia scoringu.
-- Pierwszy etap zintegrowanego AutoFE może wybierać jedną deterministyczną recepturę na podstawie pełnozbiorowego profilowania i następnie uruchamiać istniejący AutoML. Musi jawnie oznaczać, że nie jest to jeszcze wspólne przeszukiwanie wielu receptur FE.
+- Historyczny pierwszy etap wybierał jedną deterministyczną recepturę. Obecna implementacja wykonuje model-aware joint search maksymalnie trzech profili receptur; dalszy plan rozszerzenia przestrzeni opisuje sekcja poniżej.
 - AutoFE fituje stan wyłącznie na partycji treningowej i stosuje go bez ponownego fitowania do validation/test/scoring.
 - Cross-validation całej ścieżki jest dozwolone dopiero po wdrożeniu fold-localnego fitowania receptury FE. Do tego czasu zintegrowany AutoFE korzysta z jawnego albo deterministycznie wygenerowanego holdoutu i odrzuca CV, zamiast raportować wynik z leakage.
 - Planner AutoFE może używać ograniczonych przybliżeń do decyzji planistycznych, np. approximate distinct count, ale musi zapisać rodzaj przybliżenia, pełny zakres profilowania i liczbę przetworzonych wierszy.
@@ -287,3 +291,94 @@ Poniższe ustalenia są obowiązującym kierunkiem rozwoju platformy po rozmowie
 - Monitoring może bezpośrednio następować po Test Scoring w tym samym lifecycle pipeline, ponieważ testowy prediction dataset zawiera target. Produkcyjny monitoring po późniejszym dostarczeniu actuals nadal pozostaje osobnym pipeline'em z jawnym Target Join/Process & Join.
 - Model-aware AutoFE grupuje algorytmy według jawnych capability profiles i wspólnie porównuje pary `receptura FE + algorytm/hiperparametry` na tym samym leakage-safe holdoucie. Profile co najmniej rozróżniają modele wymagające skalowania, rodziny drzewiaste bez skalowania oraz estymatory wymagające cech nieujemnych.
 - Wszystkie kandydackie receptury w jednym joint study muszą korzystać z jednego pełnozbiorowego profilu danych i wspólnego, podzielonego budżetu triali/czasu. Kandydackie macierze i modele są tymczasowe; po wyborze zwycięzcy wykonuj finalny refit i utrwalaj tylko zwycięski fitted transform, Feature Manifest, model oraz pełne provenance porównania.
+
+### Aktualny status i plan rozwoju AutoML / AutoFE (lipiec 2026)
+
+Ta sekcja jest nadrzędną pamięcią projektową dla kolejnych prac nad AutoML. Starsze punkty opisujące „pierwszy etap” są historią rozwoju, a nie bieżącym stanem.
+
+#### Bieżący stan
+
+- AutoML jest działającym, zarządzanym MVP dla tabelarycznej klasyfikacji binarnej, wieloklasowej i regresji, ale nie jest jeszcze kompleksowym autonomicznym AutoFE/AutoML.
+- Backendowy katalog zawiera około 52 wykonywalne algorytmy, zależnie od dostępności opcjonalnych bibliotek. AutoML przeszukuje rodziny estymatorów i ich warunkowe hiperparametry z limitami triali, czasu, pamięci i równoległości.
+- AutoFE profiluje pełny zadeklarowany zakres w DuckDB bez cichego samplingu. `approx_count_distinct` służy tylko decyzjom planistycznym, a przybliżenie i liczba wierszy są zapisywane.
+- Obecne transformacje obejmują medianową imputację liczb, opcjonalne wskaźniki braków, skalowanie, bounded one-hot, frequency encoding, proste cechy kalendarzowe oraz odrzucanie prawdopodobnych identyfikatorów i niewspieranych typów.
+- Joint search porównuje maksymalnie trzy profile: `scaled_dense`, `tree_unscaled`, `non_negative`. Optymalizuje parę `receptura FE + model/hiperparametry` na jednym leakage-safe holdoucie.
+- Stan FE jest fitowany tylko na train i stosowany bez refitu do validation/test. Zwycięzca jest refitowany; utrwalane są receptura, fitted transform, Feature Manifest, model, metryki i provenance.
+- Zintegrowany AutoFE celowo odrzuca CV, bo nie ma jeszcze fold-local fitowania. Brakuje supervised feature selection, target encodingu, szerokiego feature generation, learned interactions, kategorii natywnych, ensemble/stackingu i wielokryterialnego wyboru championa.
+- Klasteryzacja, szeregi czasowe i zaawansowane przetwarzanie tekstu pozostają poza obecnym zakresem.
+
+#### Ograniczenie technologiczne
+
+- Pozostajemy przy obecnym stosie: Python/backend aplikacji, DuckDB, Parquet, obecny worker/kolejka, istniejące biblioteki ML i React frontend.
+- Nie wprowadzaj Sparka, Ray, Dask, zewnętrznej platformy AutoML ani nowego orkiestratora bez osobnej decyzji użytkownika popartej pomiarami.
+- DuckDB pozostaje silnikiem profilowania, relacyjnych transformacji i materializacji. Transformacje uczone oraz trening pozostają za obecnymi kontraktami executorów, z kontrolą pamięci, strumieniowaniem gdzie możliwe i run-scoped Parquet.
+
+#### Docelowy kontrakt AutoFE Experiment Engine
+
+- Jednostką eksperymentu jest cała ścieżka `receptura FE -> feature selection -> estimator -> hiperparametry -> walidacja`, nie sam estymator.
+- Przestrzeń poszukiwań jest formalna, wersjonowana, audytowalna, deterministyczna dla seeda oraz warunkowa względem schematu i capabilities modelu.
+- Każda próba zapisuje: recipe ID/hash i definicję, selektor, model i parametry, foldy/seed, zakres i liczbę wierszy, score per fold i OOF, czas/zasoby, liczbę cech, warnings, failure/pruning reason i lineage.
+- Kandydackie macierze, fold-local state i modele są tymczasowe. Utrwalaj zwycięską recepturę, finalny fitted state, Feature Manifest, model oraz ograniczone provenance badania bez kopiowania danych wierszowych.
+- Każdą transformację zależną od danych lub targetu fituj wewnątrz foldu. Globalny fit przed CV jest zabroniony dla imputacji uczonej, skalowania, encodingu, selekcji, redukcji wymiaru i agregatów.
+- Test pozostaje nietknięty podczas optymalizacji. Finalny refit zwycięskiej ścieżki wykonuj na pełnym dozwolonym train scope.
+
+#### Kolejność wdrażania
+
+1. **Etap A — fold-local FE i CV foundation**
+   - Dodać executor pełnej receptury fitowany osobno w każdym foldzie i wykorzystać istniejący audytowalny plan foldów.
+   - Zapewnić wspólne foldy dla kandydatów, metryki per fold/OOF, deterministyczność i finalny refit zwycięzcy.
+   - Cache'ować tylko bezpieczne elementy. Klucz cache obejmuje dataset/version, recipe hash, fold ID i tożsamość partycji train.
+   - Dodać testy dowodzące, że zmiana wyłącznie validation fold nie zmienia fitted state, oraz klasyfikację i regresję end-to-end.
+   - Done: AutoFE obsługuje leakage-safe K-fold/stratified K-fold, zapisuje fold provenance i usuwa obecny zakaz CV.
+
+2. **Etap B — formalna przestrzeń receptur i orkiestracja**
+   - Rozdzielić profiler/planner, generator kandydatów, evaluator, scheduler budżetu i champion selector za testowalnymi kontraktami.
+   - Wprowadzić warunkową przestrzeń receptur i stabilny `recipe_hash`; generować różnorodne kandydatury zamiast tylko profili skalowania.
+   - Budżet dzielić na eksplorację rodzin FE i pogłębianie najlepszych; używać Optuna/pruningu z zachowaniem audytu.
+   - Kandydatów pominiętych przez budżet/capabilities oznaczać jako skipped, nie jako przegrane.
+   - Done: leaderboard porównuje pełne ścieżki, a ten sam dataset/version, katalog, zakres i seed odtwarzają foldy i przestrzeń kandydatów.
+
+3. **Etap C — bogate, typowane feature generation**
+   - Numeryczne: warianty imputacji, missing indicators, clipping/winsorization, log/signed-log, Yeo-Johnson, quantile, binning oraz ograniczone polynomial/interactions.
+   - Kategorie: one-hot, ordinal, frequency, hashing, a następnie leakage-safe out-of-fold target encoding z kontraktem smoothing/unknown.
+   - Daty: kalendarz, cykliczność, elapsed time i jawnie skonfigurowane różnice; nie zgadywać semantyki czasu.
+   - Tekst: tylko jawnie ograniczony wariant hashing/TF-IDF; bez deklarowania kompleksowego NLP.
+   - Obowiązkowe limity wymiarowości, memory preflight, sparse/dense capability, pruning przed eksplozją macierzy i column lineage każdej cechy.
+   - Done: wiele typowanych rodzin receptur daje się odtworzyć i identycznie zastosować w batch scoringu.
+
+4. **Etap D — feature selection i redukcja wymiaru**
+   - Filtry: constant/variance, brakowość, redundancja/korelacje, univariate tests i mutual information.
+   - Selekcja modelowa: L1, tree importance i ograniczone RFE; permutation importance głównie diagnostycznie lub z jawnym budżetem.
+   - PCA/SVD tylko dla kompatybilnych reprezentacji, z fitted state i lineage komponentów.
+   - Supervised selection zawsze fold-local; metoda, próg i liczba cech należą do search space.
+   - Done: AutoML wspólnie wybiera recepturę, selektor i model, pokazuje stabilność między foldami i utrwala rozwiązaną listę cech.
+
+5. **Etap E — kategorie natywne**
+   - Rozszerzyć kontrakt model input o typowaną reprezentację categorical i mapowanie kolumn.
+   - Dodać adaptery/capabilities dla CatBoost, LightGBM i, jeśli wspiera to używana wersja, XGBoost.
+   - One-hot/frequency nie mogą być oznaczane jako native. Zachować surowe kategorie oraz identyczny missing/unknown contract w scoringu.
+   - Porównywać native categorical i kodowane warianty jako różne receptury na tych samych foldach.
+   - Done: model native categorical daje się zarejestrować, odtworzyć i uruchomić w test/batch scoring bez refitu encoderów.
+
+6. **Etap F — champion selection, ensemble i UX**
+   - Ensemble/blending/stacking wdrażać dopiero po stabilizacji OOF predictions; meta-model trenuje wyłącznie na OOF.
+   - Dodać opcjonalną optymalizację wielokryterialną: primary metric oraz ograniczenia/cel czasu, pamięci, rozmiaru modelu i liczby cech.
+   - UI pokazuje leaderboard pełnych ścieżek, recepturę i lineage, foldy/wariancję, koszty, failures/pruning, zakres danych, przybliżenia i powód wyboru.
+   - Użytkownik może skopiować zwycięską recepturę do edytowalnego FE i świadomie wybrać innego kandydata.
+   - Done: eksperyment jest zrozumiały, audytowalny i operacjonalizowalny, a scoring używa dokładnie artefaktów zwycięskiej ścieżki.
+
+#### Skala i uczciwość wyników
+
+- Pełnozbiorowa analiza pozostaje domyślna. Nie wolno po cichu przejść na próbkę, zmniejszyć liczby foldów ani pominąć kosztownych kandydatów.
+- Dla dużych danych użytkownik jawnie wybiera: pełnozbiorowy holdout, pełnozbiorowe CV, oznaczoną eksplorację na próbce z obowiązkową pełnozbiorową walidacją finalistów albo progresywny zakres z pełnozbiorowym finałem.
+- Wynik pokazuje zakres, liczbę unikalnych wierszy, łączną liczbę przetworzeń przez foldy/triale/refit, przybliżenia oraz timeout/pruning.
+- Przed materializacją wykonuj dimensionality i memory preflight; preferuj sparse representation, DuckDB, bounded batches, run-scoped Parquet i usuwanie tymczasowych kandydatów.
+- Najpierw mierz i optymalizuj obecny single-node stack. Cięższą infrastrukturę rozważaj tylko po pomiarach i osobnej decyzji.
+
+#### Reguły dla kolejnych zakresów
+
+- Realizuj etapy w tej kolejności. Nie wdrażaj target encodingu, supervised selection, RFE, PCA ani stackingu przed fold-local foundation.
+- Każdy etap dziel na małe pionowe zakresy: kontrakt backendowy, wykonanie, artifact/provenance, minimalne API/UI i testy end-to-end.
+- Nie dodawaj aktywnej kontrolki UI bez działającego backendu; funkcje planowane oznaczaj jako planowane.
+- Zachowuj kompatybilność opublikowanych PipelineVersion i modeli. Migracje draftów są deterministyczne; opublikowanych definicji nie mutuj.
+- Po każdym zakresie aktualizuj tę sekcję: przenieś ukończone elementy do statusu, zapisz realne ograniczenia i wskaż następny najmniejszy krok.
