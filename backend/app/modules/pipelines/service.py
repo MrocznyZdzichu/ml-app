@@ -340,6 +340,9 @@ class PipelineService:
             )
         version.definition = validate_definition(version.definition, executable=True)
         workflow = WorkflowDefinition.model_validate(version.definition)
+        resolved_models = self._resolve_model_versions(
+            workflow, payload.model_versions, principal, pipeline.business_case_id
+        )
         self._validate_external_artifacts(
             workflow,
             principal,
@@ -359,6 +362,7 @@ class PipelineService:
         )
         runtime_parameters = dict(payload.runtime_parameters)
         runtime_parameters["resolved_input_versions"] = resolved_inputs
+        runtime_parameters["resolved_model_versions"] = resolved_models
         run = PipelineRun(
             id=str(uuid4()),
             owner_id=principal.user_id,
@@ -521,6 +525,57 @@ class PipelineService:
                 }
         return resolved
 
+    def _resolve_model_versions(
+        self,
+        workflow: WorkflowDefinition,
+        requested_versions: dict[str, str],
+        principal: Principal,
+        business_case_id: str,
+    ) -> dict[str, dict[str, Any]]:
+        """Resolve an immutable model from the family anchored in the workflow."""
+        model_artifacts = [
+            artifact
+            for artifact in self.artifacts.list_artifacts(principal.user_id, ArtifactType.MODEL_VERSION)
+            if artifact.business_case_id == business_case_id
+        ]
+        by_id = {artifact.id: artifact for artifact in model_artifacts}
+        resolved: dict[str, dict[str, Any]] = {}
+        for step in workflow.steps:
+            if step.type != "scoring":
+                continue
+            definition = step.config.get("definition")
+            if not isinstance(definition, dict) or definition.get("purpose") != "batch":
+                continue
+            configured = by_id.get(str(definition.get("model_artifact_id") or ""))
+            if configured is None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail={"message": f"Step '{step.step_id}' references an unavailable model artifact"},
+                )
+            logical_id = str(configured.metadata.get("logical_model_id") or configured.id)
+            family = [
+                artifact for artifact in model_artifacts
+                if str(artifact.metadata.get("logical_model_id") or artifact.id) == logical_id
+            ]
+            selected_id = requested_versions.get(step.step_id)
+            selected = by_id.get(selected_id) if selected_id else max(
+                family, key=lambda artifact: (artifact.created_at, artifact.id)
+            )
+            if selected not in family:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail={"message": f"Selected model version is not available for step '{step.step_id}'"},
+                )
+            version_number = sorted(family, key=lambda artifact: (artifact.created_at, artifact.id)).index(selected) + 1
+            resolved[step.step_id] = {
+                "model_artifact_id": selected.id,
+                "logical_model_id": logical_id,
+                "version_number": version_number,
+                "model_name": str(selected.metadata.get("model_name") or "Model"),
+                "selection_policy": "selected" if selected_id else "latest",
+            }
+        return resolved
+
     def _validate_external_artifacts(
         self,
         workflow: WorkflowDefinition,
@@ -640,6 +695,12 @@ class PipelineService:
             for key, value in resolved.items()
             if isinstance(value, dict) and value.get("dataset_id")
         } if isinstance(resolved, dict) else {}
+        resolved_models = previous.runtime_parameters.get("resolved_model_versions", {})
+        model_versions = {
+            str(key): str(value.get("model_artifact_id"))
+            for key, value in resolved_models.items()
+            if isinstance(value, dict) and value.get("model_artifact_id")
+        } if isinstance(resolved_models, dict) else {}
         runtime_parameters = {
             key: value
             for key, value in previous.runtime_parameters.items()
@@ -653,6 +714,7 @@ class PipelineService:
                 trigger_type=PipelineRunTrigger.MANUAL,
                 runtime_parameters=runtime_parameters,
                 input_versions=input_versions,
+                model_versions=model_versions,
                 is_dry_run=previous.is_dry_run,
                 step_id=previous.requested_step_id or None,
             ),
@@ -677,6 +739,32 @@ class PipelineService:
             offset=offset,
         )
         return [self._repair_finished_active_run(run) for run in runs]
+
+    def list_run_summaries(
+        self,
+        principal: Principal,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[PipelineRun]:
+        # The history grid needs metadata only. Trial events and output manifests
+        # can be several megabytes and are fetched lazily with run details.
+        summaries = self.repository.list_run_summaries(
+            principal.user_id,
+            limit=limit,
+            offset=offset,
+        )
+        reconciled: list[PipelineRun] = []
+        for summary in summaries:
+            if (
+                summary.status in {PipelineRunStatus.QUEUED, PipelineRunStatus.RUNNING}
+                and summary.finished_at is not None
+            ):
+                full_run = self.repository.get_run(summary.id)
+                if full_run is not None:
+                    summary = self._repair_finished_active_run(full_run)
+            reconciled.append(summary)
+        return reconciled
 
     def list_step_runs(
         self,

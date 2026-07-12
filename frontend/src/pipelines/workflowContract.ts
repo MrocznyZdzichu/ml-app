@@ -479,15 +479,18 @@ export function normalizeWorkflowDefinition(value: unknown): WorkflowDefinition 
           }];
         }
         if (step.type === "training" || step.type === "automl") {
+          const inputs = Array.isArray(step.inputs)
+            ? step.inputs as Extract<WorkflowStepDefinition, { type: "training" | "automl" }>["inputs"]
+            : [];
+          const exposesTestOutput = step.type === "automl"
+            && inputs.some((input) => input.port_id === "test");
           return [{
             step_id: String(step.step_id ?? (step.type === "automl" ? "automl_1" : "training_1")),
             name: String(step.name ?? (step.type === "automl" ? "AutoML" : "Model Training")),
             type: step.type,
-            inputs: Array.isArray(step.inputs)
-              ? step.inputs as Extract<WorkflowStepDefinition, { type: "training" | "automl" }>["inputs"]
-              : [],
+            inputs,
             output_port_id: "model",
-            additional_output_port_ids: ["metrics"],
+            additional_output_port_ids: exposesTestOutput ? ["metrics", "test"] : ["metrics"],
             config: { definition: normalizeTrainingDefinition(config.definition) }
           }];
         }

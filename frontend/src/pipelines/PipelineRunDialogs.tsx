@@ -436,7 +436,7 @@ function GeneratedArtifactsDialog({
           <div>
             <span className="builder-kicker">Pipeline run {shortId(run.id)}</span>
             <h2>Generated artifacts</h2>
-            <p>{run.output_artifact_ids.length} registered objects · {run.output_row_count ?? 0} output rows processed at full scope.</p>
+            <p>{details?.run.output_artifact_ids.length ?? 0} registered objects · {details?.run.output_row_count ?? run.output_row_count ?? 0} output rows processed at full scope.</p>
           </div>
           <button className="icon-button" type="button" onClick={onClose} aria-label="Close generated artifacts"><X size={18} /></button>
         </div>

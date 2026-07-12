@@ -579,7 +579,7 @@ class PipelineOutputMaterializer:
     ) -> Artifact:
         reference_id = str(uuid5(
             NAMESPACE_URL,
-            f"mlapp:feature-transform:{run.id}:{item['output_id']}",
+            f"mlapp:feature-transform:{run.id}:{step_id}:{item['output_id']}",
         ))
         existing = self.business_cases.find_artifact(
             run.owner_id,

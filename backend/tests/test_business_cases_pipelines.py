@@ -391,6 +391,9 @@ def test_pipeline_version_and_run_contracts_are_auditable(monkeypatch) -> None:
     )
     assert history.status_code == 200
     assert [item["id"] for item in history.json()] == [retried.json()["id"]]
+    assert "events" not in history.json()[0]
+    assert "output_manifest" not in history.json()[0]
+    assert "runtime_parameters" not in history.json()[0]
 
 
 def test_select_at_run_requires_and_audits_a_concrete_dataset_version(monkeypatch) -> None:

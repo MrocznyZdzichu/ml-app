@@ -265,6 +265,17 @@ def execute_pipeline_run(run_id: str) -> dict:
                         f"Step '{step.step_id}' did not produce bound artifact '{output_id}'"
                     )
                 artifacts[(step.step_id, port_id)] = output
+            for port_id, source_key in result.relation_passthroughs.items():
+                source = relations.get(source_key)
+                if source is None:
+                    raise ValueError(
+                        f"Step '{step.step_id}' cannot pass through missing relation "
+                        f"'{source_key[0]}:{source_key[1]}'"
+                    )
+                relations[(step.step_id, port_id)] = source
+                upstream_artifact_ids[(step.step_id, port_id)] = list(
+                    upstream_artifact_ids.get(source_key, [])
+                )
 
             active_step_run.input_row_count = result.input_row_count
             active_step_run.processed_row_count = result.processed_row_count
@@ -443,7 +454,10 @@ def _definition_with_resolved_inputs(
 ) -> dict:
     resolved = runtime_parameters.get("resolved_input_versions", {})
     if not isinstance(resolved, dict):
-        return definition
+        resolved = {}
+    resolved_models = runtime_parameters.get("resolved_model_versions", {})
+    if not isinstance(resolved_models, dict):
+        resolved_models = {}
     steps: list[dict] = []
     for raw_step in definition.get("steps", []):
         step = dict(raw_step)
@@ -462,6 +476,9 @@ def _definition_with_resolved_inputs(
                 }
                 for item in nested.get("inputs", [])
             ]
+        selected_model = resolved_models.get(str(step.get("step_id")), {})
+        if isinstance(selected_model, dict) and selected_model.get("model_artifact_id"):
+            nested["model_artifact_id"] = str(selected_model["model_artifact_id"])
         config["definition"] = nested
         step["config"] = config
         steps.append(step)

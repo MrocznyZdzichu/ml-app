@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from app.modules.datasets.domain import DataAsset, DataAssetStatus, SourceType
 from app.modules.datasets.repository import InMemoryDatasetRepository
+from app.modules.business_cases.domain import ArtifactType
 from app.modules.business_cases.repository import InMemoryBusinessCaseRepository
 from app.modules.pipelines.dag import PipelineDefinition
 from app.modules.pipelines.domain import (
@@ -239,6 +240,75 @@ def test_materialized_pipeline_outputs_are_versions_of_one_logical_dataset(
     assert [outputs[0].version_number, outputs[1].version_number] == [1, 2]
     assert len(business_cases.list_data_attachments("bc-1")) == 1
     assert business_cases.list_data_attachments("bc-1")[0].data_asset_id == outputs[1].id
+
+
+def test_feature_transform_artifacts_are_scoped_to_pipeline_step(tmp_path: Path) -> None:
+    repository_root = tmp_path / "repository"
+    business_cases = InMemoryBusinessCaseRepository()
+    materializer = PipelineOutputMaterializer(
+        datasets=InMemoryDatasetRepository(),
+        business_cases=business_cases,
+        repository_root=repository_root,
+    )
+    workflow = WorkflowDefinition.model_validate({
+        "contract_version": "2.0",
+        "steps": [],
+        "outputs": [],
+    })
+    version = PipelineVersion(
+        id="pipeline-version-1",
+        owner_id="owner-1",
+        pipeline_id="pipeline-1",
+        business_case_id="bc-1",
+        version_number=1,
+        status=PipelineVersionStatus.PUBLISHED,
+        definition=workflow.model_dump(mode="json"),
+        definition_hash="definition-hash",
+        created_by="owner-1",
+    )
+    run = PipelineRun(
+        id="run-1",
+        owner_id="owner-1",
+        pipeline_id="pipeline-1",
+        pipeline_version_id=version.id,
+        business_case_id="bc-1",
+        status=PipelineRunStatus.RUNNING,
+        trigger_type=PipelineRunTrigger.MANUAL,
+        created_by="owner-1",
+    )
+
+    artifact_ids: list[str] = []
+    for step_id, content in (("fe_1", b"outer-fe"), ("automl_1", b"inner-autofe")):
+        source = repository_root / "users" / "owner-1" / "pipeline-runs" / "run-1" / f"{step_id}.json"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(content)
+        manifest, created_ids = materializer.materialize(
+            run=run,
+            version=version,
+            workflow=workflow,
+            output_manifest=[{
+                "output_id": "fitted_transform",
+                "artifact_type": "feature_transform",
+                "materialization": "artifact",
+                "location_uri": f"file://{source.as_posix()}",
+                "state_hash": f"hash-{step_id}",
+                "definition_hash": f"definition-{step_id}",
+            }],
+            step_id=step_id,
+            input_dataset_ids=[],
+            output_stage="intermediate",
+        )
+        artifact_ids.extend(created_ids)
+        assert manifest[0]["artifact_id"] == created_ids[0]
+
+    assert len(set(artifact_ids)) == 2
+    artifacts = business_cases.list_artifacts("owner-1", ArtifactType.FEATURE_TRANSFORM)
+    assert {artifact.metadata["lineage"]["pipeline_step_id"] for artifact in artifacts} == {
+        "fe_1", "automl_1"
+    }
+    assert {Path(artifact.metadata["location_uri"].removeprefix("file://")).read_bytes() for artifact in artifacts} == {
+        b"outer-fe", b"inner-autofe"
+    }
 
 
 def test_dag_rejects_cycles_and_unknown_ports() -> None:

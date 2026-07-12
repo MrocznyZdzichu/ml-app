@@ -54,6 +54,7 @@ class HandledStepResult:
     input_dataset_ids: list[str]
     relation_output_ids: dict[str, str]
     artifact_output_ids: dict[str, str] = field(default_factory=dict)
+    relation_passthroughs: dict[str, tuple[str, str]] = field(default_factory=dict)
     external_input_artifact_ids: list[str] = field(default_factory=list)
     external_input_lineage: list[dict] = field(default_factory=list)
 
@@ -214,6 +215,7 @@ class TrainingStepHandler:
             emit_event=context.emit_event,
             is_cancel_requested=context.is_cancel_requested,
         )
+        test_port = next((port for port in step.inputs if port.port_id == "test"), None)
         return HandledStepResult(
             input_row_count=result.input_row_count,
             processed_row_count=result.processed_row_count,
@@ -223,6 +225,11 @@ class TrainingStepHandler:
             input_dataset_ids=[],
             relation_output_ids={},
             artifact_output_ids={"model": "model", "metrics": "training_metrics"},
+            relation_passthroughs=(
+                {"test": (test_port.source.step_id, test_port.source.port_id)}
+                if test_port is not None and "test" in step.additional_output_port_ids
+                else {}
+            ),
         )
 
 

@@ -216,6 +216,53 @@ def test_training_resolves_dynamic_one_hot_features_from_upstream_contract() -> 
     assert captured["definition"].feature_columns == ["age", "segment_0", "segment_1"]
 
 
+def test_training_exposes_declared_test_output_as_relation_passthrough() -> None:
+    class Engine:
+        def execute(self, definition, training, validation, **kwargs):
+            return ModelingResult(10, 10, 1, [], [])
+
+    step = WorkflowStep.model_validate({
+        "step_id": "automl_1",
+        "name": "AutoML",
+        "type": "automl",
+        "inputs": [
+            {
+                "port_id": "training",
+                "source": {"step_id": "fe_1", "port_id": "training"},
+            },
+            {
+                "port_id": "test",
+                "source": {"step_id": "fe_1", "port_id": "test"},
+            },
+        ],
+        "output_port_id": "model",
+        "additional_output_port_ids": ["metrics", "test"],
+        "config": {"definition": {
+            "problem_type": "binary_classification",
+            "algorithm": "sgd_classifier",
+            "target_column": "churned",
+            "feature_columns": ["age"],
+            "optimization": {"mode": "automl"},
+        }},
+    })
+    relation = SourceRelation(sql="input", row_count=10)
+
+    result = TrainingStepHandler(Engine()).execute(
+        step,
+        StepExecutionContext(
+            run_id="run-1",
+            owner_id="owner-1",
+            is_dry_run=True,
+            upstream_relations={
+                ("fe_1", "training"): relation,
+                ("fe_1", "test"): relation,
+            },
+        ),
+    )
+
+    assert result.relation_passthroughs == {"test": ("fe_1", "test")}
+
+
 def test_training_and_scoring_process_full_declared_inputs(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     source = repository / "users" / "owner-1" / "source"

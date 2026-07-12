@@ -96,7 +96,9 @@ import {
 } from "./pipelines/dataContractOptions";
 import {
   resolvePipelineRunInputs,
-  type PipelineRunInput
+  resolvePipelineRunModels,
+  type PipelineRunInput,
+  type PipelineRunModel
 } from "./pipelines/pipelineRunInputs";
 
 type TabId = "overview" | "business-cases" | "data" | "analysis" | "pipelines" | "jobs" | "models" | "scoring-reports" | "serving" | "share";
@@ -537,8 +539,10 @@ function BusinessCasesPanel({
     pipeline: Pipeline;
     version: PipelineVersion;
     inputs: PipelineRunInput[];
+    models: PipelineRunModel[];
   } | null>(null);
   const [bcRunSelections, setBcRunSelections] = useState<Record<string, string>>({});
+  const [bcRunModelSelections, setBcRunModelSelections] = useState<Record<string, string>>({});
   const [bcRunResult, setBcRunResult] = useState<PipelineRun | null>(null);
   const [bcRunSubmitting, setBcRunSubmitting] = useState(false);
   const [bcSelectedRunDetails, setBcSelectedRunDetails] = useState<PipelineRun | null>(null);
@@ -551,6 +555,8 @@ function BusinessCasesPanel({
   const [bcModelPipelineFilter, setBcModelPipelineFilter] = useState("");
   const [bcReportPurposeFilter, setBcReportPurposeFilter] = useState("");
   const [bcReportPipelineFilter, setBcReportPipelineFilter] = useState("");
+  const [bcPipelineTypeFilter, setBcPipelineTypeFilter] = useState("");
+  const [bcPipelineStatusFilter, setBcPipelineStatusFilter] = useState("");
   const [dependencyTarget, setDependencyTarget] = useState<{ referenceId: string; artifactType: string; title: string } | null>(null);
 
   const selectedBusinessCase = businessCases.find((item) => item.id === selectedBusinessCaseId);
@@ -600,6 +606,23 @@ function BusinessCasesPanel({
       ? pipelines.filter((pipeline) => pipeline.business_case_id === selectedBusinessCase.id)
       : [],
     [pipelines, selectedBusinessCase]
+  );
+  const businessCasePipelineTypes = useMemo(
+    () => [...new Set(selectedBusinessCasePipelines.map((pipeline) => pipeline.type))]
+      .sort((left, right) => left.localeCompare(right)),
+    [selectedBusinessCasePipelines]
+  );
+  const businessCasePipelineStatuses = useMemo(
+    () => [...new Set(selectedBusinessCasePipelines.map((pipeline) => pipeline.status))]
+      .sort((left, right) => left.localeCompare(right)),
+    [selectedBusinessCasePipelines]
+  );
+  const visibleBusinessCasePipelines = useMemo(
+    () => selectedBusinessCasePipelines.filter((pipeline) =>
+      (!bcPipelineTypeFilter || pipeline.type === bcPipelineTypeFilter)
+      && (!bcPipelineStatusFilter || pipeline.status === bcPipelineStatusFilter)
+    ),
+    [bcPipelineStatusFilter, bcPipelineTypeFilter, selectedBusinessCasePipelines]
   );
   const selectedBusinessCaseModels = useMemo(
     () => latestModelFamilies(
@@ -692,6 +715,8 @@ function BusinessCasesPanel({
     setBcModelPipelineFilter("");
     setBcReportPurposeFilter("");
     setBcReportPipelineFilter("");
+    setBcPipelineTypeFilter("");
+    setBcPipelineStatusFilter("");
     if (!selectedBusinessCase) {
       setAttachments([]);
       return;
@@ -858,9 +883,11 @@ function BusinessCasesPanel({
         datasets
       );
       const inputs = resolvePipelineRunInputs(normalized, datasets);
+      const runModels = resolvePipelineRunModels(normalized, models);
       setBcRunSelections({});
+      setBcRunModelSelections(Object.fromEntries(runModels.map((model) => [model.key, model.versions[0]?.id ?? ""])));
       setBcRunResult(null);
-      setBcRunDialog({ pipeline, version: published, inputs });
+      setBcRunDialog({ pipeline, version: published, inputs, models: runModels });
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not prepare pipeline run");
     }
@@ -884,7 +911,8 @@ function BusinessCasesPanel({
         trigger_type: "manual",
         is_dry_run: false,
         runtime_parameters: {},
-        input_versions: bcRunSelections
+        input_versions: bcRunSelections,
+        model_versions: bcRunModelSelections
       });
       setBcRunResult(run);
       setNotice(`Pipeline run ${shortId(run.id)} queued`);
@@ -1294,13 +1322,44 @@ function BusinessCasesPanel({
         {selectedBusinessCase && activeWorkspace === "pipelines" && (
           <div className="panel">
             <div className="panel-header">
-              <div><h2>Mapped pipelines</h2><p>Published workflows and their official execution history.</p></div>
+              <div><h2>Mapped pipelines</h2><p>{visibleBusinessCasePipelines.length} of {selectedBusinessCasePipelines.length} workflows shown.</p></div>
               <button className="secondary-button compact-button" type="button"
                 onClick={() => setBcRunsPipelineId("all")}>
                 <History size={15} /> Runs
               </button>
             </div>
-          <AssetList title="" assets={selectedBusinessCasePipelines.map((item) => ({
+            <div className="pipeline-catalog-filters" aria-label="Business Case pipeline filters">
+              <label>
+                <span><Filter size={14} /> Pipeline type</span>
+                <select
+                  aria-label="Filter Business Case pipelines by type"
+                  value={bcPipelineTypeFilter}
+                  onChange={(event) => setBcPipelineTypeFilter(event.target.value)}
+                >
+                  <option value="">All pipeline types</option>
+                  {businessCasePipelineTypes.map((type) => (
+                    <option key={type} value={type}>{type.replaceAll("_", " ")}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span><Filter size={14} /> Status</span>
+                <select
+                  aria-label="Filter Business Case pipelines by status"
+                  value={bcPipelineStatusFilter}
+                  onChange={(event) => setBcPipelineStatusFilter(event.target.value)}
+                >
+                  <option value="">All statuses</option>
+                  {businessCasePipelineStatuses.map((status) => (
+                    <option key={status} value={status}>{status.replaceAll("_", " ")}</option>
+                  ))}
+                </select>
+              </label>
+              <span className="pipeline-filter-summary">
+                {visibleBusinessCasePipelines.length} of {selectedBusinessCasePipelines.length} workflows
+              </span>
+            </div>
+          <AssetList title="" assets={visibleBusinessCasePipelines.map((item) => ({
             id: item.id,
             name: item.name,
             meta: `${item.type} / ${businessCaseName(businessCases, item.business_case_id)}`,
@@ -1529,6 +1588,19 @@ function BusinessCasesPanel({
                 </label>
               );
             })}
+            {bcRunDialog.models.map((model) => (
+              <label key={model.key}>Model — {model.name}
+                <select value={bcRunModelSelections[model.key] ?? ""}
+                  onChange={(event) => setBcRunModelSelections((current) => ({ ...current, [model.key]: event.target.value }))}>
+                  {model.versions.map((version, index) => (
+                    <option key={version.id} value={version.id}>
+                      {index === 0 ? "Latest — " : ""}v{version.version_number} · {version.algorithm}
+                    </option>
+                  ))}
+                </select>
+                <small>The selected immutable model version is recorded with this run.</small>
+              </label>
+            ))}
             {bcRunResult && (
               <div className={`catalog-run-monitor ${bcRunResult.status}`}>
                 <div><strong>{bcRunResult.status}</strong>
@@ -1864,8 +1936,10 @@ function PipelinesPanel({
     pipeline: Pipeline;
     version: PipelineVersion;
     inputs: PipelineRunInput[];
+    models: PipelineRunModel[];
   } | null>(null);
   const [catalogRunSelections, setCatalogRunSelections] = useState<Record<string, string>>({});
+  const [catalogRunModelSelections, setCatalogRunModelSelections] = useState<Record<string, string>>({});
   const [isCatalogRunSubmitting, setIsCatalogRunSubmitting] = useState(false);
   const [catalogRunResult, setCatalogRunResult] = useState<PipelineRun | null>(null);
   const [isRenamingPipeline, setIsRenamingPipeline] = useState(false);
@@ -2279,9 +2353,11 @@ function PipelinesPanel({
         datasets
       );
       const inputs = resolvePipelineRunInputs(normalized, datasets);
+      const runModels = resolvePipelineRunModels(normalized, models);
       setCatalogRunSelections({});
+      setCatalogRunModelSelections(Object.fromEntries(runModels.map((model) => [model.key, model.versions[0]?.id ?? ""])));
       setCatalogRunResult(null);
-      setCatalogRunDialog({ pipeline, version: published, inputs });
+      setCatalogRunDialog({ pipeline, version: published, inputs, models: runModels });
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not prepare pipeline run");
     }
@@ -2305,7 +2381,8 @@ function PipelinesPanel({
         trigger_type: "manual",
         is_dry_run: false,
         runtime_parameters: {},
-        input_versions: catalogRunSelections
+        input_versions: catalogRunSelections,
+        model_versions: catalogRunModelSelections
       });
       setNotice(`Pipeline run ${shortId(run.id)} queued`);
       setCatalogRunResult(run);
@@ -2737,6 +2814,19 @@ function PipelinesPanel({
                   </label>
                 );
               })}
+              {!catalogRunResult && catalogRunDialog.models.map((model) => (
+                <label key={model.key}>Model — {model.name}
+                  <select value={catalogRunModelSelections[model.key] ?? ""}
+                    onChange={(event) => setCatalogRunModelSelections((current) => ({ ...current, [model.key]: event.target.value }))}>
+                    {model.versions.map((version, index) => (
+                      <option key={version.id} value={version.id}>
+                        {index === 0 ? "Latest — " : ""}v{version.version_number} · {version.algorithm}
+                      </option>
+                    ))}
+                  </select>
+                  <small>The selected immutable model version is recorded with this run.</small>
+                </label>
+              ))}
               {!catalogRunResult && !catalogRunDialog.inputs.length && <p>This pipeline has no external dataset inputs.</p>}
               {catalogRunResult && !["queued", "running"].includes(catalogRunResult.status) && (
                 <div className="catalog-run-outputs">
@@ -3075,6 +3165,19 @@ function PipelinesPanel({
                 </label>
               );
             })}
+            {!catalogRunResult && catalogRunDialog.models.map((model) => (
+              <label key={model.key}>Model — {model.name}
+                <select value={catalogRunModelSelections[model.key] ?? ""}
+                  onChange={(event) => setCatalogRunModelSelections((current) => ({ ...current, [model.key]: event.target.value }))}>
+                  {model.versions.map((version, index) => (
+                    <option key={version.id} value={version.id}>
+                      {index === 0 ? "Latest — " : ""}v{version.version_number} · {version.algorithm}
+                    </option>
+                  ))}
+                </select>
+                <small>The selected immutable model version is recorded with this run.</small>
+              </label>
+            ))}
             {catalogRunResult && !["queued", "running"].includes(catalogRunResult.status) && (
               <div className="catalog-run-outputs">
                 <strong>Created datasets</strong>

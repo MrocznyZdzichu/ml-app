@@ -9,6 +9,7 @@ from app.modules.pipelines.schemas import (
     PipelineRunOutputPreviewRead,
     PipelineRunOutputProfileRead,
     PipelineRunRead,
+    PipelineRunSummaryRead,
     PipelineRunDetailsRead,
     PipelineStepTypeRead,
     PipelineStepRunRead,
@@ -143,15 +144,15 @@ def list_pipeline_runs(
     ]
 
 
-@router.get("/runs/history", response_model=list[PipelineRunRead])
+@router.get("/runs/history", response_model=list[PipelineRunSummaryRead])
 def list_run_history(
     limit: int = Query(default=200, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     principal: Principal = Depends(require_user),
-) -> list[PipelineRunRead]:
+) -> list[PipelineRunSummaryRead]:
     return [
-        PipelineRunRead.model_validate(item)
-        for item in service.list_runs(principal, limit=limit, offset=offset)
+        PipelineRunSummaryRead.model_validate(item)
+        for item in service.list_run_summaries(principal, limit=limit, offset=offset)
     ]
 
 

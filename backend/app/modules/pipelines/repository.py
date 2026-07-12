@@ -172,6 +172,15 @@ class PipelineRepository(Protocol):
     ) -> list[PipelineRun]:
         ...
 
+    def list_run_summaries(
+        self,
+        owner_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[PipelineRun]:
+        ...
+
     def add_step_run(self, step_run: PipelineStepRun) -> PipelineStepRun:
         ...
 
@@ -278,6 +287,15 @@ class InMemoryPipelineRepository:
         ]
         matching.sort(key=lambda item: item.created_at, reverse=True)
         return matching[offset:offset + limit]
+
+    def list_run_summaries(
+        self,
+        owner_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[PipelineRun]:
+        return self.list_runs(None, owner_id, limit=limit, offset=offset)
 
     def add_step_run(self, step_run: PipelineStepRun) -> PipelineStepRun:
         self._step_runs[step_run.id] = step_run
@@ -466,6 +484,47 @@ class PostgresPipelineRepository:
         with self.engine.begin() as connection:
             return [self._run_from_record(row._mapping) for row in connection.execute(statement)]
 
+    def list_run_summaries(
+        self,
+        owner_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[PipelineRun]:
+        self._ensure_initialized()
+        columns = [
+            pipeline_runs_table.c.id,
+            pipeline_runs_table.c.owner_id,
+            pipeline_runs_table.c.pipeline_id,
+            pipeline_runs_table.c.pipeline_version_id,
+            pipeline_runs_table.c.business_case_id,
+            pipeline_runs_table.c.status,
+            pipeline_runs_table.c.trigger_type,
+            pipeline_runs_table.c.is_dry_run,
+            pipeline_runs_table.c.requested_step_id,
+            pipeline_runs_table.c.input_row_count,
+            pipeline_runs_table.c.processed_row_count,
+            pipeline_runs_table.c.output_row_count,
+            pipeline_runs_table.c.rejected_row_count,
+            pipeline_runs_table.c.error_message,
+            pipeline_runs_table.c.created_by,
+            pipeline_runs_table.c.created_at,
+            pipeline_runs_table.c.started_at,
+            pipeline_runs_table.c.finished_at,
+        ]
+        statement = (
+            select(*columns)
+            .where(pipeline_runs_table.c.owner_id == owner_id)
+            .order_by(pipeline_runs_table.c.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        with self.engine.begin() as connection:
+            return [
+                self._run_from_record(row._mapping)
+                for row in connection.execute(statement)
+            ]
+
     def add_step_run(self, step_run: PipelineStepRun) -> PipelineStepRun:
         self._ensure_initialized()
         with self.engine.begin() as connection:
@@ -615,17 +674,17 @@ class PostgresPipelineRepository:
             business_case_id=record["business_case_id"],
             status=PipelineRunStatus(record["status"]),
             trigger_type=PipelineRunTrigger(record["trigger_type"]),
-            runtime_parameters=dict(record["runtime_parameters"] or {}),
+            runtime_parameters=dict(record.get("runtime_parameters") or {}),
             is_dry_run=record["is_dry_run"],
             requested_step_id=record["requested_step_id"] or "",
             input_row_count=record["input_row_count"],
             processed_row_count=record["processed_row_count"],
             output_row_count=record["output_row_count"],
             rejected_row_count=record["rejected_row_count"],
-            warnings=list(record["warnings"] or []),
+            warnings=list(record.get("warnings") or []),
             events=list(record.get("events") or []),
-            output_artifact_ids=list(record["output_artifact_ids"] or []),
-            output_manifest=list(record["output_manifest"] or []),
+            output_artifact_ids=list(record.get("output_artifact_ids") or []),
+            output_manifest=list(record.get("output_manifest") or []),
             error_message=record["error_message"] or "",
             created_by=record["created_by"],
             created_at=record["created_at"],
