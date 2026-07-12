@@ -291,6 +291,8 @@ Use these files for manual testing:
 - `examples/data/general-churn-batch-scoring-10k.csv`
 - `examples/data/general-churn-batch-scoring-10k-actuals.csv`
 - `examples/data/regression-example.csv`
+- `examples/data/estates-sale-prices-batch-scoring-100k.parquet`
+- `examples/data/estates-sale-prices-batch-scoring-100k-actuals.parquet`
 - `examples/data/dynamic-reactor-timeseries.csv`
 - `examples/data/equipment-operating-regimes.csv`
 
@@ -305,6 +307,11 @@ Their business context, controlled drift, and limitations are documented in
 
 `regression-example.csv` contains 10,000 synthetic real-estate transaction rows
 for a regression task where the target is `sale_price_pln`.
+
+The two `estates-sale-prices-batch-scoring` Parquet files provide a 100,000-row
+out-of-time scoring cohort and delayed sale-price actuals for the `Estates Sell
+Prices` Business Case. Their contract and generation assumptions are documented
+in `docs/synthetic-ml-scenarios.md`.
 
 `dynamic-reactor-timeseries.csv` is a dynamic, delayed thermal-process forecasting
 case. `equipment-operating-regimes.csv` is an unlabeled machine-telemetry clustering

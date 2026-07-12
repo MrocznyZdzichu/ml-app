@@ -1963,6 +1963,7 @@ function PipelinesPanel({
   const [definitionText, setDefinitionText] = useState(JSON.stringify(emptyWorkflowDefinition(), null, 2));
   const [draftValidationError, setDraftValidationError] = useState("");
   const [versions, setVersions] = useState<PipelineVersion[]>([]);
+  const [hydratedPipelineId, setHydratedPipelineId] = useState("");
   const [runs, setRuns] = useState<PipelineRun[]>([]);
   const [activeStepRuns, setActiveStepRuns] = useState<PipelineStepRun[]>([]);
   const [selectedRunDetails, setSelectedRunDetails] = useState<PipelineRun | null>(null);
@@ -1984,7 +1985,11 @@ function PipelinesPanel({
   const filteredActivePipelines = activePipelines.filter(pipelineMatchesCatalogFilters);
   const filteredDeprecatedPipelines = deprecatedPipelines.filter(pipelineMatchesCatalogFilters);
   const hasCatalogFilters = Boolean(catalogBusinessCaseFilter || catalogPipelineTypeFilter);
-  const selectedPipeline = activePipelines.find((item) => item.id === selectedPipelineId) ?? activePipelines[0];
+  // Do not fall back to another pipeline while a freshly created/copied item is
+  // being added to the refreshed catalog. Rendering that fallback with the new
+  // selected ID can persist the previous workflow under the new pipeline.
+  const selectedPipeline = activePipelines.find((item) => item.id === selectedPipelineId)
+    ?? (!selectedPipelineId ? activePipelines[0] : undefined);
   const selectedPipelineIdValue = selectedPipeline?.id ?? "";
   const selectedBusinessCaseIdValue = selectedPipeline?.business_case_id ?? "";
   const workflowValidationIssues = useMemo(
@@ -2026,11 +2031,12 @@ function PipelinesPanel({
   }, [selectedPipeline?.description, selectedPipeline?.id, selectedPipeline?.name, selectedPipeline?.type]);
 
   useEffect(() => {
+    setHydratedPipelineId("");
+    setVersions([]);
+    setRuns([]);
+    setActiveStepRuns([]);
+    setPipelineDataAttachments([]);
     if (!selectedPipelineIdValue) {
-      setVersions([]);
-      setRuns([]);
-      setActiveStepRuns([]);
-      setPipelineDataAttachments([]);
       setDraftValidationError("");
       return;
     }
@@ -2052,7 +2058,7 @@ function PipelinesPanel({
           // draft exists. Otherwise stale browser state makes a published
           // version look dirty and points dry-run at a draft that is gone.
           const workingDraft = draftVersion
-            ? readPipelineWorkingDraft(selectedPipelineIdValue)
+            ? readPipelineWorkingDraft(selectedPipelineIdValue, draftVersion.id)
             : null;
           if (!draftVersion) clearPipelineWorkingDraft(selectedPipelineIdValue);
           const normalized = canonicalizeWorkflowDatasetIds(
@@ -2063,7 +2069,14 @@ function PipelinesPanel({
           setDefinitionText(JSON.stringify(normalized, null, 2));
           setIsDefinitionDirty(Boolean(workingDraft));
           setDraftValidationError("");
+          setHydratedPipelineId(selectedPipelineIdValue);
           if (workingDraft) setNotice("Recovered unsaved pipeline changes from this browser tab");
+        } else {
+          const empty = emptyWorkflowDefinition();
+          setWorkflowDefinition(empty);
+          setDefinitionText(JSON.stringify(empty, null, 2));
+          setIsDefinitionDirty(false);
+          setHydratedPipelineId(selectedPipelineIdValue);
         }
       })
       .catch((error) => setNotice(error instanceof Error ? error.message : "Could not load pipeline details"));
@@ -2158,6 +2171,13 @@ function PipelinesPanel({
     setIsPipelineMutationSubmitting(true);
     try {
       const copied = await api.copyPipeline(copyPipelineTarget.id, { name: nextName });
+      clearPipelineWorkingDraft(copied.id);
+      const empty = emptyWorkflowDefinition();
+      setHydratedPipelineId("");
+      setVersions([]);
+      setWorkflowDefinition(empty);
+      setDefinitionText(JSON.stringify(empty, null, 2));
+      setIsDefinitionDirty(false);
       setCopyPipelineTarget(null);
       setCopyPipelineName("");
       setSelectedPipelineId(copied.id);
@@ -2407,14 +2427,18 @@ function PipelinesPanel({
   }
 
   function updateWorkflowDefinition(definition: WorkflowDefinition) {
+    const draftVersion = versions.find((item) => item.status === "draft");
+    if (!selectedPipeline || hydratedPipelineId !== selectedPipeline.id || !draftVersion) return;
     setWorkflowDefinition(definition);
     setDefinitionText(JSON.stringify(definition, null, 2));
     setIsDefinitionDirty(true);
     setDraftValidationError("");
-    if (selectedPipeline) writePipelineWorkingDraft(selectedPipeline.id, definition);
+    writePipelineWorkingDraft(selectedPipeline.id, draftVersion.id, definition);
   }
 
   function updateDefinitionText(value: string) {
+    const draftVersion = versions.find((item) => item.status === "draft");
+    if (!selectedPipeline || hydratedPipelineId !== selectedPipeline.id || !draftVersion) return;
     setDefinitionText(value);
     setIsDefinitionDirty(true);
     try {
@@ -2423,7 +2447,7 @@ function PipelinesPanel({
         normalizeWorkflowDefinition(parsed),
         datasets
       ));
-      if (selectedPipeline) writePipelineWorkingDraft(selectedPipeline.id, parsed);
+      writePipelineWorkingDraft(selectedPipeline.id, draftVersion.id, parsed);
     } catch {
       // Keep the last valid visual definition while the advanced JSON is incomplete.
     }
@@ -3024,8 +3048,11 @@ function PipelinesPanel({
       )}
 
       <div className="panel pipeline-canvas-panel">
-        <DeferredPanel>
+        {hydratedPipelineId !== selectedPipeline?.id ? (
+          <p>Loading pipeline definitionâ€¦</p>
+        ) : <DeferredPanel>
           <WorkflowEditor
+            key={`${selectedPipeline.id}:${versions.find((item) => item.status === "draft")?.id ?? versions.at(-1)?.id ?? "empty"}`}
             definition={workflowDefinition}
             businessCase={businessCases.find((item) => item.id === selectedBusinessCaseIdValue)}
             datasets={latestLogicalDatasetAliases(datasets)}
@@ -3041,7 +3068,7 @@ function PipelinesPanel({
             onChange={updateWorkflowDefinition}
             disabled={!hasDraft}
           />
-        </DeferredPanel>
+        </DeferredPanel>}
       </div>
 
       <div className="editor-lower-grid">

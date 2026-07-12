@@ -166,6 +166,72 @@ def test_synthetic_dataset_generator_is_reproducible_and_preserves_contract(tmp_
     assert all(300 <= int(row["credit_score"]) <= 850 for row in churn_scoring)
 
 
+def test_estates_scoring_generator_preserves_regression_monitoring_contract(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(generator, "OUTPUT", tmp_path)
+    generator.write_estates_batch_scoring(row_count=4_000)
+    scoring_path = tmp_path / "estates-sale-prices-batch-scoring-100k.parquet"
+    actuals_path = tmp_path / "estates-sale-prices-batch-scoring-100k-actuals.parquet"
+
+    connection = duckdb.connect()
+    try:
+        scoring_columns = [
+            row[0]
+            for row in connection.execute(
+                f"DESCRIBE SELECT * FROM read_parquet('{str(scoring_path).replace(chr(39), chr(39) * 2)}')"
+            ).fetchall()
+        ]
+        actuals_columns = [
+            row[0]
+            for row in connection.execute(
+                f"DESCRIBE SELECT * FROM read_parquet('{str(actuals_path).replace(chr(39), chr(39) * 2)}')"
+            ).fetchall()
+        ]
+        contract = connection.execute(
+            f"""
+            SELECT
+                count(*) AS scoring_count,
+                count(DISTINCT s.property_id) AS scoring_keys,
+                count(a.property_id) AS joined_count,
+                count(DISTINCT a.property_id) AS actual_keys,
+                min(a.sale_price_pln) AS min_price,
+                max(a.sale_price_pln) AS max_price,
+                corr(s.floor_area_sqm, a.sale_price_pln) AS area_price_correlation,
+                count(DISTINCT s.snapshot_month) AS scoring_months,
+                count(*) FILTER (WHERE a.actual_observed_at IS NULL) AS missing_observation_dates
+            FROM read_parquet('{str(scoring_path).replace(chr(39), chr(39) * 2)}') s
+            LEFT JOIN read_parquet('{str(actuals_path).replace(chr(39), chr(39) * 2)}') a USING (property_id)
+            """
+        ).fetchone()
+        first_values = connection.execute(
+            f"SELECT * FROM read_parquet('{str(scoring_path).replace(chr(39), chr(39) * 2)}') ORDER BY property_id LIMIT 20"
+        ).fetchall()
+    finally:
+        connection.close()
+
+    with generator.REGRESSION_SOURCE.open(encoding="utf-8", newline="") as handle:
+        training_columns = list(next(csv.DictReader(handle)))
+    assert scoring_columns == [name for name in training_columns if name != "sale_price_pln"]
+    assert actuals_columns == ["property_id", "sale_price_pln", "actual_observed_at"]
+    assert "sale_price_pln" not in scoring_columns
+    assert contract is not None
+    assert contract[:4] == (4_000, 4_000, 4_000, 4_000)
+    assert 90_000 <= contract[4] < contract[5] <= 15_000_000
+    assert contract[6] > 0.60
+    assert contract[7:] == (4, 0)
+
+    generator.write_estates_batch_scoring(row_count=4_000)
+    connection = duckdb.connect()
+    try:
+        regenerated_values = connection.execute(
+            f"SELECT * FROM read_parquet('{str(scoring_path).replace(chr(39), chr(39) * 2)}') ORDER BY property_id LIMIT 20"
+        ).fetchall()
+    finally:
+        connection.close()
+    assert first_values == regenerated_values
+
+
 def iris_reference_by_species() -> dict[str, list[list[float]]]:
     result: dict[str, list[list[float]]] = {"versicolor": [], "virginica": []}
     with generator.IRIS_SOURCE.open(encoding="utf-8", newline="") as handle:

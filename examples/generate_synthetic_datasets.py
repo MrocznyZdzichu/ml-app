@@ -12,9 +12,11 @@ from pathlib import Path
 OUTPUT = Path(__file__).resolve().parent / "data"
 IRIS_SOURCE = Path(__file__).resolve().parent / "data" / "iris.csv"
 GENERAL_SOURCE = Path(__file__).resolve().parent / "data" / "general-example.csv"
+REGRESSION_SOURCE = Path(__file__).resolve().parent / "data" / "regression-example.csv"
 SEED = 20260624
 IRIS_FEATURES = ("sepal_length", "sepal_width", "petal_length", "petal_width")
 IRIS_THREE_CLASS_SCORING_ROWS = 200_000
+ESTATES_SCORING_ROWS = 100_000
 
 
 def write_dynamic_reactor() -> None:
@@ -363,6 +365,125 @@ def write_churn_batch_scoring() -> None:
     write_csv(OUTPUT / "general-churn-batch-scoring-10k-actuals.csv", actual_rows)
 
 
+def write_estates_batch_scoring(row_count: int = ESTATES_SCORING_ROWS) -> None:
+    """Create an out-of-time property cohort and delayed sale-price actuals.
+
+    The checked-in regression population supplies realistic joint combinations of
+    location, property and listing attributes. Numeric attributes are perturbed,
+    while the hidden sale price responds to those changes, regional market drift
+    and transaction noise. Rows are streamed through staging CSV files so the
+    default 100k cohort is never materialized as a second large Python object graph.
+    """
+    if row_count < 1:
+        raise ValueError("row_count must be positive")
+
+    rng = random.Random(SEED + 5)
+    with REGRESSION_SOURCE.open(encoding="utf-8", newline="") as handle:
+        training_rows = list(csv.DictReader(handle))
+
+    scoring_path = OUTPUT / "estates-sale-prices-batch-scoring-100k.parquet"
+    actuals_path = OUTPUT / "estates-sale-prices-batch-scoring-100k-actuals.parquet"
+    scoring_csv = scoring_path.with_suffix(".staging.csv")
+    actuals_csv = actuals_path.with_suffix(".staging.csv")
+    feature_names = tuple(name for name in training_rows[0] if name != "sale_price_pln")
+    scoring_months = ("2027-01", "2027-02", "2027-03", "2027-04")
+    regional_market_factor = {
+        "central": 1.075,
+        "north": 1.058,
+        "south": 1.049,
+        "east": 1.041,
+        "west": 1.064,
+    }
+
+    try:
+        with scoring_csv.open("w", newline="", encoding="utf-8") as scoring_handle, actuals_csv.open(
+            "w", newline="", encoding="utf-8"
+        ) as actuals_handle:
+            scoring_writer = csv.DictWriter(scoring_handle, fieldnames=feature_names, lineterminator="\n")
+            actuals_writer = csv.DictWriter(
+                actuals_handle,
+                fieldnames=("property_id", "sale_price_pln", "actual_observed_at"),
+                lineterminator="\n",
+            )
+            scoring_writer.writeheader()
+            actuals_writer.writeheader()
+
+            for index in range(1, row_count + 1):
+                source = rng.choice(training_rows)
+                wave = (index - 1) % len(scoring_months)
+                property_id = f"EST-SCORE-{index:06d}"
+                source_area = float(source["floor_area_sqm"])
+                floor_area = round(clamp(source_area * math.exp(rng.gauss(0, 0.045)), 18, 650), 1)
+                source_district = int(source["district_score"])
+                district_score = round(clamp(source_district + rng.gauss(0.8, 2.2), 20, 100))
+                source_center_distance = float(source["distance_to_center_km"])
+                center_distance = round(
+                    clamp(source_center_distance + rng.gauss(0, 0.32), 0.1, 45), 2
+                )
+                transit_distance = round(
+                    clamp(float(source["distance_to_transit_m"]) + rng.gauss(-12, 55), 20, 5_000)
+                )
+                rooms = round(clamp(int(source["rooms"]) + rng.choice((0, 0, 0, 0, -1, 1)), 1, 12))
+                school_rating = round(clamp(int(source["school_rating"]) + rng.choice((-1, 0, 0, 0, 1)), 1, 10))
+                building_age = round(clamp(int(source["building_age_years"]) + 1, 0, 180))
+                days_on_market = round(
+                    clamp(float(source["days_on_market"]) * math.exp(rng.gauss(-0.035, 0.12)), 1, 730)
+                )
+
+                scoring_row = {
+                    "property_id": property_id,
+                    "snapshot_month": scoring_months[wave],
+                    "region": source["region"],
+                    "district_score": district_score,
+                    "property_type": source["property_type"],
+                    "floor_area_sqm": floor_area,
+                    "rooms": rooms,
+                    "building_age_years": building_age,
+                    "floor_number": source["floor_number"],
+                    "has_elevator": source["has_elevator"],
+                    "distance_to_center_km": center_distance,
+                    "distance_to_transit_m": transit_distance,
+                    "school_rating": school_rating,
+                    "energy_class": source["energy_class"],
+                    "condition_level": source["condition_level"],
+                    "heating_type": source["heating_type"],
+                    "parking_type": source["parking_type"],
+                    "listing_channel": source["listing_channel"],
+                    "days_on_market": days_on_market,
+                }
+                scoring_writer.writerow(scoring_row)
+
+                # The target remains hidden from scoring. It reflects the changed
+                # property attributes plus moderate out-of-time market appreciation.
+                price_factor = (
+                    (floor_area / source_area) ** 0.82
+                    * math.exp(0.006 * (district_score - source_district))
+                    * math.exp(-0.010 * (center_distance - source_center_distance))
+                    * math.exp(0.012 * (school_rating - int(source["school_rating"])))
+                    * regional_market_factor[str(source["region"])]
+                    * (1 + 0.006 * wave)
+                    * math.exp(rng.gauss(0, 0.055))
+                )
+                sale_price = round(
+                    clamp(float(source["sale_price_pln"]) * price_factor, 90_000, 15_000_000)
+                    / 1_000
+                ) * 1_000
+                observed_at = datetime(2027, 3, 15, tzinfo=UTC) + timedelta(
+                    days=wave * 31 + rng.randrange(0, 29)
+                )
+                actuals_writer.writerow({
+                    "property_id": property_id,
+                    "sale_price_pln": sale_price,
+                    "actual_observed_at": observed_at.date().isoformat(),
+                })
+
+        csv_to_parquet(scoring_csv, scoring_path)
+        csv_to_parquet(actuals_csv, actuals_path)
+    finally:
+        scoring_csv.unlink(missing_ok=True)
+        actuals_csv.unlink(missing_ok=True)
+
+
 def clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
@@ -416,7 +537,9 @@ if __name__ == "__main__":
     write_iris_batch_scoring()
     write_iris_three_class_scoring_large()
     write_churn_batch_scoring()
+    write_estates_batch_scoring()
     print(
         "Generated dynamic-reactor-timeseries.csv, equipment-operating-regimes.csv, "
-        "Iris batch-scoring files, the 200k Iris three-class performance cohort, and churn batch-scoring files"
+        "Iris batch-scoring files, the 200k Iris three-class performance cohort, churn batch-scoring files, "
+        "and the 100k estates regression scoring cohort"
     )

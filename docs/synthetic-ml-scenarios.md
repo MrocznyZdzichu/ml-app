@@ -137,3 +137,37 @@ one-to-one on `customer_id`; scoring contains 10,000 rows and monitoring actuals
 cover all 10,000. This synthetic batch is intended to validate scoring, lineage,
 target joining, and monitoring behavior. It is not evidence of production model
 quality or real customer prevalence.
+
+## Estates sale prices batch scoring and delayed actuals
+
+Business case: the `Estates Sell Prices` team uses a model trained on
+`examples/data/regression-example.csv` to estimate likely transaction prices for
+new listings. Scoring happens before the transaction closes. The final sale price
+arrives later from the notarial transaction feed and is joined only in the
+monitoring pipeline.
+
+Files:
+
+- `examples/data/estates-sale-prices-batch-scoring-100k.parquet`: exactly 100,000
+  scoring records. Its schema matches the regression training features, including
+  stable `property_id`, and deliberately excludes `sale_price_pln`.
+- `examples/data/estates-sale-prices-batch-scoring-100k-actuals.parquet`: exactly
+  100,000 delayed outcomes containing `property_id`, `sale_price_pln` and
+  `actual_observed_at`.
+
+The generator uses the complete 10,000-row training population as an empirical
+joint model, then perturbs floor area, rooms, building age, location accessibility,
+district and school quality, and listing duration. Property-type and infrastructure
+combinations remain internally consistent with observed training records. The
+hidden price responds to the changed attributes, regional appreciation of 4.1%
+to 7.5%, four monthly market waves and moderate log-normal transaction noise.
+This creates controlled out-of-time covariate and target drift without exposing
+the target to batch scoring or introducing an identifier disguised as a feature.
+
+Both files contain 100,000 unique keys and join one-to-one. Scoring covers January
+through April 2027; actual prices become available from March through July 2027.
+There are no missing values. Prices are PLN transaction amounts rounded to the
+nearest PLN 1,000. The files use Parquet with Zstandard compression and are produced
+through streaming staging files. This deterministic synthetic cohort (seed
+`20260624`) is suitable for full-dataset regression scoring, target joining and
+performance-monitoring tests, not for real property valuation or market inference.
