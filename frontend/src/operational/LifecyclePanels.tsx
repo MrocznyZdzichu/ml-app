@@ -524,6 +524,8 @@ function TrainingConfigSummary({ config }: { config: Record<string, unknown> }) 
         selected_algorithm: jointStudy.selected_algorithm,
         best_score: jointStudy.best_score,
         recipe_candidates: jointStudy.recipe_candidate_count,
+        configured_recipe_candidates: jointStudy.configured_recipe_candidate_count,
+        skipped_recipes: jointStudy.skipped_recipe_count,
         configured_trial_budget: jointStudy.trial_budget,
         completed_trials_all_recipes: completedJointTrials,
         cv_folds: crossValidation.fold_count,
@@ -534,6 +536,24 @@ function TrainingConfigSummary({ config }: { config: Record<string, unknown> }) 
         fold_cache_hits: foldCache.hit_count,
         fold_cache_misses: foldCache.miss_count,
       }} empty="No AutoFE experiment provenance recorded." />
+      <h4>Full-pipeline leaderboard</h4>
+      <div className="optimization-trial-table">
+        <div className="head"><span>Recipe</span><span>Status</span><span>Variant</span><span>Algorithm</span><span>Score</span><span>Features / reason</span></div>
+        {candidates.map((candidate, index) => {
+          const recipe = objectValue(candidate.recipe_contract);
+          return <div key={`${String(candidate.recipe_id ?? "recipe")}-${index}`}>
+            <code>{String(candidate.recipe_id ?? "—")}</code>
+            <span className={`trial-status ${String(candidate.status ?? "unknown")}`}>{String(candidate.status ?? "unknown")}</span>
+            <span>{String(recipe.numeric_variant ?? "baseline")}</span>
+            <code>{String(candidate.best_algorithm ?? "—")}</code>
+            <strong>{typeof candidate.score === "number" ? formatNumber(candidate.score) : "—"}</strong>
+            <span>{candidate.status === "skipped"
+              ? String(candidate.reason ?? "budget/capability constraint")
+              : `${String(candidate.resolved_feature_count ?? "—")} features`}</span>
+          </div>;
+        })}
+        {!candidates.length && <div className="catalog-empty">No recipe candidates were recorded.</div>}
+      </div>
       {selectedOOF.predictions_persisted === false && <div className="training-help">
         OOF metrics cover the full training scope. Row-level candidate predictions remain temporary and are not
         persisted; only bounded fold summaries are retained.

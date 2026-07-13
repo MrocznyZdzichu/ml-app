@@ -68,7 +68,7 @@ class AutoFeatureEngineeringDefinition(BaseModel):
     enabled: bool = False
     strategy: Literal["balanced"] = "balanced"
     joint_search_enabled: bool = True
-    max_recipe_candidates: int = Field(default=3, ge=1, le=3)
+    max_recipe_candidates: int = Field(default=3, ge=1, le=9)
     row_id_column: str = Field(default="", max_length=255)
     excluded_columns: list[str] = Field(default_factory=list, max_length=500)
     validation_size: float = Field(default=0.2, gt=0, lt=0.5)
@@ -79,6 +79,14 @@ class AutoFeatureEngineeringDefinition(BaseModel):
     min_category_frequency: int = Field(default=2, ge=1, le=1_000_000)
     max_one_hot_categories: int = Field(default=32, ge=2, le=500)
     max_frequency_categories: int = Field(default=500, ge=2, le=500)
+    # Kept disabled for definitions created before this field existed; new UI drafts
+    # opt in explicitly so published versions retain their historical search space.
+    numeric_feature_search: bool = False
+    winsorization_lower_quantile: float = Field(default=0.01, ge=0, lt=0.5)
+    winsorization_upper_quantile: float = Field(default=0.99, gt=0.5, le=1)
+    signed_log_features: bool = True
+    low_variance_selection: bool = True
+    variance_threshold: float = Field(default=0.0, ge=0)
 
     @model_validator(mode="after")
     def validate_columns_and_bounds(self) -> "AutoFeatureEngineeringDefinition":
@@ -87,6 +95,10 @@ class AutoFeatureEngineeringDefinition(BaseModel):
         if self.max_frequency_categories < self.max_one_hot_categories:
             raise ValueError(
                 "AutoFE max_frequency_categories cannot be lower than max_one_hot_categories"
+            )
+        if self.winsorization_lower_quantile >= self.winsorization_upper_quantile:
+            raise ValueError(
+                "AutoFE winsorization lower quantile must be below the upper quantile"
             )
         return self
 
@@ -259,6 +271,13 @@ class SklearnTrainingEngine:
                 spec.execution_mode == "incremental"
                 and definition.optimization.mode == "single"
             ):
+                incremental_parameters, parameter_resolution = (
+                    self._resolve_incremental_parameters(
+                        connection,
+                        definition,
+                        training,
+                    )
+                )
                 (
                     estimator,
                     actual_epochs,
@@ -271,14 +290,11 @@ class SklearnTrainingEngine:
                     training,
                     validation,
                     classes,
+                    parameters=incremental_parameters,
                 )
                 processed_row_count = row_count * actual_epochs
                 resolved_algorithm = definition.algorithm
-                resolved_parameters = validate_algorithm_parameters(
-                    definition.algorithm,
-                    definition.problem_type,
-                    definition.parameters,
-                )
+                resolved_parameters = incremental_parameters
                 optimization_summary = {
                     "mode": "single",
                     "primary_metric": (
@@ -295,8 +311,14 @@ class SklearnTrainingEngine:
                     "best_score": None,
                     "best_algorithm": resolved_algorithm,
                     "best_parameters": resolved_parameters,
+                    "parameter_resolution": parameter_resolution,
                     "trials": [],
                 }
+                if parameter_resolution:
+                    warnings.append(
+                        "Resolved class_weight='balanced' from exact full-training-scope "
+                        "class counts for incremental partial_fit execution"
+                    )
             else:
                 uses_cross_validation = (
                     definition.optimization.mode != "single"
@@ -641,14 +663,26 @@ class SklearnTrainingEngine:
         training: SourceRelation,
         validation: SourceRelation | None,
         classes: np.ndarray | None,
+        *,
+        parameters: dict[str, Any] | None = None,
     ) -> tuple[Any, int, bool, int | None, list[dict[str, Any]]]:
+        estimator_parameters = dict(
+            parameters if parameters is not None else definition.parameters
+        )
+        resolved_class_weight = (
+            estimator_parameters.pop("class_weight")
+            if isinstance(estimator_parameters.get("class_weight"), dict)
+            else None
+        )
         estimator = build_estimator(
             definition.algorithm,
             definition.problem_type,
-            definition.parameters,
+            estimator_parameters,
             random_seed=definition.random_seed,
             n_jobs=definition.resource_limits.max_parallel_jobs,
         )
+        if resolved_class_weight is not None:
+            estimator.set_params(class_weight=resolved_class_weight)
         selection = [*definition.feature_columns, definition.target_column]
         query = (
             f"SELECT {', '.join(identifier(item) for item in selection)} "
@@ -722,6 +756,50 @@ class SklearnTrainingEngine:
             best_epoch,
             validation_history,
         )
+
+    @staticmethod
+    def _resolve_incremental_parameters(
+        connection: Any,
+        definition: TrainingDefinition,
+        training: SourceRelation,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Resolve symbolic weights before partial_fit without sampling target rows."""
+
+        parameters = validate_algorithm_parameters(
+            definition.algorithm,
+            definition.problem_type,
+            definition.parameters,
+        )
+        if (
+            definition.problem_type == "regression"
+            or parameters.get("class_weight") != "balanced"
+        ):
+            return parameters, {}
+        rows = connection.execute(
+            f"SELECT {identifier(definition.target_column)}, count(*) "
+            f"FROM {training.sql} "
+            f"WHERE {identifier(definition.target_column)} IS NOT NULL "
+            f"GROUP BY {identifier(definition.target_column)} ORDER BY 1"
+        ).fetchall()
+        if len(rows) < 2:
+            raise ValueError(
+                "Balanced incremental class weights require at least two target classes"
+            )
+        total = sum(int(row[1]) for row in rows)
+        class_count = len(rows)
+        weights = {
+            row[0]: total / (class_count * int(row[1]))
+            for row in rows
+        }
+        resolved = {**parameters, "class_weight": weights}
+        return resolved, {
+            "kind": "balanced_class_weight",
+            "data_scope": "full_training",
+            "row_count": total,
+            "class_counts": {str(row[0]): int(row[1]) for row in rows},
+            "resolved_weights": {str(key): value for key, value in weights.items()},
+            "formula": "n_samples / (n_classes * class_count)",
+        }
 
     def _load_matrix(
         self,

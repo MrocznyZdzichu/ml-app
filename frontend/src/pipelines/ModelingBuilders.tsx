@@ -423,19 +423,50 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
           <label>Minimum category frequency<input type="number" min={1} max={1000000}
             value={definition.auto_feature_engineering.min_category_frequency} disabled={disabled}
             onChange={(event) => updateAutoFE({ min_category_frequency: Number(event.target.value) })} /></label>
-          <label>Maximum FE recipe candidates<input type="number" min={1} max={3}
+          <label>Maximum FE recipe candidates<input type="number" min={1} max={9}
             value={definition.auto_feature_engineering.max_recipe_candidates}
             disabled={disabled || !definition.auto_feature_engineering.joint_search_enabled}
             onChange={(event) => updateAutoFE({ max_recipe_candidates: Number(event.target.value) })} /></label>
         </div>
+        <label className="fe-toggle">
+          <input type="checkbox" checked={definition.auto_feature_engineering.numeric_feature_search}
+            disabled={disabled || !definition.auto_feature_engineering.joint_search_enabled}
+            onChange={(event) => updateAutoFE({ numeric_feature_search: event.target.checked })} />
+          <span><strong>Numeric feature generation + selection</strong>
+            <small>Compare baseline recipes with fold-local winsorization, signed-log features and low-variance filtering.</small>
+          </span>
+        </label>
+        {definition.auto_feature_engineering.numeric_feature_search && <div className="step-grid">
+          <label>Winsor lower quantile<input type="number" min={0} max={0.49} step={0.01}
+            value={definition.auto_feature_engineering.winsorization_lower_quantile} disabled={disabled}
+            onChange={(event) => updateAutoFE({ winsorization_lower_quantile: Number(event.target.value) })} /></label>
+          <label>Winsor upper quantile<input type="number" min={0.51} max={1} step={0.01}
+            value={definition.auto_feature_engineering.winsorization_upper_quantile} disabled={disabled}
+            onChange={(event) => updateAutoFE({ winsorization_upper_quantile: Number(event.target.value) })} /></label>
+          <label className="fe-toggle"><input type="checkbox"
+            checked={definition.auto_feature_engineering.signed_log_features} disabled={disabled}
+            onChange={(event) => updateAutoFE({ signed_log_features: event.target.checked })} />
+            <span><strong>Signed-log features</strong><small>Keep originals and add sign(x) · log(1 + |x|).</small></span>
+          </label>
+          <label className="fe-toggle"><input type="checkbox"
+            checked={definition.auto_feature_engineering.low_variance_selection} disabled={disabled}
+            onChange={(event) => updateAutoFE({ low_variance_selection: event.target.checked })} />
+            <span><strong>Low-variance selection</strong><small>Fit the selector on train/fold-train only.</small></span>
+          </label>
+          {definition.auto_feature_engineering.low_variance_selection &&
+            <label>Variance threshold<input type="number" min={0} step={0.000001}
+              value={definition.auto_feature_engineering.variance_threshold} disabled={disabled}
+              onChange={(event) => updateAutoFE({ variance_threshold: Number(event.target.value) })} /></label>}
+        </div>}
         {!defaults.has_validation && !definition.auto_feature_engineering.row_id_column
           && <div className="training-warning"><AlertTriangle size={16} /><span>
             Choose a stable row ID so AutoFE can create deterministic leakage-safe holdout or CV folds.
           </span></div>}
         <div className="training-help"><strong>Model-aware AutoFE scope</strong><span>
-          Classification and regression only. Joint search coordinates scaling and bounded categorical preparation
-          with estimator capabilities, then refits the winning recipe and model. Cross-validation fits every learned
-          FE transformation independently inside each fold and requires a pre-FE input.
+          Classification and regression only. Joint search coordinates scaling, bounded categorical preparation,
+          numeric feature generation and low-variance selection with estimator capabilities, then refits the winning
+          recipe and model. Cross-validation fits every learned FE transformation and selector independently inside
+          each fold and requires a pre-FE input.
         </span></div>
       </>}
     </section>}

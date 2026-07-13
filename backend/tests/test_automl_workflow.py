@@ -334,6 +334,39 @@ def test_autofe_planner_profiles_full_scope_and_builds_bounded_recipe(tmp_path) 
         "tree_unscaled": [],
         "non_negative": ["minmax"],
     }
+    expanded = model_aware_autofe_plans(
+        plan,
+        ["logistic_regression", "random_forest_classifier", "complement_nb"],
+        max_candidates=6,
+        numeric_feature_search=True,
+    )
+    assert [item.provenance["recipe_id"] for item in expanded] == [
+        "scaled_dense",
+        "tree_unscaled",
+        "non_negative",
+        "scaled_dense__robust_generated",
+        "tree_unscaled__robust_generated",
+        "non_negative__robust_generated",
+    ]
+    enhanced = expanded[3]
+    assert enhanced.provenance["recipe_contract"] == {
+        "contract_version": "2.0",
+        "capability_profile": "scaled_dense",
+        "numeric_variant": "robust_generated",
+        "numeric_scaling": "standard",
+        "winsorization": {"lower_quantile": 0.01, "upper_quantile": 0.99},
+        "signed_log_features": True,
+        "feature_selector": {"type": "variance_filter", "threshold": 0.0},
+    }
+    assert [item.type for item in enhanced.definition.transformations] == [
+        "impute",
+        "winsorize_numeric",
+        "math_transform",
+        "scale_numeric",
+        "encode_categorical",
+        "variance_filter",
+    ]
+    assert expanded[5].provenance["recipe_contract"]["signed_log_features"] is False
 
 
 def test_autofe_planner_accepts_parquet_table_function_relation(tmp_path) -> None:
@@ -557,6 +590,11 @@ def test_integrated_autofe_and_automl_train_a_real_classification_model(tmp_path
         "validation_strategy": "auto",
         "max_trials": 2,
     }
+    definition["auto_feature_engineering"] = {
+        **definition["auto_feature_engineering"],
+        "numeric_feature_search": True,
+        "max_recipe_candidates": 2,
+    }
     step_payload["steps"][1]["config"]["definition"] = definition
     step = WorkflowStep.model_validate(step_payload["steps"][1])
     source = SourceRelation(
@@ -590,7 +628,69 @@ def test_integrated_autofe_and_automl_train_a_real_classification_model(tmp_path
     assert model["metrics"]["optimization"]["trial_count"] == 1
     assert model["auto_feature_engineering"]["profiled_row_count"] == 120
     assert model["auto_feature_engineering"]["resolved_feature_count"] >= 3
-    assert model["auto_feature_engineering"]["joint_study"]["candidates"][0]["trial_count"] == 2
+    study = model["auto_feature_engineering"]["joint_study"]
+    assert study["recipe_candidate_count"] == 2
+    assert sum(item["trial_count"] for item in study["candidates"]) == 2
+    assert study["candidates"][1]["recipe_contract"]["numeric_variant"] == "robust_generated"
+    assert study["candidates"][1]["resolved_feature_count"] > study["candidates"][0]["resolved_feature_count"]
+
+
+def test_automl_incremental_winner_refits_balanced_class_weight(tmp_path) -> None:
+    step_payload = automl_workflow()
+    definition = {
+        **automl_definition(autofe=True),
+        "feature_columns": [],
+        "feature_selection": "upstream_contract",
+        "epochs": 2,
+    }
+    definition["optimization"] = {
+        **definition["optimization"],
+        "validation_strategy": "auto",
+        "max_trials": 1,
+        "candidate_algorithms": ["sgd_classifier"],
+        "search_space": {
+            "sgd_classifier__class_weight": {
+                "kind": "categorical",
+                "values": ["balanced"],
+            },
+        },
+    }
+    definition["auto_feature_engineering"] = {
+        **definition["auto_feature_engineering"],
+        "max_recipe_candidates": 1,
+        "numeric_feature_search": False,
+    }
+    step_payload["steps"][1]["config"]["definition"] = definition
+    source = SourceRelation(
+        sql=(
+            "(SELECT i AS row_id, CAST(i < 90 AS INTEGER) AS target, "
+            "CAST(i AS DOUBLE) AS amount FROM range(120) t(i))"
+        ),
+        row_count=120,
+        metadata={"scope": "full"},
+    )
+
+    result = AutoMLStepHandler(
+        SklearnTrainingEngine(repository_root=tmp_path),
+        feature_engine=DuckDbFeatureEngineeringEngine(repository_root=tmp_path),
+        planner=DuckDbAutoFEPlanner(tmp_path),
+    ).execute(
+        WorkflowStep.model_validate(step_payload["steps"][1]),
+        StepExecutionContext(
+            run_id="run-balanced-incremental-winner",
+            owner_id="owner",
+            is_dry_run=True,
+            upstream_relations={("de_1", "dataset"): source},
+        ),
+    )
+
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    resolution = model["metrics"]["optimization"]["parameter_resolution"]
+    assert model["algorithm"] == "sgd_classifier"
+    assert resolution["kind"] == "balanced_class_weight"
+    assert resolution["data_scope"] == "full_training"
+    assert sum(resolution["class_counts"].values()) == resolution["row_count"]
+    assert model["training_config"]["resolved_parameters"]["class_weight"] != "balanced"
 
 
 def test_joint_autofe_compares_model_specific_recipes_on_one_holdout(tmp_path) -> None:

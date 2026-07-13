@@ -36,6 +36,12 @@ export type AutoFeatureEngineeringDefinition = {
   min_category_frequency: number;
   max_one_hot_categories: number;
   max_frequency_categories: number;
+  numeric_feature_search: boolean;
+  winsorization_lower_quantile: number;
+  winsorization_upper_quantile: number;
+  signed_log_features: boolean;
+  low_variance_selection: boolean;
+  variance_threshold: number;
 };
 
 export type TrainingAlgorithm = string;
@@ -164,7 +170,7 @@ export const emptyTrainingDefinition = (): TrainingDefinition => ({
     enabled: false,
     strategy: "balanced",
     joint_search_enabled: true,
-    max_recipe_candidates: 3,
+    max_recipe_candidates: 6,
     row_id_column: "",
     excluded_columns: [],
     validation_size: 0.2,
@@ -174,7 +180,13 @@ export const emptyTrainingDefinition = (): TrainingDefinition => ({
     detect_identifier_columns: true,
     min_category_frequency: 2,
     max_one_hot_categories: 32,
-    max_frequency_categories: 500
+    max_frequency_categories: 500,
+    numeric_feature_search: true,
+    winsorization_lower_quantile: 0.01,
+    winsorization_upper_quantile: 0.99,
+    signed_log_features: true,
+    low_variance_selection: true,
+    variance_threshold: 0
   }
 });
 
@@ -357,7 +369,7 @@ function normalizeAutoFeatureEngineering(value: unknown): AutoFeatureEngineering
     enabled: raw.enabled === true,
     strategy: "balanced",
     joint_search_enabled: raw.joint_search_enabled !== false,
-    max_recipe_candidates: boundedNumber(raw.max_recipe_candidates, 3, 1, 3),
+    max_recipe_candidates: boundedNumber(raw.max_recipe_candidates, 6, 1, 9),
     row_id_column: String(raw.row_id_column ?? ""),
     excluded_columns: Array.isArray(raw.excluded_columns) ? raw.excluded_columns.map(String) : [],
     validation_size: boundedNumber(raw.validation_size, 0.2, 0.01, 0.49),
@@ -370,7 +382,17 @@ function normalizeAutoFeatureEngineering(value: unknown): AutoFeatureEngineering
     max_frequency_categories: Math.max(
       oneHot,
       boundedNumber(raw.max_frequency_categories, 500, 2, 500)
-    )
+    ),
+    numeric_feature_search: raw.numeric_feature_search !== false,
+    winsorization_lower_quantile: boundedNumber(
+      raw.winsorization_lower_quantile, 0.01, 0, 0.49
+    ),
+    winsorization_upper_quantile: boundedNumber(
+      raw.winsorization_upper_quantile, 0.99, 0.51, 1
+    ),
+    signed_log_features: raw.signed_log_features !== false,
+    low_variance_selection: raw.low_variance_selection !== false,
+    variance_threshold: boundedNumber(raw.variance_threshold, 0, 0, Number.MAX_SAFE_INTEGER)
   };
 }
 
@@ -473,6 +495,13 @@ export function validateTrainingConfiguration(definition: TrainingDefinition): s
   }
   if (definition.auto_feature_engineering.enabled && definition.optimization.mode !== "automl") {
     issues.push("AutoFE is available only with AutoML optimization.");
+  }
+  if (
+    definition.auto_feature_engineering.numeric_feature_search
+    && definition.auto_feature_engineering.winsorization_lower_quantile
+      >= definition.auto_feature_engineering.winsorization_upper_quantile
+  ) {
+    issues.push("AutoFE winsorization lower quantile must be below the upper quantile.");
   }
   if (definition.early_stopping && definition.optimization.mode !== "single") {
     issues.push("Training early stopping cannot be combined with hyperparameter optimization.");

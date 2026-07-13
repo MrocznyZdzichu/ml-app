@@ -303,9 +303,9 @@ Ta sekcja jest nadrzędną pamięcią projektową dla kolejnych prac nad AutoML.
 - Backendowy katalog zawiera około 52 wykonywalne algorytmy, zależnie od dostępności opcjonalnych bibliotek. AutoML przeszukuje rodziny estymatorów i ich warunkowe hiperparametry z limitami triali, czasu, pamięci i równoległości.
 - AutoFE profiluje pełny zadeklarowany zakres w DuckDB bez cichego samplingu. `approx_count_distinct` służy tylko decyzjom planistycznym, a przybliżenie i liczba wierszy są zapisywane.
 - Obecne transformacje obejmują medianową imputację liczb, opcjonalne wskaźniki braków, skalowanie, bounded one-hot, frequency encoding, proste cechy kalendarzowe oraz odrzucanie prawdopodobnych identyfikatorów i niewspieranych typów.
-- Joint search porównuje maksymalnie trzy profile: `scaled_dense`, `tree_unscaled`, `non_negative`. Optymalizuje parę `receptura FE + model/hiperparametry` na leakage-safe holdoucie albo fold-local CV.
+- Joint search porównuje bazowe profile `scaled_dense`, `tree_unscaled`, `non_negative` oraz, dla nowych draftów z włączonym numeric feature search, ich ograniczone warianty rozszerzone. Wariant rozszerzony fituje winsoryzację, tworzy signed-log1p features i wykonuje constant/low-variance selection, po czym stosuje skalowanie zgodne z capabilities modelu. Optymalizuje pełną ścieżkę `receptura FE + selektor + model/hiperparametry` na leakage-safe holdoucie albo fold-local CV.
 - Stan FE jest fitowany tylko na train i stosowany bez refitu do validation/test. Zwycięzca jest refitowany; utrwalane są receptura, fitted transform, Feature Manifest, model, metryki i provenance.
-- Zintegrowany AutoFE obsługuje jawne fold-local CV dla tabelarycznej klasyfikacji i regresji: surowe foldy są deterministyczne, a pełna receptura jest fitowana osobno na train każdego foldu. Wynik zapisuje fold scores, pełnozakresowe bounded OOF summary, liczebności, seed, etap przypisania, `recipe_hash` i fitted-state signatures. Run-scoped cache materializuje FE tylko raz per `recipe + raw fold + seed + input scope`, a kolejne triale ponownie używają fold Parquetów. Brakuje persisted row-level OOF predictions, group/time CV dla AutoFE, supervised feature selection, target encodingu, szerokiego feature generation, learned interactions, kategorii natywnych, ensemble/stackingu i wielokryterialnego wyboru championa.
+- Zintegrowany AutoFE obsługuje jawne fold-local CV dla tabelarycznej klasyfikacji i regresji: surowe foldy są deterministyczne, a pełna receptura wraz z winsoryzacją i selektorem wariancji jest fitowana osobno na train każdego foldu. Wynik zapisuje fold scores, pełnozakresowe bounded OOF summary, liczebności, seed, etap przypisania, wersjonowany `recipe_contract`, `recipe_hash` i fitted-state signatures. Run-scoped cache materializuje FE tylko raz per `recipe + raw fold + seed + input scope`, a kolejne triale ponownie używają fold Parquetów. Brakuje persisted row-level OOF predictions, group/time CV dla AutoFE, supervised feature selection, target encodingu, szerszego feature generation, learned interactions, kategorii natywnych, ensemble/stackingu i wielokryterialnego wyboru championa.
 - `max_trials` w joint AutoFE jest globalnym limitem dzielonym pomiędzy receptury, nie gwarantowaną liczbą ukończonych prób. Budżet czasu również jest dzielony; timeout może zakończyć recepturę wcześniej i zachować najlepszą udaną próbę. Koszt CV szacuj jako `ukończone triale × liczba foldów` fitów modeli plus przygotowanie FE i finalny refit; UI ma komunikować limit globalny, przydział per receptura, szacowane fity i faktycznie ukończone triale.
 - Kolumny techniczne platformy z prefiksem `__mlapp_`, w szczególności `__mlapp_cv_fold`, nigdy nie są kandydatami na cechy ani wejściami transformacji AutoFE. Przestrzeń AutoML może losować tylko kompletne, wykonywalne kombinacje parametrów; wariant HGBR `loss=quantile` pozostaje ręczny, dopóki search-space nie modeluje warunkowego parametru `quantile`.
 - Klasteryzacja, szeregi czasowe i zaawansowane przetwarzanie tekstu pozostają poza obecnym zakresem.
@@ -334,7 +334,7 @@ Ta sekcja jest nadrzędną pamięcią projektową dla kolejnych prac nad AutoML.
    - Row-level OOF predictions dla wszystkich przegranych triali nie są utrwalane, aby nie mnożyć dużych artefaktów; provenance jawnie zapisuje `predictions_persisted: false`. Ewentualne utrwalenie OOF zwycięzcy wymaga osobnego kontraktu artefaktu i polityki retencji. Group/time fold-local AutoFE jest osobnym rozszerzeniem po podstawie.
 
 2. **Etap B — formalna przestrzeń receptur i orkiestracja**
-   - Status: rozpoczęty. Każda obecna receptura ma deterministyczny `recipe_hash` zapisany w provenance; pozostałe elementy etapu nie są jeszcze wdrożone.
+   - Status: częściowo wdrożony. Receptury mają wersjonowany kontrakt `2.0`, deterministyczny `recipe_hash`, jawny wariant numeryczny i selektor, a leaderboard zapisuje pełną ścieżkę oraz kandydatów `skipped` przez minimalny budżet. Nadal należy rozdzielić profiler, generator, evaluator, scheduler i champion selector na osobne komponenty oraz dodać dwufazową eksplorację/pogłębianie i pruning.
    - Rozdzielić profiler/planner, generator kandydatów, evaluator, scheduler budżetu i champion selector za testowalnymi kontraktami.
    - Wprowadzić warunkową przestrzeń receptur i stabilny `recipe_hash`; generować różnorodne kandydatury zamiast tylko profili skalowania.
    - Budżet dzielić na eksplorację rodzin FE i pogłębianie najlepszych; używać Optuna/pruningu z zachowaniem audytu.
@@ -342,6 +342,7 @@ Ta sekcja jest nadrzędną pamięcią projektową dla kolejnych prac nad AutoML.
    - Kryterium zakończenia: leaderboard porównuje pełne ścieżki, a ten sam dataset/version, katalog, zakres i seed odtwarzają foldy i przestrzeń kandydatów.
 
 3. **Etap C — bogate, typowane feature generation**
+   - Status: rozpoczęty. Działa fold-local winsoryzacja oraz tworzenie signed-log1p features z fitted state, lineage przez Feature Manifest i identycznym zastosowaniem w scoringu. Pozostałe rodziny z listy poniżej nie są jeszcze wdrożone w AutoFE search space.
    - Numeryczne: warianty imputacji, missing indicators, clipping/winsorization, log/signed-log, Yeo-Johnson, quantile, binning oraz ograniczone polynomial/interactions.
    - Kategorie: one-hot, ordinal, frequency, hashing, a następnie leakage-safe out-of-fold target encoding z kontraktem smoothing/unknown.
    - Daty: kalendarz, cykliczność, elapsed time i jawnie skonfigurowane różnice; nie zgadywać semantyki czasu.
@@ -350,6 +351,7 @@ Ta sekcja jest nadrzędną pamięcią projektową dla kolejnych prac nad AutoML.
    - Kryterium zakończenia: wiele typowanych rodzin receptur daje się odtworzyć i identycznie zastosować w batch scoringu.
 
 4. **Etap D — feature selection i redukcja wymiaru**
+   - Status: rozpoczęty. Działa fold-local constant/low-variance filter jako element formalnej receptury; zapisuje wariancje, próg, wybrane i odrzucone kolumny w fitted state. Selekcja nadzorowana i redukcja wymiaru pozostają kolejnym zakresem.
    - Filtry: constant/variance, brakowość, redundancja/korelacje, univariate tests i mutual information.
    - Selekcja modelowa: L1, tree importance i ograniczone RFE; permutation importance głównie diagnostycznie lub z jawnym budżetem.
    - PCA/SVD tylko dla kompatybilnych reprezentacji, z fitted state i lineage komponentów.
@@ -380,7 +382,7 @@ Ta sekcja jest nadrzędną pamięcią projektową dla kolejnych prac nad AutoML.
 
 #### Reguły dla kolejnych zakresów
 
-- Fold-local foundation jest zakończony. Kolejne prace rozpocznij od najmniejszego pionowego zakresu Etapu B, a następnie rozwijaj C–F; target encoding, supervised selection, RFE, PCA i stacking muszą korzystać z istniejącego fold-local executora.
+- Fold-local foundation i pierwszy pionowy fragment B/C/D (recipe contract 2.0, winsoryzacja, signed-log1p, low-variance selection i leaderboard ścieżek) są zakończone. Kolejne prace powinny domknąć separację komponentów oraz dwufazowy scheduler Etapu B albo rozszerzyć typowane transformacje Etapu C; target encoding, supervised selection, RFE, PCA i stacking muszą korzystać z istniejącego fold-local executora.
 - Każdy etap dziel na małe pionowe zakresy: kontrakt backendowy, wykonanie, artifact/provenance, minimalne API/UI i testy end-to-end.
 - Nie dodawaj aktywnej kontrolki UI bez działającego backendu; funkcje planowane oznaczaj jako planowane.
 - Zachowuj kompatybilność opublikowanych PipelineVersion i modeli. Migracje draftów są deterministyczne; opublikowanych definicji nie mutuj.

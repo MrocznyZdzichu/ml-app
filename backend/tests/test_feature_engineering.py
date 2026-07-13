@@ -442,6 +442,87 @@ def test_feature_sql_expression_rejects_queries_and_external_reads() -> None:
             })
 
 
+def test_numeric_generation_and_variance_selection_fit_only_training_scope(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    source = repository_root / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    train_path = source / "numeric-train.csv"
+    validation_path = source / "numeric-validation.csv"
+    train_path.write_text(
+        "id,signal,constant,target\n1,0,5,0\n2,1,5,0\n3,2,5,1\n4,100,5,1\n",
+        encoding="utf-8",
+    )
+    validation_path.write_text(
+        "id,signal,constant,target\n5,1000,5,1\n",
+        encoding="utf-8",
+    )
+    repository = InMemoryDatasetRepository()
+    repository.add(_asset("numeric-train", "owner-1", train_path, 4))
+    repository.add(_asset("numeric-validation", "owner-1", validation_path, 1))
+    engine = DuckDbFeatureEngineeringEngine(
+        input_adapter=CsvDatasetInputAdapter(repository, repository_root),
+        repository_root=repository_root,
+    )
+    definition = FeatureEngineeringDefinition.model_validate({
+        "contract_version": "1.0",
+        "mode": "fit_transform",
+        "inputs": [
+            {"input_id": "training", "role": "training", "dataset_id": "numeric-train"},
+            {"input_id": "validation", "role": "validation", "dataset_id": "numeric-validation"},
+        ],
+        "feature_columns": ["signal", "constant"],
+        "target_column": "target",
+        "row_id_column": "id",
+        "transformations": [
+            {
+                "transform_id": "winsor",
+                "type": "winsorize_numeric",
+                "columns": ["signal", "constant"],
+                "config": {"lower_quantile": 0.25, "upper_quantile": 0.75},
+            },
+            {
+                "transform_id": "signed_log",
+                "type": "math_transform",
+                "columns": ["signal"],
+                "config": {"operation": "signed_log1p", "output_suffix": "__signed_log1p"},
+            },
+            {
+                "transform_id": "selector",
+                "type": "variance_filter",
+                "columns": ["signal", "constant", "signal__signed_log1p"],
+                "config": {"threshold": 0.0},
+            },
+        ],
+        "outputs": [
+            {"output_id": "training_features", "input_id": "training", "dataset_name": "Train", "business_case_role": "training"},
+            {"output_id": "validation_features", "input_id": "validation", "dataset_name": "Validation", "business_case_role": "validation"},
+        ],
+    })
+
+    result = engine.execute(
+        definition=definition,
+        run_id="numeric-generation",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+    state_item = next(item for item in result.output_manifest if item["output_id"] == "fitted_transform")
+    state = json.loads(Path(state_item["location_uri"].removeprefix("file://")).read_text(encoding="utf-8"))
+    assert state["transforms"]["winsor"]["columns"]["signal"] == {
+        "lower": 0.75,
+        "upper": 26.5,
+    }
+    assert state["transforms"]["selector"]["dropped_columns"] == ["constant"]
+    validation = next(item for item in result.output_manifest if item["output_id"] == "validation_features")
+    row = duckdb.connect().execute(
+        'SELECT signal, "signal__signed_log1p" FROM read_parquet(?)',
+        [validation["location_uri"].removeprefix("file://")],
+    ).fetchone()
+    assert row == (26.5, pytest.approx(3.3141860046725258))
+    assert "constant" not in {item["name"] for item in validation["schema"]}
+
+
 def test_workflow_accepts_de_followed_by_feature_engineering() -> None:
     workflow = {
         "contract_version": "2.0",

@@ -604,6 +604,51 @@ def test_supported_incremental_estimators_fit_full_input(
         assert scored.output_manifest[0]["score_contract"]["problem_type"] == "regression"
 
 
+def test_incremental_balanced_class_weight_uses_exact_full_scope_counts(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    source = repository / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    path = source / "imbalanced.parquet"
+    escaped_path = str(path).replace("'", "''")
+    duckdb.connect().execute(
+        "COPY (SELECT range AS row_id, range::DOUBLE AS x, "
+        "CASE WHEN range < 30 THEN 0 ELSE 1 END AS target FROM range(40)) "
+        f"TO '{escaped_path}' (FORMAT PARQUET)"
+    ).close()
+
+    result = SklearnTrainingEngine(repository).execute(
+        TrainingDefinition(
+            problem_type="binary_classification",
+            algorithm="sgd_classifier",
+            target_column="target",
+            feature_columns=["x"],
+            epochs=2,
+            batch_size=100,
+            parameters={"class_weight": "balanced"},
+        ),
+        _relation(path, 40),
+        None,
+        run_id="balanced-incremental",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    resolution = model["metrics"]["optimization"]["parameter_resolution"]
+    assert resolution["data_scope"] == "full_training"
+    assert resolution["row_count"] == 40
+    assert resolution["class_counts"] == {"0": 30, "1": 10}
+    assert resolution["resolved_weights"] == pytest.approx({"0": 2 / 3, "1": 2.0})
+    assert model["training_config"]["resolved_parameters"]["class_weight"] == pytest.approx({
+        "0": 2 / 3,
+        "1": 2.0,
+    })
+    assert result.processed_row_count == 80
+    assert any("exact full-training-scope" in warning for warning in result.warnings)
+
+
 def test_multiclass_scoring_persists_per_class_probabilities(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     source = repository / "users" / "owner-1" / "source"

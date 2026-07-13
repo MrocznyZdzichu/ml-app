@@ -35,6 +35,30 @@ class AutoFEPlan:
 
 
 @dataclass(frozen=True)
+class AutoFERecipeSpec:
+    """Versioned, engine-neutral identity of one complete AutoFE candidate."""
+
+    contract_version: str
+    capability_profile: str
+    numeric_variant: str
+    numeric_scaling: str
+    winsorization: dict[str, float] | None
+    signed_log_features: bool
+    feature_selector: dict[str, Any] | None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "contract_version": self.contract_version,
+            "capability_profile": self.capability_profile,
+            "numeric_variant": self.numeric_variant,
+            "numeric_scaling": self.numeric_scaling,
+            "winsorization": self.winsorization,
+            "signed_log_features": self.signed_log_features,
+            "feature_selector": self.feature_selector,
+        }
+
+
+@dataclass(frozen=True)
 class AutoFECrossValidationFold:
     fold: int
     training: SourceRelation
@@ -53,6 +77,12 @@ def model_aware_autofe_plans(
     candidate_algorithms: list[str],
     *,
     max_candidates: int = 3,
+    numeric_feature_search: bool = False,
+    winsorization_lower_quantile: float = 0.01,
+    winsorization_upper_quantile: float = 0.99,
+    signed_log_features: bool = True,
+    low_variance_selection: bool = True,
+    variance_threshold: float = 0.0,
 ) -> list[AutoFEPlan]:
     """Derive model-compatible recipes from one full-scope profiling pass."""
 
@@ -64,12 +94,25 @@ def model_aware_autofe_plans(
     ordered_profiles = [profile for profile in preferred_order if profile in grouped]
     ordered_profiles.extend(sorted(set(grouped) - set(ordered_profiles)))
     plans: list[AutoFEPlan] = []
-    for profile in ordered_profiles[:max_candidates]:
+    variants = ["baseline"]
+    if numeric_feature_search:
+        variants.append("robust_generated")
+    candidate_pairs = [
+        (profile, variant)
+        for variant in variants
+        for profile in ordered_profiles
+    ]
+    for profile, variant in candidate_pairs[:max_candidates]:
         definition = base_plan.definition.model_copy(deep=True)
         transformations = [
             transform
             for transform in definition.transformations
-            if transform.transform_id != "autofe_numeric_scaling"
+            if transform.transform_id not in {
+                "autofe_numeric_scaling",
+                "autofe_numeric_winsorization",
+                "autofe_numeric_signed_log",
+                "autofe_low_variance_selection",
+            }
         ]
         numeric_columns = [
             str(item["column"])
@@ -81,11 +124,43 @@ def model_aware_autofe_plans(
             "tree_unscaled": "none",
             "non_negative": "minmax",
         }.get(profile, "standard")
-        if numeric_columns and scaling != "none":
+        enhanced = variant == "robust_generated" and bool(numeric_columns)
+        generated_columns = []
+        if enhanced:
+            numeric_insert_at = next(
+                (
+                    index for index, item in enumerate(transformations)
+                    if item.type not in {"impute"}
+                ),
+                len(transformations),
+            )
+            transformations.insert(numeric_insert_at, FeatureTransformation(
+                transform_id="autofe_numeric_winsorization",
+                type="winsorize_numeric",
+                columns=numeric_columns,
+                config={
+                    "lower_quantile": winsorization_lower_quantile,
+                    "upper_quantile": winsorization_upper_quantile,
+                },
+            ))
+            if signed_log_features and profile != "non_negative":
+                generated_columns = [f"{column}__signed_log1p" for column in numeric_columns]
+                transformations.insert(numeric_insert_at + 1, FeatureTransformation(
+                    transform_id="autofe_numeric_signed_log",
+                    type="math_transform",
+                    columns=numeric_columns,
+                    config={
+                        "operation": "signed_log1p",
+                        "output_suffix": "__signed_log1p",
+                        "drop_original": False,
+                    },
+                ))
+        scale_columns = numeric_columns + generated_columns
+        if scale_columns and scaling != "none":
             scaling_transform = FeatureTransformation(
                 transform_id="autofe_numeric_scaling",
                 type="scale_numeric",
-                columns=numeric_columns,
+                columns=scale_columns,
                 config={
                     "method": scaling,
                     "output_suffix": "__scaled",
@@ -101,6 +176,17 @@ def model_aware_autofe_plans(
                 len(transformations),
             )
             transformations.insert(insert_at, scaling_transform)
+        selector_columns = (
+            [f"{column}__scaled" for column in scale_columns]
+            if scaling != "none" else scale_columns
+        )
+        if enhanced and low_variance_selection and selector_columns:
+            transformations.append(FeatureTransformation(
+                transform_id="autofe_low_variance_selection",
+                type="variance_filter",
+                columns=selector_columns,
+                config={"threshold": variance_threshold},
+            ))
         definition = definition.model_copy(update={"transformations": transformations})
         decisions = []
         for raw_decision in base_plan.provenance.get("column_decisions", []):
@@ -112,17 +198,37 @@ def model_aware_autofe_plans(
                     "non_negative": "impute_and_minmax_scale",
                 }.get(profile, decision.get("action"))
             decisions.append(decision)
+        recipe_id = profile if variant == "baseline" else f"{profile}__{variant}"
+        recipe_contract = AutoFERecipeSpec(
+            contract_version="2.0",
+            capability_profile=profile,
+            numeric_variant=variant,
+            numeric_scaling=scaling,
+            winsorization=(
+                {
+                    "lower_quantile": winsorization_lower_quantile,
+                    "upper_quantile": winsorization_upper_quantile,
+                }
+                if enhanced else None
+            ),
+            signed_log_features=bool(generated_columns),
+            feature_selector=(
+                {"type": "variance_filter", "threshold": variance_threshold}
+                if enhanced and low_variance_selection else None
+            ),
+        ).as_dict()
         provenance = {
             **base_plan.provenance,
-            "planner": "duckdb_model_aware_tabular_v2",
+            "planner": "duckdb_model_aware_tabular_v3",
             "recipe_search_mode": "joint_model_aware_holdout",
-            "recipe_id": profile,
+            "recipe_id": recipe_id,
             "feature_capability_profile": profile,
             "compatible_algorithms": list(grouped[profile]),
             "numeric_scaling": scaling,
+            "recipe_contract": recipe_contract,
             "column_decisions": decisions,
             "resolved_recipe": definition.model_dump(mode="json"),
-            "recipe_hash": _autofe_recipe_hash(definition),
+            "recipe_hash": _autofe_recipe_hash(definition, recipe_contract),
         }
         plans.append(AutoFEPlan(
             definition=definition,
@@ -335,8 +441,17 @@ class DuckDbAutoFEPlanner:
                 outputs=outputs,
                 evaluation=evaluation,
             )
+            recipe_contract = AutoFERecipeSpec(
+                contract_version="2.0",
+                capability_profile="balanced",
+                numeric_variant="baseline",
+                numeric_scaling=config.numeric_scaling,
+                winsorization=None,
+                signed_log_features=False,
+                feature_selector=None,
+            ).as_dict()
             provenance = {
-                "contract_version": "1.0",
+                "contract_version": "2.0",
                 "planner": "duckdb_rule_based_tabular_v1",
                 "strategy": config.strategy,
                 "supported_problem_scope": "classification_and_regression",
@@ -349,7 +464,8 @@ class DuckDbAutoFEPlanner:
                 "inherited_row_id_column": inherited_row_id_column,
                 "column_decisions": decisions,
                 "resolved_recipe": definition.model_dump(mode="json"),
-                "recipe_hash": _autofe_recipe_hash(definition),
+                "recipe_contract": recipe_contract,
+                "recipe_hash": _autofe_recipe_hash(definition, recipe_contract),
             }
             return AutoFEPlan(definition=definition, provenance=provenance, warnings=warnings)
         finally:
@@ -605,7 +721,10 @@ class DuckDbAutoFEPlanner:
         return column.lower().startswith("__mlapp_")
 
 
-def _autofe_recipe_hash(definition: FeatureEngineeringDefinition) -> str:
+def _autofe_recipe_hash(
+    definition: FeatureEngineeringDefinition,
+    recipe_contract: dict[str, Any] | None = None,
+) -> str:
     payload = {
         "contract_version": definition.contract_version,
         "feature_columns": definition.feature_columns,
@@ -616,6 +735,7 @@ def _autofe_recipe_hash(definition: FeatureEngineeringDefinition) -> str:
         "transformations": [
             item.model_dump(mode="json") for item in definition.transformations
         ],
+        "recipe_contract": recipe_contract or {},
     }
     canonical = json.dumps(
         payload,

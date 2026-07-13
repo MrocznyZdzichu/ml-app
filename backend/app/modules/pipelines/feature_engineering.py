@@ -60,6 +60,8 @@ class FeatureTransformation(BaseModel):
         "datetime_features",
         "numeric_interaction",
         "math_transform",
+        "winsorize_numeric",
+        "variance_filter",
         "sql_expression",
         "pca",
     ]
@@ -79,7 +81,9 @@ class FeatureTransformation(BaseModel):
             },
             "datetime_features": {"features", "cyclical", "drop_original"},
             "numeric_interaction": {"left", "right", "operator", "output_column", "zero_division"},
-            "math_transform": {"operation", "output_suffix"},
+            "math_transform": {"operation", "output_suffix", "drop_original"},
+            "winsorize_numeric": {"lower_quantile", "upper_quantile"},
+            "variance_filter": {"threshold"},
             "sql_expression": {"expression", "output_column", "output_type"},
             "pca": {"n_components", "output_prefix", "whiten", "drop_original"},
         }
@@ -122,12 +126,21 @@ class FeatureTransformation(BaseModel):
                 raise ValueError("Unsupported numeric interaction operator")
         if self.type == "math_transform":
             if self.config.get("operation", "square") not in {
-                "square", "sqrt", "exp", "log", "log1p", "abs",
+                "square", "sqrt", "exp", "log", "log1p", "signed_log1p", "abs",
             }:
                 raise ValueError("Unsupported mathematical feature transformation")
             suffix = self.config.get("output_suffix")
             if not isinstance(suffix, str) or not suffix:
                 raise ValueError("math_transform requires a non-empty output_suffix")
+        if self.type == "winsorize_numeric":
+            lower = float(self.config.get("lower_quantile", 0.01))
+            upper = float(self.config.get("upper_quantile", 0.99))
+            if not 0 <= lower < upper <= 1:
+                raise ValueError("Winsorization quantiles must satisfy 0 <= lower < upper <= 1")
+        if self.type == "variance_filter":
+            threshold = float(self.config.get("threshold", 0.0))
+            if threshold < 0:
+                raise ValueError("Variance threshold cannot be negative")
         if self.type == "sql_expression":
             output = self.config.get("output_column")
             if not isinstance(output, str) or not output:
@@ -649,8 +662,15 @@ class DuckDbFeatureEngineeringEngine:
             )
         schema_rows = connection.execute(f"DESCRIBE SELECT * FROM {identifier(current)}").fetchall()
         final_names = {str(row[0]) for row in schema_rows}
+        selector_dropped = {
+            str(column)
+            for state in transform_states.values()
+            if state.get("type") == "variance_filter"
+            for column in state.get("dropped_columns") or []
+        }
         missing_features = sorted(
             feature for feature in definition.feature_columns
+            if feature not in selector_dropped
             if feature not in final_names
             and not any(name.startswith(f"{feature}__") for name in final_names)
         )
@@ -769,6 +789,57 @@ class DuckDbFeatureEngineeringEngine:
                     "scale": json_safe(scale or 1),
                 }
             return {"type": transform.type, "method": method, "columns": columns}
+        if transform.type == "winsorize_numeric":
+            lower = float(transform.config.get("lower_quantile", 0.01))
+            upper = float(transform.config.get("upper_quantile", 0.99))
+            expressions = []
+            for column in transform.columns:
+                name = identifier(column)
+                expressions.extend([
+                    f"quantile_cont({name}, {lower})",
+                    f"quantile_cont({name}, {upper})",
+                ])
+            row = connection.execute(
+                f"SELECT {', '.join(expressions)} FROM {identifier(source)}"
+            ).fetchone()
+            bounds = {
+                column: {
+                    "lower": json_safe(row[index * 2]),
+                    "upper": json_safe(row[index * 2 + 1]),
+                }
+                for index, column in enumerate(transform.columns)
+            }
+            return {
+                "type": transform.type,
+                "lower_quantile": lower,
+                "upper_quantile": upper,
+                "columns": bounds,
+            }
+        if transform.type == "variance_filter":
+            threshold = float(transform.config.get("threshold", 0.0))
+            row = connection.execute(
+                "SELECT " + ", ".join(
+                    f"var_pop(CAST({identifier(column)} AS DOUBLE))"
+                    for column in transform.columns
+                ) + f" FROM {identifier(source)}"
+            ).fetchone()
+            variances = {
+                column: float(row[index] or 0.0)
+                for index, column in enumerate(transform.columns)
+            }
+            selected = [
+                column for column in transform.columns
+                if variances[column] > threshold
+            ]
+            return {
+                "type": transform.type,
+                "threshold": threshold,
+                "variances": variances,
+                "selected_columns": selected,
+                "dropped_columns": [
+                    column for column in transform.columns if column not in selected
+                ],
+            }
         if transform.type == "encode_categorical":
             method = str(transform.config.get("method", "ordinal"))
             minimum = int(transform.config.get("min_frequency", 1))
@@ -893,6 +964,25 @@ class DuckDbFeatureEngineeringEngine:
                     f"(CAST({identifier(column)} AS DOUBLE) - {sql_literal(params['center'])}) "
                     f"/ {sql_literal(params['scale'])} AS {identifier(column + suffix)}"
                 )
+        elif transform.type == "winsorize_numeric":
+            selection = []
+            for column in columns:
+                if column not in transform.columns:
+                    selection.append(identifier(column))
+                    continue
+                bounds = fitted["columns"][column]
+                lower = bounds.get("lower")
+                upper = bounds.get("upper")
+                if lower is None or upper is None:
+                    selection.append(identifier(column))
+                    continue
+                selection.append(
+                    f"greatest({sql_literal(lower)}, least({sql_literal(upper)}, "
+                    f"CAST({identifier(column)} AS DOUBLE))) AS {identifier(column)}"
+                )
+        elif transform.type == "variance_filter":
+            dropped = set(fitted.get("dropped_columns") or [])
+            selection = [identifier(column) for column in columns if column not in dropped]
         elif transform.type == "encode_categorical":
             method = fitted["method"]
             suffix = str(transform.config.get("output_suffix", ""))
@@ -987,8 +1077,14 @@ class DuckDbFeatureEngineeringEngine:
                     "exp": f"exp({value})",
                     "log": f"CASE WHEN {value} > 0 THEN ln({value}) ELSE NULL END",
                     "log1p": f"CASE WHEN {value} > -1 THEN ln(1 + {value}) ELSE NULL END",
+                    "signed_log1p": f"sign({value}) * ln(1 + abs({value}))",
                     "abs": f"abs({value})",
                 }[operation]
+                if bool(transform.config.get("drop_original", False)):
+                    selection = [
+                        selected for selected in selection
+                        if selected != identifier(column)
+                    ]
                 selection.append(
                     f"{expression} AS {identifier(column + suffix)}"
                 )
@@ -1145,7 +1241,10 @@ class DuckDbFeatureEngineeringEngine:
                 f"Feature transform '{transform.transform_id}' would overwrite columns: "
                 + ", ".join(collisions)
             )
-        numeric_transforms = {"scale_numeric", "numeric_interaction", "math_transform", "pca"}
+        numeric_transforms = {
+            "scale_numeric", "numeric_interaction", "math_transform", "pca",
+            "winsorize_numeric", "variance_filter",
+        }
         if transform.type in numeric_transforms:
             described = connection.execute(
                 f"DESCRIBE SELECT * FROM {identifier(source)}"

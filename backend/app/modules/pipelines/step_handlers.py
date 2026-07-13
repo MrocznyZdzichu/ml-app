@@ -316,19 +316,48 @@ class AutoMLStepHandler(TrainingStepHandler):
             list(definition.optimization.candidate_algorithms)
             or automl_algorithms(definition.problem_type)
         )
-        plans = (
+        configured_plans = (
             model_aware_autofe_plans(
                 plan,
                 candidate_algorithms,
-                max_candidates=min(
-                    definition.auto_feature_engineering.max_recipe_candidates,
-                    definition.optimization.max_trials,
-                    max(1, definition.optimization.timeout_seconds // 10),
+                max_candidates=definition.auto_feature_engineering.max_recipe_candidates,
+                numeric_feature_search=(
+                    definition.auto_feature_engineering.numeric_feature_search
+                ),
+                winsorization_lower_quantile=(
+                    definition.auto_feature_engineering.winsorization_lower_quantile
+                ),
+                winsorization_upper_quantile=(
+                    definition.auto_feature_engineering.winsorization_upper_quantile
+                ),
+                signed_log_features=(
+                    definition.auto_feature_engineering.signed_log_features
+                ),
+                low_variance_selection=(
+                    definition.auto_feature_engineering.low_variance_selection
+                ),
+                variance_threshold=(
+                    definition.auto_feature_engineering.variance_threshold
                 ),
             )
             if definition.auto_feature_engineering.joint_search_enabled
             else [plan]
         )
+        executable_recipe_limit = min(
+            len(configured_plans),
+            definition.optimization.max_trials,
+            max(1, definition.optimization.timeout_seconds // 10),
+        )
+        plans = configured_plans[:executable_recipe_limit]
+        skipped_recipe_candidates = [
+            {
+                "recipe_id": str(item.provenance.get("recipe_id") or "recipe"),
+                "recipe_hash": str(item.provenance.get("recipe_hash") or ""),
+                "status": "skipped",
+                "reason": "global trial or wall-clock budget cannot allocate a minimum evaluation",
+            }
+            for item in configured_plans[executable_recipe_limit:]
+        ]
         if not plans:
             raise ValueError("AutoFE found no model-aware recipe candidates")
         evaluated_algorithms = list(dict.fromkeys(
@@ -349,6 +378,11 @@ class AutoMLStepHandler(TrainingStepHandler):
             ]
         else:
             candidate_warnings = []
+        if skipped_recipe_candidates:
+            candidate_warnings.append(
+                f"AutoFE skipped {len(skipped_recipe_candidates)} recipe candidate(s) because "
+                "the global trial/time budget could not allocate a minimum evaluation"
+            )
         if cv_plan is not None and definition.resource_limits.max_parallel_jobs > 1:
             candidate_warnings.append(
                 "Fold-local AutoFE currently evaluates trials serially so run-scoped fitted "
@@ -359,6 +393,8 @@ class AutoMLStepHandler(TrainingStepHandler):
                 "message": "AutoFE created model-aware tabular recipe candidates",
                 "profiled_row_count": plan.provenance["profiled_row_count"],
                 "recipe_candidate_count": len(plans),
+                "configured_recipe_candidate_count": len(configured_plans),
+                "skipped_recipe_candidates": skipped_recipe_candidates,
                 "validation_source": plan.provenance["validation_source"],
                 "evaluated_algorithms": evaluated_algorithms,
                 "skipped_algorithms": skipped_algorithms,
@@ -478,6 +514,8 @@ class AutoMLStepHandler(TrainingStepHandler):
                 study_candidates.append({
                     "recipe": recipe,
                     "recipe_id": recipe_id,
+                    "recipe_hash": recipe.provenance.get("recipe_hash"),
+                    "recipe_contract": recipe.provenance.get("recipe_contract"),
                     "status": "succeeded",
                     "score": float(score),
                     "best_algorithm": str(optimization.get("best_algorithm") or model_manifest["algorithm"]),
@@ -517,6 +555,8 @@ class AutoMLStepHandler(TrainingStepHandler):
                 study_candidates.append({
                     "recipe": recipe,
                     "recipe_id": recipe_id,
+                    "recipe_hash": recipe.provenance.get("recipe_hash"),
+                    "recipe_contract": recipe.provenance.get("recipe_contract"),
                     "status": "failed",
                     "error": str(exc),
                     "score": None,
@@ -595,8 +635,10 @@ class AutoMLStepHandler(TrainingStepHandler):
             "primary_metric": definition.optimization.primary_metric,
             "trial_budget": definition.optimization.max_trials,
             "recipe_candidate_count": len(plans),
+            "configured_recipe_candidate_count": len(configured_plans),
             "successful_recipe_count": len(successful),
             "failed_recipe_count": len(study_candidates) - len(successful),
+            "skipped_recipe_count": len(skipped_recipe_candidates),
             "requested_algorithms": candidate_algorithms,
             "evaluated_algorithms": evaluated_algorithms,
             "skipped_algorithms": skipped_algorithms,
@@ -612,7 +654,7 @@ class AutoMLStepHandler(TrainingStepHandler):
                     if key != "recipe"
                 }
                 for item in study_candidates
-            ],
+            ] + skipped_recipe_candidates,
         }
         auto_fe_payload = {
             **selected_plan.provenance,

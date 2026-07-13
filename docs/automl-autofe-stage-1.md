@@ -1,4 +1,4 @@
-# AutoML + AutoFE — Stages 1–3
+# AutoML + AutoFE — Stages 1–4
 
 The first integrated AutoFE increment is limited to binary classification,
 multiclass classification, and regression over tabular data. Clustering and
@@ -67,6 +67,28 @@ the configured recipe cap excludes an estimator capability profile, the run
 records the skipped algorithms and emits an explicit warning instead of silently
 treating them as evaluated.
 
+Stage 4 introduces a versioned recipe contract (`contract_version: 2.0`) and a
+first bounded vertical slice of numeric feature generation and selection. New
+pipeline drafts can compare each model capability baseline with an enhanced
+recipe that:
+
+- learns full-scope or fold-train winsorization bounds;
+- adds signed `log1p` features while retaining the original numeric features;
+- applies the model-compatible numeric scaling profile; and
+- learns a constant/low-variance filter after feature generation.
+
+Every learned bound and selector decision is fitted only on the permitted
+training scope. Fold-local CV therefore learns distinct winsorization and
+variance states inside every fold, while validation, test and scoring reuse the
+pinned fitted state. The recipe contract, transform definition, selector,
+stable recipe hash, resolved features and outcome are recorded per leaderboard
+candidate. Candidates that cannot receive the minimum global trial/time budget
+are recorded as `skipped` rather than silently treated as evaluated.
+
+Definitions published before Stage 4 retain their historical search space.
+Numeric feature search is enabled explicitly for new UI drafts, and the recipe
+cap can be increased to compare baseline and enhanced capability profiles.
+
 ## Trial and time budgets
 
 `max_trials` is a cap for the complete joint study. It is divided between the
@@ -88,9 +110,10 @@ search-space contract, although users may still configure it explicitly.
 ## Honest limitations
 
 Current coordination changes numeric preprocessing by estimator capability and
-uses bounded one-hot/frequency encoding for all estimators. Native categorical
-execution, supervised feature selection, target encoding, and learned feature
-interactions are not claimed yet.
+uses bounded one-hot/frequency encoding for all estimators. The implemented
+selector is unsupervised constant/low-variance filtering; supervised feature
+selection, native categorical execution, target encoding, learned feature
+interactions and broader power/quantile transformations are not claimed yet.
 
 ## Fold-local cross-validation
 
