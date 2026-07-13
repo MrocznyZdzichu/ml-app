@@ -58,9 +58,10 @@ Classification outputs use an explicit ranking-score contract:
 The dataset metadata records class labels, positive class, score kind and column
 mapping so later analysis does not have to infer semantics from column names.
 
-Deployment, online endpoints, arbitrary Python, AutoML and distributed
-training are outside this increment. Leakage-safe refitting of Feature
-Engineering inside every cross-validation fold also remains future work.
+Deployment, online endpoints, arbitrary Python and distributed training remain
+outside this historical increment. AutoML and fold-local AutoFE were delivered
+in later increments and are documented in `automl-autofe-stage-1.md`; they are
+now executable lifecycle blocks rather than future placeholders.
 
 ## Custom lifecycle composition
 

@@ -57,10 +57,14 @@ folds. If no plan exists, deterministic stratified K-fold or K-fold splitting
 is available only for an input without fitted FE transformations.
 
 The engine refuses to report CV scores when upstream preprocessing state was
-fitted once on the complete training partition. Correct fold-local refitting
-requires the original FE recipe and is a separate execution capability; until
-then the user must provide an explicit validation partition. The platform never
-silently substitutes a sample or a potentially leaked score.
+fitted once on the complete training partition. Integrated AutoFE has a
+fold-local executor for tabular classification and regression: it starts from a
+pre-FE input, fits the complete generated recipe independently on every
+fold-train partition, transforms only that fold's validation rows, and refits
+the winner on the permitted full training scope. Arbitrary human-authored FE is
+not automatically replayed fold-locally and must use an explicit holdout unless
+it enters through this contract. The platform never silently substitutes a
+sample or a potentially leaked score.
 
 ## Full-data and resource behavior
 

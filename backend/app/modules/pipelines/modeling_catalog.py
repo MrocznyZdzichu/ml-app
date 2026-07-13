@@ -1665,7 +1665,10 @@ def _algorithm_specs() -> tuple[AlgorithmSpec, ...]:
                     ("squared_error", "absolute_error", "gamma", "poisson", "quantile"),
                     search={
                         "kind": "categorical",
-                        "values": ["squared_error", "absolute_error", "gamma", "poisson", "quantile"],
+                        # Quantile remains available for an explicitly configured model,
+                        # but AutoML must not sample it until the conditional `quantile`
+                        # parameter is represented in the search-space contract.
+                        "values": ["squared_error", "absolute_error", "gamma", "poisson"],
                     },
                 ),
             ),

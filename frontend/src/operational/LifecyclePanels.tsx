@@ -469,6 +469,22 @@ function TrainingConfigSummary({ config }: { config: Record<string, unknown> }) 
   const parameters = objectValue(config.parameters);
   const optimization = objectValue(config.optimization);
   const resourceLimits = objectValue(config.resource_limits);
+  const autoFE = objectValue(config.auto_feature_engineering);
+  const jointStudy = objectValue(autoFE.joint_study);
+  const crossValidation = objectValue(jointStudy.cross_validation);
+  const candidates = Array.isArray(jointStudy.candidates)
+    ? jointStudy.candidates.filter((item): item is Record<string, unknown> => Boolean(item)
+      && typeof item === "object" && !Array.isArray(item))
+    : [];
+  const selectedCandidate = candidates.find((item) => item.recipe_id === jointStudy.selected_recipe_id);
+  const selectedOOF = objectValue(selectedCandidate?.selected_oof_summary);
+  const foldCache = objectValue(selectedCandidate?.fold_cache);
+  const completedJointTrials = candidates.reduce((total, candidate) => {
+    const candidateOptimization = objectValue(candidate.optimization);
+    return total + (typeof candidateOptimization.trial_count === "number"
+      ? candidateOptimization.trial_count
+      : 0);
+  }, 0);
   const basic = {
     algorithm: config.algorithm,
     problem_type: config.problem_type,
@@ -500,6 +516,29 @@ function TrainingConfigSummary({ config }: { config: Record<string, unknown> }) 
       <h4>Resource limits</h4>
       <KeyValueGrid values={resourceLimits} empty="No resource limits recorded." />
     </section>
+    {Object.keys(jointStudy).length > 0 && <section>
+      <h4>AutoFE experiment</h4>
+      <KeyValueGrid values={{
+        mode: jointStudy.mode,
+        selected_recipe: jointStudy.selected_recipe_id,
+        selected_algorithm: jointStudy.selected_algorithm,
+        best_score: jointStudy.best_score,
+        recipe_candidates: jointStudy.recipe_candidate_count,
+        configured_trial_budget: jointStudy.trial_budget,
+        completed_trials_all_recipes: completedJointTrials,
+        cv_folds: crossValidation.fold_count,
+        cv_scope_rows: crossValidation.planned_row_count,
+        oof_predictions: selectedOOF.prediction_count,
+        oof_coverage: selectedOOF.coverage,
+        oof_fold_score_std: selectedOOF.fold_score_std,
+        fold_cache_hits: foldCache.hit_count,
+        fold_cache_misses: foldCache.miss_count,
+      }} empty="No AutoFE experiment provenance recorded." />
+      {selectedOOF.predictions_persisted === false && <div className="training-help">
+        OOF metrics cover the full training scope. Row-level candidate predictions remain temporary and are not
+        persisted; only bounded fold summaries are retained.
+      </div>}
+    </section>}
   </div>;
 }
 
@@ -528,6 +567,10 @@ function SearchDetailsTab({ optimization }: { optimization: OptimizationSummary 
     {optimization.stopped_by_max_trials && <div className="training-warning">
       This search was capped by Maximum trials = {optimization.max_trials}. Increase the cap to evaluate more
       combinations, or narrow the search space.
+    </div>}
+    {optimization.timed_out && <div className="training-warning">
+      The time budget expired after {optimization.trial_count ?? 0} of up to {optimization.max_trials ?? optimization.planned_trial_count ?? "—"} allocated trials.
+      Maximum trials is a cap, not a promise that every trial will finish. The best successful trial was retained.
     </div>}
     <h4>Winning trial</h4>
     <ParameterList parameters={optimization.best_parameters ?? {}} empty="Best parameters were not recorded." />

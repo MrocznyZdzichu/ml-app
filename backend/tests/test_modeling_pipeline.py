@@ -47,6 +47,18 @@ def test_catalog_exposes_conditional_tuning_for_perceptron_and_sgd() -> None:
     assert sgd["power_t"]["active_when"] == {"learning_rate": ["invscaling"]}
 
 
+def test_hist_gradient_boosting_automl_does_not_sample_incomplete_quantile_loss() -> None:
+    catalog = training_catalog()
+    algorithm = next(
+        item for item in catalog["algorithms"]
+        if item["id"] == "hist_gradient_boosting_regressor"
+    )
+    loss = next(item for item in algorithm["parameters"] if item["id"] == "loss")
+
+    assert "quantile" in loss["options"]
+    assert "quantile" not in loss["search"]["values"]
+
+
 def test_conditional_search_space_does_not_expand_inactive_sgd_parameters() -> None:
     engine = ModelOptimizationEngine()
     raw_space = curated_search_space("sgd_classifier")

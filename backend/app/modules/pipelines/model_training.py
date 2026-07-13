@@ -38,6 +38,7 @@ OptimizationMode = Literal[
     "automl",
 ]
 ValidationStrategy = Literal["auto", "holdout", "cross_validation"]
+OptimizationScoreCallback = Callable[[Any, str], tuple[float, list[float]]]
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,7 @@ class ModelOptimizationEngine:
         cv_strategy: str = "",
         emit_event: Callable[[str, dict[str, Any]], None] | None = None,
         is_cancel_requested: Callable[[], bool] | None = None,
+        score_callback: OptimizationScoreCallback | None = None,
     ) -> TrainingFitResult:
         metric = (
             default_metric(problem_type)
@@ -162,6 +164,7 @@ class ModelOptimizationEngine:
                 cv_strategy=cv_strategy,
                 emit_event=emit_event,
                 is_cancel_requested=is_cancel_requested,
+                score_callback=score_callback,
             )
         return self._fit_optuna(
             algorithm=algorithm,
@@ -186,6 +189,7 @@ class ModelOptimizationEngine:
             cv_strategy=cv_strategy,
             emit_event=emit_event,
             is_cancel_requested=is_cancel_requested,
+            score_callback=score_callback,
         )
 
     def _fit_enumerated(
@@ -212,6 +216,7 @@ class ModelOptimizationEngine:
         cv_strategy: str,
         emit_event: Callable[[str, dict[str, Any]], None] | None,
         is_cancel_requested: Callable[[], bool] | None,
+        score_callback: OptimizationScoreCallback | None,
     ) -> TrainingFitResult:
         raw_space = self._resolved_search_space(algorithm, search_space)
         space = {
@@ -308,6 +313,7 @@ class ModelOptimizationEngine:
                     y_validation=y_validation,
                     cv_fold_assignments=cv_fold_assignments,
                     cv_strategy=cv_strategy,
+                    score_callback=score_callback,
                 )
                 normalized = validate_algorithm_parameters(
                     algorithm, problem_type, merged
@@ -470,6 +476,7 @@ class ModelOptimizationEngine:
         cv_strategy: str,
         emit_event: Callable[[str, dict[str, Any]], None] | None,
         is_cancel_requested: Callable[[], bool] | None,
+        score_callback: OptimizationScoreCallback | None,
     ) -> TrainingFitResult:
         import optuna
 
@@ -533,7 +540,8 @@ class ModelOptimizationEngine:
                 x_validation=x_validation,
                 y_validation=y_validation,
                 cv_fold_assignments=cv_fold_assignments,
-                cv_strategy=cv_strategy,
+                    cv_strategy=cv_strategy,
+                    score_callback=score_callback,
             )
             trial.set_user_attr("fold_scores", fold_scores)
             return score
@@ -741,7 +749,10 @@ class ModelOptimizationEngine:
         y_validation: np.ndarray | None,
         cv_fold_assignments: np.ndarray | None,
         cv_strategy: str,
+        score_callback: OptimizationScoreCallback | None = None,
     ) -> tuple[float, list[float]]:
+        if score_callback is not None:
+            return score_callback(estimator, metric)
         scorer = get_scorer(metric)
         if validation_strategy == "holdout":
             if x_validation is None or y_validation is None:

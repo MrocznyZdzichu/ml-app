@@ -536,6 +536,7 @@ function BusinessCasesPanel({
   const [bcDatasetHistory, setBcDatasetHistory] = useState<DataAsset | null>(null);
   const [bcPipelineHistory, setBcPipelineHistory] = useState<Pipeline | null>(null);
   const [bcRunDialog, setBcRunDialog] = useState<{
+    sessionId: string;
     pipeline: Pipeline;
     version: PipelineVersion;
     inputs: PipelineRunInput[];
@@ -543,8 +544,8 @@ function BusinessCasesPanel({
   } | null>(null);
   const [bcRunSelections, setBcRunSelections] = useState<Record<string, string>>({});
   const [bcRunModelSelections, setBcRunModelSelections] = useState<Record<string, string>>({});
-  const [bcRunResult, setBcRunResult] = useState<PipelineRun | null>(null);
-  const [bcRunSubmitting, setBcRunSubmitting] = useState(false);
+  const [bcRunResults, setBcRunResults] = useState<Record<string, PipelineRun>>({});
+  const [bcRunSubmittingSessions, setBcRunSubmittingSessions] = useState<Record<string, boolean>>({});
   const [bcSelectedRunDetails, setBcSelectedRunDetails] = useState<PipelineRun | null>(null);
   const [bcRunsPipelineId, setBcRunsPipelineId] = useState<string | null>(null);
   const [bcRunsRefreshKey, setBcRunsRefreshKey] = useState(0);
@@ -886,8 +887,16 @@ function BusinessCasesPanel({
       const runModels = resolvePipelineRunModels(normalized, models);
       setBcRunSelections({});
       setBcRunModelSelections(Object.fromEntries(runModels.map((model) => [model.key, model.versions[0]?.id ?? ""])));
-      setBcRunResult(null);
-      setBcRunDialog({ pipeline, version: published, inputs, models: runModels });
+      setBcRunResults((current) => Object.fromEntries(
+        Object.entries(current).filter(([, run]) => ["queued", "running"].includes(run.status))
+      ));
+      setBcRunDialog({
+        sessionId: crypto.randomUUID(),
+        pipeline,
+        version: published,
+        inputs,
+        models: runModels
+      });
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not prepare pipeline run");
     }
@@ -896,7 +905,9 @@ function BusinessCasesPanel({
   async function submitBcPipelineRun(event: FormEvent) {
     event.preventDefault();
     if (!bcRunDialog) return;
-    const missing = bcRunDialog.inputs.find(
+    const dialog = bcRunDialog;
+    const sessionId = dialog.sessionId;
+    const missing = dialog.inputs.find(
       (input) => requiresRuntimeDatasetSelection(input.policy)
         && !bcRunSelections[input.key]
     );
@@ -904,22 +915,22 @@ function BusinessCasesPanel({
       setNotice(`Select a version for ${missing.name}`);
       return;
     }
-    setBcRunSubmitting(true);
+    setBcRunSubmittingSessions((current) => ({ ...current, [sessionId]: true }));
     try {
-      let run = await api.runPipeline(bcRunDialog.pipeline.id, {
-        pipeline_version_id: bcRunDialog.version.id,
+      let run = await api.runPipeline(dialog.pipeline.id, {
+        pipeline_version_id: dialog.version.id,
         trigger_type: "manual",
         is_dry_run: false,
         runtime_parameters: {},
         input_versions: bcRunSelections,
         model_versions: bcRunModelSelections
       });
-      setBcRunResult(run);
+      setBcRunResults((current) => ({ ...current, [sessionId]: run }));
       setNotice(`Pipeline run ${shortId(run.id)} queued`);
       while (["queued", "running"].includes(run.status)) {
         await new Promise((resolve) => window.setTimeout(resolve, 750));
-        run = await api.getPipelineRun(bcRunDialog.pipeline.id, run.id);
-        setBcRunResult(run);
+        run = await api.getPipelineRun(dialog.pipeline.id, run.id);
+        setBcRunResults((current) => ({ ...current, [sessionId]: run }));
       }
       await onRefresh();
       setNotice(
@@ -930,9 +941,14 @@ function BusinessCasesPanel({
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not start pipeline run");
     } finally {
-      setBcRunSubmitting(false);
+      setBcRunSubmittingSessions((current) => ({ ...current, [sessionId]: false }));
     }
   }
+
+  const currentBcRunResult = bcRunDialog ? bcRunResults[bcRunDialog.sessionId] ?? null : null;
+  const currentBcRunSubmitting = bcRunDialog
+    ? Boolean(bcRunSubmittingSessions[bcRunDialog.sessionId])
+    : false;
 
   return (
     <section className="business-case-screen">
@@ -1601,23 +1617,23 @@ function BusinessCasesPanel({
                 <small>The selected immutable model version is recorded with this run.</small>
               </label>
             ))}
-            {bcRunResult && (
-              <div className={`catalog-run-monitor ${bcRunResult.status}`}>
-                <div><strong>{bcRunResult.status}</strong>
-                  <span>Run {shortId(bcRunResult.id)} · {bcRunResult.processed_row_count ?? 0} processed rows</span></div>
+            {currentBcRunResult && (
+              <div className={`catalog-run-monitor ${currentBcRunResult.status}`}>
+                <div><strong>{currentBcRunResult.status}</strong>
+                  <span>Run {shortId(currentBcRunResult.id)} · {currentBcRunResult.processed_row_count ?? 0} processed rows</span></div>
               </div>
             )}
-            {bcRunResult && (
-              <button className="secondary-button" type="button" onClick={() => setBcSelectedRunDetails(bcRunResult)}>
+            {currentBcRunResult && (
+              <button className="secondary-button" type="button" onClick={() => setBcSelectedRunDetails(currentBcRunResult)}>
                 <History size={15} /> Logs, details and cancel
               </button>
             )}
             <div className="modal-actions">
               <button className="secondary-button" type="button"
-                onClick={() => setBcRunDialog(null)}>{bcRunSubmitting ? "Run in background" : "Close"}</button>
-              {!bcRunResult && (
-                <button className="primary-button" type="submit" disabled={bcRunSubmitting}>
-                  <Play size={15} /> {bcRunSubmitting ? "Running…" : "Run published version"}
+                onClick={() => setBcRunDialog(null)}>{currentBcRunSubmitting ? "Run in background" : "Close"}</button>
+              {!currentBcRunResult && (
+                <button className="primary-button" type="submit" disabled={currentBcRunSubmitting}>
+                  <Play size={15} /> {currentBcRunSubmitting ? "Starting…" : "Run published version"}
                 </button>
               )}
             </div>

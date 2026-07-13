@@ -223,6 +223,18 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
     && (optimization.validation_strategy === "cross_validation"
       || (optimization.validation_strategy === "auto" && !defaults.has_validation && !autoFEHasHoldout));
   const usesUpstreamFoldPlan = optimizationUsesCrossValidation && defaults.has_cv_plan;
+  const estimatedRecipeCount = definition.auto_feature_engineering.enabled
+    && definition.auto_feature_engineering.joint_search_enabled
+    ? Math.max(1, definition.auto_feature_engineering.max_recipe_candidates)
+    : 1;
+  const estimatedFoldCount = optimizationUsesCrossValidation
+    ? Math.max(2, usesUpstreamFoldPlan ? defaults.cv_folds : optimization.cv_folds)
+    : 1;
+  const estimatedFits = optimization.max_trials * estimatedFoldCount;
+  const trialsPerRecipe = optimization.max_trials / estimatedRecipeCount;
+  const trialAllocation = Number.isInteger(trialsPerRecipe)
+    ? `${trialsPerRecipe}`
+    : `${Math.floor(trialsPerRecipe)}–${Math.ceil(trialsPerRecipe)}`;
   return <div className="modeling-modal-content">
     <section className="training-config-section">
       <header><div><strong>Optimization strategy</strong>
@@ -239,7 +251,8 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
           <span><strong>{mode.label}</strong><small>{mode.description}</small></span>
         </label>)}
       </div>
-      {optimizationUsesCrossValidation && defaults.has_fitted_transformations &&
+      {optimizationUsesCrossValidation && defaults.has_fitted_transformations
+        && !definition.auto_feature_engineering.enabled &&
         <div className="training-warning"><AlertTriangle size={16} /><span>
           Leakage-safe CV cannot reuse preprocessing fitted on the whole training partition.
           Add an explicit validation output and use holdout optimization. The backend rejects
@@ -257,8 +270,11 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
           })}>
           <option value="auto">Auto — holdout if present, otherwise CV</option>
           <option value="holdout" disabled={!defaults.has_validation && !autoFEHasHoldout}>Validation holdout</option>
-          <option value="cross_validation" disabled={definition.auto_feature_engineering.enabled}>
-            Cross-validation on training data
+          <option value="cross_validation"
+            disabled={definition.auto_feature_engineering.enabled && defaults.has_fitted_transformations}>
+            {definition.auto_feature_engineering.enabled
+              ? "Fold-local cross-validation"
+              : "Cross-validation on training data"}
           </option>
         </select></label>
         <label>Primary metric<select value={optimization.primary_metric} disabled={disabled}
@@ -285,6 +301,18 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
           Maximum trials caps sampled candidates for random, Optuna and AutoML. For grid search, Maximum grid
           combinations can go up to 100,000 and caps the deterministic grid. The time budget is a hard wall-clock
           safety limit.
+        </span>
+      </div>}
+      {optimization.mode !== "single" && <div className="training-help">
+        <strong>Estimated search cost</strong>
+        <span>
+          <strong>{optimization.max_trials}</strong> is the maximum for the whole search, not a guaranteed completed
+          count. With up to <strong>{estimatedRecipeCount}</strong> FE {estimatedRecipeCount === 1 ? "recipe" : "recipes"},
+          the budget is allocated as about <strong>{trialAllocation} trials per recipe</strong>. {estimatedFoldCount > 1
+            ? <>Each trial is evaluated on <strong>{estimatedFoldCount} folds</strong>, for up to approximately <strong>{estimatedFits} model fits</strong>.</>
+            : <>Each trial requires one validation fit, for up to approximately <strong>{estimatedFits} model fits</strong>.</>}
+          {" "}The run can complete fewer trials when the time budget expires; the result keeps the best successful
+          trial found so far.
         </span>
       </div>}
       {optimization.mode === "automl" && <fieldset className="automl-candidates">
@@ -366,11 +394,11 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
             disabled={disabled}
             onChange={(event) => updateAutoFE({ joint_search_enabled: event.target.checked })} />
           <span><strong>Joint FE + model search</strong>
-            <small>Compare complete model-aware FE recipe and algorithm pairs on the same leakage-safe holdout.</small>
+            <small>Compare complete model-aware FE recipe and algorithm pairs on the same holdout or fold-local CV plan.</small>
           </span>
         </label>
         <div className="step-grid">
-          <ColumnSelect label="Stable row ID for generated holdout"
+          <ColumnSelect label="Stable row ID for holdout or CV folds"
             value={definition.auto_feature_engineering.row_id_column}
             columns={defaults.available_columns.filter((item) => item !== definition.target_column)}
             disabled={disabled || defaults.has_validation}
@@ -402,11 +430,12 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
         </div>
         {!defaults.has_validation && !definition.auto_feature_engineering.row_id_column
           && <div className="training-warning"><AlertTriangle size={16} /><span>
-            Choose a stable row ID so AutoFE can create a deterministic leakage-safe holdout.
+            Choose a stable row ID so AutoFE can create deterministic leakage-safe holdout or CV folds.
           </span></div>}
         <div className="training-help"><strong>Model-aware AutoFE scope</strong><span>
           Classification and regression only. Joint search coordinates scaling and bounded categorical preparation
-          with estimator capabilities, then refits the winning recipe and model. Fold-local CV remains a later stage.
+          with estimator capabilities, then refits the winning recipe and model. Cross-validation fits every learned
+          FE transformation independently inside each fold and requires a pre-FE input.
         </span></div>
       </>}
     </section>}

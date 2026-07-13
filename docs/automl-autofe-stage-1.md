@@ -1,4 +1,4 @@
-# AutoML + AutoFE — Stages 1 and 2
+# AutoML + AutoFE — Stages 1–3
 
 The first integrated AutoFE increment is limited to binary classification,
 multiclass classification, and regression over tabular data. Clustering and
@@ -11,9 +11,10 @@ step consumes the Data Engineering output before a feature matrix exists. It:
 
 1. profiles the complete declared training scope in DuckDB;
 2. derives bounded model-aware recipes from one profiling pass;
-3. creates or consumes an explicit validation holdout before fitting state;
-4. fits the recipe only on the training partition;
-5. transforms validation with that same fitted state;
+3. creates or consumes an explicit validation holdout, or creates deterministic
+   raw folds for explicit fold-local cross-validation;
+4. fits the recipe only on the permitted training partition or fold-train rows;
+5. transforms validation or fold-validation rows with that same fitted state;
 6. jointly compares recipe, estimator-family and hyperparameter candidates;
 7. refits the winning recipe and estimator on the complete training partition;
 8. resolves the runtime Feature Manifest and persists the fitted transform,
@@ -27,7 +28,8 @@ approximation together with the number of profiled rows.
 If an explicit validation input is not connected, the definition must provide
 a stable `row_id_column`. Classification uses a deterministic stratified
 holdout and regression uses a deterministic random holdout. The target and row
-ID are excluded from estimator features.
+ID and platform-owned `__mlapp_*` technical columns are excluded from estimator
+features and AutoFE transformations.
 
 ## Planner and model capability profiles
 
@@ -65,6 +67,24 @@ the configured recipe cap excludes an estimator capability profile, the run
 records the skipped algorithms and emits an explicit warning instead of silently
 treating them as evaluated.
 
+## Trial and time budgets
+
+`max_trials` is a cap for the complete joint study. It is divided between the
+selected FE recipe profiles; it is not a guaranteed number of completed trials
+per profile. The wall-clock budget is divided as well. A recipe may therefore
+finish fewer allocated trials when its timeout expires, while retaining its
+best successful trial. With cross-validation, the approximate model-fit cost is
+`completed trials × fold count`, plus fold-local FE preparation and the final
+winner refit.
+
+The editor reports the global cap, approximate per-recipe allocation, fold count
+and estimated maximum fits. Result views report the configured joint budget and
+completed trials across recipes, and distinguish timeout from reaching the
+trial cap. Search spaces contain only complete executable combinations. For
+example, histogram gradient boosting does not automatically sample
+`loss=quantile` until the conditional `quantile` value is represented in the
+search-space contract, although users may still configure it explicitly.
+
 ## Honest limitations
 
 Current coordination changes numeric preprocessing by estimator capability and
@@ -72,10 +92,45 @@ uses bounded one-hot/frequency encoding for all estimators. Native categorical
 execution, supervised feature selection, target encoding, and learned feature
 interactions are not claimed yet.
 
-Cross-validation is rejected while integrated AutoFE is enabled. Leakage-safe
-CV requires fitting a fresh feature recipe inside every fold. Fold-local FE is
-the next execution stage; current joint comparison uses one leakage-safe
-holdout shared by every candidate.
+## Fold-local cross-validation
+
+Integrated AutoFE supports explicit `cross_validation` for tabular
+classification and regression. Fold assignment is deterministic, uses the
+stable row ID and configured seed, and happens on the raw pre-FE relation.
+Classification uses stratified folds; regression uses deterministic K-fold.
+
+For every estimator/hyperparameter candidate and every fold, the engine fits a
+fresh copy of the complete FE recipe only on fold training rows, transforms the
+fold validation rows with that fitted state, and records the fold score. The
+same raw folds are reused for every recipe and model candidate. After selection,
+the winning recipe and estimator are refitted on the complete training scope.
+The study provenance records fold counts, row counts, seed, assignment stage,
+recipe hashes, fold scores, and resolved feature counts.
+
+Fold-local feature matrices are cached inside the candidate run. The cache key
+binds the recipe hash, raw train/validation fold relations, fold number and
+seed. The first trial materializes each fold once; subsequent model and
+hyperparameter trials reuse those Parquet outputs. Cache hits/misses and keys
+are recorded, and the complete candidate directory is removed when its recipe
+study ends.
+
+Every successful trial records a bounded full-training-scope OOF summary:
+prediction coverage/count, fold count, mean, row-weighted mean, standard
+deviation and min/max fold score. Row-level predictions for every losing trial
+are deliberately not persisted because that would multiply dataset-sized
+artifacts by trials and recipes. Provenance explicitly reports
+`predictions_persisted: false`; persisting only the winning OOF dataset remains
+a separate artifact-retention decision.
+
+Existing holdout definitions remain unchanged. Human-authored FE pipelines also
+remain supported; if their transformations were fitted on the complete training
+partition, they cannot be reused for CV. Fold-local AutoFE therefore requires a
+pre-FE input (normally the Data Engineering output). This guard prevents a
+globally fitted human recipe from being misreported as leakage-safe CV.
+
+Fold-local trials currently run serially for deterministic run-directory and
+memory isolation. Group/time folds, a retained winning OOF dataset, and
+fold-local execution of arbitrary human-authored FE recipes remain future work.
 
 ## Reusing Data Engineering in AutoML drafts
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,20 @@ class AutoFEPlan:
     definition: FeatureEngineeringDefinition
     provenance: dict[str, Any]
     warnings: list[str]
+
+
+@dataclass(frozen=True)
+class AutoFECrossValidationFold:
+    fold: int
+    training: SourceRelation
+    validation: SourceRelation
+
+
+@dataclass(frozen=True)
+class AutoFECrossValidationPlan:
+    strategy: str
+    folds: list[AutoFECrossValidationFold]
+    provenance: dict[str, Any]
 
 
 def model_aware_autofe_plans(
@@ -106,6 +122,7 @@ def model_aware_autofe_plans(
             "numeric_scaling": scaling,
             "column_decisions": decisions,
             "resolved_recipe": definition.model_dump(mode="json"),
+            "recipe_hash": _autofe_recipe_hash(definition),
         }
         plans.append(AutoFEPlan(
             definition=definition,
@@ -155,6 +172,7 @@ class DuckDbAutoFEPlanner:
                 training_definition.target_column,
                 row_id_column,
                 *config.excluded_columns,
+                *(name for name in schema if self._is_internal_column(name)),
             }
             requested = (
                 list(training_definition.feature_columns)
@@ -243,11 +261,28 @@ class DuckDbAutoFEPlanner:
                 config=config,
             )
             inputs = [FeatureInput(input_id="training", role="training")]
+            uses_fold_local_cv = (
+                training_definition.optimization.validation_strategy == "cross_validation"
+            )
             if validation is not None:
                 inputs.append(FeatureInput(input_id="validation", role="validation"))
                 output_input_ids = {"training": "training", "validation": "validation"}
                 evaluation = EvaluationConfig(split_strategy="predefined")
-                validation_source = "explicit"
+                validation_source = (
+                    "explicit_post_cv_evaluation" if uses_fold_local_cv else "explicit"
+                )
+            elif uses_fold_local_cv:
+                if not row_id_column:
+                    raise ValueError(
+                        "Fold-local AutoFE requires a stable row_id_column"
+                    )
+                if row_id_column not in schema:
+                    raise ValueError(
+                        f"AutoFE row ID column '{row_id_column}' was not found"
+                    )
+                output_input_ids = {"training": "training"}
+                evaluation = EvaluationConfig(split_strategy="predefined")
+                validation_source = "fold_local_cross_validation"
             else:
                 if not row_id_column:
                     raise ValueError(
@@ -314,10 +349,136 @@ class DuckDbAutoFEPlanner:
                 "inherited_row_id_column": inherited_row_id_column,
                 "column_decisions": decisions,
                 "resolved_recipe": definition.model_dump(mode="json"),
+                "recipe_hash": _autofe_recipe_hash(definition),
             }
             return AutoFEPlan(definition=definition, provenance=provenance, warnings=warnings)
         finally:
             connection.close()
+
+    def cross_validation_plan(
+        self,
+        *,
+        training: SourceRelation,
+        training_definition: Any,
+        run_id: str,
+        owner_id: str,
+    ) -> AutoFECrossValidationPlan:
+        """Build deterministic raw-data folds before any learned FE is fitted."""
+
+        config = training_definition.auto_feature_engineering
+        row_id_column = config.row_id_column or self._upstream_row_id_column_from_relation(
+            training
+        )
+        if not row_id_column:
+            raise ValueError(
+                "Fold-local AutoFE requires a stable row_id_column so every recipe "
+                "uses the same reproducible folds"
+            )
+        fold_count = int(training_definition.optimization.cv_folds)
+        seed = int(training_definition.random_seed)
+        temp = (
+            self.repository_root / "users" / owner_id / "pipeline-runs" / run_id
+            / ".autofe-cv-plan"
+        )
+        connection = configured_duckdb_connection(temp)
+        try:
+            schema_rows = connection.execute(
+                f"DESCRIBE SELECT * FROM {training.sql} AS autofe_cv_schema"
+            ).fetchall()
+            schema = {str(row[0]) for row in schema_rows}
+            if row_id_column not in schema:
+                raise ValueError(
+                    f"AutoFE row ID column '{row_id_column}' was not found"
+                )
+            target_column = str(training_definition.target_column)
+            if target_column not in schema:
+                raise ValueError(
+                    f"AutoFE target column '{target_column}' was not found"
+                )
+            key = (
+                f"hash(concat(CAST({identifier(row_id_column)} AS VARCHAR), "
+                f"'|', CAST({seed} AS VARCHAR)))"
+            )
+            if training_definition.problem_type in {
+                "binary_classification", "multiclass_classification",
+            }:
+                fold_expression = (
+                    f"(row_number() OVER (PARTITION BY {identifier(target_column)} "
+                    f"ORDER BY {key}) - 1) % {fold_count}"
+                )
+                strategy = "stratified_kfold"
+            else:
+                fold_expression = f"{key} % {fold_count}"
+                strategy = "kfold"
+            folded_sql = (
+                "(SELECT *, CAST("
+                + fold_expression
+                + " AS INTEGER) AS __mlapp_autofe_fold "
+                + f"FROM {training.sql} AS autofe_cv_source)"
+            )
+            count_rows = connection.execute(
+                "SELECT __mlapp_autofe_fold, count(*) "
+                f"FROM {folded_sql} AS autofe_cv_counts "
+                "GROUP BY __mlapp_autofe_fold ORDER BY __mlapp_autofe_fold"
+            ).fetchall()
+            counts = {int(row[0]): int(row[1]) for row in count_rows}
+            missing = [fold for fold in range(fold_count) if not counts.get(fold)]
+            if missing:
+                raise ValueError(
+                    "Fold-local AutoFE produced empty validation folds: "
+                    + ", ".join(str(item) for item in missing)
+                )
+            total = sum(counts.values())
+            folds = [
+                AutoFECrossValidationFold(
+                    fold=fold,
+                    training=SourceRelation(
+                        sql=(
+                            "(SELECT * EXCLUDE (__mlapp_autofe_fold) "
+                            f"FROM {folded_sql} AS autofe_cv_train "
+                            f"WHERE __mlapp_autofe_fold <> {fold})"
+                        ),
+                        row_count=total - counts[fold],
+                        metadata={**training.metadata, "autofe_cv_fold": fold, "role": "training"},
+                    ),
+                    validation=SourceRelation(
+                        sql=(
+                            "(SELECT * EXCLUDE (__mlapp_autofe_fold) "
+                            f"FROM {folded_sql} AS autofe_cv_validation "
+                            f"WHERE __mlapp_autofe_fold = {fold})"
+                        ),
+                        row_count=counts[fold],
+                        metadata={**training.metadata, "autofe_cv_fold": fold, "role": "validation"},
+                    ),
+                )
+                for fold in range(fold_count)
+            ]
+            return AutoFECrossValidationPlan(
+                strategy=strategy,
+                folds=folds,
+                provenance={
+                    "strategy": strategy,
+                    "fold_count": fold_count,
+                    "seed": seed,
+                    "row_id_column": row_id_column,
+                    "data_scope": "full",
+                    "planned_row_count": total,
+                    "fold_row_counts": [
+                        {"fold": fold, "validation_row_count": counts[fold]}
+                        for fold in range(fold_count)
+                    ],
+                    "fold_assignment_stage": "raw_before_feature_engineering",
+                },
+            )
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _upstream_row_id_column_from_relation(training: SourceRelation) -> str:
+        for item in training.metadata.get("feature_manifest") or []:
+            if isinstance(item, dict) and item.get("role") == "row_id" and item.get("name"):
+                return str(item["name"])
+        return ""
 
     @staticmethod
     def _upstream_row_id_column(training: SourceRelation, schema: dict[str, str]) -> str:
@@ -438,3 +599,28 @@ class DuckDbAutoFEPlanner:
         normalized = column.lower().replace("-", "_")
         parts = {part for part in normalized.split("_") if part}
         return bool(parts & set(_IDENTIFIER_NAME_TOKENS)) or normalized.endswith("id")
+
+    @staticmethod
+    def _is_internal_column(column: str) -> bool:
+        return column.lower().startswith("__mlapp_")
+
+
+def _autofe_recipe_hash(definition: FeatureEngineeringDefinition) -> str:
+    payload = {
+        "contract_version": definition.contract_version,
+        "feature_columns": definition.feature_columns,
+        "target_column": definition.target_column,
+        "row_id_column": definition.row_id_column,
+        "group_column": definition.group_column,
+        "event_time_column": definition.event_time_column,
+        "transformations": [
+            item.model_dump(mode="json") for item in definition.transformations
+        ],
+    }
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

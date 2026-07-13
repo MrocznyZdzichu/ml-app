@@ -275,7 +275,8 @@ def test_autofe_planner_profiles_full_scope_and_builds_bounded_recipe(tmp_path) 
             "(SELECT i AS row_id, CAST(i % 2 AS INTEGER) AS target, "
             "CASE WHEN i = 3 THEN NULL ELSE CAST(i AS DOUBLE) END AS amount, "
             "CASE WHEN i % 3 = 0 THEN 'a' ELSE 'b' END AS segment, "
-            "'customer_' || CAST(i AS VARCHAR) AS customer_id FROM range(100) t(i))"
+            "'customer_' || CAST(i AS VARCHAR) AS customer_id, "
+            "CAST(i % 5 AS INTEGER) AS __mlapp_cv_fold FROM range(100) t(i))"
         ),
         row_count=100,
     )
@@ -294,6 +295,8 @@ def test_autofe_planner_profiles_full_scope_and_builds_bounded_recipe(tmp_path) 
     assert plan.provenance["cardinality_is_approximate"] is True
     assert plan.provenance["validation_source"] == "generated_stratified_holdout"
     decisions = {item["column"]: item for item in plan.provenance["column_decisions"]}
+    assert "__mlapp_cv_fold" not in decisions
+    assert "__mlapp_cv_fold" not in plan.definition.feature_columns
     assert decisions["customer_id"]["action"] == "exclude"
     assert decisions["segment"]["action"] == "one_hot"
     assert [item.type for item in plan.definition.transformations] == [
@@ -309,6 +312,14 @@ def test_autofe_planner_profiles_full_scope_and_builds_bounded_recipe(tmp_path) 
     )
     assert [item.provenance["recipe_id"] for item in model_aware] == [
         "scaled_dense", "tree_unscaled", "non_negative"
+    ]
+    assert len({item.provenance["recipe_hash"] for item in model_aware}) == 3
+    repeated = model_aware_autofe_plans(
+        plan,
+        ["logistic_regression", "random_forest_classifier", "complement_nb"],
+    )
+    assert [item.provenance["recipe_hash"] for item in repeated] == [
+        item.provenance["recipe_hash"] for item in model_aware
     ]
     scaling = {
         item.provenance["recipe_id"]: [
@@ -639,3 +650,313 @@ def test_joint_autofe_compares_model_specific_recipes_on_one_holdout(tmp_path) -
     assert study["selected_algorithm"] in {
         "ridge_regression", "decision_tree_regressor"
     }
+
+
+def test_autofe_cross_validation_plan_is_deterministic_disjoint_and_full_scope(tmp_path) -> None:
+    payload = {
+        **automl_definition(autofe=True),
+        "feature_columns": [],
+        "feature_selection": "upstream_contract",
+    }
+    payload["optimization"] = {
+        **payload["optimization"],
+        "validation_strategy": "cross_validation",
+        "cv_folds": 4,
+    }
+    definition = TrainingDefinition.model_validate(payload)
+    source = SourceRelation(
+        sql=(
+            "(SELECT i AS row_id, CAST(i % 2 AS INTEGER) AS target, "
+            "CAST(i AS DOUBLE) AS amount FROM range(120) t(i))"
+        ),
+        row_count=120,
+        metadata={"scope": "full"},
+    )
+    planner = DuckDbAutoFEPlanner(tmp_path)
+
+    first = planner.cross_validation_plan(
+        training=source,
+        training_definition=definition,
+        run_id="cv-plan-first",
+        owner_id="owner",
+    )
+    second = planner.cross_validation_plan(
+        training=source,
+        training_definition=definition,
+        run_id="cv-plan-second",
+        owner_id="owner",
+    )
+
+    assert first.provenance == second.provenance
+    assert first.provenance["data_scope"] == "full"
+    assert first.provenance["fold_assignment_stage"] == "raw_before_feature_engineering"
+    assert sum(item.validation.row_count for item in first.folds) == 120
+    connection = duckdb.connect()
+    try:
+        for left, right in zip(first.folds, second.folds, strict=True):
+            first_ids = {
+                row[0] for row in connection.execute(
+                    f"SELECT row_id FROM {left.validation.sql}"
+                ).fetchall()
+            }
+            second_ids = {
+                row[0] for row in connection.execute(
+                    f"SELECT row_id FROM {right.validation.sql}"
+                ).fetchall()
+            }
+            training_ids = {
+                row[0] for row in connection.execute(
+                    f"SELECT row_id FROM {left.training.sql}"
+                ).fetchall()
+            }
+            assert first_ids == second_ids
+            assert first_ids.isdisjoint(training_ids)
+            assert len(first_ids | training_ids) == 120
+    finally:
+        connection.close()
+
+
+def test_integrated_autofe_runs_fold_local_cross_validation_and_refits_winner(tmp_path) -> None:
+    step_payload = automl_workflow()
+    definition = {
+        **automl_definition(autofe=True),
+        "feature_columns": [],
+        "feature_selection": "upstream_contract",
+    }
+    definition["optimization"] = {
+        **definition["optimization"],
+        "validation_strategy": "cross_validation",
+        "cv_folds": 3,
+        "max_trials": 2,
+        "candidate_algorithms": ["logistic_regression"],
+    }
+    definition["auto_feature_engineering"] = {
+        **definition["auto_feature_engineering"],
+        "max_recipe_candidates": 1,
+    }
+    step_payload["steps"][1]["config"]["definition"] = definition
+    step = WorkflowStep.model_validate(step_payload["steps"][1])
+    source = SourceRelation(
+        sql=(
+            "(SELECT i AS row_id, CAST(i % 2 AS INTEGER) AS target, "
+            "CAST(i AS DOUBLE) + CASE WHEN i % 2 = 0 THEN 25 ELSE 0 END AS amount, "
+            "CASE WHEN i % 4 < 2 THEN 'retail' ELSE 'business' END AS segment "
+            "FROM range(150) t(i))"
+        ),
+        row_count=150,
+        metadata={"scope": "full"},
+    )
+    feature_engine = DuckDbFeatureEngineeringEngine(repository_root=tmp_path)
+
+    result = AutoMLStepHandler(
+        SklearnTrainingEngine(repository_root=tmp_path),
+        feature_engine=feature_engine,
+        planner=DuckDbAutoFEPlanner(tmp_path),
+    ).execute(
+        step,
+        StepExecutionContext(
+            run_id="run-fold-local-autofe",
+            owner_id="owner",
+            is_dry_run=True,
+            upstream_relations={("de_1", "dataset"): source},
+        ),
+    )
+
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    study = model["auto_feature_engineering"]["joint_study"]
+    assert study["mode"] == "joint_model_aware_fold_local_cv"
+    assert study["cross_validation"]["fold_count"] == 3
+    assert study["cross_validation"]["planned_row_count"] == 150
+    assert study["candidates"][0]["optimization"]["validation_strategy"] == "cross_validation"
+    assert len(study["candidates"][0]["optimization"]["trials"][0]["fold_scores"]) == 3
+    assert len(study["candidates"][0]["fold_local_feature_counts"]) == 3
+    assert study["candidates"][0]["fold_cache"] == {
+        "scope": "run_recipe",
+        "recipe_hash": study["candidates"][0]["fold_cache"]["recipe_hash"],
+        "fold_count": 3,
+        "miss_count": 3,
+        "hit_count": 3,
+    }
+    assert len(study["candidates"][0]["oof_summaries"]) == 2
+    for trial in study["candidates"][0]["optimization"]["trials"]:
+        assert trial["oof_summary"]["prediction_count"] == 150
+        assert trial["oof_summary"]["coverage"] == 1.0
+        assert trial["oof_summary"]["predictions_persisted"] is False
+    assert study["candidates"][0]["selected_oof_summary"]["coverage"] == 1.0
+    assert model["training_config"]["auto_feature_engineering"]["joint_study"]["best_score"] is not None
+
+
+def test_fold_local_autofe_rejects_globally_fitted_human_fe_input(tmp_path) -> None:
+    step_payload = automl_workflow()
+    definition = {
+        **automl_definition(autofe=True),
+        "feature_columns": [],
+        "feature_selection": "upstream_contract",
+    }
+    definition["optimization"] = {
+        **definition["optimization"],
+        "validation_strategy": "cross_validation",
+    }
+    step_payload["steps"][1]["config"]["definition"] = definition
+    step = WorkflowStep.model_validate(step_payload["steps"][1])
+    source = SourceRelation(
+        sql="(SELECT i AS row_id, i % 2 AS target, i::DOUBLE AS amount FROM range(20) t(i))",
+        row_count=20,
+        metadata={"fitted_transform_count": 1},
+    )
+
+    with pytest.raises(ValueError, match="requires pre-FE training data"):
+        AutoMLStepHandler(
+            SklearnTrainingEngine(repository_root=tmp_path),
+            feature_engine=DuckDbFeatureEngineeringEngine(repository_root=tmp_path),
+            planner=DuckDbAutoFEPlanner(tmp_path),
+        ).execute(
+            step,
+            StepExecutionContext(
+                run_id="run-reject-global-fe",
+                owner_id="owner",
+                is_dry_run=True,
+                upstream_relations={("de_1", "dataset"): source},
+            ),
+        )
+
+
+def test_integrated_autofe_fold_local_cv_supports_regression(tmp_path) -> None:
+    step_payload = automl_workflow()
+    definition = {
+        **automl_definition(autofe=True),
+        "problem_type": "regression",
+        "algorithm": "ridge_regression",
+        "parameters": {},
+        "feature_columns": [],
+        "feature_selection": "upstream_contract",
+    }
+    definition["optimization"] = {
+        **definition["optimization"],
+        "validation_strategy": "cross_validation",
+        "primary_metric": "neg_root_mean_squared_error",
+        "cv_folds": 3,
+        "max_trials": 1,
+        "candidate_algorithms": ["ridge_regression"],
+    }
+    definition["auto_feature_engineering"] = {
+        **definition["auto_feature_engineering"],
+        "max_recipe_candidates": 1,
+    }
+    step_payload["steps"][1]["config"]["definition"] = definition
+    source = SourceRelation(
+        sql=(
+            "(SELECT i AS row_id, CAST(i AS DOUBLE) AS amount, "
+            "CASE WHEN i % 3 = 0 THEN 'north' ELSE 'south' END AS region, "
+            "2.5 * CAST(i AS DOUBLE) + 10 AS target FROM range(120) t(i))"
+        ),
+        row_count=120,
+        metadata={"scope": "full"},
+    )
+
+    result = AutoMLStepHandler(
+        SklearnTrainingEngine(repository_root=tmp_path),
+        feature_engine=DuckDbFeatureEngineeringEngine(repository_root=tmp_path),
+        planner=DuckDbAutoFEPlanner(tmp_path),
+    ).execute(
+        WorkflowStep.model_validate(step_payload["steps"][1]),
+        StepExecutionContext(
+            run_id="run-fold-local-regression",
+            owner_id="owner",
+            is_dry_run=True,
+            upstream_relations={("de_1", "dataset"): source},
+        ),
+    )
+
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    study = model["auto_feature_engineering"]["joint_study"]
+    assert model["problem_type"] == "regression"
+    assert study["cross_validation"]["strategy"] == "kfold"
+    assert len(study["candidates"][0]["optimization"]["trials"][0]["fold_scores"]) == 3
+
+
+def test_fold_local_fitted_state_does_not_see_validation_only_changes(tmp_path) -> None:
+    step_payload = automl_workflow()
+    definition_payload = {
+        **automl_definition(autofe=True),
+        "feature_columns": [],
+        "feature_selection": "upstream_contract",
+    }
+    definition_payload["optimization"] = {
+        **definition_payload["optimization"],
+        "validation_strategy": "cross_validation",
+        "cv_folds": 3,
+        "max_trials": 1,
+        "candidate_algorithms": ["logistic_regression"],
+    }
+    definition_payload["auto_feature_engineering"] = {
+        **definition_payload["auto_feature_engineering"],
+        "max_recipe_candidates": 1,
+    }
+    step_payload["steps"][1]["config"]["definition"] = definition_payload
+    definition = TrainingDefinition.model_validate(definition_payload)
+    base = SourceRelation(
+        sql=(
+            "(SELECT i AS row_id, CAST(i % 2 AS INTEGER) AS target, "
+            "CAST(i AS DOUBLE) AS amount FROM range(90) t(i))"
+        ),
+        row_count=90,
+        metadata={"scope": "full"},
+    )
+    planner = DuckDbAutoFEPlanner(tmp_path)
+    cv_plan = planner.cross_validation_plan(
+        training=base,
+        training_definition=definition,
+        run_id="leakage-plan",
+        owner_id="owner",
+    )
+    connection = duckdb.connect()
+    try:
+        validation_ids = [
+            int(row[0]) for row in connection.execute(
+                f"SELECT row_id FROM {cv_plan.folds[0].validation.sql}"
+            ).fetchall()
+        ]
+    finally:
+        connection.close()
+    changed = SourceRelation(
+        sql=(
+            "(SELECT i AS row_id, CAST(i % 2 AS INTEGER) AS target, "
+            f"CASE WHEN i IN ({', '.join(map(str, validation_ids))}) "
+            "THEN CAST(i AS DOUBLE) + 100000 ELSE CAST(i AS DOUBLE) END AS amount "
+            "FROM range(90) t(i))"
+        ),
+        row_count=90,
+        metadata={"scope": "full"},
+    )
+
+    def run(source: SourceRelation, run_id: str) -> dict:
+        result = AutoMLStepHandler(
+            SklearnTrainingEngine(repository_root=tmp_path),
+            feature_engine=DuckDbFeatureEngineeringEngine(repository_root=tmp_path),
+            planner=DuckDbAutoFEPlanner(tmp_path),
+        ).execute(
+            WorkflowStep.model_validate(step_payload["steps"][1]),
+            StepExecutionContext(
+                run_id=run_id,
+                owner_id="owner",
+                is_dry_run=True,
+                upstream_relations={("de_1", "dataset"): source},
+            ),
+        )
+        model = next(item for item in result.output_manifest if item["output_id"] == "model")
+        return model["auto_feature_engineering"]["joint_study"]["candidates"][0]
+
+    original_candidate = run(base, "leakage-original")
+    changed_candidate = run(changed, "leakage-changed")
+    original_states = {
+        item["fold"]: item["fitted_state_signature"]
+        for item in original_candidate["fold_local_feature_counts"]
+    }
+    changed_states = {
+        item["fold"]: item["fitted_state_signature"]
+        for item in changed_candidate["fold_local_feature_counts"]
+    }
+
+    assert original_states[0] == changed_states[0]
+    assert any(original_states[fold] != changed_states[fold] for fold in (1, 2))

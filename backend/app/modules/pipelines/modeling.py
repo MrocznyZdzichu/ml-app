@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.modules.pipelines.model_evaluation import ModelEvaluationSnapshotBuilder
 from app.modules.pipelines.model_training import (
     ModelOptimizationEngine,
+    OptimizationScoreCallback,
     OptimizationMode,
     ValidationStrategy,
 )
@@ -145,14 +146,6 @@ class TrainingDefinition(BaseModel):
         if self.auto_feature_engineering.enabled and self.optimization.mode != "automl":
             raise ValueError("AutoFE can currently be enabled only for AutoML optimization")
         if (
-            self.auto_feature_engineering.enabled
-            and self.optimization.validation_strategy == "cross_validation"
-        ):
-            raise ValueError(
-                "AutoFE v1 uses leakage-safe holdout validation; fold-local AutoFE is required "
-                "before cross-validation can be enabled"
-            )
-        if (
             self.auto_feature_engineering.row_id_column
             and self.auto_feature_engineering.row_id_column == self.target_column
         ):
@@ -222,6 +215,7 @@ class SklearnTrainingEngine:
         is_dry_run: bool,
         emit_event: Callable[[str, dict[str, Any]], None] | None = None,
         is_cancel_requested: Callable[[], bool] | None = None,
+        optimization_score_callback: OptimizationScoreCallback | None = None,
     ) -> ModelingResult:
         directory = self._run_directory(owner_id, run_id)
         connection = configured_duckdb_connection(directory / ".training-duckdb")
@@ -318,7 +312,11 @@ class SklearnTrainingEngine:
                 fitted_transform_count = int(
                     training.metadata.get("fitted_transform_count") or 0
                 )
-                if uses_cross_validation and fitted_transform_count:
+                if (
+                    uses_cross_validation
+                    and fitted_transform_count
+                    and optimization_score_callback is None
+                ):
                     raise ValueError(
                         "Leakage-safe cross-validation cannot reuse Feature Engineering "
                         f"state fitted on the complete training partition "
@@ -449,6 +447,7 @@ class SklearnTrainingEngine:
                     cv_strategy=cv_strategy,
                     emit_event=emit_event,
                     is_cancel_requested=is_cancel_requested,
+                    score_callback=optimization_score_callback,
                 )
                 estimator = fit_result.estimator
                 processed_row_count = fit_result.processed_row_count

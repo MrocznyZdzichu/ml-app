@@ -474,10 +474,6 @@ export function validateTrainingConfiguration(definition: TrainingDefinition): s
   if (definition.auto_feature_engineering.enabled && definition.optimization.mode !== "automl") {
     issues.push("AutoFE is available only with AutoML optimization.");
   }
-  if (definition.auto_feature_engineering.enabled
-    && definition.optimization.validation_strategy === "cross_validation") {
-    issues.push("AutoFE v1 requires holdout validation until fold-local preprocessing is available.");
-  }
   if (definition.early_stopping && definition.optimization.mode !== "single") {
     issues.push("Training early stopping cannot be combined with hyperparameter optimization.");
   }
