@@ -532,13 +532,20 @@ class PipelineService:
         principal: Principal,
         business_case_id: str,
     ) -> dict[str, dict[str, Any]]:
-        """Resolve an immutable model from the family anchored in the workflow."""
+        """Resolve an immutable model and its matching inference FE bundle."""
         model_artifacts = [
             artifact
             for artifact in self.artifacts.list_artifacts(principal.user_id, ArtifactType.MODEL_VERSION)
             if artifact.business_case_id == business_case_id
         ]
         by_id = {artifact.id: artifact for artifact in model_artifacts}
+        fitted_artifacts = [
+            artifact
+            for artifact in self.artifacts.list_artifacts(
+                principal.user_id, ArtifactType.FEATURE_TRANSFORM
+            )
+            if artifact.business_case_id == business_case_id
+        ]
         resolved: dict[str, dict[str, Any]] = {}
         for step in workflow.steps:
             if step.type != "scoring":
@@ -567,14 +574,149 @@ class PipelineService:
                     detail={"message": f"Selected model version is not available for step '{step.step_id}'"},
                 )
             version_number = sorted(family, key=lambda artifact: (artifact.created_at, artifact.id)).index(selected) + 1
+            bundle = self._resolve_model_inference_bundle(
+                workflow,
+                step.step_id,
+                selected,
+                fitted_artifacts,
+            )
             resolved[step.step_id] = {
                 "model_artifact_id": selected.id,
                 "logical_model_id": logical_id,
                 "version_number": version_number,
                 "model_name": str(selected.metadata.get("model_name") or "Model"),
                 "selection_policy": "selected" if selected_id else "latest",
+                **bundle,
             }
         return resolved
+
+    def _resolve_model_inference_bundle(
+        self,
+        workflow: WorkflowDefinition,
+        scoring_step_id: str,
+        model_artifact: Any,
+        fitted_artifacts: list[Any],
+    ) -> dict[str, Any]:
+        """Pin the recipe and fitted state produced by the selected model run."""
+        scoring_step = next(step for step in workflow.steps if step.step_id == scoring_step_id)
+        data_input = next(
+            (item for item in scoring_step.inputs if item.port_id == "data"),
+            None,
+        )
+        feature_step_id = data_input.source.step_id if data_input is not None else ""
+        feature_step = next(
+            (step for step in workflow.steps if step.step_id == feature_step_id),
+            None,
+        )
+        if feature_step is None or feature_step.type != "feature_engineering":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "message": (
+                        f"Batch scoring step '{scoring_step_id}' must consume a Feature "
+                        "Engineering step so the model and fitted transform can be pinned together"
+                    )
+                },
+            )
+
+        metadata = dict(model_artifact.metadata or {})
+        lineage = dict(metadata.get("lineage") or {})
+        training_run_id = str(lineage.get("pipeline_run_id") or "")
+        training_version_id = str(lineage.get("pipeline_version_id") or "")
+        model_step_id = str(lineage.get("pipeline_step_id") or "")
+        training_config = dict(metadata.get("training_config") or {})
+        auto_fe = dict(training_config.get("auto_feature_engineering") or {})
+        resolved_recipe = auto_fe.get("resolved_recipe")
+
+        if isinstance(resolved_recipe, dict) and resolved_recipe:
+            fitted_step_id = model_step_id
+            feature_definition = dict(resolved_recipe)
+        else:
+            version = self.repository.get_version(training_version_id)
+            if version is None or version.owner_id != model_artifact.owner_id:
+                raise self._incomplete_inference_bundle(scoring_step_id, model_artifact.id)
+            fitted_step_id = self._upstream_feature_step_id(version.definition, model_step_id)
+            feature_definition = self._feature_definition(version.definition, fitted_step_id)
+
+        matches = [
+            artifact for artifact in fitted_artifacts
+            if str(dict(artifact.metadata.get("lineage") or {}).get("pipeline_run_id") or "")
+            == training_run_id
+            and str(dict(artifact.metadata.get("lineage") or {}).get("pipeline_step_id") or "")
+            == fitted_step_id
+        ]
+        if len(matches) != 1 or not feature_definition:
+            raise self._incomplete_inference_bundle(scoring_step_id, model_artifact.id)
+        fitted = matches[0]
+
+        model_features = [str(value) for value in metadata.get("feature_columns") or []]
+        manifest_features = [
+            str(item.get("name"))
+            for item in fitted.metadata.get("feature_manifest") or []
+            if isinstance(item, dict) and item.get("role") == "feature" and item.get("name")
+        ]
+        if model_features and manifest_features and model_features != manifest_features:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "message": (
+                        f"Model and fitted transform feature contracts do not match for step "
+                        f"'{scoring_step_id}'"
+                    )
+                },
+            )
+
+        return {
+            "feature_step_id": feature_step_id,
+            "feature_engineering_definition": feature_definition,
+            "fitted_transform_artifact_id": fitted.id,
+            "fitted_transform_state_hash": str(fitted.metadata.get("state_hash") or ""),
+            "fitted_transform_definition_hash": str(
+                fitted.metadata.get("definition_hash") or ""
+            ),
+            "training_pipeline_run_id": training_run_id,
+            "training_pipeline_version_id": training_version_id,
+            "training_pipeline_step_id": model_step_id,
+            "feature_columns": model_features,
+        }
+
+    @staticmethod
+    def _upstream_feature_step_id(definition: dict[str, Any], model_step_id: str) -> str:
+        model_step = next(
+            (
+                step for step in definition.get("steps", [])
+                if isinstance(step, dict) and step.get("step_id") == model_step_id
+            ),
+            {},
+        )
+        for item in model_step.get("inputs", []):
+            if isinstance(item, dict) and item.get("port_id") == "training":
+                source = item.get("source") or {}
+                if isinstance(source, dict):
+                    return str(source.get("step_id") or "")
+        return ""
+
+    @staticmethod
+    def _feature_definition(definition: dict[str, Any], step_id: str) -> dict[str, Any]:
+        for step in definition.get("steps", []):
+            if not isinstance(step, dict) or step.get("step_id") != step_id:
+                continue
+            config = step.get("config") or {}
+            nested = config.get("definition") if isinstance(config, dict) else None
+            return dict(nested) if isinstance(nested, dict) else {}
+        return {}
+
+    @staticmethod
+    def _incomplete_inference_bundle(scoring_step_id: str, model_artifact_id: str) -> HTTPException:
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "message": (
+                    f"Model '{model_artifact_id}' has no complete fitted Feature Engineering "
+                    f"bundle for scoring step '{scoring_step_id}'"
+                )
+            },
+        )
 
     def _validate_external_artifacts(
         self,

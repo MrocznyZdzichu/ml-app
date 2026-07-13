@@ -1,10 +1,17 @@
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 import duckdb
 import joblib
 import numpy as np
 import pytest
+from fastapi import HTTPException
 
+from app.core.security import Principal
+from app.modules.business_cases.domain import Artifact, ArtifactOrigin, ArtifactType
+from app.modules.business_cases.repository import InMemoryBusinessCaseRepository
+from app.modules.pipelines.repository import InMemoryPipelineRepository
+from app.modules.pipelines.service import PipelineService
 from app.modules.pipelines.modeling import (
     ModelingResult,
     ScoringDefinition,
@@ -23,7 +30,11 @@ from app.modules.pipelines.modeling_catalog import (
 from app.modules.pipelines.model_training import ModelOptimizationEngine
 from app.modules.pipelines.runtime import SourceRelation
 from app.modules.pipelines.step_handlers import StepExecutionContext, TrainingStepHandler
-from app.modules.pipelines.workflow import WorkflowStep, validate_workflow_definition
+from app.modules.pipelines.workflow import (
+    WorkflowDefinition,
+    WorkflowStep,
+    validate_workflow_definition,
+)
 from app.worker.tasks import _definition_with_resolved_inputs
 
 
@@ -1530,6 +1541,138 @@ def test_runtime_input_resolution_does_not_inject_inputs_into_training_definitio
 
     assert resolved["steps"][0]["config"]["definition"]["inputs"][0]["dataset_id"] == "physical-version"
     assert "inputs" not in resolved["steps"][1]["config"]["definition"]
+
+
+def test_runtime_model_resolution_applies_matching_recipe_and_fitted_state() -> None:
+    definition = {
+        "steps": [
+            {
+                "step_id": "fe_1",
+                "type": "feature_engineering",
+                "config": {"definition": {
+                    "mode": "transform",
+                    "inputs": [{"input_id": "scoring", "dataset_id": "logical"}],
+                    "outputs": [{"output_id": "features", "input_id": "scoring"}],
+                    "transformations": [{"type": "scale_numeric", "method": "standard"}],
+                    "fitted_state_artifact_id": "old-transform",
+                }},
+            },
+            {
+                "step_id": "score_1",
+                "type": "scoring",
+                "config": {"definition": {"model_artifact_id": "old-model"}},
+            },
+        ]
+    }
+    resolved = _definition_with_resolved_inputs(definition, {
+        "resolved_input_versions": {
+            "fe_1:scoring": {"dataset_id": "physical-version"}
+        },
+        "resolved_model_versions": {
+            "score_1": {
+                "model_artifact_id": "new-model",
+                "feature_step_id": "fe_1",
+                "fitted_transform_artifact_id": "new-transform",
+                "feature_engineering_definition": {
+                    "mode": "fit_transform",
+                    "transformations": [{"type": "scale_numeric", "method": "robust"}],
+                    "feature_columns": ["x"],
+                },
+            }
+        },
+    })
+
+    feature = resolved["steps"][0]["config"]["definition"]
+    scoring = resolved["steps"][1]["config"]["definition"]
+    assert feature["mode"] == "transform"
+    assert feature["fitted_state_artifact_id"] == "new-transform"
+    assert feature["transformations"][0]["method"] == "robust"
+    assert feature["inputs"][0]["dataset_id"] == "physical-version"
+    assert scoring["model_artifact_id"] == "new-model"
+
+
+def test_model_version_resolution_pins_latest_model_and_its_autofe_transform() -> None:
+    artifacts = InMemoryBusinessCaseRepository()
+    repository = InMemoryPipelineRepository()
+    now = datetime.now(timezone.utc)
+    recipe_v1 = {"contract_version": "1.0", "mode": "fit_transform", "transformations": []}
+    recipe_v2 = {
+        "contract_version": "1.0",
+        "mode": "fit_transform",
+        "transformations": [{"type": "scale_numeric", "method": "robust"}],
+    }
+    for version, recipe in ((1, recipe_v1), (2, recipe_v2)):
+        run_id = f"run-{version}"
+        artifacts.add_artifact(Artifact(
+            id=f"model-{version}", owner_id="owner", type=ArtifactType.MODEL_VERSION,
+            reference_id=f"model-{version}", origin=ArtifactOrigin.PLATFORM_GENERATED,
+            business_case_id="bc", created_by="owner",
+            created_at=now + timedelta(minutes=version),
+            metadata={
+                "logical_model_id": "family", "model_name": "Iris", "feature_columns": ["x"],
+                "training_config": {"auto_feature_engineering": {"resolved_recipe": recipe}},
+                "lineage": {
+                    "pipeline_run_id": run_id, "pipeline_version_id": "training-version",
+                    "pipeline_step_id": "automl_1",
+                },
+            },
+        ))
+        artifacts.add_artifact(Artifact(
+            id=f"transform-{version}", owner_id="owner",
+            type=ArtifactType.FEATURE_TRANSFORM, reference_id=f"transform-{version}",
+            origin=ArtifactOrigin.PLATFORM_GENERATED, business_case_id="bc",
+            created_by="owner", metadata={
+                "state_hash": f"state-{version}",
+                "feature_manifest": [{"name": "x", "role": "feature"}],
+                "lineage": {"pipeline_run_id": run_id, "pipeline_step_id": "automl_1"},
+            },
+        ))
+    workflow = WorkflowDefinition.model_validate({
+        "contract_version": "2.0",
+        "steps": [
+            {
+                "step_id": "fe_1", "name": "Feature Engineering",
+                "type": "feature_engineering", "inputs": [], "output_port_id": "dataset",
+                "config": {"definition": {}},
+            },
+            {
+                "step_id": "score_1", "name": "Batch Scoring", "type": "scoring",
+                "inputs": [{"port_id": "data", "source": {"step_id": "fe_1", "port_id": "dataset"}}],
+                "output_port_id": "predictions",
+                "config": {"definition": {"purpose": "batch", "model_artifact_id": "model-1"}},
+            },
+        ],
+        "outputs": [{"output_id": "predictions", "source": {"step_id": "score_1", "port_id": "predictions"}}],
+    })
+    service = PipelineService(repository=repository, artifacts=artifacts)
+
+    resolved = service._resolve_model_versions(
+        workflow, {}, Principal("owner", "owner@example.test", "Owner"), "bc"
+    )["score_1"]
+
+    assert resolved["model_artifact_id"] == "model-2"
+    assert resolved["fitted_transform_artifact_id"] == "transform-2"
+    assert resolved["feature_engineering_definition"] == recipe_v2
+    assert resolved["feature_step_id"] == "fe_1"
+
+    artifacts.add_artifact(Artifact(
+        id="model-3", owner_id="owner", type=ArtifactType.MODEL_VERSION,
+        reference_id="model-3", origin=ArtifactOrigin.PLATFORM_GENERATED,
+        business_case_id="bc", created_by="owner", created_at=now + timedelta(minutes=3),
+        metadata={
+            "logical_model_id": "family", "model_name": "Iris", "feature_columns": ["x"],
+            "training_config": {"auto_feature_engineering": {"resolved_recipe": recipe_v2}},
+            "lineage": {
+                "pipeline_run_id": "run-3", "pipeline_version_id": "training-version",
+                "pipeline_step_id": "automl_1",
+            },
+        },
+    ))
+    with pytest.raises(HTTPException, match="complete fitted Feature Engineering bundle") as error:
+        service._resolve_model_versions(
+            workflow, {}, Principal("owner", "owner@example.test", "Owner"), "bc"
+        )
+    assert error.value.status_code == 422
 
 
 def test_training_and_scoring_workflow_requires_typed_ports() -> None:

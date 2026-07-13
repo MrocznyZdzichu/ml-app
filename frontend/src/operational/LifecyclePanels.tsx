@@ -471,6 +471,7 @@ function TrainingConfigSummary({ config }: { config: Record<string, unknown> }) 
   const resourceLimits = objectValue(config.resource_limits);
   const autoFE = objectValue(config.auto_feature_engineering);
   const jointStudy = objectValue(autoFE.joint_study);
+  const scheduler = objectValue(jointStudy.scheduler);
   const crossValidation = objectValue(jointStudy.cross_validation);
   const candidates = Array.isArray(jointStudy.candidates)
     ? jointStudy.candidates.filter((item): item is Record<string, unknown> => Boolean(item)
@@ -481,8 +482,10 @@ function TrainingConfigSummary({ config }: { config: Record<string, unknown> }) 
   const foldCache = objectValue(selectedCandidate?.fold_cache);
   const completedJointTrials = candidates.reduce((total, candidate) => {
     const candidateOptimization = objectValue(candidate.optimization);
-    return total + (typeof candidateOptimization.trial_count === "number"
-      ? candidateOptimization.trial_count
+    return total + (typeof candidate.trial_count === "number"
+      ? candidate.trial_count
+      : typeof candidateOptimization.trial_count === "number"
+        ? candidateOptimization.trial_count
       : 0);
   }, 0);
   const basic = {
@@ -525,9 +528,15 @@ function TrainingConfigSummary({ config }: { config: Record<string, unknown> }) 
         best_score: jointStudy.best_score,
         recipe_candidates: jointStudy.recipe_candidate_count,
         configured_recipe_candidates: jointStudy.configured_recipe_candidate_count,
+        generated_recipe_candidates: jointStudy.generated_recipe_candidate_count,
+        scheduler_mode: scheduler.mode,
+        promoted_recipes: jointStudy.promoted_recipe_count,
+        pruned_recipes: jointStudy.pruned_recipe_count,
         skipped_recipes: jointStudy.skipped_recipe_count,
         configured_trial_budget: jointStudy.trial_budget,
         completed_trials_all_recipes: completedJointTrials,
+        exploration_trial_budget: scheduler.allocated_exploration_trials,
+        deepening_trial_budget: scheduler.allocated_deepening_trials,
         cv_folds: crossValidation.fold_count,
         cv_scope_rows: crossValidation.planned_row_count,
         oof_predictions: selectedOOF.prediction_count,
@@ -538,18 +547,20 @@ function TrainingConfigSummary({ config }: { config: Record<string, unknown> }) 
       }} empty="No AutoFE experiment provenance recorded." />
       <h4>Full-pipeline leaderboard</h4>
       <div className="optimization-trial-table">
-        <div className="head"><span>Recipe</span><span>Status</span><span>Variant</span><span>Algorithm</span><span>Score</span><span>Features / reason</span></div>
+        <div className="head"><span>Recipe</span><span>Status</span><span>Variant / scaling</span><span>Algorithm</span><span>Score</span><span>Features / reason</span></div>
         {candidates.map((candidate, index) => {
           const recipe = objectValue(candidate.recipe_contract);
           return <div key={`${String(candidate.recipe_id ?? "recipe")}-${index}`}>
             <code>{String(candidate.recipe_id ?? "—")}</code>
             <span className={`trial-status ${String(candidate.status ?? "unknown")}`}>{String(candidate.status ?? "unknown")}</span>
-            <span>{String(recipe.numeric_variant ?? "baseline")}</span>
+            <span>{String(recipe.numeric_variant ?? "baseline")} / {String(recipe.numeric_scaling ?? "none")}</span>
             <code>{String(candidate.best_algorithm ?? "—")}</code>
             <strong>{typeof candidate.score === "number" ? formatNumber(candidate.score) : "—"}</strong>
-            <span>{candidate.status === "skipped"
+            <span>{candidate.status === "skipped" || candidate.status === "pruned"
               ? String(candidate.reason ?? "budget/capability constraint")
-              : `${String(candidate.resolved_feature_count ?? "—")} features`}</span>
+              : candidate.status === "promoted"
+                ? `${String(candidate.resolved_feature_count ?? "—")} features · exploration ${formatMaybeNumber(candidate.exploration_score)} · deepening ${formatMaybeNumber(candidate.deepening_score)}`
+                : `${String(candidate.resolved_feature_count ?? "—")} features`}</span>
           </div>;
         })}
         {!candidates.length && <div className="catalog-empty">No recipe candidates were recorded.</div>}

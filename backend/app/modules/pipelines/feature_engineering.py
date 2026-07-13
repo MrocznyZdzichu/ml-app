@@ -379,7 +379,7 @@ class DuckDbFeatureEngineeringEngine:
                 state["feature_roles"] = _feature_roles(definition)
             else:
                 state = self._load_state(definition.fitted_state_artifact_id, owner_id)
-                if state.get("recipe_hash") != _recipe_hash(definition):
+                if state.get("recipe_hash") not in _compatible_recipe_hashes(definition):
                     raise ValueError(
                         "Feature Engineering recipe does not match the pinned fitted transform"
                     )
@@ -1349,13 +1349,47 @@ def _state_hash(state: dict[str, Any]) -> str:
 
 
 def _recipe_hash(definition: FeatureEngineeringDefinition) -> str:
+    return _recipe_payload_hash(
+        [item.model_dump(mode="json") for item in definition.transformations],
+        definition,
+    )
+
+
+def _compatible_recipe_hashes(definition: FeatureEngineeringDefinition) -> set[str]:
+    """Accept JSON-equivalent numeric config emitted by JavaScript clients.
+
+    JavaScript serializes integral floats such as ``0.0`` as ``0``. Existing
+    fitted artifacts retain the original byte-sensitive recipe hash, so transform
+    mode checks both the received representation and a typed-float representation
+    for FE config fields whose contract is continuous.
+    """
+    transformations = [item.model_dump(mode="json") for item in definition.transformations]
+    normalized = json.loads(json.dumps(transformations))
+    float_fields = {
+        "winsorize_numeric": ("lower_quantile", "upper_quantile"),
+        "variance_filter": ("threshold",),
+    }
+    for transform in normalized:
+        config = transform.get("config") or {}
+        for field in float_fields.get(str(transform.get("type")), ()):
+            value = config.get(field)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                config[field] = float(value)
+    return {
+        _recipe_payload_hash(transformations, definition),
+        _recipe_payload_hash(normalized, definition),
+    }
+
+
+def _recipe_payload_hash(
+    transformations: list[dict[str, Any]],
+    definition: FeatureEngineeringDefinition,
+) -> str:
     feature_roles = _feature_roles(definition)
     feature_roles.pop("cv_fold_column", None)
     payload = json.dumps(
         {
-            "transformations": [
-                item.model_dump(mode="json") for item in definition.transformations
-            ],
+            "transformations": transformations,
             "feature_roles": feature_roles,
         },
         sort_keys=True,

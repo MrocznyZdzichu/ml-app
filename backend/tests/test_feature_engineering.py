@@ -259,8 +259,16 @@ def test_transform_mode_reuses_pinned_state_without_refitting(tmp_path: Path) ->
         business_cases=business_cases,
         repository_root=repository_root,
     )
+    fitted_definition_payload = _definition().model_dump(mode="json")
+    fitted_definition_payload["transformations"].append({
+        "transform_id": "drop_constant_scaled_age",
+        "type": "variance_filter",
+        "columns": ["age__scaled"],
+        "config": {"threshold": 0.0},
+    })
+    fitted_definition = FeatureEngineeringDefinition.model_validate(fitted_definition_payload)
     fitted = engine.execute(
-        definition=_definition(),
+        definition=fitted_definition,
         run_id="fit-run",
         owner_id="owner-1",
         is_dry_run=True,
@@ -274,7 +282,10 @@ def test_transform_mode_reuses_pinned_state_without_refitting(tmp_path: Path) ->
         origin=ArtifactOrigin.PLATFORM_GENERATED,
         metadata={"location_uri": state_item["location_uri"]},
     ))
-    payload = _definition().model_dump(mode="json")
+    payload = fitted_definition.model_dump(mode="json")
+    # JSON.stringify in the browser serializes the fitted recipe's 0.0 as 0.
+    # Both representations must pin the same semantic FE recipe.
+    payload["transformations"][-1]["config"]["threshold"] = 0
     payload.update({
         "mode": "transform",
         "inputs": [{"input_id": "scoring", "role": "scoring_input", "dataset_id": "scoring"}],

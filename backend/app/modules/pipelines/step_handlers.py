@@ -316,13 +316,27 @@ class AutoMLStepHandler(TrainingStepHandler):
             list(definition.optimization.candidate_algorithms)
             or automl_algorithms(definition.problem_type)
         )
-        configured_plans = (
+        recipe_configuration = definition.auto_feature_engineering
+        generated_plans = (
             model_aware_autofe_plans(
                 plan,
                 candidate_algorithms,
-                max_candidates=definition.auto_feature_engineering.max_recipe_candidates,
+                max_candidates=(
+                    24
+                    if recipe_configuration.numeric_recipe_search_v2
+                    else recipe_configuration.max_recipe_candidates
+                ),
                 numeric_feature_search=(
                     definition.auto_feature_engineering.numeric_feature_search
+                ),
+                numeric_recipe_search_v2=(
+                    definition.auto_feature_engineering.numeric_recipe_search_v2
+                ),
+                numeric_scaling_search=(
+                    definition.auto_feature_engineering.numeric_scaling_search
+                ),
+                numeric_scaling_candidates=list(
+                    definition.auto_feature_engineering.numeric_scaling_candidates
                 ),
                 winsorization_lower_quantile=(
                     definition.auto_feature_engineering.winsorization_lower_quantile
@@ -343,20 +357,45 @@ class AutoMLStepHandler(TrainingStepHandler):
             if definition.auto_feature_engineering.joint_search_enabled
             else [plan]
         )
-        executable_recipe_limit = min(
-            len(configured_plans),
-            definition.optimization.max_trials,
-            max(1, definition.optimization.timeout_seconds // 10),
-        )
-        plans = configured_plans[:executable_recipe_limit]
-        skipped_recipe_candidates = [
+        configured_plans = generated_plans[:recipe_configuration.max_recipe_candidates]
+        cap_skipped_recipe_candidates = [
             {
                 "recipe_id": str(item.provenance.get("recipe_id") or "recipe"),
                 "recipe_hash": str(item.provenance.get("recipe_hash") or ""),
+                "recipe_contract": dict(item.provenance.get("recipe_contract") or {}),
+                "status": "skipped",
+                "reason": "explicit max_recipe_candidates cap",
+            }
+            for item in generated_plans[recipe_configuration.max_recipe_candidates:]
+        ]
+        uses_two_phase_scheduler = (
+            recipe_configuration.two_phase_search_enabled
+            and recipe_configuration.joint_search_enabled
+            and len(configured_plans) > 1
+        )
+        exploration_trials_per_recipe = (
+            recipe_configuration.exploration_trials_per_recipe
+            if uses_two_phase_scheduler else 1
+        )
+        executable_recipe_limit = min(
+            len(configured_plans),
+            definition.optimization.max_trials // exploration_trials_per_recipe,
+            max(1, definition.optimization.timeout_seconds // 10),
+        )
+        plans = configured_plans[:executable_recipe_limit]
+        budget_skipped_recipe_candidates = [
+            {
+                "recipe_id": str(item.provenance.get("recipe_id") or "recipe"),
+                "recipe_hash": str(item.provenance.get("recipe_hash") or ""),
+                "recipe_contract": dict(item.provenance.get("recipe_contract") or {}),
                 "status": "skipped",
                 "reason": "global trial or wall-clock budget cannot allocate a minimum evaluation",
             }
             for item in configured_plans[executable_recipe_limit:]
+        ]
+        skipped_recipe_candidates = [
+            *cap_skipped_recipe_candidates,
+            *budget_skipped_recipe_candidates,
         ]
         if not plans:
             raise ValueError("AutoFE found no model-aware recipe candidates")
@@ -378,9 +417,14 @@ class AutoMLStepHandler(TrainingStepHandler):
             ]
         else:
             candidate_warnings = []
-        if skipped_recipe_candidates:
+        if cap_skipped_recipe_candidates:
             candidate_warnings.append(
-                f"AutoFE skipped {len(skipped_recipe_candidates)} recipe candidate(s) because "
+                f"AutoFE skipped {len(cap_skipped_recipe_candidates)} recipe candidate(s) "
+                "because of the explicit max_recipe_candidates cap"
+            )
+        if budget_skipped_recipe_candidates:
+            candidate_warnings.append(
+                f"AutoFE skipped {len(budget_skipped_recipe_candidates)} recipe candidate(s) because "
                 "the global trial/time budget could not allocate a minimum evaluation"
             )
         if cv_plan is not None and definition.resource_limits.max_parallel_jobs > 1:
@@ -394,6 +438,7 @@ class AutoMLStepHandler(TrainingStepHandler):
                 "profiled_row_count": plan.provenance["profiled_row_count"],
                 "recipe_candidate_count": len(plans),
                 "configured_recipe_candidate_count": len(configured_plans),
+                "generated_recipe_candidate_count": len(generated_plans),
                 "skipped_recipe_candidates": skipped_recipe_candidates,
                 "validation_source": plan.provenance["validation_source"],
                 "evaluated_algorithms": evaluated_algorithms,
@@ -405,174 +450,245 @@ class AutoMLStepHandler(TrainingStepHandler):
             max(1, len(recipe.provenance.get("compatible_algorithms") or []))
             for recipe in plans
         ]
-        trial_allocations = self._allocate_weighted_budget(
-            definition.optimization.max_trials,
-            recipe_weights,
-            minimum=1,
-        )
-        timeout_allocations = self._allocate_weighted_budget(
-            definition.optimization.timeout_seconds,
-            recipe_weights,
-            minimum=10,
-        )
-        study_candidates: list[dict[str, Any]] = []
+        if uses_two_phase_scheduler:
+            trial_allocations = [exploration_trials_per_recipe] * len(plans)
+            exploration_timeout_total = min(
+                definition.optimization.timeout_seconds,
+                max(
+                    len(plans) * 10,
+                    int(
+                        definition.optimization.timeout_seconds
+                        * recipe_configuration.exploration_time_fraction
+                    ),
+                ),
+            )
+            timeout_allocations = self._allocate_weighted_budget(
+                exploration_timeout_total,
+                recipe_weights,
+                minimum=10,
+            )
+        else:
+            trial_allocations = self._allocate_weighted_budget(
+                definition.optimization.max_trials,
+                recipe_weights,
+                minimum=1,
+            )
+            timeout_allocations = self._allocate_weighted_budget(
+                definition.optimization.timeout_seconds,
+                recipe_weights,
+                minimum=10,
+            )
+
         processed_row_count = 0
-        for index, recipe in enumerate(plans):
+        def evaluate_phase(
+            recipe: AutoFEPlan,
+            index: int,
+            *,
+            phase: str,
+            trial_budget: int,
+            timeout_budget: int,
+            seed_offset: int,
+        ) -> dict[str, Any]:
+            nonlocal processed_row_count
             recipe_id = str(recipe.provenance.get("recipe_id") or f"recipe_{index + 1}")
             if context.is_cancel_requested and context.is_cancel_requested():
                 raise PipelineExecutionCancelled("Pipeline run was cancelled")
             if context.emit_event:
                 context.emit_event("autofe.recipe_trial_started", {
-                    "message": f"Evaluating AutoFE recipe '{recipe_id}'",
+                    "message": f"Evaluating AutoFE recipe '{recipe_id}' in {phase}",
                     "recipe_id": recipe_id,
+                    "phase": phase,
                     "candidate_algorithms": recipe.provenance.get("compatible_algorithms", []),
-                    "trial_budget": trial_allocations[index],
+                    "trial_budget": trial_budget,
+                    "timeout_budget_seconds": timeout_budget,
                 })
-            candidate_run_id = f"{context.run_id}/autofe-candidates/{recipe_id}"
+            candidate_run_id = f"{context.run_id}/autofe-candidates/{recipe_id}/{phase}"
             try:
-                feature_result, prepared_training, prepared_validation, _, resolved_features = (
-                    self._prepare_features(
-                        recipe,
-                        raw_training,
-                        raw_validation,
-                        None,
-                        run_id=candidate_run_id,
-                        owner_id=context.owner_id,
-                        is_dry_run=True,
-                    )
+                candidate, warnings, phase_processed = self._evaluate_autofe_recipe_candidate(
+                    recipe=recipe,
+                    definition=definition,
+                    raw_training=raw_training,
+                    raw_validation=raw_validation,
+                    cv_plan=cv_plan,
+                    candidate_algorithms=candidate_algorithms,
+                    context=context,
+                    candidate_run_id=candidate_run_id,
+                    phase=phase,
+                    trial_budget=trial_budget,
+                    timeout_budget=timeout_budget,
+                    seed_offset=seed_offset,
                 )
-                processed_row_count += feature_result.processed_row_count
-                candidate_optimization = definition.optimization.model_copy(update={
-                    "candidate_algorithms": list(
-                        recipe.provenance.get("compatible_algorithms") or candidate_algorithms
-                    ),
-                    "max_trials": trial_allocations[index],
-                    "timeout_seconds": max(10, timeout_allocations[index]),
-                })
-                candidate_definition = definition.model_copy(update={
-                    "feature_columns": resolved_features,
-                    "feature_selection": "explicit",
-                    "model_name": f"{definition.model_name} candidate {recipe_id}",
-                    "optimization": candidate_optimization,
-                    "resource_limits": (
-                        definition.resource_limits.model_copy(update={"max_parallel_jobs": 1})
-                        if cv_plan is not None else definition.resource_limits
-                    ),
-                })
-                fold_local_stats = {"processed_row_count": 0, "feature_counts": []}
-                candidate_result = self.engine.execute(
-                    candidate_definition,
-                    prepared_training,
-                    prepared_validation,
-                    run_id=candidate_run_id,
-                    owner_id=context.owner_id,
-                    is_dry_run=True,
-                    emit_event=context.emit_event,
-                    is_cancel_requested=context.is_cancel_requested,
-                    optimization_score_callback=(
-                        self._fold_local_score_callback(
-                            recipe=recipe,
-                            cv_plan=cv_plan,
-                            definition=candidate_definition,
-                            run_id=candidate_run_id,
-                            owner_id=context.owner_id,
-                            emit_event=context.emit_event,
-                            is_cancel_requested=context.is_cancel_requested,
-                            stats=fold_local_stats,
-                        )
-                        if cv_plan is not None else None
-                    ),
-                )
-                processed_row_count += candidate_result.processed_row_count
-                processed_row_count += int(fold_local_stats["processed_row_count"])
-                candidate_warnings.extend(feature_result.warnings)
-                candidate_warnings.extend(candidate_result.warnings)
-                model_manifest = next(
-                    item for item in candidate_result.output_manifest
-                    if item.get("artifact_type") == "model_version"
-                )
-                optimization = dict(model_manifest.get("metrics", {}).get("optimization") or {})
-                trial_oof_summaries = dict(fold_local_stats.get("trial_oof_summaries", {}))
-                for trial in optimization.get("trials") or []:
-                    number = int(trial.get("number", -1))
-                    if number in trial_oof_summaries:
-                        trial["oof_summary"] = trial_oof_summaries[number]
-                scored_trials = [
-                    trial for trial in optimization.get("trials") or []
-                    if trial.get("status") == "succeeded"
-                    and isinstance(trial.get("score"), (int, float))
-                ]
-                selected_oof_summary = (
-                    dict(max(scored_trials, key=lambda trial: float(trial["score"])).get("oof_summary") or {})
-                    if scored_trials else {}
-                )
-                score = optimization.get("best_score")
-                if score is None:
-                    raise ValueError(
-                        f"AutoFE recipe '{recipe_id}' did not produce a comparable holdout score"
-                    )
-                study_candidates.append({
-                    "recipe": recipe,
-                    "recipe_id": recipe_id,
-                    "recipe_hash": recipe.provenance.get("recipe_hash"),
-                    "recipe_contract": recipe.provenance.get("recipe_contract"),
-                    "status": "succeeded",
-                    "score": float(score),
-                    "best_algorithm": str(optimization.get("best_algorithm") or model_manifest["algorithm"]),
-                    "best_parameters": dict(optimization.get("best_parameters") or {}),
-                    "trial_count": int(optimization.get("trial_count") or 0),
-                    "processed_row_count": candidate_result.processed_row_count,
-                    "resolved_feature_count": len(resolved_features),
-                    "resolved_features": resolved_features,
-                    "optimization": optimization,
-                    **({
-                        "fold_local_feature_counts": list(fold_local_stats["feature_counts"]),
-                        "fold_cache": {
-                            "scope": "run_recipe",
-                            "recipe_hash": recipe.provenance.get("recipe_hash"),
-                            "fold_count": len(cv_plan.folds),
-                            "miss_count": int(fold_local_stats.get("cache_misses", 0)),
-                            "hit_count": int(fold_local_stats.get("cache_hits", 0)),
-                        },
-                        "oof_summaries": [
-                            {"trial_number": number, **summary}
-                            for number, summary in sorted(trial_oof_summaries.items())
-                        ],
-                        "selected_oof_summary": selected_oof_summary,
-                    } if cv_plan else {}),
-                })
+                processed_row_count += phase_processed
+                candidate_warnings.extend(warnings)
                 if context.emit_event:
                     context.emit_event("autofe.recipe_trial_completed", {
-                        "message": f"AutoFE recipe '{recipe_id}' evaluation completed",
+                        "message": f"AutoFE recipe '{recipe_id}' {phase} completed",
                         "recipe_id": recipe_id,
-                        "best_score": float(score),
-                        "best_algorithm": optimization.get("best_algorithm"),
-                        "resolved_feature_count": len(resolved_features),
+                        "phase": phase,
+                        "best_score": candidate["score"],
+                        "best_algorithm": candidate["best_algorithm"],
+                        "resolved_feature_count": candidate["resolved_feature_count"],
                     })
+                return candidate
             except PipelineExecutionCancelled:
                 raise
             except Exception as exc:
-                study_candidates.append({
+                failed = {
                     "recipe": recipe,
                     "recipe_id": recipe_id,
                     "recipe_hash": recipe.provenance.get("recipe_hash"),
                     "recipe_contract": recipe.provenance.get("recipe_contract"),
                     "status": "failed",
+                    "phase": phase,
                     "error": str(exc),
                     "score": None,
                     "trial_count": 0,
+                    "allocated_trial_budget": trial_budget,
+                    "allocated_timeout_seconds": timeout_budget,
                     "resolved_feature_count": 0,
                     "resolved_features": [],
-                })
+                }
                 if context.emit_event:
                     context.emit_event("autofe.recipe_trial_failed", {
-                        "message": f"AutoFE recipe '{recipe_id}' failed: {exc}",
+                        "message": f"AutoFE recipe '{recipe_id}' failed in {phase}: {exc}",
                         "recipe_id": recipe_id,
+                        "phase": phase,
                     })
+                return failed
             finally:
                 self._cleanup_candidate_run(context.owner_id, candidate_run_id)
 
-        successful = [item for item in study_candidates if item["status"] == "succeeded"]
+        exploration_results = [
+            evaluate_phase(
+                recipe,
+                index,
+                phase="exploration" if uses_two_phase_scheduler else "flat_search",
+                trial_budget=trial_allocations[index],
+                timeout_budget=timeout_allocations[index],
+                seed_offset=0,
+            )
+            for index, recipe in enumerate(plans)
+        ]
+
+        deepening_results: dict[str, dict[str, Any]] = {}
+        promoted_recipe_ids: list[str] = []
+        if uses_two_phase_scheduler:
+            remaining_trials = definition.optimization.max_trials - sum(trial_allocations)
+            remaining_timeout = definition.optimization.timeout_seconds - sum(timeout_allocations)
+            ranked_exploration = sorted(
+                (
+                    item for item in exploration_results
+                    if item["status"] == "succeeded"
+                    and isinstance(item.get("score"), (int, float))
+                ),
+                key=lambda item: (-float(item["score"]), str(item["recipe_id"])),
+            )
+            promotion_count = min(
+                recipe_configuration.promotion_top_k,
+                len(ranked_exploration),
+                remaining_trials,
+                remaining_timeout // 10,
+            )
+            promoted = ranked_exploration[:promotion_count]
+            promoted_recipe_ids = [str(item["recipe_id"]) for item in promoted]
+            if promoted:
+                plan_indexes = {
+                    str(recipe.provenance.get("recipe_id") or f"recipe_{index + 1}"): index
+                    for index, recipe in enumerate(plans)
+                }
+                promoted_weights = [recipe_weights[plan_indexes[item["recipe_id"]]] for item in promoted]
+                deep_trial_allocations = self._allocate_weighted_budget(
+                    remaining_trials,
+                    promoted_weights,
+                    minimum=1,
+                )
+                deep_timeout_allocations = self._allocate_weighted_budget(
+                    remaining_timeout,
+                    promoted_weights,
+                    minimum=10,
+                )
+                if context.emit_event:
+                    context.emit_event("autofe.deepening_started", {
+                        "message": "AutoFE promoted the strongest exploration recipes",
+                        "promoted_recipe_ids": promoted_recipe_ids,
+                        "remaining_trial_budget": remaining_trials,
+                        "remaining_timeout_seconds": remaining_timeout,
+                    })
+                for rank, explored in enumerate(promoted):
+                    recipe_index = plan_indexes[str(explored["recipe_id"])]
+                    deepening_results[str(explored["recipe_id"])] = evaluate_phase(
+                        plans[recipe_index],
+                        recipe_index,
+                        phase="deepening",
+                        trial_budget=deep_trial_allocations[rank],
+                        timeout_budget=deep_timeout_allocations[rank],
+                        seed_offset=10_000 + rank,
+                    )
+            elif remaining_trials or remaining_timeout >= 10:
+                candidate_warnings.append(
+                    "AutoFE two-phase scheduler could not deepen a recipe because no successful "
+                    "exploration candidate or complete minimum budget remained"
+                )
+
+        study_candidates: list[dict[str, Any]] = []
+        if not uses_two_phase_scheduler:
+            study_candidates = exploration_results
+        else:
+            for explored in exploration_results:
+                recipe_id = str(explored["recipe_id"])
+                phase_snapshots = [{
+                    key: value for key, value in explored.items() if key != "recipe"
+                }]
+                if explored["status"] != "succeeded":
+                    explored["phases"] = phase_snapshots
+                    study_candidates.append(explored)
+                    continue
+                deepened = deepening_results.get(recipe_id)
+                if deepened is None:
+                    candidate = dict(explored)
+                    candidate["status"] = "pruned" if promoted_recipe_ids else "explored"
+                    candidate["reason"] = (
+                        "not promoted after exploration"
+                        if promoted_recipe_ids else "no complete deepening budget remained"
+                    )
+                    candidate["phases"] = phase_snapshots
+                    study_candidates.append(candidate)
+                    continue
+                phase_snapshots.append({
+                    key: value for key, value in deepened.items() if key != "recipe"
+                })
+                best = (
+                    max([explored, deepened], key=lambda item: float(item["score"]))
+                    if deepened["status"] == "succeeded" else explored
+                )
+                candidate = dict(best)
+                candidate["recipe"] = explored["recipe"]
+                candidate["status"] = "promoted"
+                candidate["trial_count"] = int(explored["trial_count"]) + int(deepened["trial_count"])
+                candidate["processed_row_count"] = (
+                    int(explored.get("processed_row_count") or 0)
+                    + int(deepened.get("processed_row_count") or 0)
+                )
+                candidate["allocated_trial_budget"] = (
+                    int(explored.get("allocated_trial_budget") or 0)
+                    + int(deepened.get("allocated_trial_budget") or 0)
+                )
+                candidate["allocated_timeout_seconds"] = (
+                    int(explored.get("allocated_timeout_seconds") or 0)
+                    + int(deepened.get("allocated_timeout_seconds") or 0)
+                )
+                candidate["exploration_score"] = explored["score"]
+                candidate["deepening_score"] = deepened.get("score")
+                candidate["promotion_reason"] = "ranked within configured exploration top-k"
+                candidate["phases"] = phase_snapshots
+                if deepened["status"] != "succeeded":
+                    candidate["deepening_error"] = deepened.get("error")
+                study_candidates.append(candidate)
+
+        successful = [
+            item for item in study_candidates
+            if item["status"] != "failed" and isinstance(item.get("score"), (int, float))
+        ]
         if not successful:
             failures = "; ".join(
                 f"{item['recipe_id']}: {item.get('error', 'unknown failure')}"
@@ -636,8 +752,17 @@ class AutoMLStepHandler(TrainingStepHandler):
             "trial_budget": definition.optimization.max_trials,
             "recipe_candidate_count": len(plans),
             "configured_recipe_candidate_count": len(configured_plans),
+            "generated_recipe_candidate_count": len(generated_plans),
             "successful_recipe_count": len(successful),
-            "failed_recipe_count": len(study_candidates) - len(successful),
+            "failed_recipe_count": sum(
+                1 for item in study_candidates if item["status"] == "failed"
+            ),
+            "promoted_recipe_count": sum(
+                1 for item in study_candidates if item["status"] == "promoted"
+            ),
+            "pruned_recipe_count": sum(
+                1 for item in study_candidates if item["status"] == "pruned"
+            ),
             "skipped_recipe_count": len(skipped_recipe_candidates),
             "requested_algorithms": candidate_algorithms,
             "evaluated_algorithms": evaluated_algorithms,
@@ -647,6 +772,34 @@ class AutoMLStepHandler(TrainingStepHandler):
             "selected_algorithm": winner["best_algorithm"],
             "selected_parameters": winner["best_parameters"],
             "best_score": winner["score"],
+            "scheduler": {
+                "mode": "two_phase" if uses_two_phase_scheduler else "flat",
+                "exploration_trials_per_recipe": (
+                    exploration_trials_per_recipe if uses_two_phase_scheduler else None
+                ),
+                "exploration_time_fraction": (
+                    recipe_configuration.exploration_time_fraction
+                    if uses_two_phase_scheduler else None
+                ),
+                "promotion_top_k": (
+                    recipe_configuration.promotion_top_k
+                    if uses_two_phase_scheduler else None
+                ),
+                "promoted_recipe_ids": promoted_recipe_ids,
+                "allocated_exploration_trials": sum(trial_allocations),
+                "allocated_exploration_timeout_seconds": sum(timeout_allocations),
+                "allocated_deepening_trials": sum(
+                    int(item.get("allocated_trial_budget") or 0)
+                    for item in deepening_results.values()
+                ),
+                "allocated_deepening_timeout_seconds": sum(
+                    int(item.get("allocated_timeout_seconds") or 0)
+                    for item in deepening_results.values()
+                ),
+                "completed_trials": sum(
+                    int(item.get("trial_count") or 0) for item in study_candidates
+                ),
+            },
             "candidates": [
                 {
                     key: value
@@ -704,6 +857,145 @@ class AutoMLStepHandler(TrainingStepHandler):
                 "fitted_transform": "fitted_transform",
             },
         )
+
+    def _evaluate_autofe_recipe_candidate(
+        self,
+        *,
+        recipe: AutoFEPlan,
+        definition: TrainingDefinition,
+        raw_training: SourceRelation,
+        raw_validation: SourceRelation | None,
+        cv_plan: AutoFECrossValidationPlan | None,
+        candidate_algorithms: list[str],
+        context: StepExecutionContext,
+        candidate_run_id: str,
+        phase: str,
+        trial_budget: int,
+        timeout_budget: int,
+        seed_offset: int,
+    ) -> tuple[dict[str, Any], list[str], int]:
+        recipe_id = str(recipe.provenance.get("recipe_id") or "recipe")
+        feature_result, prepared_training, prepared_validation, _, resolved_features = (
+            self._prepare_features(
+                recipe,
+                raw_training,
+                raw_validation,
+                None,
+                run_id=candidate_run_id,
+                owner_id=context.owner_id,
+                is_dry_run=True,
+            )
+        )
+        candidate_optimization = definition.optimization.model_copy(update={
+            "candidate_algorithms": list(
+                recipe.provenance.get("compatible_algorithms") or candidate_algorithms
+            ),
+            "max_trials": trial_budget,
+            "timeout_seconds": max(10, timeout_budget),
+        })
+        candidate_definition = definition.model_copy(update={
+            "feature_columns": resolved_features,
+            "feature_selection": "explicit",
+            "model_name": f"{definition.model_name} candidate {recipe_id} {phase}",
+            "random_seed": definition.random_seed + seed_offset,
+            "optimization": candidate_optimization,
+            "resource_limits": (
+                definition.resource_limits.model_copy(update={"max_parallel_jobs": 1})
+                if cv_plan is not None else definition.resource_limits
+            ),
+        })
+        fold_local_stats = {"processed_row_count": 0, "feature_counts": []}
+        candidate_result = self.engine.execute(
+            candidate_definition,
+            prepared_training,
+            prepared_validation,
+            run_id=candidate_run_id,
+            owner_id=context.owner_id,
+            is_dry_run=True,
+            emit_event=context.emit_event,
+            is_cancel_requested=context.is_cancel_requested,
+            optimization_score_callback=(
+                self._fold_local_score_callback(
+                    recipe=recipe,
+                    cv_plan=cv_plan,
+                    definition=candidate_definition,
+                    run_id=candidate_run_id,
+                    owner_id=context.owner_id,
+                    emit_event=context.emit_event,
+                    is_cancel_requested=context.is_cancel_requested,
+                    stats=fold_local_stats,
+                )
+                if cv_plan is not None else None
+            ),
+        )
+        model_manifest = next(
+            item for item in candidate_result.output_manifest
+            if item.get("artifact_type") == "model_version"
+        )
+        optimization = dict(model_manifest.get("metrics", {}).get("optimization") or {})
+        trial_oof_summaries = dict(fold_local_stats.get("trial_oof_summaries", {}))
+        for trial in optimization.get("trials") or []:
+            number = int(trial.get("number", -1))
+            if number in trial_oof_summaries:
+                trial["oof_summary"] = trial_oof_summaries[number]
+        scored_trials = [
+            trial for trial in optimization.get("trials") or []
+            if trial.get("status") == "succeeded"
+            and isinstance(trial.get("score"), (int, float))
+        ]
+        selected_oof_summary = (
+            dict(max(scored_trials, key=lambda trial: float(trial["score"])).get("oof_summary") or {})
+            if scored_trials else {}
+        )
+        score = optimization.get("best_score")
+        if score is None:
+            raise ValueError(
+                f"AutoFE recipe '{recipe_id}' did not produce a comparable holdout score"
+            )
+        processed_row_count = (
+            feature_result.processed_row_count
+            + candidate_result.processed_row_count
+            + int(fold_local_stats["processed_row_count"])
+        )
+        candidate = {
+            "recipe": recipe,
+            "recipe_id": recipe_id,
+            "recipe_hash": recipe.provenance.get("recipe_hash"),
+            "recipe_contract": recipe.provenance.get("recipe_contract"),
+            "status": "succeeded",
+            "phase": phase,
+            "score": float(score),
+            "best_algorithm": str(
+                optimization.get("best_algorithm") or model_manifest["algorithm"]
+            ),
+            "best_parameters": dict(optimization.get("best_parameters") or {}),
+            "trial_count": int(optimization.get("trial_count") or 0),
+            "allocated_trial_budget": trial_budget,
+            "allocated_timeout_seconds": timeout_budget,
+            "processed_row_count": processed_row_count,
+            "resolved_feature_count": len(resolved_features),
+            "resolved_features": resolved_features,
+            "optimization": optimization,
+            **({
+                "fold_local_feature_counts": list(fold_local_stats["feature_counts"]),
+                "fold_cache": {
+                    "scope": (
+                        "run_recipe" if phase == "flat_search" else "run_recipe_phase"
+                    ),
+                    "recipe_hash": recipe.provenance.get("recipe_hash"),
+                    "fold_count": len(cv_plan.folds),
+                    "miss_count": int(fold_local_stats.get("cache_misses", 0)),
+                    "hit_count": int(fold_local_stats.get("cache_hits", 0)),
+                    **({"phase": phase} if phase != "flat_search" else {}),
+                },
+                "oof_summaries": [
+                    {"trial_number": number, **summary}
+                    for number, summary in sorted(trial_oof_summaries.items())
+                ],
+                "selected_oof_summary": selected_oof_summary,
+            } if cv_plan else {}),
+        }
+        return candidate, [*feature_result.warnings, *candidate_result.warnings], processed_row_count
 
     def _fold_local_score_callback(
         self,

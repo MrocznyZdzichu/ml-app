@@ -1605,7 +1605,7 @@ function BusinessCasesPanel({
               );
             })}
             {bcRunDialog.models.map((model) => (
-              <label key={model.key}>Model — {model.name}
+              <label key={model.key}>Inference bundle — {model.name}
                 <select value={bcRunModelSelections[model.key] ?? ""}
                   onChange={(event) => setBcRunModelSelections((current) => ({ ...current, [model.key]: event.target.value }))}>
                   {model.versions.map((version, index) => (
@@ -1614,7 +1614,9 @@ function BusinessCasesPanel({
                     </option>
                   ))}
                 </select>
-                <small>The selected immutable model version is recorded with this run.</small>
+                <small>{inferenceBundleSummary(
+                  model.versions.find((version) => version.id === bcRunModelSelections[model.key])
+                )}</small>
               </label>
             ))}
             {currentBcRunResult && (
@@ -2855,7 +2857,7 @@ function PipelinesPanel({
                 );
               })}
               {!catalogRunResult && catalogRunDialog.models.map((model) => (
-                <label key={model.key}>Model — {model.name}
+                <label key={model.key}>Inference bundle — {model.name}
                   <select value={catalogRunModelSelections[model.key] ?? ""}
                     onChange={(event) => setCatalogRunModelSelections((current) => ({ ...current, [model.key]: event.target.value }))}>
                     {model.versions.map((version, index) => (
@@ -2864,7 +2866,9 @@ function PipelinesPanel({
                       </option>
                     ))}
                   </select>
-                  <small>The selected immutable model version is recorded with this run.</small>
+                  <small>{inferenceBundleSummary(
+                    model.versions.find((version) => version.id === catalogRunModelSelections[model.key])
+                  )}</small>
                 </label>
               ))}
               {!catalogRunResult && !catalogRunDialog.inputs.length && <p>This pipeline has no external dataset inputs.</p>}
@@ -3209,7 +3213,7 @@ function PipelinesPanel({
               );
             })}
             {!catalogRunResult && catalogRunDialog.models.map((model) => (
-              <label key={model.key}>Model — {model.name}
+              <label key={model.key}>Inference bundle — {model.name}
                 <select value={catalogRunModelSelections[model.key] ?? ""}
                   onChange={(event) => setCatalogRunModelSelections((current) => ({ ...current, [model.key]: event.target.value }))}>
                   {model.versions.map((version, index) => (
@@ -3218,7 +3222,9 @@ function PipelinesPanel({
                     </option>
                   ))}
                 </select>
-                <small>The selected immutable model version is recorded with this run.</small>
+                <small>{inferenceBundleSummary(
+                  model.versions.find((version) => version.id === catalogRunModelSelections[model.key])
+                )}</small>
               </label>
             ))}
             {catalogRunResult && !["queued", "running"].includes(catalogRunResult.status) && (
@@ -3931,6 +3937,15 @@ function durationLabel(startedAt: string | null | undefined, finishedAt: string 
 
 function shortId(value: string) {
   return value.slice(0, 8);
+}
+
+function inferenceBundleSummary(model: ModelArtifact | undefined) {
+  if (!model) return "Select a model version to resolve its inference bundle.";
+  if (!model.fitted_transform_artifact_id) {
+    return "No matching fitted transform is registered; the backend will block this run.";
+  }
+  return `Model + fitted transform ${shortId(model.fitted_transform_artifact_id)} `
+    + `from training run ${shortId(model.pipeline_run_id)} are pinned atomically.`;
 }
 
 function AnalysisPanel({

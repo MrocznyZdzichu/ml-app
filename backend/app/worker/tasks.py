@@ -458,6 +458,11 @@ def _definition_with_resolved_inputs(
     resolved_models = runtime_parameters.get("resolved_model_versions", {})
     if not isinstance(resolved_models, dict):
         resolved_models = {}
+    resolved_features = {
+        str(bundle.get("feature_step_id")): bundle
+        for bundle in resolved_models.values()
+        if isinstance(bundle, dict) and bundle.get("feature_step_id")
+    }
     steps: list[dict] = []
     for raw_step in definition.get("steps", []):
         step = dict(raw_step)
@@ -476,6 +481,26 @@ def _definition_with_resolved_inputs(
                 }
                 for item in nested.get("inputs", [])
             ]
+        selected_feature = resolved_features.get(str(step.get("step_id")), {})
+        if isinstance(selected_feature, dict) and selected_feature.get(
+            "fitted_transform_artifact_id"
+        ):
+            recipe = selected_feature.get("feature_engineering_definition")
+            if not isinstance(recipe, dict) or not recipe:
+                raise ValueError("Resolved inference bundle has no Feature Engineering recipe")
+            runtime_fields = {
+                key: nested[key]
+                for key in ("inputs", "outputs", "evaluation")
+                if key in nested
+            }
+            nested = {
+                **recipe,
+                **runtime_fields,
+                "mode": "transform",
+                "fitted_state_artifact_id": str(
+                    selected_feature["fitted_transform_artifact_id"]
+                ),
+            }
         selected_model = resolved_models.get(str(step.get("step_id")), {})
         if isinstance(selected_model, dict) and selected_model.get("model_artifact_id"):
             nested["model_artifact_id"] = str(selected_model["model_artifact_id"])

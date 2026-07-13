@@ -68,7 +68,7 @@ class AutoFeatureEngineeringDefinition(BaseModel):
     enabled: bool = False
     strategy: Literal["balanced"] = "balanced"
     joint_search_enabled: bool = True
-    max_recipe_candidates: int = Field(default=3, ge=1, le=9)
+    max_recipe_candidates: int = Field(default=3, ge=1, le=24)
     row_id_column: str = Field(default="", max_length=255)
     excluded_columns: list[str] = Field(default_factory=list, max_length=500)
     validation_size: float = Field(default=0.2, gt=0, lt=0.5)
@@ -82,6 +82,19 @@ class AutoFeatureEngineeringDefinition(BaseModel):
     # Kept disabled for definitions created before this field existed; new UI drafts
     # opt in explicitly so published versions retain their historical search space.
     numeric_feature_search: bool = False
+    # V2 expands transformations into independently scored candidates. It is
+    # opt-in so already published definitions preserve their historical space.
+    numeric_recipe_search_v2: bool = False
+    numeric_scaling_search: bool = False
+    numeric_scaling_candidates: list[
+        Literal["none", "standard", "minmax", "robust"]
+    ] = Field(default_factory=lambda: ["standard", "robust", "minmax", "none"])
+    # Kept opt-in at the backend contract so published definitions retain the
+    # historical flat allocation. New UI drafts explicitly enable it.
+    two_phase_search_enabled: bool = False
+    exploration_trials_per_recipe: int = Field(default=1, ge=1, le=10)
+    exploration_time_fraction: float = Field(default=0.35, ge=0.1, le=0.8)
+    promotion_top_k: int = Field(default=3, ge=1, le=12)
     winsorization_lower_quantile: float = Field(default=0.01, ge=0, lt=0.5)
     winsorization_upper_quantile: float = Field(default=0.99, gt=0.5, le=1)
     signed_log_features: bool = True
@@ -100,6 +113,10 @@ class AutoFeatureEngineeringDefinition(BaseModel):
             raise ValueError(
                 "AutoFE winsorization lower quantile must be below the upper quantile"
             )
+        if not self.numeric_scaling_candidates:
+            raise ValueError("AutoFE numeric scaling search requires at least one candidate")
+        if len(self.numeric_scaling_candidates) != len(set(self.numeric_scaling_candidates)):
+            raise ValueError("AutoFE numeric scaling candidates must be unique")
         return self
 
 

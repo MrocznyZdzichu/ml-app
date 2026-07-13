@@ -37,6 +37,13 @@ export type AutoFeatureEngineeringDefinition = {
   max_one_hot_categories: number;
   max_frequency_categories: number;
   numeric_feature_search: boolean;
+  numeric_recipe_search_v2: boolean;
+  numeric_scaling_search: boolean;
+  numeric_scaling_candidates: Array<"none" | "standard" | "minmax" | "robust">;
+  two_phase_search_enabled: boolean;
+  exploration_trials_per_recipe: number;
+  exploration_time_fraction: number;
+  promotion_top_k: number;
   winsorization_lower_quantile: number;
   winsorization_upper_quantile: number;
   signed_log_features: boolean;
@@ -170,7 +177,7 @@ export const emptyTrainingDefinition = (): TrainingDefinition => ({
     enabled: false,
     strategy: "balanced",
     joint_search_enabled: true,
-    max_recipe_candidates: 6,
+    max_recipe_candidates: 12,
     row_id_column: "",
     excluded_columns: [],
     validation_size: 0.2,
@@ -182,6 +189,13 @@ export const emptyTrainingDefinition = (): TrainingDefinition => ({
     max_one_hot_categories: 32,
     max_frequency_categories: 500,
     numeric_feature_search: true,
+    numeric_recipe_search_v2: true,
+    numeric_scaling_search: true,
+    numeric_scaling_candidates: ["standard", "robust", "minmax", "none"],
+    two_phase_search_enabled: true,
+    exploration_trials_per_recipe: 1,
+    exploration_time_fraction: 0.35,
+    promotion_top_k: 3,
     winsorization_lower_quantile: 0.01,
     winsorization_upper_quantile: 0.99,
     signed_log_features: true,
@@ -369,7 +383,7 @@ function normalizeAutoFeatureEngineering(value: unknown): AutoFeatureEngineering
     enabled: raw.enabled === true,
     strategy: "balanced",
     joint_search_enabled: raw.joint_search_enabled !== false,
-    max_recipe_candidates: boundedNumber(raw.max_recipe_candidates, 6, 1, 9),
+    max_recipe_candidates: boundedNumber(raw.max_recipe_candidates, 12, 1, 24),
     row_id_column: String(raw.row_id_column ?? ""),
     excluded_columns: Array.isArray(raw.excluded_columns) ? raw.excluded_columns.map(String) : [],
     validation_size: boundedNumber(raw.validation_size, 0.2, 0.01, 0.49),
@@ -384,6 +398,13 @@ function normalizeAutoFeatureEngineering(value: unknown): AutoFeatureEngineering
       boundedNumber(raw.max_frequency_categories, 500, 2, 500)
     ),
     numeric_feature_search: raw.numeric_feature_search !== false,
+    numeric_recipe_search_v2: raw.numeric_recipe_search_v2 !== false,
+    numeric_scaling_search: raw.numeric_scaling_search !== false,
+    numeric_scaling_candidates: normalizeScalingCandidates(raw.numeric_scaling_candidates),
+    two_phase_search_enabled: raw.two_phase_search_enabled !== false,
+    exploration_trials_per_recipe: boundedNumber(raw.exploration_trials_per_recipe, 1, 1, 10),
+    exploration_time_fraction: boundedNumber(raw.exploration_time_fraction, 0.35, 0.1, 0.8),
+    promotion_top_k: boundedNumber(raw.promotion_top_k, 3, 1, 12),
     winsorization_lower_quantile: boundedNumber(
       raw.winsorization_lower_quantile, 0.01, 0, 0.49
     ),
@@ -394,6 +415,17 @@ function normalizeAutoFeatureEngineering(value: unknown): AutoFeatureEngineering
     low_variance_selection: raw.low_variance_selection !== false,
     variance_threshold: boundedNumber(raw.variance_threshold, 0, 0, Number.MAX_SAFE_INTEGER)
   };
+}
+
+function normalizeScalingCandidates(
+  value: unknown
+): AutoFeatureEngineeringDefinition["numeric_scaling_candidates"] {
+  const allowed = new Set(["none", "standard", "minmax", "robust"]);
+  const normalized = Array.isArray(value)
+    ? Array.from(new Set(value.map(String).filter((item) => allowed.has(item))))
+    : ["standard", "robust", "minmax", "none"];
+  return (normalized.length ? normalized : ["standard"]) as
+    AutoFeatureEngineeringDefinition["numeric_scaling_candidates"];
 }
 
 function normalizeOptimization(value: unknown): TrainingOptimization {

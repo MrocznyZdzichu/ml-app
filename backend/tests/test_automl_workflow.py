@@ -367,6 +367,44 @@ def test_autofe_planner_profiles_full_scope_and_builds_bounded_recipe(tmp_path) 
         "variance_filter",
     ]
     assert expanded[5].provenance["recipe_contract"]["signed_log_features"] is False
+    v2 = model_aware_autofe_plans(
+        plan,
+        ["logistic_regression", "random_forest_classifier", "complement_nb"],
+        max_candidates=24,
+        numeric_feature_search=True,
+        numeric_recipe_search_v2=True,
+        numeric_scaling_search=True,
+        numeric_scaling_candidates=["standard", "robust", "minmax", "none"],
+    )
+    v2_ids = [item.provenance["recipe_id"] for item in v2]
+    assert v2_ids[:10] == [
+        "scaled_dense",
+        "tree_unscaled",
+        "non_negative",
+        "scaled_dense__winsorized",
+        "tree_unscaled__winsorized",
+        "non_negative__winsorized",
+        "scaled_dense__signed_log",
+        "tree_unscaled__signed_log",
+        "scaled_dense__winsorized_signed_log",
+        "tree_unscaled__winsorized_signed_log",
+    ]
+    assert "scaled_dense__robust" in v2_ids
+    assert "scaled_dense__winsorized__minmax" in v2_ids
+    assert "scaled_dense__signed_log__none" in v2_ids
+    assert len(v2_ids) == len(set(v2_ids)) == 22
+    robust = next(item for item in v2 if item.provenance["recipe_id"] == "scaled_dense__robust")
+    assert robust.provenance["recipe_contract"]["numeric_scaling"] == "robust"
+    assert [
+        transform.config.get("method")
+        for transform in robust.definition.transformations
+        if transform.type == "scale_numeric"
+    ] == ["robust"]
+    winsor_only = next(
+        item for item in v2 if item.provenance["recipe_id"] == "scaled_dense__winsorized"
+    )
+    assert winsor_only.provenance["recipe_contract"]["signed_log_features"] is False
+    assert winsor_only.provenance["recipe_contract"]["winsorization"] is not None
 
 
 def test_autofe_planner_accepts_parquet_table_function_relation(tmp_path) -> None:
@@ -588,12 +626,19 @@ def test_integrated_autofe_and_automl_train_a_real_classification_model(tmp_path
     definition["optimization"] = {
         **definition["optimization"],
         "validation_strategy": "auto",
-        "max_trials": 2,
+        "max_trials": 5,
     }
     definition["auto_feature_engineering"] = {
         **definition["auto_feature_engineering"],
         "numeric_feature_search": True,
-        "max_recipe_candidates": 2,
+        "numeric_recipe_search_v2": True,
+        "numeric_scaling_search": True,
+        "numeric_scaling_candidates": ["standard", "robust", "minmax", "none"],
+        "max_recipe_candidates": 3,
+        "two_phase_search_enabled": True,
+        "exploration_trials_per_recipe": 1,
+        "exploration_time_fraction": 0.35,
+        "promotion_top_k": 1,
     }
     step_payload["steps"][1]["config"]["definition"] = definition
     step = WorkflowStep.model_validate(step_payload["steps"][1])
@@ -629,10 +674,38 @@ def test_integrated_autofe_and_automl_train_a_real_classification_model(tmp_path
     assert model["auto_feature_engineering"]["profiled_row_count"] == 120
     assert model["auto_feature_engineering"]["resolved_feature_count"] >= 3
     study = model["auto_feature_engineering"]["joint_study"]
-    assert study["recipe_candidate_count"] == 2
-    assert sum(item["trial_count"] for item in study["candidates"]) == 2
-    assert study["candidates"][1]["recipe_contract"]["numeric_variant"] == "robust_generated"
-    assert study["candidates"][1]["resolved_feature_count"] > study["candidates"][0]["resolved_feature_count"]
+    assert study["recipe_candidate_count"] == 3
+    assert study["configured_recipe_candidate_count"] == 3
+    assert study["generated_recipe_candidate_count"] == 16
+    assert study["skipped_recipe_count"] == 13
+    executed = [item for item in study["candidates"] if item["status"] != "skipped"]
+    skipped = [item for item in study["candidates"] if item["status"] == "skipped"]
+    assert sum(item["trial_count"] for item in executed) == 5
+    assert study["scheduler"] == {
+        "mode": "two_phase",
+        "exploration_trials_per_recipe": 1,
+        "exploration_time_fraction": 0.35,
+        "promotion_top_k": 1,
+        "promoted_recipe_ids": [
+            next(item["recipe_id"] for item in executed if item["status"] == "promoted")
+        ],
+        "allocated_exploration_trials": 3,
+        "allocated_exploration_timeout_seconds": 30,
+        "allocated_deepening_trials": 2,
+        "allocated_deepening_timeout_seconds": 30,
+        "completed_trials": 5,
+    }
+    assert [item["status"] for item in executed].count("promoted") == 1
+    assert [item["status"] for item in executed].count("pruned") == 2
+    promoted = next(item for item in executed if item["status"] == "promoted")
+    assert [phase["phase"] for phase in promoted["phases"]] == ["exploration", "deepening"]
+    assert [phase["allocated_trial_budget"] for phase in promoted["phases"]] == [1, 2]
+    assert [item["recipe_contract"]["numeric_variant"] for item in executed] == [
+        "baseline", "winsorized", "signed_log",
+    ]
+    assert all(item["reason"] == "explicit max_recipe_candidates cap" for item in skipped)
+    assert all(item["recipe_contract"] for item in skipped)
+    assert executed[2]["resolved_feature_count"] > executed[0]["resolved_feature_count"]
 
 
 def test_automl_incremental_winner_refits_balanced_class_weight(tmp_path) -> None:
@@ -936,12 +1009,14 @@ def test_integrated_autofe_fold_local_cv_supports_regression(tmp_path) -> None:
         "validation_strategy": "cross_validation",
         "primary_metric": "neg_root_mean_squared_error",
         "cv_folds": 3,
-        "max_trials": 1,
+        "max_trials": 2,
         "candidate_algorithms": ["ridge_regression"],
     }
     definition["auto_feature_engineering"] = {
         **definition["auto_feature_engineering"],
-        "max_recipe_candidates": 1,
+        "max_recipe_candidates": 2,
+        "numeric_feature_search": True,
+        "numeric_recipe_search_v2": True,
     }
     step_payload["steps"][1]["config"]["definition"] = definition
     source = SourceRelation(
@@ -973,6 +1048,8 @@ def test_integrated_autofe_fold_local_cv_supports_regression(tmp_path) -> None:
     assert model["problem_type"] == "regression"
     assert study["cross_validation"]["strategy"] == "kfold"
     assert len(study["candidates"][0]["optimization"]["trials"][0]["fold_scores"]) == 3
+    assert study["candidates"][1]["recipe_contract"]["numeric_variant"] == "winsorized"
+    assert len(study["candidates"][1]["fold_local_feature_counts"]) == 3
 
 
 def test_fold_local_fitted_state_does_not_see_validation_only_changes(tmp_path) -> None:

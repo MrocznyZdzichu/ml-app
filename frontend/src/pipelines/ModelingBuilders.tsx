@@ -231,6 +231,9 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
     ? Math.max(2, usesUpstreamFoldPlan ? defaults.cv_folds : optimization.cv_folds)
     : 1;
   const estimatedFits = optimization.max_trials * estimatedFoldCount;
+  const twoPhaseSearch = definition.auto_feature_engineering.enabled
+    && definition.auto_feature_engineering.joint_search_enabled
+    && definition.auto_feature_engineering.two_phase_search_enabled;
   const trialsPerRecipe = optimization.max_trials / estimatedRecipeCount;
   const trialAllocation = Number.isInteger(trialsPerRecipe)
     ? `${trialsPerRecipe}`
@@ -308,7 +311,9 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
         <span>
           <strong>{optimization.max_trials}</strong> is the maximum for the whole search, not a guaranteed completed
           count. With up to <strong>{estimatedRecipeCount}</strong> FE {estimatedRecipeCount === 1 ? "recipe" : "recipes"},
-          the budget is allocated as about <strong>{trialAllocation} trials per recipe</strong>. {estimatedFoldCount > 1
+          {twoPhaseSearch
+            ? <> every executable recipe first receives <strong>{definition.auto_feature_engineering.exploration_trials_per_recipe} exploration trial(s)</strong>, then up to <strong>{definition.auto_feature_engineering.promotion_top_k}</strong> recipes share the remaining budget.</>
+            : <> the budget is allocated as about <strong>{trialAllocation} trials per recipe</strong>.</>} {estimatedFoldCount > 1
             ? <>Each trial is evaluated on <strong>{estimatedFoldCount} folds</strong>, for up to approximately <strong>{estimatedFits} model fits</strong>.</>
             : <>Each trial requires one validation fit, for up to approximately <strong>{estimatedFits} model fits</strong>.</>}
           {" "}The run can complete fewer trials when the time budget expires; the result keeps the best successful
@@ -407,8 +412,8 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
             value={definition.auto_feature_engineering.validation_size}
             disabled={disabled || defaults.has_validation}
             onChange={(event) => updateAutoFE({ validation_size: Number(event.target.value) })} /></label>
-          <label>Numeric scaling<select value={definition.auto_feature_engineering.numeric_scaling}
-            disabled={disabled}
+          <label>Fixed numeric scaling<select value={definition.auto_feature_engineering.numeric_scaling}
+            disabled={disabled || definition.auto_feature_engineering.numeric_scaling_search}
             onChange={(event) => updateAutoFE({
               numeric_scaling: event.target.value as TrainingDefinition["auto_feature_engineering"]["numeric_scaling"]
             })}>
@@ -423,11 +428,30 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
           <label>Minimum category frequency<input type="number" min={1} max={1000000}
             value={definition.auto_feature_engineering.min_category_frequency} disabled={disabled}
             onChange={(event) => updateAutoFE({ min_category_frequency: Number(event.target.value) })} /></label>
-          <label>Maximum FE recipe candidates<input type="number" min={1} max={9}
+          <label>Maximum FE recipe candidates<input type="number" min={1} max={24}
             value={definition.auto_feature_engineering.max_recipe_candidates}
             disabled={disabled || !definition.auto_feature_engineering.joint_search_enabled}
             onChange={(event) => updateAutoFE({ max_recipe_candidates: Number(event.target.value) })} /></label>
         </div>
+        <label className="fe-toggle">
+          <input type="checkbox" checked={definition.auto_feature_engineering.two_phase_search_enabled}
+            disabled={disabled || !definition.auto_feature_engineering.joint_search_enabled}
+            onChange={(event) => updateAutoFE({ two_phase_search_enabled: event.target.checked })} />
+          <span><strong>Two-phase recipe scheduler</strong>
+            <small>Explore every recipe, then spend the remaining global budget only on the strongest candidates.</small>
+          </span>
+        </label>
+        {definition.auto_feature_engineering.two_phase_search_enabled && <div className="step-grid">
+          <label>Exploration trials per recipe<input type="number" min={1} max={10}
+            value={definition.auto_feature_engineering.exploration_trials_per_recipe} disabled={disabled}
+            onChange={(event) => updateAutoFE({ exploration_trials_per_recipe: Number(event.target.value) })} /></label>
+          <label>Exploration time share<input type="number" min={0.1} max={0.8} step={0.05}
+            value={definition.auto_feature_engineering.exploration_time_fraction} disabled={disabled}
+            onChange={(event) => updateAutoFE({ exploration_time_fraction: Number(event.target.value) })} /></label>
+          <label>Recipes promoted<input type="number" min={1} max={12}
+            value={definition.auto_feature_engineering.promotion_top_k} disabled={disabled}
+            onChange={(event) => updateAutoFE({ promotion_top_k: Number(event.target.value) })} /></label>
+        </div>}
         <label className="fe-toggle">
           <input type="checkbox" checked={definition.auto_feature_engineering.numeric_feature_search}
             disabled={disabled || !definition.auto_feature_engineering.joint_search_enabled}
@@ -437,6 +461,25 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
           </span>
         </label>
         {definition.auto_feature_engineering.numeric_feature_search && <div className="step-grid">
+          <label className="fe-toggle"><input type="checkbox"
+            checked={definition.auto_feature_engineering.numeric_scaling_search} disabled={disabled}
+            onChange={(event) => updateAutoFE({ numeric_scaling_search: event.target.checked })} />
+            <span><strong>Search numeric scaling</strong><small>Compare compatible scaling methods as separate recipes.</small></span>
+          </label>
+          {definition.auto_feature_engineering.numeric_scaling_search &&
+            (["standard", "robust", "minmax", "none"] as const).map((method) => {
+              const selected = definition.auto_feature_engineering.numeric_scaling_candidates.includes(method);
+              return <label className="fe-toggle" key={method}><input type="checkbox" checked={selected}
+                disabled={disabled || (selected && definition.auto_feature_engineering.numeric_scaling_candidates.length === 1)}
+                onChange={(event) => updateAutoFE({
+                  numeric_scaling_candidates: event.target.checked
+                    ? [...definition.auto_feature_engineering.numeric_scaling_candidates, method]
+                    : definition.auto_feature_engineering.numeric_scaling_candidates.filter((item) => item !== method)
+                })} />
+                <span><strong>{method === "minmax" ? "Min-max" : method === "none" ? "None" : method[0].toUpperCase() + method.slice(1)}</strong>
+                  <small>{method === "standard" ? "Mean/std scaling" : method === "robust" ? "Median/IQR scaling" : method === "minmax" ? "Bounded non-negative scaling" : "Unscaled numeric values"}</small></span>
+              </label>;
+            })}
           <label>Winsor lower quantile<input type="number" min={0} max={0.49} step={0.01}
             value={definition.auto_feature_engineering.winsorization_lower_quantile} disabled={disabled}
             onChange={(event) => updateAutoFE({ winsorization_lower_quantile: Number(event.target.value) })} /></label>
@@ -463,10 +506,10 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
             Choose a stable row ID so AutoFE can create deterministic leakage-safe holdout or CV folds.
           </span></div>}
         <div className="training-help"><strong>Model-aware AutoFE scope</strong><span>
-          Classification and regression only. Joint search coordinates scaling, bounded categorical preparation,
-          numeric feature generation and low-variance selection with estimator capabilities, then refits the winning
-          recipe and model. Cross-validation fits every learned FE transformation and selector independently inside
-          each fold and requires a pre-FE input.
+          Classification and regression only. Joint search independently compares baseline, winsorized, signed-log
+          and combined numeric recipes plus compatible scaling methods. Tree and non-negative model constraints prune
+          redundant or invalid combinations. Cross-validation fits every learned transformation and selector inside
+          each fold, then refits the winning complete recipe and model.
         </span></div>
       </>}
     </section>}

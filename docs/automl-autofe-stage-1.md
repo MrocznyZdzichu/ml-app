@@ -1,4 +1,4 @@
-# AutoML + AutoFE — Stages 1–4
+# AutoML + AutoFE — Stages 1–6
 
 The first integrated AutoFE increment is limited to binary classification,
 multiclass classification, and regression over tabular data. Clustering and
@@ -89,10 +89,42 @@ Definitions published before Stage 4 retain their historical search space.
 Numeric feature search is enabled explicitly for new UI drafts, and the recipe
 cap can be increased to compare baseline and enhanced capability profiles.
 
+Stage 5 makes the numeric recipe space conditional instead of treating all
+numeric improvements as one indivisible profile. New UI drafts independently
+compare baseline, winsorized, signed-log and winsorized-plus-signed-log variants.
+For scale-sensitive estimators they may additionally compare standard, robust,
+min-max and disabled scaling. Tree profiles do not generate redundant scaling
+variants, while non-negative estimators exclude signed-log variants that would
+violate their input contract. The default UI cap is 12 and the absolute bounded
+cap is 24; the global trial and time budgets still govern actual execution.
+
+The joint-study provenance distinguishes generated, configured and executed
+recipe counts. Every candidate excluded by the explicit recipe cap or by the
+minimum trial/time allocation is retained as `skipped`, together with its recipe
+contract and reason. Published definitions keep the historical recipe generator
+unless the version-2 numeric search flag is explicitly enabled.
+
+Stage 6 adds an opt-in two-phase scheduler, enabled by default for new UI drafts.
+Every executable recipe first receives the configured small exploration budget
+on the same holdout or raw fold plan. Successful recipes are ranked
+deterministically by score and recipe ID; up to the configured top-K then share
+all remaining global trials and wall-clock time in a deepening phase. Deepening
+uses a deterministic seed offset so sampled estimator configurations are not a
+replay of exploration, while the data split and leakage boundary stay unchanged.
+
+The leaderboard stores both phase results and their allocated/consumed budgets.
+Recipes are marked `promoted`, `pruned`, `explored`, `failed`, or `skipped`, with
+promotion/pruning reasons. A failed deepening phase falls back to that recipe's
+successful exploration result. The global `max_trials` and timeout remain hard
+caps across both phases, and only the final winning path is persisted. Published
+definitions without the scheduler flag keep the historical flat allocation.
+
 ## Trial and time budgets
 
-`max_trials` is a cap for the complete joint study. It is divided between the
-selected FE recipe profiles; it is not a guaranteed number of completed trials
+`max_trials` is a cap for the complete joint study. With the two-phase scheduler,
+the exploration minimum is assigned first and the remaining budget is divided
+between promoted recipes. With flat scheduling it is divided between all
+selected FE recipe profiles. It is not a guaranteed number of completed trials
 per profile. The wall-clock budget is divided as well. A recipe may therefore
 finish fewer allocated trials when its timeout expires, while retaining its
 best successful trial. With cross-validation, the approximate model-fit cost is

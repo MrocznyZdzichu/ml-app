@@ -78,6 +78,9 @@ def model_aware_autofe_plans(
     *,
     max_candidates: int = 3,
     numeric_feature_search: bool = False,
+    numeric_recipe_search_v2: bool = False,
+    numeric_scaling_search: bool = False,
+    numeric_scaling_candidates: list[str] | None = None,
     winsorization_lower_quantile: float = 0.01,
     winsorization_upper_quantile: float = 0.99,
     signed_log_features: bool = True,
@@ -94,15 +97,47 @@ def model_aware_autofe_plans(
     ordered_profiles = [profile for profile in preferred_order if profile in grouped]
     ordered_profiles.extend(sorted(set(grouped) - set(ordered_profiles)))
     plans: list[AutoFEPlan] = []
-    variants = ["baseline"]
-    if numeric_feature_search:
-        variants.append("robust_generated")
-    candidate_pairs = [
-        (profile, variant)
-        for variant in variants
-        for profile in ordered_profiles
-    ]
-    for profile, variant in candidate_pairs[:max_candidates]:
+    profile_scaling = {
+        "scaled_dense": "standard",
+        "tree_unscaled": "none",
+        "non_negative": "minmax",
+    }
+    if numeric_recipe_search_v2:
+        requested_scalings = list(dict.fromkeys(
+            numeric_scaling_candidates or ["standard", "robust", "minmax", "none"]
+        ))
+        if numeric_scaling_search and "scaled_dense" in ordered_profiles:
+            profile_scaling["scaled_dense"] = (
+                "standard" if "standard" in requested_scalings else requested_scalings[0]
+            )
+        variants = ["baseline"]
+        if numeric_feature_search:
+            variants.append("winsorized")
+            if signed_log_features:
+                variants.extend(["signed_log", "winsorized_signed_log"])
+        candidate_specs = [
+            (profile, variant, profile_scaling.get(profile, "standard"))
+            for variant in variants
+            for profile in ordered_profiles
+            if not ("signed_log" in variant and profile == "non_negative")
+        ]
+        if numeric_scaling_search and "scaled_dense" in ordered_profiles:
+            candidate_specs.extend(
+                ("scaled_dense", variant, scaling)
+                for scaling in requested_scalings
+                if scaling != profile_scaling["scaled_dense"]
+                for variant in variants
+            )
+    else:
+        variants = ["baseline"]
+        if numeric_feature_search:
+            variants.append("robust_generated")
+        candidate_specs = [
+            (profile, variant, profile_scaling.get(profile, "standard"))
+            for variant in variants
+            for profile in ordered_profiles
+        ]
+    for profile, variant, scaling in candidate_specs[:max_candidates]:
         definition = base_plan.definition.model_copy(deep=True)
         transformations = [
             transform
@@ -119,12 +154,9 @@ def model_aware_autofe_plans(
             for item in base_plan.provenance.get("column_decisions", [])
             if item.get("role") == "numeric" and item.get("column")
         ]
-        scaling = {
-            "scaled_dense": "standard",
-            "tree_unscaled": "none",
-            "non_negative": "minmax",
-        }.get(profile, "standard")
-        enhanced = variant == "robust_generated" and bool(numeric_columns)
+        winsorized = variant in {"robust_generated", "winsorized", "winsorized_signed_log"}
+        signed_log = variant in {"robust_generated", "signed_log", "winsorized_signed_log"}
+        enhanced = variant != "baseline" and bool(numeric_columns)
         generated_columns = []
         if enhanced:
             numeric_insert_at = next(
@@ -134,18 +166,21 @@ def model_aware_autofe_plans(
                 ),
                 len(transformations),
             )
-            transformations.insert(numeric_insert_at, FeatureTransformation(
-                transform_id="autofe_numeric_winsorization",
-                type="winsorize_numeric",
-                columns=numeric_columns,
-                config={
-                    "lower_quantile": winsorization_lower_quantile,
-                    "upper_quantile": winsorization_upper_quantile,
-                },
-            ))
-            if signed_log_features and profile != "non_negative":
+            next_insert_at = numeric_insert_at
+            if winsorized:
+                transformations.insert(next_insert_at, FeatureTransformation(
+                    transform_id="autofe_numeric_winsorization",
+                    type="winsorize_numeric",
+                    columns=numeric_columns,
+                    config={
+                        "lower_quantile": winsorization_lower_quantile,
+                        "upper_quantile": winsorization_upper_quantile,
+                    },
+                ))
+                next_insert_at += 1
+            if signed_log and signed_log_features and profile != "non_negative":
                 generated_columns = [f"{column}__signed_log1p" for column in numeric_columns]
-                transformations.insert(numeric_insert_at + 1, FeatureTransformation(
+                transformations.insert(next_insert_at, FeatureTransformation(
                     transform_id="autofe_numeric_signed_log",
                     type="math_transform",
                     columns=numeric_columns,
@@ -192,13 +227,17 @@ def model_aware_autofe_plans(
         for raw_decision in base_plan.provenance.get("column_decisions", []):
             decision = dict(raw_decision)
             if decision.get("role") == "numeric":
-                decision["action"] = {
-                    "scaled_dense": "impute_and_standard_scale",
-                    "tree_unscaled": "impute_without_scaling",
-                    "non_negative": "impute_and_minmax_scale",
-                }.get(profile, decision.get("action"))
+                decision["action"] = (
+                    "impute_without_scaling"
+                    if scaling == "none"
+                    else f"impute_and_{scaling}_scale"
+                )
+                decision["numeric_variant"] = variant
             decisions.append(decision)
+        default_scaling = profile_scaling.get(profile, "standard")
         recipe_id = profile if variant == "baseline" else f"{profile}__{variant}"
+        if scaling != default_scaling:
+            recipe_id = f"{recipe_id}__{scaling}"
         recipe_contract = AutoFERecipeSpec(
             contract_version="2.0",
             capability_profile=profile,
@@ -209,7 +248,7 @@ def model_aware_autofe_plans(
                     "lower_quantile": winsorization_lower_quantile,
                     "upper_quantile": winsorization_upper_quantile,
                 }
-                if enhanced else None
+                if winsorized else None
             ),
             signed_log_features=bool(generated_columns),
             feature_selector=(
@@ -225,6 +264,7 @@ def model_aware_autofe_plans(
             "feature_capability_profile": profile,
             "compatible_algorithms": list(grouped[profile]),
             "numeric_scaling": scaling,
+            "numeric_recipe_space_version": "2.0" if numeric_recipe_search_v2 else "1.0",
             "recipe_contract": recipe_contract,
             "column_decisions": decisions,
             "resolved_recipe": definition.model_dump(mode="json"),
