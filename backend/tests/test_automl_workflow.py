@@ -407,6 +407,128 @@ def test_autofe_planner_profiles_full_scope_and_builds_bounded_recipe(tmp_path) 
     assert winsor_only.provenance["recipe_contract"]["winsorization"] is not None
 
 
+def test_profile_aware_planner_builds_bounded_auditable_numeric_features(tmp_path) -> None:
+    payload = automl_definition(autofe=True)
+    payload["feature_columns"] = []
+    payload["feature_selection"] = "upstream_contract"
+    payload["auto_feature_engineering"] = {
+        **payload["auto_feature_engineering"],
+        "profile_aware_generation": True,
+        "max_generated_features": 5,
+        "max_interaction_features": 3,
+        "skewness_threshold": 0.75,
+    }
+    definition = TrainingDefinition.model_validate(payload)
+    source = SourceRelation(
+        sql=(
+            "(SELECT i AS row_id, CAST(i % 2 AS INTEGER) AS target, "
+            "power(1.08, CAST(i AS DOUBLE)) AS skewed_amount, "
+            "CAST(i % 17 AS DOUBLE) AS usage, "
+            "CAST(CASE WHEN i % 11 = 0 THEN 0 ELSE i % 7 END AS DOUBLE) AS balance "
+            "FROM range(120) t(i))"
+        ),
+        row_count=120,
+    )
+    plan = DuckDbAutoFEPlanner(tmp_path).plan(
+        training=source,
+        validation=None,
+        test=None,
+        training_definition=definition,
+        run_id="profile-aware-plan",
+        owner_id="owner",
+    )
+    decisions = {item["column"]: item for item in plan.provenance["column_decisions"]}
+    assert decisions["skewed_amount"]["numeric_profile"]["skewness"] > 0.75
+    assert plan.provenance["feature_generation_budget"] == {
+        "requested_max_generated_features": 5,
+        "memory_feature_capacity": plan.provenance["feature_generation_budget"]["memory_feature_capacity"],
+        "effective_max_generated_features": 5,
+        "estimated_bytes_per_generated_feature": 120 * 8 * 6,
+        "max_memory_mb": 512,
+        "limited_by_memory": False,
+    }
+
+    plans = model_aware_autofe_plans(
+        plan,
+        ["logistic_regression", "random_forest_classifier"],
+        max_candidates=8,
+        numeric_feature_search=True,
+        numeric_recipe_search_v2=True,
+        profile_aware_generation=True,
+        distribution_transformations=True,
+        numeric_interactions=True,
+        interaction_operators=["multiply", "divide"],
+        max_generated_features=5,
+        max_interaction_features=3,
+        skewness_threshold=0.75,
+    )
+    candidate = next(
+        item for item in plans
+        if item.provenance["recipe_id"] == "scaled_dense__profile_aware_interactions"
+    )
+    contract = candidate.provenance["recipe_contract"]
+    assert contract["contract_version"] == "3.0"
+    assert contract["distribution_transforms"][0]["column"] == "skewed_amount"
+    assert contract["distribution_transforms"][0]["operation"] == "log1p"
+    assert len(contract["numeric_interactions"]) == 3
+    assert contract["feature_budget"]["generated_feature_count"] == 4
+    assert contract["feature_budget"]["remaining_feature_capacity"] == 1
+    assert all(item["reason"] for item in candidate.provenance["feature_generation_decisions"])
+    assert [item.type for item in candidate.definition.transformations].count(
+        "numeric_interaction"
+    ) == 3
+    repeated = model_aware_autofe_plans(
+        plan,
+        ["logistic_regression", "random_forest_classifier"],
+        max_candidates=8,
+        numeric_feature_search=True,
+        numeric_recipe_search_v2=True,
+        profile_aware_generation=True,
+        max_generated_features=5,
+        max_interaction_features=3,
+        skewness_threshold=0.75,
+    )
+    repeated_candidate = next(
+        item for item in repeated
+        if item.provenance["recipe_id"] == "scaled_dense__profile_aware_interactions"
+    )
+    assert repeated_candidate.provenance["recipe_hash"] == candidate.provenance["recipe_hash"]
+
+
+def test_profile_aware_planner_reduces_width_to_full_scope_memory_budget(tmp_path) -> None:
+    payload = automl_definition(autofe=True)
+    payload["feature_columns"] = []
+    payload["feature_selection"] = "upstream_contract"
+    payload["resource_limits"] = {"max_memory_mb": 128, "max_parallel_jobs": 1}
+    payload["auto_feature_engineering"] = {
+        **payload["auto_feature_engineering"],
+        "profile_aware_generation": True,
+        "max_generated_features": 500,
+        "max_interaction_features": 100,
+    }
+    definition = TrainingDefinition.model_validate(payload)
+    plan = DuckDbAutoFEPlanner(tmp_path).plan(
+        training=SourceRelation(
+            sql=(
+                "(SELECT i AS row_id, CAST(i % 2 AS INTEGER) AS target, "
+                "CAST(i AS DOUBLE) AS amount, CAST(i % 97 AS DOUBLE) AS usage "
+                "FROM range(100000) t(i))"
+            ),
+            row_count=100000,
+        ),
+        validation=None,
+        test=None,
+        training_definition=definition,
+        run_id="memory-aware-plan",
+        owner_id="owner",
+    )
+    budget = plan.provenance["feature_generation_budget"]
+    assert plan.provenance["profiled_row_count"] == 100000
+    assert budget["limited_by_memory"] is True
+    assert budget["effective_max_generated_features"] < 500
+    assert budget["effective_max_generated_features"] == budget["memory_feature_capacity"]
+
+
 def test_autofe_planner_accepts_parquet_table_function_relation(tmp_path) -> None:
     """Feature Engineering publishes its outputs as a raw read_parquet relation."""
     parquet_path = tmp_path / "fe-training_features.parquet"
@@ -823,6 +945,148 @@ def test_joint_autofe_compares_model_specific_recipes_on_one_holdout(tmp_path) -
     assert study["selected_algorithm"] in {
         "ridge_regression", "decision_tree_regressor"
     }
+
+
+def test_profile_aware_recipe_executes_inside_joint_automl_search(tmp_path) -> None:
+    step_payload = automl_workflow()
+    definition = {
+        **automl_definition(autofe=True),
+        "problem_type": "regression",
+        "algorithm": "ridge_regression",
+        "parameters": {},
+        "feature_columns": [],
+        "feature_selection": "upstream_contract",
+    }
+    definition["optimization"] = {
+        **definition["optimization"],
+        "validation_strategy": "auto",
+        "primary_metric": "neg_root_mean_squared_error",
+        "max_trials": 6,
+        "candidate_algorithms": ["ridge_regression", "decision_tree_regressor"],
+    }
+    definition["auto_feature_engineering"] = {
+        **definition["auto_feature_engineering"],
+        "joint_search_enabled": True,
+        "max_recipe_candidates": 6,
+        "numeric_feature_search": True,
+        "numeric_recipe_search_v2": True,
+        "profile_aware_generation": True,
+        "distribution_transformations": True,
+        "numeric_interactions": True,
+        "interaction_operators": ["multiply", "divide"],
+        "max_generated_features": 6,
+        "max_interaction_features": 4,
+        "skewness_threshold": 0.75,
+    }
+    step_payload["steps"][1]["config"]["definition"] = definition
+    step = WorkflowStep.model_validate(step_payload["steps"][1])
+    source = SourceRelation(
+        sql=(
+            "(SELECT i AS row_id, power(1.06, CAST(i AS DOUBLE)) AS amount, "
+            "CAST((i % 13) + 1 AS DOUBLE) AS tenure, "
+            "CAST((i % 7) + 1 AS DOUBLE) AS usage, "
+            "power(1.06, CAST(i AS DOUBLE)) / CAST((i % 13) + 1 AS DOUBLE) "
+            "+ CAST(i % 7 AS DOUBLE) AS target FROM range(140) t(i))"
+        ),
+        row_count=140,
+        metadata={"scope": "full"},
+    )
+    result = AutoMLStepHandler(
+        SklearnTrainingEngine(repository_root=tmp_path),
+        feature_engine=DuckDbFeatureEngineeringEngine(repository_root=tmp_path),
+        planner=DuckDbAutoFEPlanner(tmp_path),
+    ).execute(
+        step,
+        StepExecutionContext(
+            run_id="run-profile-aware-autofe",
+            owner_id="owner",
+            is_dry_run=True,
+            upstream_relations={("de_1", "dataset"): source},
+        ),
+    )
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    study = model["auto_feature_engineering"]["joint_study"]
+    profile_candidates = [
+        item for item in study["candidates"]
+        if item["recipe_contract"]["contract_version"] == "3.0"
+    ]
+    assert len(profile_candidates) == 4
+    assert all(item["status"] in {"succeeded", "promoted"} for item in profile_candidates)
+    assert all(item["recipe_contract"]["distribution_transforms"] for item in profile_candidates)
+    interaction_candidate = next(
+        item for item in profile_candidates
+        if item["recipe_contract"]["numeric_interactions"]
+    )
+    assert interaction_candidate["resolved_feature_count"] > 3
+    assert interaction_candidate["recipe_contract"]["feature_budget"]["generated_feature_count"] <= 6
+
+
+def test_profile_aware_interaction_wins_when_linear_baseline_cannot_model_xor(tmp_path) -> None:
+    step_payload = automl_workflow()
+    definition = {
+        **automl_definition(autofe=True),
+        "algorithm": "logistic_regression",
+        "parameters": {},
+        "feature_columns": [],
+        "feature_selection": "upstream_contract",
+    }
+    definition["optimization"] = {
+        **definition["optimization"],
+        "validation_strategy": "auto",
+        "primary_metric": "accuracy",
+        "max_trials": 3,
+        "candidate_algorithms": ["logistic_regression"],
+    }
+    definition["auto_feature_engineering"] = {
+        **definition["auto_feature_engineering"],
+        "joint_search_enabled": True,
+        "max_recipe_candidates": 3,
+        "numeric_feature_search": True,
+        "numeric_recipe_search_v2": True,
+        "profile_aware_generation": True,
+        "distribution_transformations": True,
+        "numeric_interactions": True,
+        "interaction_operators": ["multiply"],
+        "max_generated_features": 1,
+        "max_interaction_features": 1,
+        "skewness_threshold": 1.0,
+    }
+    step_payload["steps"][1]["config"]["definition"] = definition
+    source = SourceRelation(
+        sql=(
+            "(SELECT i AS row_id, "
+            "CAST((i % 20) - 9.5 AS DOUBLE) AS x, "
+            "CAST(((i // 20) % 20) - 9.5 AS DOUBLE) AS y, "
+            "CAST(CASE WHEN (((i % 20) - 9.5) * (((i // 20) % 20) - 9.5)) > 0 "
+            "THEN 1 ELSE 0 END AS INTEGER) AS target FROM range(400) t(i))"
+        ),
+        row_count=400,
+        metadata={"scope": "full"},
+    )
+    result = AutoMLStepHandler(
+        SklearnTrainingEngine(repository_root=tmp_path),
+        feature_engine=DuckDbFeatureEngineeringEngine(repository_root=tmp_path),
+        planner=DuckDbAutoFEPlanner(tmp_path),
+    ).execute(
+        WorkflowStep.model_validate(step_payload["steps"][1]),
+        StepExecutionContext(
+            run_id="run-profile-aware-xor",
+            owner_id="owner",
+            is_dry_run=True,
+            upstream_relations={("de_1", "dataset"): source},
+        ),
+    )
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    study = model["auto_feature_engineering"]["joint_study"]
+    scores = {
+        item["recipe_id"]: item["score"]
+        for item in study["candidates"]
+        if isinstance(item.get("score"), (int, float))
+    }
+    assert study["selected_recipe_id"] == "scaled_dense__profile_aware_interactions"
+    assert scores[study["selected_recipe_id"]] >= 0.95
+    assert scores["scaled_dense"] <= 0.7
+    assert scores[study["selected_recipe_id"]] - scores["scaled_dense"] >= 0.25
 
 
 def test_autofe_cross_validation_plan_is_deterministic_disjoint_and_full_scope(tmp_path) -> None:

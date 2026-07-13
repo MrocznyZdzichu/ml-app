@@ -492,6 +492,51 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
             <span><strong>Signed-log features</strong><small>Keep originals and add sign(x) · log(1 + |x|).</small></span>
           </label>
           <label className="fe-toggle"><input type="checkbox"
+            checked={definition.auto_feature_engineering.profile_aware_generation} disabled={disabled}
+            onChange={(event) => updateAutoFE({ profile_aware_generation: event.target.checked })} />
+            <span><strong>Profile-aware Planner v2</strong>
+              <small>Use full-scope, target-free distribution statistics to propose bounded nonlinear features and interactions.</small></span>
+          </label>
+          {definition.auto_feature_engineering.profile_aware_generation && <>
+            <label className="fe-toggle"><input type="checkbox"
+              checked={definition.auto_feature_engineering.distribution_transformations} disabled={disabled}
+              onChange={(event) => updateAutoFE({ distribution_transformations: event.target.checked })} />
+              <span><strong>Distribution-aware transforms</strong>
+                <small>Select log1p, square-root or signed-log only for sufficiently skewed, non-constant columns.</small></span>
+            </label>
+            <label>Skewness threshold<input type="number" min={0.25} max={10} step={0.25}
+              value={definition.auto_feature_engineering.skewness_threshold} disabled={disabled}
+              onChange={(event) => updateAutoFE({ skewness_threshold: Number(event.target.value) })} /></label>
+            <label className="fe-toggle"><input type="checkbox"
+              checked={definition.auto_feature_engineering.numeric_interactions} disabled={disabled}
+              onChange={(event) => updateAutoFE({ numeric_interactions: event.target.checked })} />
+              <span><strong>Numeric interactions</strong>
+                <small>Rank target-free column pairs by variability and coverage, then test a bounded interaction recipe.</small></span>
+            </label>
+            {definition.auto_feature_engineering.numeric_interactions &&
+              (["multiply", "divide", "subtract"] as const).map((operator) => {
+                const selected = definition.auto_feature_engineering.interaction_operators.includes(operator);
+                return <label className="fe-toggle" key={operator}><input type="checkbox"
+                  checked={selected} disabled={disabled || (selected
+                    && definition.auto_feature_engineering.interaction_operators.length === 1)}
+                  onChange={(event) => updateAutoFE({
+                    interaction_operators: event.target.checked
+                      ? [...definition.auto_feature_engineering.interaction_operators, operator]
+                      : definition.auto_feature_engineering.interaction_operators.filter((item) => item !== operator)
+                  })} />
+                  <span><strong>{operator[0].toUpperCase() + operator.slice(1)}</strong>
+                    <small>{operator === "divide" ? "Zero-safe ratios" : `Pairwise ${operator} features`}</small></span>
+                </label>;
+              })}
+            <label>Maximum generated features<input type="number" min={0} max={500}
+              value={definition.auto_feature_engineering.max_generated_features} disabled={disabled}
+              onChange={(event) => updateAutoFE({ max_generated_features: Number(event.target.value) })} /></label>
+            <label>Maximum interaction features<input type="number" min={0} max={100}
+              value={definition.auto_feature_engineering.max_interaction_features}
+              disabled={disabled || !definition.auto_feature_engineering.numeric_interactions}
+              onChange={(event) => updateAutoFE({ max_interaction_features: Number(event.target.value) })} /></label>
+          </>}
+          <label className="fe-toggle"><input type="checkbox"
             checked={definition.auto_feature_engineering.low_variance_selection} disabled={disabled}
             onChange={(event) => updateAutoFE({ low_variance_selection: event.target.checked })} />
             <span><strong>Low-variance selection</strong><small>Fit the selector on train/fold-train only.</small></span>
@@ -506,10 +551,10 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
             Choose a stable row ID so AutoFE can create deterministic leakage-safe holdout or CV folds.
           </span></div>}
         <div className="training-help"><strong>Model-aware AutoFE scope</strong><span>
-          Classification and regression only. Joint search independently compares baseline, winsorized, signed-log
-          and combined numeric recipes plus compatible scaling methods. Tree and non-negative model constraints prune
-          redundant or invalid combinations. Cross-validation fits every learned transformation and selector inside
-          each fold, then refits the winning complete recipe and model.
+          Classification and regression only. Joint search compares baseline, robust numeric and profile-aware recipes,
+          including bounded nonlinear features and zero-safe interactions. The planner uses target-free full-scope
+          aggregates, applies the configured memory/width budget and records every generation decision. Cross-validation
+          fits learned transformations and selectors inside each fold, then refits the winning complete recipe and model.
         </span></div>
       </>}
     </section>}

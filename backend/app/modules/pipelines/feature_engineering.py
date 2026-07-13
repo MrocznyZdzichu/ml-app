@@ -124,6 +124,8 @@ class FeatureTransformation(BaseModel):
                 raise ValueError("numeric_interaction requires left, right, operator and output_column")
             if self.config["operator"] not in {"add", "subtract", "multiply", "divide"}:
                 raise ValueError("Unsupported numeric interaction operator")
+            if self.config.get("zero_division", "null") not in {"null", "zero"}:
+                raise ValueError("Numeric interaction zero_division must be null or zero")
         if self.type == "math_transform":
             if self.config.get("operation", "square") not in {
                 "square", "sqrt", "exp", "log", "log1p", "signed_log1p", "abs",
@@ -1120,9 +1122,15 @@ class DuckDbFeatureEngineeringEngine:
             symbol = {"add": "+", "subtract": "-", "multiply": "*", "divide": "/"}[operator]
             if operator == "divide":
                 zero_policy = transform.config.get("zero_division", "null")
-                right = f"nullif({right}, 0)" if zero_policy == "null" else right
+                expression = (
+                    f"({left} / nullif({right}, 0))"
+                    if zero_policy == "null"
+                    else f"CASE WHEN {right} = 0 THEN 0.0 ELSE {left} / {right} END"
+                )
+            else:
+                expression = f"({left} {symbol} {right})"
             selection.append(
-                f"({left} {symbol} {right}) AS {identifier(str(transform.config['output_column']))}"
+                f"{expression} AS {identifier(str(transform.config['output_column']))}"
             )
         else:
             raise ValueError(f"Unsupported Feature Engineering transform '{transform.type}'")

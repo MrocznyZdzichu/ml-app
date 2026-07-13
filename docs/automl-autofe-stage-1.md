@@ -119,6 +119,30 @@ successful exploration result. The global `max_trials` and timeout remain hard
 caps across both phases, and only the final winning path is persisted. Published
 definitions without the scheduler flag keep the historical flat allocation.
 
+Stage 7 adds the profile-aware numeric Planner v2, enabled for new UI drafts.
+The planner extends the one-pass full-scope DuckDB profile with target-free
+numeric aggregates: minimum, maximum, mean, population standard deviation,
+skewness, zero share and non-null coverage. These statistics are used only to
+propose bounded recipe candidates; the target is never inspected by feature
+generation rules.
+
+Planner v2 can:
+
+- select `log1p`, square-root or signed-`log1p` only for non-constant columns
+  whose absolute skewness crosses the configured threshold;
+- rank numeric column pairs by target-free variability and coverage;
+- create bounded multiply, subtract and zero-safe divide interactions;
+- cap all generated columns by both an explicit width limit and a memory-aware
+  capacity derived from the complete row count and training memory budget; and
+- persist every generation reason, selected pair, transform, feature count and
+  budget decision in recipe contract `3.0` and the model leaderboard.
+
+The baseline and Stage 4-6 recipes remain candidates, so profile-aware features
+must win the same leakage-safe joint validation rather than being enabled
+unconditionally. Learned transformations and selectors remain fold-local.
+Scoring reuses the exact winning recipe and fitted state through the atomic
+inference bundle.
+
 ## Trial and time budgets
 
 `max_trials` is a cap for the complete joint study. With the two-phase scheduler,
@@ -142,10 +166,12 @@ search-space contract, although users may still configure it explicitly.
 ## Honest limitations
 
 Current coordination changes numeric preprocessing by estimator capability and
-uses bounded one-hot/frequency encoding for all estimators. The implemented
-selector is unsupervised constant/low-variance filtering; supervised feature
-selection, native categorical execution, target encoding, learned feature
-interactions and broader power/quantile transformations are not claimed yet.
+uses bounded one-hot/frequency encoding for all estimators. Planner v2 includes
+target-free, rule-selected nonlinear transforms and arithmetic interactions.
+The implemented selector remains unsupervised constant/low-variance filtering;
+supervised feature selection, native categorical execution, target encoding,
+learned symbolic interactions, Yeo-Johnson and quantile transformations are not
+claimed yet.
 
 ## Fold-local cross-validation
 

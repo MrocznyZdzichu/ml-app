@@ -478,6 +478,16 @@ function TrainingConfigSummary({ config }: { config: Record<string, unknown> }) 
       && typeof item === "object" && !Array.isArray(item))
     : [];
   const selectedCandidate = candidates.find((item) => item.recipe_id === jointStudy.selected_recipe_id);
+  const selectedRecipe = objectValue(selectedCandidate?.recipe_contract);
+  const selectedFeatureBudget = objectValue(selectedRecipe.feature_budget);
+  const selectedDistributionTransforms = Array.isArray(selectedRecipe.distribution_transforms)
+    ? selectedRecipe.distribution_transforms.filter((item): item is Record<string, unknown> => Boolean(item)
+      && typeof item === "object" && !Array.isArray(item))
+    : [];
+  const selectedInteractions = Array.isArray(selectedRecipe.numeric_interactions)
+    ? selectedRecipe.numeric_interactions.filter((item): item is Record<string, unknown> => Boolean(item)
+      && typeof item === "object" && !Array.isArray(item))
+    : [];
   const selectedOOF = objectValue(selectedCandidate?.selected_oof_summary);
   const foldCache = objectValue(selectedCandidate?.fold_cache);
   const completedJointTrials = candidates.reduce((total, candidate) => {
@@ -544,7 +554,26 @@ function TrainingConfigSummary({ config }: { config: Record<string, unknown> }) 
         oof_fold_score_std: selectedOOF.fold_score_std,
         fold_cache_hits: foldCache.hit_count,
         fold_cache_misses: foldCache.miss_count,
+        planner_contract: selectedRecipe.contract_version,
+        generated_features: selectedFeatureBudget.generated_feature_count,
+        generated_feature_limit: selectedFeatureBudget.requested_max_generated_features,
+        memory_feature_capacity: selectedFeatureBudget.memory_feature_capacity,
+        distribution_transforms: selectedDistributionTransforms.length,
+        numeric_interactions: selectedInteractions.length,
       }} empty="No AutoFE experiment provenance recorded." />
+      {(selectedDistributionTransforms.length > 0 || selectedInteractions.length > 0) && <>
+        <h4>Planner v2 generation decisions</h4>
+        <div className="parameter-chip-list">
+          {selectedDistributionTransforms.map((decision, index) => (
+            <span key={`distribution-${index}`}><strong>{String(decision.column ?? "feature")}</strong>
+              {String(decision.operation ?? "transform")} · {String(decision.reason ?? "profile rule")}</span>
+          ))}
+          {selectedInteractions.map((decision, index) => (
+            <span key={`interaction-${index}`}><strong>{String(decision.output_column ?? "interaction")}</strong>
+              {String(decision.operator ?? "interaction")} · {String(decision.reason ?? "pair ranking")}</span>
+          ))}
+        </div>
+      </>}
       <h4>Full-pipeline leaderboard</h4>
       <div className="optimization-trial-table">
         <div className="head"><span>Recipe</span><span>Status</span><span>Variant / scaling</span><span>Algorithm</span><span>Score</span><span>Features / reason</span></div>

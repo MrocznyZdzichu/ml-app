@@ -353,6 +353,15 @@ class AutoMLStepHandler(TrainingStepHandler):
                 variance_threshold=(
                     definition.auto_feature_engineering.variance_threshold
                 ),
+                profile_aware_generation=recipe_configuration.profile_aware_generation,
+                distribution_transformations=(
+                    recipe_configuration.distribution_transformations
+                ),
+                numeric_interactions=recipe_configuration.numeric_interactions,
+                interaction_operators=list(recipe_configuration.interaction_operators),
+                max_generated_features=recipe_configuration.max_generated_features,
+                max_interaction_features=recipe_configuration.max_interaction_features,
+                skewness_threshold=recipe_configuration.skewness_threshold,
             )
             if definition.auto_feature_engineering.joint_search_enabled
             else [plan]

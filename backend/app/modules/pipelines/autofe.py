@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
+from itertools import combinations
 from pathlib import Path
 from typing import Any
 
@@ -45,9 +47,12 @@ class AutoFERecipeSpec:
     winsorization: dict[str, float] | None
     signed_log_features: bool
     feature_selector: dict[str, Any] | None
+    distribution_transforms: list[dict[str, Any]] | None = None
+    numeric_interactions: list[dict[str, Any]] | None = None
+    feature_budget: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "contract_version": self.contract_version,
             "capability_profile": self.capability_profile,
             "numeric_variant": self.numeric_variant,
@@ -56,6 +61,13 @@ class AutoFERecipeSpec:
             "signed_log_features": self.signed_log_features,
             "feature_selector": self.feature_selector,
         }
+        if self.distribution_transforms is not None:
+            result["distribution_transforms"] = self.distribution_transforms
+        if self.numeric_interactions is not None:
+            result["numeric_interactions"] = self.numeric_interactions
+        if self.feature_budget is not None:
+            result["feature_budget"] = self.feature_budget
+        return result
 
 
 @dataclass(frozen=True)
@@ -86,6 +98,13 @@ def model_aware_autofe_plans(
     signed_log_features: bool = True,
     low_variance_selection: bool = True,
     variance_threshold: float = 0.0,
+    profile_aware_generation: bool = False,
+    distribution_transformations: bool = True,
+    numeric_interactions: bool = True,
+    interaction_operators: list[str] | None = None,
+    max_generated_features: int = 64,
+    max_interaction_features: int = 12,
+    skewness_threshold: float = 1.0,
 ) -> list[AutoFEPlan]:
     """Derive model-compatible recipes from one full-scope profiling pass."""
 
@@ -112,6 +131,11 @@ def model_aware_autofe_plans(
             )
         variants = ["baseline"]
         if numeric_feature_search:
+            if profile_aware_generation:
+                if distribution_transformations:
+                    variants.append("profile_aware")
+                if numeric_interactions:
+                    variants.append("profile_aware_interactions")
             variants.append("winsorized")
             if signed_log_features:
                 variants.extend(["signed_log", "winsorized_signed_log"])
@@ -119,7 +143,10 @@ def model_aware_autofe_plans(
             (profile, variant, profile_scaling.get(profile, "standard"))
             for variant in variants
             for profile in ordered_profiles
-            if not ("signed_log" in variant and profile == "non_negative")
+            if not (
+                ("signed_log" in variant or "profile_aware" in variant)
+                and profile == "non_negative"
+            )
         ]
         if numeric_scaling_search and "scaled_dense" in ordered_profiles:
             candidate_specs.extend(
@@ -148,6 +175,7 @@ def model_aware_autofe_plans(
                 "autofe_numeric_signed_log",
                 "autofe_low_variance_selection",
             }
+            and not transform.transform_id.startswith("autofe_generated_")
         ]
         numeric_columns = [
             str(item["column"])
@@ -156,8 +184,18 @@ def model_aware_autofe_plans(
         ]
         winsorized = variant in {"robust_generated", "winsorized", "winsorized_signed_log"}
         signed_log = variant in {"robust_generated", "signed_log", "winsorized_signed_log"}
+        profile_aware = variant in {"profile_aware", "profile_aware_interactions"}
+        interaction_enabled = variant == "profile_aware_interactions"
         enhanced = variant != "baseline" and bool(numeric_columns)
-        generated_columns = []
+        generated_columns: list[str] = []
+        distribution_specs: list[dict[str, Any]] = []
+        interaction_specs: list[dict[str, Any]] = []
+        requested_feature_budget = max(0, int(max_generated_features))
+        planner_budget = dict(base_plan.provenance.get("feature_generation_budget") or {})
+        effective_feature_budget = min(
+            requested_feature_budget,
+            int(planner_budget.get("effective_max_generated_features", requested_feature_budget)),
+        )
         if enhanced:
             numeric_insert_at = next(
                 (
@@ -190,6 +228,55 @@ def model_aware_autofe_plans(
                         "drop_original": False,
                     },
                 ))
+                next_insert_at += 1
+            if profile_aware and distribution_transformations:
+                distribution_specs = _profile_aware_distribution_specs(
+                    base_plan.provenance,
+                    skewness_threshold=skewness_threshold,
+                    limit=effective_feature_budget,
+                )
+                for operation in ("log1p", "sqrt", "signed_log1p"):
+                    columns = [
+                        str(item["column"])
+                        for item in distribution_specs
+                        if item["operation"] == operation
+                    ]
+                    if not columns:
+                        continue
+                    suffix = f"__autofe_{operation}"
+                    transformations.insert(next_insert_at, FeatureTransformation(
+                        transform_id=f"autofe_generated_distribution_{operation}",
+                        type="math_transform",
+                        columns=columns,
+                        config={
+                            "operation": operation,
+                            "output_suffix": suffix,
+                            "drop_original": False,
+                        },
+                    ))
+                    next_insert_at += 1
+                    generated_columns.extend(f"{column}{suffix}" for column in columns)
+            remaining_budget = max(0, effective_feature_budget - len(generated_columns))
+            if interaction_enabled and remaining_budget:
+                interaction_specs = _profile_aware_interaction_specs(
+                    base_plan.provenance,
+                    operators=interaction_operators or ["multiply", "divide"],
+                    limit=min(max_interaction_features, remaining_budget),
+                )
+                for index, item in enumerate(interaction_specs, start=1):
+                    transformations.insert(next_insert_at, FeatureTransformation(
+                        transform_id=f"autofe_generated_interaction_{index}",
+                        type="numeric_interaction",
+                        config={
+                            "left": item["left"],
+                            "right": item["right"],
+                            "operator": item["operator"],
+                            "output_column": item["output_column"],
+                            "zero_division": "zero",
+                        },
+                    ))
+                    next_insert_at += 1
+                    generated_columns.append(str(item["output_column"]))
         scale_columns = numeric_columns + generated_columns
         if scale_columns and scaling != "none":
             scaling_transform = FeatureTransformation(
@@ -239,7 +326,7 @@ def model_aware_autofe_plans(
         if scaling != default_scaling:
             recipe_id = f"{recipe_id}__{scaling}"
         recipe_contract = AutoFERecipeSpec(
-            contract_version="2.0",
+            contract_version="3.0" if profile_aware else "2.0",
             capability_profile=profile,
             numeric_variant=variant,
             numeric_scaling=scaling,
@@ -255,16 +342,38 @@ def model_aware_autofe_plans(
                 {"type": "variance_filter", "threshold": variance_threshold}
                 if enhanced and low_variance_selection else None
             ),
+            distribution_transforms=distribution_specs if profile_aware else None,
+            numeric_interactions=interaction_specs if profile_aware else None,
+            feature_budget=(
+                {
+                    **planner_budget,
+                    "requested_max_generated_features": requested_feature_budget,
+                    "generated_feature_count": len(generated_columns),
+                    "remaining_feature_capacity": max(
+                        0, effective_feature_budget - len(generated_columns)
+                    ),
+                }
+                if profile_aware else None
+            ),
         ).as_dict()
         provenance = {
             **base_plan.provenance,
-            "planner": "duckdb_model_aware_tabular_v3",
+            "planner": (
+                "duckdb_profile_aware_tabular_v2"
+                if profile_aware else "duckdb_model_aware_tabular_v3"
+            ),
             "recipe_search_mode": "joint_model_aware_holdout",
             "recipe_id": recipe_id,
             "feature_capability_profile": profile,
             "compatible_algorithms": list(grouped[profile]),
             "numeric_scaling": scaling,
-            "numeric_recipe_space_version": "2.0" if numeric_recipe_search_v2 else "1.0",
+            "numeric_recipe_space_version": (
+                "3.0" if profile_aware else "2.0" if numeric_recipe_search_v2 else "1.0"
+            ),
+            "feature_generation_decisions": [
+                *distribution_specs,
+                *interaction_specs,
+            ],
             "recipe_contract": recipe_contract,
             "column_decisions": decisions,
             "resolved_recipe": definition.model_dump(mode="json"),
@@ -276,6 +385,102 @@ def model_aware_autofe_plans(
             warnings=list(base_plan.warnings),
         ))
     return plans
+
+
+def _finite_number(value: Any) -> float | None:
+    if value is None:
+        return None
+    converted = float(value)
+    return converted if math.isfinite(converted) else None
+
+
+def _profile_aware_distribution_specs(
+    provenance: dict[str, Any],
+    *,
+    skewness_threshold: float,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Choose safe nonlinear transforms using target-free full-scope aggregates."""
+    candidates: list[dict[str, Any]] = []
+    for decision in provenance.get("column_decisions", []):
+        if not isinstance(decision, dict) or decision.get("role") != "numeric":
+            continue
+        stats = dict(decision.get("numeric_profile") or {})
+        skewness = float(stats.get("skewness") or 0.0)
+        minimum = stats.get("min")
+        standard_deviation = float(stats.get("stddev") or 0.0)
+        if standard_deviation <= 0 or abs(skewness) < skewness_threshold:
+            continue
+        if minimum is not None and float(minimum) >= 0:
+            operation = "log1p" if skewness >= skewness_threshold * 2 else "sqrt"
+        else:
+            operation = "signed_log1p"
+        candidates.append({
+            "kind": "distribution_transform",
+            "column": str(decision["column"]),
+            "operation": operation,
+            "skewness": skewness,
+            "reason": (
+                f"abs(skewness)={abs(skewness):.4g} exceeded "
+                f"threshold={skewness_threshold:.4g}"
+            ),
+        })
+    candidates.sort(key=lambda item: (-abs(float(item["skewness"])), str(item["column"])))
+    return candidates[:max(0, limit)]
+
+
+def _profile_aware_interaction_specs(
+    provenance: dict[str, Any],
+    *,
+    operators: list[str],
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Select bounded interaction pairs from informative, non-constant columns."""
+    numeric: list[dict[str, Any]] = []
+    for decision in provenance.get("column_decisions", []):
+        if not isinstance(decision, dict) or decision.get("role") != "numeric":
+            continue
+        stats = dict(decision.get("numeric_profile") or {})
+        stddev = float(stats.get("stddev") or 0.0)
+        if stddev <= 0:
+            continue
+        mean = abs(float(stats.get("mean") or 0.0))
+        completeness = float(stats.get("non_null_fraction") or 0.0)
+        variability = stddev / max(stddev + mean, 1e-12)
+        numeric.append({
+            "column": str(decision["column"]),
+            "score": variability * completeness,
+            "zero_fraction": float(stats.get("zero_fraction") or 0.0),
+        })
+    pair_candidates = sorted(
+        combinations(numeric, 2),
+        key=lambda pair: (
+            -(float(pair[0]["score"]) * float(pair[1]["score"])),
+            str(pair[0]["column"]),
+            str(pair[1]["column"]),
+        ),
+    )
+    result: list[dict[str, Any]] = []
+    suffix = {"multiply": "mul", "divide": "div", "subtract": "sub"}
+    for left_raw, right_raw in pair_candidates:
+        for operator in operators:
+            left, right = left_raw, right_raw
+            if operator == "divide" and left["zero_fraction"] < right["zero_fraction"]:
+                left, right = right, left
+            result.append({
+                "kind": "numeric_interaction",
+                "left": str(left["column"]),
+                "right": str(right["column"]),
+                "operator": operator,
+                "output_column": (
+                    f"{left['column']}__autofe_{suffix[operator]}__{right['column']}"
+                ),
+                "pair_score": float(left["score"]) * float(right["score"]),
+                "reason": "high target-free variability and non-null coverage",
+            })
+            if len(result) >= max(0, limit):
+                return result
+    return result
 
 
 class DuckDbAutoFEPlanner:
@@ -333,7 +538,9 @@ class DuckDbAutoFEPlanner:
             if not candidates:
                 raise ValueError("AutoFE found no candidate feature columns after exclusions")
 
-            profile = self._profile_columns(connection, training, candidates, row_count)
+            profile = self._profile_columns(
+                connection, training, candidates, row_count, schema
+            )
             decisions: list[dict[str, Any]] = []
             numeric: list[str] = []
             categorical_one_hot: list[str] = []
@@ -355,7 +562,17 @@ class DuckDbAutoFEPlanner:
                 }
                 if self._is_numeric(column_type):
                     numeric.append(column)
-                    decision.update({"role": "numeric", "action": "impute_and_scale"})
+                    decision.update({
+                        "role": "numeric",
+                        "action": "impute_and_scale",
+                        "numeric_profile": {
+                            key: stats.get(key)
+                            for key in (
+                                "min", "max", "mean", "stddev", "skewness",
+                                "zero_fraction", "non_null_fraction",
+                            )
+                        },
+                    })
                 elif self._is_temporal(column_type) and config.include_datetime_features:
                     temporal.append(column)
                     decision.update({"role": "datetime", "action": "calendar_components"})
@@ -490,6 +707,18 @@ class DuckDbAutoFEPlanner:
                 signed_log_features=False,
                 feature_selector=None,
             ).as_dict()
+            bytes_per_feature = max(1, row_count) * 8 * 6
+            memory_feature_capacity = max(
+                0,
+                int(training_definition.resource_limits.max_memory_mb * 1024 * 1024)
+                // bytes_per_feature
+                - len(selected)
+                - 1,
+            )
+            effective_generation_budget = min(
+                config.max_generated_features,
+                memory_feature_capacity,
+            )
             provenance = {
                 "contract_version": "2.0",
                 "planner": "duckdb_rule_based_tabular_v1",
@@ -503,6 +732,16 @@ class DuckDbAutoFEPlanner:
                 "validation_source": validation_source,
                 "inherited_row_id_column": inherited_row_id_column,
                 "column_decisions": decisions,
+                "feature_generation_budget": {
+                    "requested_max_generated_features": config.max_generated_features,
+                    "memory_feature_capacity": memory_feature_capacity,
+                    "effective_max_generated_features": effective_generation_budget,
+                    "estimated_bytes_per_generated_feature": bytes_per_feature,
+                    "max_memory_mb": training_definition.resource_limits.max_memory_mb,
+                    "limited_by_memory": (
+                        effective_generation_budget < config.max_generated_features
+                    ),
+                },
                 "resolved_recipe": definition.model_dump(mode="json"),
                 "recipe_contract": recipe_contract,
                 "recipe_hash": _autofe_recipe_hash(definition, recipe_contract),
@@ -648,25 +887,66 @@ class DuckDbAutoFEPlanner:
         return ""
 
     @staticmethod
-    def _profile_columns(connection, source: SourceRelation, columns: list[str], row_count: int) -> dict[str, dict[str, int]]:
-        result: dict[str, dict[str, int]] = {}
-        for start in range(0, len(columns), 64):
-            chunk = columns[start:start + 64]
+    def _profile_columns(
+        connection,
+        source: SourceRelation,
+        columns: list[str],
+        row_count: int,
+        schema: dict[str, str],
+    ) -> dict[str, dict[str, Any]]:
+        result: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(columns), 32):
+            chunk = columns[start:start + 32]
             expressions: list[str] = []
+            widths: list[int] = []
             for column in chunk:
                 expressions.extend([
                     f"count(*) FILTER (WHERE {identifier(column)} IS NULL)",
                     f"approx_count_distinct({identifier(column)})",
                 ])
+                width = 2
+                if DuckDbAutoFEPlanner._is_numeric(schema[column]):
+                    value = f"CAST({identifier(column)} AS DOUBLE)"
+                    expressions.extend([
+                        f"min({value})",
+                        f"max({value})",
+                        f"avg({value})",
+                        f"stddev_pop({value})",
+                        f"skewness({value})",
+                        f"count(*) FILTER (WHERE {value} = 0)",
+                    ])
+                    width += 6
+                widths.append(width)
             row = connection.execute(
                 "SELECT " + ", ".join(expressions)
                 + f" FROM {source.sql} AS autofe_profile"
             ).fetchone()
-            for index, column in enumerate(chunk):
-                result[column] = {
-                    "null_count": int(row[index * 2] or 0),
-                    "approx_distinct_count": min(row_count, int(row[index * 2 + 1] or 0)),
+            offset = 0
+            for column, width in zip(chunk, widths, strict=True):
+                null_count = int(row[offset] or 0)
+                stats: dict[str, Any] = {
+                    "null_count": null_count,
+                    "approx_distinct_count": min(row_count, int(row[offset + 1] or 0)),
                 }
+                if width > 2:
+                    non_null_count = max(0, row_count - null_count)
+                    numeric_values = [
+                        _finite_number(row[offset + index]) for index in range(2, 7)
+                    ]
+                    stats.update({
+                        "min": numeric_values[0],
+                        "max": numeric_values[1],
+                        "mean": numeric_values[2],
+                        "stddev": numeric_values[3],
+                        "skewness": numeric_values[4],
+                        "zero_fraction": (
+                            int(row[offset + 7] or 0) / non_null_count
+                            if non_null_count else 0.0
+                        ),
+                        "non_null_fraction": non_null_count / max(1, row_count),
+                    })
+                result[column] = stats
+                offset += width
         return result
 
     @staticmethod

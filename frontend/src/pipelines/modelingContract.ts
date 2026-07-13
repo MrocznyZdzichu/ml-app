@@ -49,6 +49,13 @@ export type AutoFeatureEngineeringDefinition = {
   signed_log_features: boolean;
   low_variance_selection: boolean;
   variance_threshold: number;
+  profile_aware_generation: boolean;
+  distribution_transformations: boolean;
+  numeric_interactions: boolean;
+  interaction_operators: Array<"multiply" | "divide" | "subtract">;
+  max_generated_features: number;
+  max_interaction_features: number;
+  skewness_threshold: number;
 };
 
 export type TrainingAlgorithm = string;
@@ -200,7 +207,14 @@ export const emptyTrainingDefinition = (): TrainingDefinition => ({
     winsorization_upper_quantile: 0.99,
     signed_log_features: true,
     low_variance_selection: true,
-    variance_threshold: 0
+    variance_threshold: 0,
+    profile_aware_generation: true,
+    distribution_transformations: true,
+    numeric_interactions: true,
+    interaction_operators: ["multiply", "divide"],
+    max_generated_features: 64,
+    max_interaction_features: 12,
+    skewness_threshold: 1
   }
 });
 
@@ -413,8 +427,26 @@ function normalizeAutoFeatureEngineering(value: unknown): AutoFeatureEngineering
     ),
     signed_log_features: raw.signed_log_features !== false,
     low_variance_selection: raw.low_variance_selection !== false,
-    variance_threshold: boundedNumber(raw.variance_threshold, 0, 0, Number.MAX_SAFE_INTEGER)
+    variance_threshold: boundedNumber(raw.variance_threshold, 0, 0, Number.MAX_SAFE_INTEGER),
+    profile_aware_generation: raw.profile_aware_generation !== false,
+    distribution_transformations: raw.distribution_transformations !== false,
+    numeric_interactions: raw.numeric_interactions !== false,
+    interaction_operators: normalizeInteractionOperators(raw.interaction_operators),
+    max_generated_features: boundedNumber(raw.max_generated_features, 64, 0, 500),
+    max_interaction_features: boundedNumber(raw.max_interaction_features, 12, 0, 100),
+    skewness_threshold: boundedNumber(raw.skewness_threshold, 1, 0.25, 10)
   };
+}
+
+function normalizeInteractionOperators(
+  value: unknown
+): AutoFeatureEngineeringDefinition["interaction_operators"] {
+  const allowed = new Set(["multiply", "divide", "subtract"]);
+  const normalized = Array.isArray(value)
+    ? Array.from(new Set(value.map(String).filter((item) => allowed.has(item))))
+    : ["multiply", "divide"];
+  return (normalized.length ? normalized : ["multiply"]) as
+    AutoFeatureEngineeringDefinition["interaction_operators"];
 }
 
 function normalizeScalingCandidates(
@@ -534,6 +566,12 @@ export function validateTrainingConfiguration(definition: TrainingDefinition): s
       >= definition.auto_feature_engineering.winsorization_upper_quantile
   ) {
     issues.push("AutoFE winsorization lower quantile must be below the upper quantile.");
+  }
+  if (
+    definition.auto_feature_engineering.max_interaction_features
+    > definition.auto_feature_engineering.max_generated_features
+  ) {
+    issues.push("AutoFE interaction limit cannot exceed the total generated-feature limit.");
   }
   if (definition.early_stopping && definition.optimization.mode !== "single") {
     issues.push("Training early stopping cannot be combined with hyperparameter optimization.");

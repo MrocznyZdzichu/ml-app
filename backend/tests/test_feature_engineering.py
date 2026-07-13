@@ -534,6 +534,70 @@ def test_numeric_generation_and_variance_selection_fit_only_training_scope(
     assert "constant" not in {item["name"] for item in validation["schema"]}
 
 
+def test_numeric_interaction_zero_policy_produces_finite_features(tmp_path: Path) -> None:
+    repository_root = tmp_path / "repository"
+    source = repository_root / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    train_path = source / "interaction-train.csv"
+    validation_path = source / "interaction-validation.csv"
+    train_path.write_text(
+        "id,left_value,right_value,target\n1,10,2,0\n2,5,0,1\n3,9,3,0\n",
+        encoding="utf-8",
+    )
+    validation_path.write_text(
+        "id,left_value,right_value,target\n4,7,0,1\n",
+        encoding="utf-8",
+    )
+    datasets = InMemoryDatasetRepository()
+    datasets.add(_asset("interaction-train", "owner-1", train_path, 3))
+    datasets.add(_asset("interaction-validation", "owner-1", validation_path, 1))
+    definition = FeatureEngineeringDefinition.model_validate({
+        "contract_version": "1.0",
+        "mode": "fit_transform",
+        "inputs": [
+            {"input_id": "training", "role": "training", "dataset_id": "interaction-train"},
+            {"input_id": "validation", "role": "validation", "dataset_id": "interaction-validation"},
+        ],
+        "feature_columns": ["safe_ratio"],
+        "target_column": "target",
+        "row_id_column": "id",
+        "transformations": [{
+            "transform_id": "safe_ratio",
+            "type": "numeric_interaction",
+            "config": {
+                "left": "left_value",
+                "right": "right_value",
+                "operator": "divide",
+                "output_column": "safe_ratio",
+                "zero_division": "zero",
+            },
+        }],
+        "outputs": [
+            {"output_id": "training_features", "input_id": "training", "dataset_name": "Train"},
+            {"output_id": "validation_features", "input_id": "validation", "dataset_name": "Validation", "business_case_role": "validation"},
+        ],
+    })
+    result = DuckDbFeatureEngineeringEngine(
+        input_adapter=CsvDatasetInputAdapter(datasets, repository_root),
+        repository_root=repository_root,
+    ).execute(
+        definition=definition,
+        run_id="safe-interaction",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+    training = next(item for item in result.output_manifest if item["output_id"] == "training_features")
+    validation = next(item for item in result.output_manifest if item["output_id"] == "validation_features")
+    assert duckdb.connect().execute(
+        "SELECT safe_ratio FROM read_parquet(?) ORDER BY id",
+        [training["location_uri"].removeprefix("file://")],
+    ).fetchall() == [(5.0,), (0.0,), (3.0,)]
+    assert duckdb.connect().execute(
+        "SELECT safe_ratio FROM read_parquet(?)",
+        [validation["location_uri"].removeprefix("file://")],
+    ).fetchone() == (0.0,)
+
+
 def test_workflow_accepts_de_followed_by_feature_engineering() -> None:
     workflow = {
         "contract_version": "2.0",

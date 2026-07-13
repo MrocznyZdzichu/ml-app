@@ -100,6 +100,18 @@ class AutoFeatureEngineeringDefinition(BaseModel):
     signed_log_features: bool = True
     low_variance_selection: bool = True
     variance_threshold: float = Field(default=0.0, ge=0)
+    # Planner v2 is opt-in in the backend contract so immutable historical
+    # pipeline definitions retain their original recipe space. New UI drafts
+    # enable it explicitly.
+    profile_aware_generation: bool = False
+    distribution_transformations: bool = True
+    numeric_interactions: bool = True
+    interaction_operators: list[
+        Literal["multiply", "divide", "subtract"]
+    ] = Field(default_factory=lambda: ["multiply", "divide"])
+    max_generated_features: int = Field(default=64, ge=0, le=500)
+    max_interaction_features: int = Field(default=12, ge=0, le=100)
+    skewness_threshold: float = Field(default=1.0, ge=0.25, le=10)
 
     @model_validator(mode="after")
     def validate_columns_and_bounds(self) -> "AutoFeatureEngineeringDefinition":
@@ -117,6 +129,14 @@ class AutoFeatureEngineeringDefinition(BaseModel):
             raise ValueError("AutoFE numeric scaling search requires at least one candidate")
         if len(self.numeric_scaling_candidates) != len(set(self.numeric_scaling_candidates)):
             raise ValueError("AutoFE numeric scaling candidates must be unique")
+        if self.numeric_interactions and not self.interaction_operators:
+            raise ValueError("AutoFE numeric interactions require at least one operator")
+        if len(self.interaction_operators) != len(set(self.interaction_operators)):
+            raise ValueError("AutoFE interaction operators must be unique")
+        if self.max_interaction_features > self.max_generated_features:
+            raise ValueError(
+                "AutoFE max_interaction_features cannot exceed max_generated_features"
+            )
         return self
 
 
