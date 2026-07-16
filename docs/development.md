@@ -180,14 +180,16 @@ git status --short
 git add --dry-run .
 ```
 
-## Intended Next Steps
+## Known development gaps
 
-- Add Alembic migrations and SQLAlchemy repositories.
-- Add database connection testing and external source adapters.
-- Add an xlsx source adapter.
-- Move the live Data Browser preview and Custom SQL execution to paged DuckDB
-  query pushdown instead of bounded frontend/Python records.
-- Add query cancellation, quotas, and persisted observability for long-running analytics.
-- Add remote query-engine adapters for datasets that exceed a single-node DuckDB deployment.
-- Implement model training workers and artifact registration.
-- Add deployment adapter for Docker Compose or Kubernetes.
+Keep product-roadmap decisions in `AGENTS.md`; this file lists only engineering
+gaps that affect local development:
+
+- Alembic-style managed migrations are not yet the primary migration path.
+- XLSX, database, object-storage, and remote query-engine adapters are missing.
+- Long-running analytics need stronger cancellation, quotas, and persisted
+  resource accounting.
+- Serving metadata is not connected to an automatic Docker/Kubernetes deployment
+  adapter.
+- The frontend has a production TypeScript build but no broad component-test and
+  lint baseline yet.

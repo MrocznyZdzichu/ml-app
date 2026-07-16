@@ -59,8 +59,7 @@ Files:
   `row_id` and the four measurement columns used by the reference Iris model. It
   deliberately contains no `species` target.
 - `examples/data/iris-batch-scoring-10k-actuals.csv`: separately held actuals with
-  `row_id` and `species`, intended only for a future target-joining and monitoring
-  pipeline.
+  `row_id` and `species`, intended for the target-joining and monitoring pipeline.
 
 The hidden population is balanced: 5,000 Versicolor and 5,000 Virginica records.
 For each class, the generator estimates the full four-dimensional sample covariance

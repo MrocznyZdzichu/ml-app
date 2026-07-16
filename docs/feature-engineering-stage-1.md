@@ -1,4 +1,4 @@
-# Feature Engineering — Stage 1 contract
+# Feature Engineering contract
 
 The first Feature Engineering increment adds a second executable high-level
 pipeline step. A workflow may contain Data Engineering followed by Feature
@@ -42,10 +42,11 @@ Optional cross-validation adds `__mlapp_cv_fold` to the training output.
 Supported plans are K-fold, stratified K-fold, group folds, and ordered time
 folds. Fold counts and row counts are persisted for audit. This is a **fold
 plan**, not model evaluation: no estimator is trained in Feature Engineering.
-The future Training step must join the plan to the prepared input and fit a
-fresh copy of the FE recipe inside each fold. Using one preprocessing state
-fitted on the whole training partition to report CV metrics would leak
-information between folds.
+Training joins the plan to the prepared input and fits a fresh preprocessing
+state inside each fold. Reusing one state fitted on the whole training partition
+would leak information between folds. Integrated AutoFE performs this fold-local
+replay for generated recipes; manually authored FE requires an explicit holdout
+unless it enters through an equivalent fold-local contract.
 
 ## Supported operations
 

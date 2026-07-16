@@ -1,4 +1,4 @@
-# Monitoring pipeline — stage 1
+# Monitoring pipeline contract
 
 Monitoring is a separate workflow from batch scoring. It never mutates the
 immutable prediction dataset.

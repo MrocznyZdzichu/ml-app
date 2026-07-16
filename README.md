@@ -1,9 +1,10 @@
 # ML App
 
-ML App is a containerized analytics workbench for CSV ingestion, metadata
-management, exploratory analysis, reusable SQL/browser views, full-dataset
-profiling, and visualization. It also contains prototype interfaces for future
-model-training, serving, sharing, and export workflows.
+ML App is a containerized data-science and machine-learning workbench. It covers
+file ingestion, metadata, full-dataset analysis, reusable Data Views, versioned
+Data/Feature Engineering pipelines, Training, AutoML, scoring, model registry,
+and monitoring. Serving, sharing, export, and some external-source integrations
+remain provisional.
 
 > **AI-developed project:** This application has been designed and implemented
 > with substantial AI assistance. Treat the codebase as an actively evolving
@@ -18,10 +19,11 @@ The current product slice focuses on a practical analyst workflow:
 - profile datasets with descriptive, target-aware, and comparison summaries,
 - run read-only Custom SQL,
 - save reusable Data Views,
-- execute versioned Data Engineering → Feature Engineering workflows,
+- execute versioned Data Engineering → Feature Engineering → Training/AutoML workflows,
 - continue from saved views into browsing, visualization, and descriptive analysis,
 - compose reusable interactive dashboards over full datasets and Data Views,
-- exercise placeholder model registry, deployment, sharing, and export contracts.
+- register immutable models and reports, run Test/Batch Scoring and Monitoring,
+- exercise provisional deployment, sharing, and export contracts.
 
 The analytics paths described as full-dataset below execute against all rows.
 The explicitly identified preview and prototype paths have important limitations;
@@ -89,8 +91,8 @@ For a clean no-cache rebuild:
 
 ### Data Assets
 
-- UTF-8 CSV upload with delimiter/header detection, a streaming row/schema scan,
-  file metadata, tags, and status.
+- UTF-8 CSV upload with delimiter/header detection and flat tabular Parquet
+  upload, including schema/row validation, metadata, tags, and status.
 - Dataset metadata persisted in PostgreSQL.
 - Uploaded file content stored under local `data/repository` in development.
 - Soft deletion of dataset metadata with physical local file cleanup.
@@ -214,9 +216,9 @@ recursion, and caches are invalidated when the definition or source changes.
 
 Views are shown in Overview, Data, and Analysis, and they can be used in Data
 Roles, Data Browsing, Visualization and Trends, and Descriptive Analysis.
-Visualization queries operate on the full transformed relation. Descriptive
-Analysis for a Data View currently uses its explicitly bounded preview range and
-must not be interpreted as a full-view profile.
+Visualization and Descriptive Analysis query the full transformed relation and
+return bounded aggregates or chart payloads. A bounded browser preview is never
+reported as a full-view profile.
 
 When possible, data roles are inherited from the source dataset for columns that
 survive in the view.
@@ -373,11 +375,12 @@ separate from the placeholder deployment records in the application UI.
 
 ## Documentation
 
+- [Documentation map](docs/README.md)
 - [Architecture](docs/architecture.md)
 - [Development notes](docs/development.md)
 - [Analysis and Data Browser reference](docs/analysis-data-browser-reference.md)
 - [Descriptive profiling performance](docs/descriptive-profiling-performance.md)
-- [Feature Engineering Stage 1](docs/feature-engineering-stage-1.md)
+- [Feature Engineering contract](docs/feature-engineering-stage-1.md)
 - [AutoML + AutoFE current implementation](docs/automl-autofe-stage-1.md)
 - [Model Training workbench](docs/model-training-workbench.md)
 - [Model Training and Test Scoring](docs/model-training-scoring-stage-1.md)

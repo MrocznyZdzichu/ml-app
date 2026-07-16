@@ -1,5 +1,8 @@
 # Repository refactoring audit — 2026-07
 
+> Dated engineering snapshot. Priorities describe the repository at audit time
+> and may no longer match the current implementation.
+
 ## Executive summary
 
 The backend data plane is directionally sound for large datasets: CSV/Parquet

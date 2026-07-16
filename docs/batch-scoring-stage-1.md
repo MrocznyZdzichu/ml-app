@@ -1,4 +1,4 @@
-# Batch Scoring — Stage 1
+# Batch Scoring contract
 
 Batch scoring and model-performance monitoring are separate workflows.
 
@@ -7,7 +7,7 @@ Batch scoring
   scoring dataset -> inference-safe DE -> fitted FE transform -> pinned model
                   -> immutable prediction dataset
 
-Monitoring (future)
+Monitoring
   prediction dataset + actuals -> target join -> performance metrics/report
 ```
 
@@ -45,7 +45,7 @@ configuration is removed or rejected.
 
 ## Monitoring boundary
 
-Predictions are never updated in place when actuals arrive. A later monitoring
-pipeline will join an immutable prediction dataset with an actuals dataset using
-declared business keys and observation-time rules, then create a new labeled
-prediction artifact and performance report.
+Predictions are never updated in place when actuals arrive. The executable
+Monitoring pipeline joins an immutable prediction dataset with an explicit
+actuals dataset using declared keys, creates a new labeled dataset, and writes a
+performance report. See [Monitoring](monitoring-pipeline-stage-1.md).

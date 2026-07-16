@@ -31,7 +31,7 @@ holdout and regression uses a deterministic random holdout. The target and row
 ID and platform-owned `__mlapp_*` technical columns are excluded from estimator
 features and AutoFE transformations.
 
-## Planner and model capability profiles
+## Recipe space and model capabilities
 
 The shared `balanced` base recipe supports:
 
@@ -48,8 +48,7 @@ The generated feature matrices are run-scoped intermediate Parquet files. The
 engine-neutral fitted transform remains a registered artifact required for
 reproducible scoring.
 
-Stage 2 exposes declarative FE capabilities in the backend-owned algorithm
-catalog and groups candidates into bounded profiles:
+The backend algorithm catalog groups estimators into three input profiles:
 
 - `scaled_dense`: standard scaling for linear, kernel, distance-based, neural,
   and other scale-sensitive estimators;
@@ -57,76 +56,37 @@ catalog and groups candidates into bounded profiles:
   forests, and boosting families;
 - `non_negative`: min-max scaling for estimators requiring non-negative input.
 
-All profiles reuse one full-scope DuckDB profiling result. The configured trial
-and wall-clock budgets are divided between the selected profiles. Candidate
-matrices and models are temporary and removed after evaluation. The winner is
-refitted once and only its engine-neutral fitted transform and model are
-persisted. The joint study records every recipe profile, compatible algorithms,
-resolved feature count, trial history, score, failure, and final selection. If
-the configured recipe cap excludes an estimator capability profile, the run
-records the skipped algorithms and emits an explicit warning instead of silently
-treating them as evaluated.
+All candidates reuse one full-scope DuckDB profile. Candidate matrices and
+models are run-scoped and temporary; only the refitted winner is persisted. The
+study records recipe identity, compatible algorithms, resolved feature count,
+trial history, score, failures, skipped candidates, and final selection.
 
-Stage 4 introduces a versioned recipe contract (`contract_version: 2.0`) and a
-first bounded vertical slice of numeric feature generation and selection. New
-pipeline drafts can compare each model capability baseline with an enhanced
-recipe that:
+Numeric recipes can independently compare:
 
-- learns full-scope or fold-train winsorization bounds;
-- adds signed `log1p` features while retaining the original numeric features;
-- applies the model-compatible numeric scaling profile; and
-- learns a constant/low-variance filter after feature generation.
+- fold-local winsorization;
+- signed `log1p` variants that retain the original column;
+- standard, robust, min-max, or disabled scaling when compatible;
+- distribution-driven log/square-root transforms and bounded arithmetic
+  interactions; and
+- constant/low-variance filtering.
 
 Every learned bound and selector decision is fitted only on the permitted
-training scope. Fold-local CV therefore learns distinct winsorization and
-variance states inside every fold, while validation, test and scoring reuse the
-pinned fitted state. The recipe contract, transform definition, selector,
-stable recipe hash, resolved features and outcome are recorded per leaderboard
-candidate. Candidates that cannot receive the minimum global trial/time budget
-are recorded as `skipped` rather than silently treated as evaluated.
+training scope. Each candidate stores a versioned recipe contract, stable hash,
+resolved features, and outcome. Candidates excluded by capabilities or budget
+are recorded as `skipped`, not treated as evaluated.
 
-Definitions published before Stage 4 retain their historical search space.
-Numeric feature search is enabled explicitly for new UI drafts, and the recipe
-cap can be increased to compare baseline and enhanced capability profiles.
+Published definitions retain their historical search flags. New drafts opt into
+the broader conditional space. Tree profiles avoid redundant scaling, and
+non-negative estimators reject variants that can create negative values. The UI
+defaults to 12 recipes and the backend enforces an absolute cap of 24.
 
-Stage 5 makes the numeric recipe space conditional instead of treating all
-numeric improvements as one indivisible profile. New UI drafts independently
-compare baseline, winsorized, signed-log and winsorized-plus-signed-log variants.
-For scale-sensitive estimators they may additionally compare standard, robust,
-min-max and disabled scaling. Tree profiles do not generate redundant scaling
-variants, while non-negative estimators exclude signed-log variants that would
-violate their input contract. The default UI cap is 12 and the absolute bounded
-cap is 24; the global trial and time budgets still govern actual execution.
+The optional two-phase scheduler first explores every executable recipe, then
+gives the remaining budget to deterministic top-K winners. It records allocated
+and consumed budgets plus `promoted`, `pruned`, `explored`, `failed`, or
+`skipped` status. Failed deepening falls back to successful exploration.
 
-The joint-study provenance distinguishes generated, configured and executed
-recipe counts. Every candidate excluded by the explicit recipe cap or by the
-minimum trial/time allocation is retained as `skipped`, together with its recipe
-contract and reason. Published definitions keep the historical recipe generator
-unless the version-2 numeric search flag is explicitly enabled.
-
-Stage 6 adds an opt-in two-phase scheduler, enabled by default for new UI drafts.
-Every executable recipe first receives the configured small exploration budget
-on the same holdout or raw fold plan. Successful recipes are ranked
-deterministically by score and recipe ID; up to the configured top-K then share
-all remaining global trials and wall-clock time in a deepening phase. Deepening
-uses a deterministic seed offset so sampled estimator configurations are not a
-replay of exploration, while the data split and leakage boundary stay unchanged.
-
-The leaderboard stores both phase results and their allocated/consumed budgets.
-Recipes are marked `promoted`, `pruned`, `explored`, `failed`, or `skipped`, with
-promotion/pruning reasons. A failed deepening phase falls back to that recipe's
-successful exploration result. The global `max_trials` and timeout remain hard
-caps across both phases, and only the final winning path is persisted. Published
-definitions without the scheduler flag keep the historical flat allocation.
-
-Stage 7 adds the profile-aware numeric Planner v2, enabled for new UI drafts.
-The planner extends the one-pass full-scope DuckDB profile with target-free
-numeric aggregates: minimum, maximum, mean, population standard deviation,
-skewness, zero share and non-null coverage. These statistics are used only to
-propose bounded recipe candidates; the target is never inspected by feature
-generation rules.
-
-Planner v2 can:
+Distribution-driven numeric generation uses target-free minimum, maximum, mean,
+standard deviation, skewness, zero share, and non-null coverage to:
 
 - select `log1p`, square-root or signed-`log1p` only for non-constant columns
   whose absolute skewness crosses the configured threshold;
@@ -137,11 +97,8 @@ Planner v2 can:
 - persist every generation reason, selected pair, transform, feature count and
   budget decision in recipe contract `3.0` and the model leaderboard.
 
-The baseline and Stage 4-6 recipes remain candidates, so profile-aware features
-must win the same leakage-safe joint validation rather than being enabled
-unconditionally. Learned transformations and selectors remain fold-local.
-Scoring reuses the exact winning recipe and fitted state through the atomic
-inference bundle.
+Generated features must win the same leakage-safe validation as baseline
+recipes. Scoring reuses the exact winner through the atomic inference bundle.
 
 ## Trial and time budgets
 

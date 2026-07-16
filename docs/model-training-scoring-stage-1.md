@@ -1,9 +1,9 @@
-# Model Training and Test Scoring — Stage 1
+# Model Training and Test Scoring contract
 
 The expanded workbench replacing the provisional estimator catalog is
 documented in [model-training-workbench.md](model-training-workbench.md).
 
-This increment adds two executable high-level steps:
+The lifecycle provides two executable high-level steps:
 
 ```text
 Feature Engineering
@@ -17,13 +17,15 @@ Training requires an explicit `training` port. Scoring requires explicit
 `data` and exact `model` artifact ports; it never resolves a mutable "latest"
 intermediate result.
 
-Stage 1 supports incremental logistic SGD, Passive-Aggressive PA-I and
-Perceptron classification, plus incremental linear SGD and Passive-Aggressive
-PA-I regression. They process the complete declared relation in bounded
-batches, use a deterministic seed, reject invalid numeric features, and persist
-their ordered feature contract. There is no silent sampling. Each algorithm has
-its own validated parameter allowlist; changing the algorithm resets the UI to
-safe defaults for that estimator.
+The estimator catalog contains executable classification and regression
+families, including incremental and full-matrix algorithms; availability of a
+few families depends on optional backend packages. Incremental estimators read
+the full relation in bounded batches. Matrix-based estimators run a memory
+preflight before materialization. All families use validated parameters and
+deterministic seeds where supported, persist the ordered feature contract, and
+never silently replace full-data training with a sample. The complete catalog
+and resource behavior are documented in
+[model-training-workbench.md](model-training-workbench.md).
 
 When Feature Engineering exposes an explicit validation output, Training can
 use a maximum epoch budget with validation-based early stopping. Patience,
@@ -63,10 +65,10 @@ Classification outputs use an explicit ranking-score contract:
 The dataset metadata records class labels, positive class, score kind and column
 mapping so later analysis does not have to infer semantics from column names.
 
-Deployment, online endpoints, arbitrary Python and distributed training remain
-outside this historical increment. AutoML and fold-local AutoFE were delivered
-in later increments and are documented in `automl-autofe-stage-1.md`; they are
-now executable lifecycle blocks rather than future placeholders.
+Arbitrary Python steps, distributed training, and automatic production
+deployment remain outside the current scope. AutoML and fold-local AutoFE are
+executable lifecycle blocks documented in
+[automl-autofe-stage-1.md](automl-autofe-stage-1.md).
 
 ## Custom lifecycle composition
 
