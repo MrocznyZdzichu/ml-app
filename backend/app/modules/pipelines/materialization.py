@@ -290,6 +290,7 @@ class PipelineOutputMaterializer:
             if item.get("artifact_type") in {
                 ArtifactType.MODEL_VERSION.value,
                 ArtifactType.METRICS.value,
+                ArtifactType.REPORT.value,
             }:
                 if item.get("materialization") != "artifact":
                     materialized_manifest.append(item)
@@ -540,6 +541,14 @@ class PipelineOutputMaterializer:
             if artifact_type == ArtifactType.MODEL_VERSION
             else ""
         )
+        logical_report_id = (
+            str(uuid5(
+                NAMESPACE_URL,
+                f"mlapp:report-family:{run.owner_id}:{run.pipeline_id}:{step_id}:{item['output_id']}",
+            ))
+            if artifact_type == ArtifactType.REPORT
+            else ""
+        )
         artifact = Artifact(
             id=str(uuid4()),
             owner_id=run.owner_id,
@@ -556,6 +565,10 @@ class PipelineOutputMaterializer:
                 "target_column": item.get("target_column", ""),
                 "model_hash": item.get("model_hash", ""),
                 "logical_model_id": logical_model_id,
+                "logical_report_id": logical_report_id,
+                "report_name": item.get("report_name", ""),
+                "report_type": item.get("report_type", ""),
+                "report": dict(item.get("report") or {}),
                 "metrics": dict(item.get("metrics") or {}),
                 "training_config": dict(item.get("training_config") or {}),
                 "model_parameters": dict(item.get("model_parameters") or {}),

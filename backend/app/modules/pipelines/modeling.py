@@ -27,6 +27,7 @@ from app.modules.pipelines.modeling_catalog import (
     validate_algorithm_parameters,
 )
 from app.modules.pipelines.runtime import SourceRelation, json_safe, safe_filename, sql_literal
+from app.modules.pipelines.reports import TrainingReportBuilder
 from app.shared.duckdb_runtime import configured_duckdb_connection, write_parquet_atomic
 from app.shared.sql_security import identifier
 
@@ -112,6 +113,27 @@ class AutoFeatureEngineeringDefinition(BaseModel):
     max_generated_features: int = Field(default=64, ge=0, le=500)
     max_interaction_features: int = Field(default=12, ge=0, le=100)
     skewness_threshold: float = Field(default=1.0, ge=0.25, le=10)
+    # Planner v3: immutable historical definitions remain unchanged; new UI
+    # drafts opt in explicitly.
+    supervised_feature_selection: bool = False
+    feature_selection_methods: list[
+        Literal["mutual_information", "f_test", "chi_square", "l1", "importance"]
+    ] = Field(default_factory=lambda: ["mutual_information", "l1", "importance"])
+    feature_selection_profiles: list[
+        Literal["compact", "balanced", "wide"]
+    ] = Field(default_factory=lambda: ["compact", "balanced", "wide"])
+    feature_redundancy_threshold: float = Field(default=0.98, gt=0, le=1)
+    # Planner v4: bounded categorical strategies. Native categorical execution
+    # is advertised only when an estimator adapter can consume it directly.
+    categorical_recipe_search: bool = False
+    categorical_encoding_candidates: list[
+        Literal["one_hot_frequency", "hashing", "target_mean", "ordered_target", "native"]
+    ] = Field(default_factory=lambda: [
+        "one_hot_frequency", "hashing", "target_mean", "ordered_target", "native",
+    ])
+    categorical_hash_bins: int = Field(default=32, ge=2, le=256)
+    target_encoding_smoothing: float = Field(default=10.0, ge=0, le=10_000)
+    target_encoding_folds: int = Field(default=5, ge=2, le=20)
 
     @model_validator(mode="after")
     def validate_columns_and_bounds(self) -> "AutoFeatureEngineeringDefinition":
@@ -137,6 +159,18 @@ class AutoFeatureEngineeringDefinition(BaseModel):
             raise ValueError(
                 "AutoFE max_interaction_features cannot exceed max_generated_features"
             )
+        if not self.feature_selection_methods:
+            raise ValueError("Planner v3 requires at least one feature-selection method")
+        if len(self.feature_selection_methods) != len(set(self.feature_selection_methods)):
+            raise ValueError("Planner v3 feature-selection methods must be unique")
+        if not self.feature_selection_profiles:
+            raise ValueError("Planner v3 requires at least one selection profile")
+        if len(self.feature_selection_profiles) != len(set(self.feature_selection_profiles)):
+            raise ValueError("Planner v3 selection profiles must be unique")
+        if not self.categorical_encoding_candidates:
+            raise ValueError("Planner v4 requires at least one categorical encoding candidate")
+        if len(self.categorical_encoding_candidates) != len(set(self.categorical_encoding_candidates)):
+            raise ValueError("Planner v4 categorical candidates must be unique")
         return self
 
 
@@ -265,6 +299,7 @@ class SklearnTrainingEngine:
         emit_event: Callable[[str, dict[str, Any]], None] | None = None,
         is_cancel_requested: Callable[[], bool] | None = None,
         optimization_score_callback: OptimizationScoreCallback | None = None,
+        create_training_report: bool = True,
     ) -> ModelingResult:
         directory = self._run_directory(owner_id, run_id)
         connection = configured_duckdb_connection(directory / ".training-duckdb")
@@ -582,6 +617,42 @@ class SklearnTrainingEngine:
                 definition.feature_columns,
                 classes.tolist() if classes is not None else [],
             )
+            report_outputs: list[dict[str, Any]] = []
+            if create_training_report:
+                training_report = TrainingReportBuilder().build(
+                    connection,
+                    estimator,
+                    validation or training,
+                    feature_columns=definition.feature_columns,
+                    target_column=definition.target_column,
+                    problem_type=definition.problem_type,
+                    model_name=definition.model_name,
+                    algorithm=resolved_algorithm,
+                    metrics=metrics,
+                    model_parameters=model_parameters,
+                    random_seed=definition.random_seed,
+                )
+                report_path = directory / "training_report.json"
+                report_path.write_text(
+                    json.dumps(training_report, sort_keys=True, ensure_ascii=True),
+                    encoding="utf-8",
+                )
+                report_outputs.append({
+                    "output_id": "training_report",
+                    "artifact_type": "report",
+                    "report_type": "training_evaluation_report",
+                    "materialization": "temporary" if is_dry_run else "artifact",
+                    "location_uri": f"file://{report_path.as_posix()}",
+                    "report_name": training_report["name"],
+                    "report": training_report,
+                    "row_count": row_count,
+                    "data_scope": "full",
+                    "is_dry_run": is_dry_run,
+                    "internal_input_outputs": [
+                        {"input_port_id": "model", "output_id": "model"},
+                        {"input_port_id": "metrics", "output_id": "training_metrics"},
+                    ],
+                })
             return ModelingResult(
                 input_row_count=row_count,
                 processed_row_count=processed_row_count,
@@ -626,6 +697,7 @@ class SklearnTrainingEngine:
                         "data_scope": "full",
                         "is_dry_run": is_dry_run,
                     },
+                    *report_outputs,
                 ],
             )
         finally:

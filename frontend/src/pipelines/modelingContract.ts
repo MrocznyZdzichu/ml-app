@@ -56,6 +56,15 @@ export type AutoFeatureEngineeringDefinition = {
   max_generated_features: number;
   max_interaction_features: number;
   skewness_threshold: number;
+  supervised_feature_selection: boolean;
+  feature_selection_methods: Array<"mutual_information" | "f_test" | "chi_square" | "l1" | "importance">;
+  feature_selection_profiles: Array<"compact" | "balanced" | "wide">;
+  feature_redundancy_threshold: number;
+  categorical_recipe_search: boolean;
+  categorical_encoding_candidates: Array<"one_hot_frequency" | "hashing" | "target_mean" | "ordered_target" | "native">;
+  categorical_hash_bins: number;
+  target_encoding_smoothing: number;
+  target_encoding_folds: number;
 };
 
 export type TrainingAlgorithm = string;
@@ -184,7 +193,7 @@ export const emptyTrainingDefinition = (): TrainingDefinition => ({
     enabled: false,
     strategy: "balanced",
     joint_search_enabled: true,
-    max_recipe_candidates: 12,
+    max_recipe_candidates: 24,
     row_id_column: "",
     excluded_columns: [],
     validation_size: 0.2,
@@ -214,7 +223,16 @@ export const emptyTrainingDefinition = (): TrainingDefinition => ({
     interaction_operators: ["multiply", "divide"],
     max_generated_features: 64,
     max_interaction_features: 12,
-    skewness_threshold: 1
+    skewness_threshold: 1,
+    supervised_feature_selection: true,
+    feature_selection_methods: ["mutual_information", "f_test", "chi_square", "l1", "importance"],
+    feature_selection_profiles: ["compact", "balanced", "wide"],
+    feature_redundancy_threshold: 0.98,
+    categorical_recipe_search: true,
+    categorical_encoding_candidates: ["one_hot_frequency", "hashing", "target_mean", "ordered_target"],
+    categorical_hash_bins: 32,
+    target_encoding_smoothing: 10,
+    target_encoding_folds: 5
   }
 });
 
@@ -397,7 +415,7 @@ function normalizeAutoFeatureEngineering(value: unknown): AutoFeatureEngineering
     enabled: raw.enabled === true,
     strategy: "balanced",
     joint_search_enabled: raw.joint_search_enabled !== false,
-    max_recipe_candidates: boundedNumber(raw.max_recipe_candidates, 12, 1, 24),
+    max_recipe_candidates: boundedNumber(raw.max_recipe_candidates, 24, 1, 24),
     row_id_column: String(raw.row_id_column ?? ""),
     excluded_columns: Array.isArray(raw.excluded_columns) ? raw.excluded_columns.map(String) : [],
     validation_size: boundedNumber(raw.validation_size, 0.2, 0.01, 0.49),
@@ -434,8 +452,41 @@ function normalizeAutoFeatureEngineering(value: unknown): AutoFeatureEngineering
     interaction_operators: normalizeInteractionOperators(raw.interaction_operators),
     max_generated_features: boundedNumber(raw.max_generated_features, 64, 0, 500),
     max_interaction_features: boundedNumber(raw.max_interaction_features, 12, 0, 100),
-    skewness_threshold: boundedNumber(raw.skewness_threshold, 1, 0.25, 10)
+    skewness_threshold: boundedNumber(raw.skewness_threshold, 1, 0.25, 10),
+    supervised_feature_selection: raw.supervised_feature_selection === true,
+    feature_selection_methods: normalizeStringCandidates(
+      raw.feature_selection_methods,
+      ["mutual_information", "f_test", "chi_square", "l1", "importance"],
+      ["mutual_information", "f_test", "chi_square", "l1", "importance"]
+    ) as AutoFeatureEngineeringDefinition["feature_selection_methods"],
+    feature_selection_profiles: normalizeStringCandidates(
+      raw.feature_selection_profiles,
+      ["compact", "balanced", "wide"],
+      ["compact", "balanced", "wide"]
+    ) as AutoFeatureEngineeringDefinition["feature_selection_profiles"],
+    feature_redundancy_threshold: boundedNumber(raw.feature_redundancy_threshold, 0.98, 0.01, 1),
+    categorical_recipe_search: raw.categorical_recipe_search === true,
+    categorical_encoding_candidates: normalizeStringCandidates(
+      raw.categorical_encoding_candidates,
+      ["one_hot_frequency", "hashing", "target_mean", "ordered_target", "native"],
+      ["one_hot_frequency", "hashing", "target_mean", "ordered_target"]
+    ) as AutoFeatureEngineeringDefinition["categorical_encoding_candidates"],
+    categorical_hash_bins: boundedNumber(raw.categorical_hash_bins, 32, 2, 256),
+    target_encoding_smoothing: boundedNumber(raw.target_encoding_smoothing, 10, 0, 10000),
+    target_encoding_folds: boundedNumber(raw.target_encoding_folds, 5, 2, 20)
   };
+}
+
+function normalizeStringCandidates(
+  value: unknown,
+  allowedValues: string[],
+  defaults: string[]
+): string[] {
+  const allowed = new Set(allowedValues);
+  const normalized = Array.isArray(value)
+    ? Array.from(new Set(value.map(String).filter((item) => allowed.has(item))))
+    : defaults;
+  return normalized.length ? normalized : [defaults[0]];
 }
 
 function normalizeInteractionOperators(

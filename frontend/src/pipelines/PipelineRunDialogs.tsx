@@ -8,6 +8,7 @@ import type {
   BusinessCase,
   ModelArtifact,
   ModelEvaluationSnapshot,
+  TrainingEvaluationReport,
   Pipeline,
   PipelineVersion,
   PipelineRun,
@@ -394,6 +395,7 @@ function GeneratedArtifactsDialog({
   const [error, setError] = useState("");
   const [selectedModel, setSelectedModel] = useState<ModelArtifact | null>(null);
   const [selectedReport, setSelectedReport] = useState<import("../api/client").ScoringReport | null>(null);
+  const [selectedTrainingReport, setSelectedTrainingReport] = useState<TrainingEvaluationReport | null>(null);
   const [openingArtifactId, setOpeningArtifactId] = useState("");
 
   useEffect(() => {
@@ -449,6 +451,7 @@ function GeneratedArtifactsDialog({
                 ?? artifactByReference.get(output.dataset_id ?? "");
               const isDataset = ["dataset", "prediction_dataset"].includes(output.artifact_type ?? "");
               const isBrowsableDomainArtifact = ["model_version", "report"].includes(output.artifact_type ?? "");
+              const isTrainingReport = output.report_type === "training_evaluation_report";
               return (
                 <article key={`${output.pipeline_step_id}:${output.output_id}`}>
                   <div className="generated-artifact-icon">
@@ -474,7 +477,9 @@ function GeneratedArtifactsDialog({
                   {isBrowsableDomainArtifact && output.artifact_id && (
                     <button className="primary-button compact-button" type="button"
                       disabled={openingArtifactId === output.artifact_id}
-                      onClick={() => void openDomainArtifact(output.artifact_id!, output.artifact_type!)}>
+                      onClick={() => isTrainingReport
+                        ? setSelectedTrainingReport(output.report as TrainingEvaluationReport)
+                        : void openDomainArtifact(output.artifact_id!, output.artifact_type!)}>
                       <Eye size={14} /> {openingArtifactId === output.artifact_id ? "Opening…" : "View"}
                     </button>
                   )}
@@ -505,6 +510,9 @@ function GeneratedArtifactsDialog({
               onClose={() => setSelectedReport(null)}
             />
           </Suspense>
+        )}
+        {selectedTrainingReport && (
+          <TrainingReportDialog report={selectedTrainingReport} onClose={() => setSelectedTrainingReport(null)} />
         )}
       </div>
     </div>
@@ -769,9 +777,13 @@ export function DryRunPreview({
   const outputs = browsableDryRunOutputs(run);
   const modelOutput = run.output_manifest.find((item) => item.artifact_type === "model_version");
   const scoringReportOutput = run.output_manifest.find(isScoringReportOutput);
+  const trainingReportOutput = run.output_manifest.find(
+    (item) => item.report_type === "training_evaluation_report" && item.report
+  );
   const [selectedOutputIndex, setSelectedOutputIndex] = useState(0);
   const [selectedModel, setSelectedModel] = useState<ModelArtifact | null>(null);
   const [selectedReport, setSelectedReport] = useState<ModelEvaluationSnapshot | null>(null);
+  const [selectedTrainingReport, setSelectedTrainingReport] = useState<TrainingEvaluationReport | null>(null);
   const output = outputs[selectedOutputIndex] ?? outputs[0];
   const outputId = output?.output_id ?? "";
   const pipelineStepId = output?.pipeline_step_id ?? "";
@@ -789,6 +801,7 @@ export function DryRunPreview({
     setSelectedOutputIndex(0);
     setSelectedModel(null);
     setSelectedReport(null);
+    setSelectedTrainingReport(null);
   }, [run.id]);
 
   useEffect(() => {
@@ -881,7 +894,7 @@ export function DryRunPreview({
           </button>
         </div>
       </div>
-      {(modelOutput || scoringReportOutput) && (
+      {(modelOutput || scoringReportOutput || trainingReportOutput) && (
         <div className="dry-run-artifact-actions" aria-label="Temporary dry-run artifacts">
           <span>Temporary artifacts</span>
           {modelOutput && (
@@ -900,6 +913,12 @@ export function DryRunPreview({
               onClick={() => setSelectedReport(scoringReportOutput.evaluation as ModelEvaluationSnapshot)}
             >
               <BarChart3 size={14} /> Preview scoring report
+            </button>
+          )}
+          {trainingReportOutput && (
+            <button className="secondary-button compact-button" type="button"
+              onClick={() => setSelectedTrainingReport(trainingReportOutput.report as TrainingEvaluationReport)}>
+              <BarChart3 size={14} /> Preview training report
             </button>
           )}
         </div>
@@ -1058,6 +1077,9 @@ export function DryRunPreview({
           onClose={() => setSelectedReport(null)}
         />
       )}
+      {selectedTrainingReport && (
+        <TrainingReportDialog report={selectedTrainingReport} onClose={() => setSelectedTrainingReport(null)} />
+      )}
     </section>
   );
 }
@@ -1092,6 +1114,87 @@ function RunEventTimeline({ events }: { events: PipelineRunEvent[] }) {
       ))}
     </div>
   );
+}
+
+function TrainingReportDialog({
+  report,
+  onClose
+}: {
+  report: TrainingEvaluationReport;
+  onClose: () => void;
+}) {
+  const summary = report.sections.summary ?? {};
+  const metrics = report.sections.metrics ?? {};
+  const validation = report.sections.validation ?? {};
+  const autoFE = report.sections.feature_engineering ?? {};
+  const jointStudy = autoFE.joint_study && typeof autoFE.joint_study === "object"
+    ? autoFE.joint_study as Record<string, unknown> : {};
+  const explainability = report.sections.explainability ?? {};
+  const shapValues = explainability.shap?.values ?? [];
+  const permutation = explainability.permutation_importance ?? [];
+  return (
+    <div className="modal-backdrop nested-modal" role="presentation"
+      onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <div className="modal-dialog generated-artifacts-dialog" role="dialog" aria-modal="true"
+        aria-label="Training evaluation report">
+        <div className="modal-header"><div><span className="builder-kicker">Training report</span>
+          <h2>{report.name}</h2><p>Immutable model-selection and explainability snapshot.</p></div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close"><X size={18} /></button>
+        </div>
+        <div className="evaluation-report">
+          <div className="evaluation-scope">
+            <span><strong>{report.data_scope.row_count.toLocaleString()}</strong> evaluated rows</span>
+            <span><strong>Full dataset</strong> metric scope</span>
+            <span><strong>{String(summary.algorithm ?? "model")}</strong> winner</span>
+            <span><strong>{String(summary.feature_count ?? "—")}</strong> resolved features</span>
+          </div>
+          <section className="evaluation-section"><header><div><h4>Selection summary</h4>
+            <p>Validation, search and selected AutoFE recipe.</p></div></header>
+            <div className="evaluation-residual-summary">
+              <span>Strategy <strong>{String(validation.strategy ?? "training")}</strong></span>
+              <span>Primary metric <strong>{String(validation.primary_metric ?? "auto")}</strong></span>
+              <span>Best score <strong>{formatReportValue(validation.best_score)}</strong></span>
+              <span>Recipe <strong>{String(autoFE.recipe_id ?? "manual FE")}</strong></span>
+              <span>Candidates <strong>{String(jointStudy.recipe_candidate_count ?? 1)}</strong></span>
+            </div>
+          </section>
+          <section className="evaluation-section"><header><div><h4>Training metrics</h4>
+            <p>Full declared evaluation scope.</p></div></header>
+            <div className="evaluation-metrics">
+              {Object.entries(metrics).filter(([, value]) => typeof value === "number").slice(0, 12).map(([key, value]) =>
+                <article key={key}><span>{key.replaceAll("_", " ")}</span>
+                  <strong>{formatReportValue(value)}</strong></article>)}
+            </div>
+          </section>
+          <div className="evaluation-chart-grid">
+            <ImportanceTable title={`SHAP · ${explainability.shap?.explainer ?? explainability.shap?.status ?? "unavailable"}`}
+              rows={shapValues.map((item) => ({ feature: item.feature, value: item.mean_absolute_shap }))} />
+            <ImportanceTable title="Permutation importance"
+              rows={permutation.map((item) => ({ feature: item.feature, value: item.mean_importance }))} />
+          </div>
+          <div className="evaluation-notes">
+            {explainability.notes?.map((note) => <p key={note}>{note}</p>)}
+            {explainability.reason && <p>{explainability.reason}</p>}
+            {report.warnings.map((warning) => <p key={warning}>{warning}</p>)}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ImportanceTable({ title, rows }: { title: string; rows: Array<{ feature: string; value: number }> }) {
+  return <section className="evaluation-section"><header><div><h4>{title}</h4>
+    <p>Bounded deterministic explanation sample; metrics above remain full-scope.</p></div></header>
+    {rows.length ? <div className="evaluation-class-table"><table><thead><tr><th>Feature</th><th>Importance</th></tr></thead>
+      <tbody>{rows.slice(0, 20).map((item) => <tr key={item.feature}><td>{item.feature}</td>
+        <td>{item.value.toPrecision(5)}</td></tr>)}</tbody></table></div>
+      : <div className="evaluation-empty"><p>No bounded importance output is available for this estimator.</p></div>}
+  </section>;
+}
+
+function formatReportValue(value: unknown) {
+  return typeof value === "number" ? value.toPrecision(6) : String(value ?? "—");
 }
 
 export function ModelPerformanceReport({ report }: { report: ModelEvaluationSnapshot }) {

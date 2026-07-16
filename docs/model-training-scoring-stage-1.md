@@ -31,9 +31,14 @@ minimum improvement, executed epochs, validation history and the restored best
 epoch are persisted with the metrics. Validation is never inferred from a
 mutable or implicit dataset.
 
-Official runs create lineage-backed `model_version` and `metrics` artifacts.
-Dry-runs keep them temporary but may pass the model directly to scoring in the
-same run.
+Official runs create lineage-backed `model_version`, `metrics`, and
+`training_evaluation_report` artifacts. Dry-runs keep them temporary but may
+pass the model directly to scoring in the same run and expose a temporary
+training-report preview. The report stores full-scope metrics, validation and
+search provenance, a bounded model-parameter summary, and explainability.
+Permutation importance is available as the common diagnostic; supported linear
+and tree winners also receive SHAP. Explainability uses a deterministic bounded
+sample that is reported separately from the full metric scope.
 
 Scoring processes every input row in bounded batches and writes Parquet with
 the required source row ID, prediction, optional class probability, and

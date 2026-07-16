@@ -1,6 +1,6 @@
-# AutoML + AutoFE — Stages 1–6
+# AutoML + AutoFE — current implementation
 
-The first integrated AutoFE increment is limited to binary classification,
+The current integrated AutoFE scope is limited to binary classification,
 multiclass classification, and regression over tabular data. Clustering and
 time-series-specific feature generation are intentionally outside this stage.
 
@@ -166,12 +166,61 @@ search-space contract, although users may still configure it explicitly.
 ## Honest limitations
 
 Current coordination changes numeric preprocessing by estimator capability and
-uses bounded one-hot/frequency encoding for all estimators. Planner v2 includes
-target-free, rule-selected nonlinear transforms and arithmetic interactions.
-The implemented selector remains unsupervised constant/low-variance filtering;
-supervised feature selection, native categorical execution, target encoding,
-learned symbolic interactions, Yeo-Johnson and quantile transformations are not
-claimed yet.
+jointly compares bounded one-hot/frequency, hashing, cross-fitted target mean,
+and ordered target encoding. The target-free numeric planner includes
+rule-selected nonlinear transforms and arithmetic interactions.
+Planner v3 adds fold-local supervised selection with mutual information,
+ANOVA/F-test, chi-square for non-negative classification inputs, embedded L1 and
+ExtraTrees importance. Every selector uses the complete permitted training
+scope, performs score-ordered correlation pruning, persists selected/dropped
+features and records between-fold selection frequency. Compact, balanced and
+wide widths are separate joint-search candidates. A hard memory preflight fails
+instead of sampling when the complete selector matrix exceeds its budget.
+
+Planner v4 adds bounded categorical hashing, cross-fitted target-mean encoding
+and ordered target encoding. Binary classification stores one positive-class
+encoding; multiclass stores bounded one-vs-rest outputs. Validation, test and
+scoring reuse global smoothed statistics from the pinned fitted state, while a
+training row never receives an encoding fitted from its own target. Unknown
+categories use the training prior (or a deterministic hash bucket). Existing
+one-hot/frequency recipes remain competitors.
+
+Native categorical execution is deliberately not claimed yet. The catalog can
+identify capable estimators, but the common training matrix adapter is numeric;
+native execution needs a dedicated CatBoost-compatible matrix and scoring
+adapter. No numerically encoded recipe is labelled as native. Learned symbolic
+interactions, Yeo-Johnson and quantile transformations also remain future work.
+
+Before the trial/time scheduler runs, a deterministic family round-robin applies
+the configured recipe cap across base/numeric, supervised-selection,
+categorical, and combined candidates. This prevents an earlier numeric generator
+from consuming the complete cap before later families are represented. The
+generated and scheduled family counts, order and cap are stored in provenance.
+Definitions without v3/v4 feature flags retain the historical ordered-prefix
+selection, preserving published search spaces.
+
+The UI deliberately avoids planner-version names. Configuration is grouped by
+data split and experiment size, budget allocation, numeric preparation,
+target-guided selection, and categorical encoding. Information tooltips explain
+the effect and trade-offs of technical parameters without changing their
+backend contract.
+
+## Immutable training report
+
+Every successful Training and AutoML step now emits a separate immutable
+`training_evaluation_report` artifact in addition to model and metrics
+artifacts. The shared report envelope reserves a distinct
+`monitoring_performance_report` type without changing the monitoring workflow.
+The training report stores full-scope metrics, validation/search provenance,
+the selected AutoFE recipe, fitted selector decisions, model parameter summary,
+diagnostics and bounded explainability.
+
+Permutation importance and SHAP are calculated only for the selected winner on
+a deterministic, explicitly reported sample. Linear and tree estimators use
+native bounded SHAP explainers; unsupported estimators retain permutation
+importance with an explicit reason. Explainability sampling is never presented
+as the scope of model metrics. Reports are accessible from official run
+artifacts and temporary dry-run previews.
 
 ## Fold-local cross-validation
 

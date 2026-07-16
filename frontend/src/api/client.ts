@@ -659,6 +659,9 @@ export type PipelineRun = {
     quality_output_kind?: "rejected_records";
     source_output_id?: string;
     evaluation?: ModelEvaluationSnapshot | Record<string, unknown>;
+    report_type?: "training_evaluation_report" | "monitoring_performance_report";
+    report_name?: string;
+    report?: TrainingEvaluationReport | Record<string, unknown>;
     score_contract?: Record<string, unknown>;
     row_id_column?: string;
     prediction_column?: string;
@@ -699,6 +702,44 @@ export type PipelineRun = {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+};
+
+export type TrainingEvaluationReport = {
+  contract_version: "1.0";
+  report_type: "training_evaluation_report";
+  name: string;
+  created_at: string;
+  data_scope: {
+    mode: "full" | "sample";
+    row_count: number;
+    sampled: boolean;
+    sample_size: number;
+    sampling_method: string;
+    seed: number | null;
+  };
+  sections: {
+    summary?: Record<string, unknown>;
+    metrics?: Record<string, unknown>;
+    validation?: Record<string, unknown>;
+    search?: Record<string, unknown>;
+    feature_engineering?: Record<string, unknown>;
+    model_parameters?: Record<string, unknown>;
+    explainability?: {
+      status?: string;
+      reason?: string;
+      scope?: Record<string, unknown>;
+      permutation_importance?: Array<{ feature: string; mean_importance: number; std?: number }>;
+      shap?: {
+        status?: string;
+        explainer?: string;
+        reason?: string;
+        values?: Array<{ feature: string; mean_absolute_shap: number }>;
+      };
+      notes?: string[];
+    };
+  };
+  diagnostics: Array<Record<string, unknown>>;
+  warnings: string[];
 };
 
 export type PipelineStepRun = {

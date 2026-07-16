@@ -236,7 +236,13 @@ class TrainingStepHandler:
             output_manifest=result.output_manifest,
             input_dataset_ids=[],
             relation_output_ids={},
-            artifact_output_ids={"model": "model", "metrics": "training_metrics"},
+            artifact_output_ids={
+                "model": "model",
+                "metrics": "training_metrics",
+                **({"training_report": "training_report"} if any(
+                    item.get("output_id") == "training_report" for item in result.output_manifest
+                ) else {}),
+            },
             relation_passthroughs=(
                 {"test": (test_port.source.step_id, test_port.source.port_id)}
                 if test_port is not None and "test" in step.additional_output_port_ids
@@ -362,6 +368,22 @@ class AutoMLStepHandler(TrainingStepHandler):
                 max_generated_features=recipe_configuration.max_generated_features,
                 max_interaction_features=recipe_configuration.max_interaction_features,
                 skewness_threshold=recipe_configuration.skewness_threshold,
+                supervised_feature_selection=recipe_configuration.supervised_feature_selection,
+                feature_selection_methods=recipe_configuration.feature_selection_methods,
+                feature_selection_profiles=recipe_configuration.feature_selection_profiles,
+                feature_redundancy_threshold=recipe_configuration.feature_redundancy_threshold,
+                categorical_recipe_search=recipe_configuration.categorical_recipe_search,
+                categorical_encoding_candidates=recipe_configuration.categorical_encoding_candidates,
+                categorical_hash_bins=recipe_configuration.categorical_hash_bins,
+                target_encoding_smoothing=recipe_configuration.target_encoding_smoothing,
+                target_encoding_folds=recipe_configuration.target_encoding_folds,
+                target_column=definition.target_column,
+                row_id_column=(recipe_configuration.row_id_column or str(
+                    plan.provenance.get("inherited_row_id_column") or ""
+                )),
+                problem_type=definition.problem_type,
+                random_seed=definition.random_seed,
+                max_memory_mb=definition.resource_limits.max_memory_mb,
             )
             if definition.auto_feature_engineering.joint_search_enabled
             else [plan]
@@ -823,17 +845,38 @@ class AutoMLStepHandler(TrainingStepHandler):
             "resolved_feature_count": len(resolved_features),
             "resolved_features": resolved_features,
             "joint_study": joint_study,
+            "fitted_feature_selection": self._selection_state_from_manifest(
+                next((
+                    item for item in feature_result.output_manifest
+                    if item.get("artifact_type") == "feature_transform"
+                ), {})
+            ),
         }
         for item in training_result.output_manifest:
             item["auto_feature_engineering"] = auto_fe_payload
-            item["internal_input_outputs"] = [{
-                "output_id": "fitted_transform",
-                "input_port_id": "fitted_transform",
-            }]
+            item["internal_input_outputs"] = [
+                *list(item.get("internal_input_outputs") or []),
+                {
+                    "output_id": "fitted_transform",
+                    "input_port_id": "fitted_transform",
+                },
+            ]
             if item.get("artifact_type") == "model_version":
                 item["training_config"]["auto_feature_engineering"] = auto_fe_payload
             if item.get("artifact_type") == "metrics":
                 item["metrics"]["auto_feature_engineering"] = auto_fe_payload
+            if item.get("report_type") == "training_evaluation_report":
+                report = dict(item.get("report") or {})
+                sections = dict(report.get("sections") or {})
+                sections["feature_engineering"] = auto_fe_payload
+                report["sections"] = sections
+                item["report"] = report
+                location_uri = str(item.get("location_uri") or "")
+                if location_uri.startswith("file://"):
+                    Path(location_uri.removeprefix("file://")).write_text(
+                        json.dumps(report, sort_keys=True, ensure_ascii=True),
+                        encoding="utf-8",
+                    )
 
         # Feature matrices are run-scoped intermediates. The fitted transform is
         # persisted so the selected model can later be reproduced for scoring.
@@ -864,6 +907,10 @@ class AutoMLStepHandler(TrainingStepHandler):
                 "model": "model",
                 "metrics": "training_metrics",
                 "fitted_transform": "fitted_transform",
+                **({"training_report": "training_report"} if any(
+                    item.get("output_id") == "training_report"
+                    for item in training_result.output_manifest
+                ) else {}),
             },
         )
 
@@ -936,6 +983,7 @@ class AutoMLStepHandler(TrainingStepHandler):
                 )
                 if cv_plan is not None else None
             ),
+            create_training_report=False,
         )
         model_manifest = next(
             item for item in candidate_result.output_manifest
@@ -987,6 +1035,7 @@ class AutoMLStepHandler(TrainingStepHandler):
             "optimization": optimization,
             **({
                 "fold_local_feature_counts": list(fold_local_stats["feature_counts"]),
+                "feature_stability": dict(fold_local_stats.get("feature_stability") or {}),
                 "fold_cache": {
                     "scope": (
                         "run_recipe" if phase == "flat_search" else "run_recipe_phase"
@@ -1098,6 +1147,7 @@ class AutoMLStepHandler(TrainingStepHandler):
                         "fitted_state_signature": self._stable_state_signature(
                             str(fitted_state.get("location_uri") or "")
                         ),
+                        "feature_selection": self._selection_state_from_manifest(fitted_state),
                         "cache_key": hashlib.sha256(
                             (
                                 f"{recipe.provenance.get('recipe_hash', '')}|"
@@ -1166,6 +1216,9 @@ class AutoMLStepHandler(TrainingStepHandler):
                         "fitted_state_signature": cached["fitted_state_signature"],
                         "cache_key": cached["cache_key"],
                         "cache_hit": cache_hit,
+                        "selected_features": list(
+                            (cached.get("feature_selection") or {}).get("selected_columns") or []
+                        ),
                     })
                     if emit_event:
                         emit_event("autofe.fold_completed", {
@@ -1181,6 +1234,21 @@ class AutoMLStepHandler(TrainingStepHandler):
                     pass
             stats.setdefault("trial_feature_counts", []).append(trial_feature_counts)
             stats["feature_counts"] = trial_feature_counts
+            selected_by_fold = [
+                set(item.get("selected_features") or []) for item in trial_feature_counts
+            ]
+            all_selected = sorted(set().union(*selected_by_fold)) if selected_by_fold else []
+            stats["feature_stability"] = {
+                "fold_count": len(selected_by_fold),
+                "selection_frequency": {
+                    feature: sum(feature in selected for selected in selected_by_fold) / len(selected_by_fold)
+                    for feature in all_selected
+                },
+                "stable_features": [
+                    feature for feature in all_selected
+                    if all(feature in selected for selected in selected_by_fold)
+                ],
+            }
             if not fold_scores:
                 raise ValueError("Fold-local AutoFE produced no fold scores")
             weights = [fold.validation.row_count for fold in cv_plan.folds]
@@ -1238,6 +1306,23 @@ class AutoMLStepHandler(TrainingStepHandler):
             separators=(",", ":"),
         )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _selection_state_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+        location_uri = str(manifest.get("location_uri") or "")
+        if not location_uri.startswith("file://"):
+            return {}
+        path = Path(location_uri.removeprefix("file://"))
+        if not path.is_file():
+            return {}
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        selectors = [
+            {"transform_id": transform_id, **dict(state)}
+            for transform_id, state in dict(payload.get("transforms") or {}).items()
+            if isinstance(state, dict)
+            and state.get("type") in {"variance_filter", "supervised_feature_selector"}
+        ]
+        return {"selectors": selectors, **(selectors[-1] if selectors else {})}
 
     def _prepare_features(
         self,

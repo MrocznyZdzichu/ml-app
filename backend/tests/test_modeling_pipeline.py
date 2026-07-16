@@ -334,6 +334,20 @@ def test_training_and_scoring_process_full_declared_inputs(tmp_path: Path) -> No
     assert model["model_parameters"]["weights"][0]["feature"] == "x"
     assert model["model_parameters"]["returned_weight_count"] == 1
     assert model["model_parameters"]["truncated"] is False
+    report_output = next(
+        item for item in trained.output_manifest if item["output_id"] == "training_report"
+    )
+    assert report_output["artifact_type"] == "report"
+    assert report_output["report_type"] == "training_evaluation_report"
+    report = report_output["report"]
+    assert report["data_scope"]["mode"] == "full"
+    assert report["data_scope"]["row_count"] == 20
+    assert report["sections"]["summary"]["feature_count"] == 1
+    assert report["sections"]["explainability"]["scope"]["sampled"] is True
+    assert report["sections"]["explainability"]["permutation_importance"][0]["feature"] == "x"
+    assert report["sections"]["explainability"]["shap"]["status"] == "completed"
+    assert report["sections"]["explainability"]["shap"]["values"][0]["feature"] == "x"
+    assert Path(report_output["location_uri"].removeprefix("file://")).is_file()
 
     scored = SklearnScoringEngine(repository).execute(
         ScoringDefinition(

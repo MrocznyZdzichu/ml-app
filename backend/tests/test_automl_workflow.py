@@ -406,6 +406,42 @@ def test_autofe_planner_profiles_full_scope_and_builds_bounded_recipe(tmp_path) 
     assert winsor_only.provenance["recipe_contract"]["signed_log_features"] is False
     assert winsor_only.provenance["recipe_contract"]["winsorization"] is not None
 
+    fair = model_aware_autofe_plans(
+        plan,
+        ["logistic_regression", "random_forest_classifier", "complement_nb"],
+        max_candidates=12,
+        numeric_feature_search=True,
+        numeric_recipe_search_v2=True,
+        numeric_scaling_search=True,
+        numeric_scaling_candidates=["standard", "robust", "minmax", "none"],
+        profile_aware_generation=True,
+        supervised_feature_selection=True,
+        feature_selection_methods=["mutual_information", "l1", "importance"],
+        feature_selection_profiles=["compact", "balanced", "wide"],
+        categorical_recipe_search=True,
+        categorical_encoding_candidates=[
+            "one_hot_frequency", "hashing", "target_mean", "ordered_target",
+        ],
+        target_column="target",
+        row_id_column="row_id",
+        problem_type="binary_classification",
+    )
+    assert len(fair) == 12
+    assert [item.provenance["candidate_family"] for item in fair[:4]] == [
+        "base_numeric",
+        "v3_supervised_selection",
+        "v4_categorical",
+        "v3_v4_combined",
+    ]
+    assert fair[0].provenance["candidate_scheduler"]["scheduled_family_counts"] == {
+        "base_numeric": 3,
+        "v3_supervised_selection": 3,
+        "v4_categorical": 3,
+        "v3_v4_combined": 3,
+    }
+    assert any("__categorical_hashing" in item.provenance["recipe_id"] for item in fair)
+    assert any("__select_" in item.provenance["recipe_id"] for item in fair)
+
 
 def test_profile_aware_planner_builds_bounded_auditable_numeric_features(tmp_path) -> None:
     payload = automl_definition(autofe=True)

@@ -74,10 +74,14 @@ on the bounded feature-by-feature covariance matrix. A block accepts at most
 in recipe order. Means, components, explained variance, and optional whitening
 state are stored in the fitted transform artifact.
 
-The current increment deliberately excludes target encoding, WoE, supervised
-feature selection, arbitrary Python, embeddings, historical windows, and
-point-in-time joins. Those require cross-fitting, entity/event-time contracts,
-or a separate resource and security model.
+The manually authored Stage 1 FE block deliberately excludes target encoding,
+WoE, supervised feature selection, arbitrary Python, embeddings, historical
+windows, and point-in-time joins. Integrated AutoFE now provides a separate,
+bounded fold-local implementation of cross-fitted target mean, ordered target
+encoding, supervised selection, and correlation pruning. Those target-aware
+operations are generated and executed only through the AutoFE experiment
+contract; they are not yet exposed as unrestricted manual FE blocks. See
+`automl-autofe-stage-1.md`.
 
 ## Fit and transform modes
 
@@ -131,8 +135,10 @@ relations, intermediate DE output is passed to FE as Parquet, and no full table
 crosses the API or browser boundary. Fitted statistics are aggregate queries
 over all training rows.
 
-Actual estimator fitting and fold-metric aggregation are not implemented yet.
-A feature dataset fitted once on all training rows is appropriate for an
-explicit holdout workflow and final model fit, but must not be used to report
-fold-based metrics as though preprocessing had been fitted independently in
-each fold.
+Estimator fitting and fold-metric aggregation are implemented by the Training
+and AutoML execution engines, not by this standalone FE block. A manually
+authored feature dataset fitted once on all training rows remains appropriate
+for an explicit holdout workflow and final model fit, but must not be used to
+report fold-based metrics as though preprocessing had been fitted independently
+in each fold. Integrated AutoFE solves this for its generated recipes by fitting
+the complete recipe independently inside every raw-data fold.

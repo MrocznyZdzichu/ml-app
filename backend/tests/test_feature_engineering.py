@@ -1094,3 +1094,130 @@ def test_de_to_fe_pipeline_run_creates_step_runs_dataset_and_fitted_artifact(
         item["role"] for item in attachments.json()
         if item["data_asset_id"] in generated_dataset_ids
     } == {"training", "validation", "test"}
+
+
+def test_supervised_selector_is_full_scope_redundancy_aware_and_persisted(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    source = repository_root / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    train_path = source / "selector.csv"
+    train_path.write_text(
+        "id,signal,signal_copy,noise,target\n"
+        + "\n".join(
+            f"{index},{index},{index},{(index * 7) % 5},{int(index >= 10)}"
+            for index in range(20)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    repository = InMemoryDatasetRepository()
+    repository.add(_asset("selector", "owner-1", train_path, 20))
+    engine = DuckDbFeatureEngineeringEngine(
+        input_adapter=CsvDatasetInputAdapter(repository, repository_root),
+        repository_root=repository_root,
+    )
+    definition = FeatureEngineeringDefinition.model_validate({
+        "mode": "fit_transform",
+        "inputs": [{"input_id": "training", "role": "training", "dataset_id": "selector"}],
+        "feature_columns": ["signal", "signal_copy", "noise"],
+        "target_column": "target",
+        "row_id_column": "id",
+        "transformations": [{
+            "transform_id": "supervised",
+            "type": "supervised_feature_selector",
+            "columns": [],
+            "config": {
+                "method": "mutual_information",
+                "target_column": "target",
+                "problem_type": "binary_classification",
+                "max_features": 2,
+                "correlation_threshold": 0.95,
+                "random_seed": 42,
+                "max_memory_mb": 128,
+                "profile": "compact",
+            },
+        }],
+        "outputs": [{
+            "output_id": "training_features", "input_id": "training",
+            "dataset_name": "Selected", "business_case_role": "training",
+        }],
+    })
+
+    result = engine.execute(
+        definition=definition, run_id="selector", owner_id="owner-1", is_dry_run=True,
+    )
+    state_item = next(item for item in result.output_manifest if item["output_id"] == "fitted_transform")
+    state = json.loads(Path(state_item["location_uri"].removeprefix("file://")).read_text())
+    selector = state["transforms"]["supervised"]
+    assert selector["data_scope"] == "full"
+    assert selector["fitted_row_count"] == 20
+    assert len(selector["selected_columns"]) == 2
+    assert {"signal", "signal_copy"} & set(selector["selected_columns"])
+    assert selector["correlation_dropped"]
+
+
+def test_target_encoding_is_cross_fitted_and_reuses_global_state_for_validation(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    source = repository_root / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    train_path = source / "target-train.csv"
+    validation_path = source / "target-validation.csv"
+    train_path.write_text(
+        "id,city,target\n1,A,0\n2,A,1\n3,B,0\n4,B,1\n5,A,1\n6,B,0\n",
+        encoding="utf-8",
+    )
+    validation_path.write_text("id,city,target\n7,A,1\n8,C,0\n", encoding="utf-8")
+    repository = InMemoryDatasetRepository()
+    repository.add(_asset("target-train", "owner-1", train_path, 6))
+    repository.add(_asset("target-validation", "owner-1", validation_path, 2))
+    engine = DuckDbFeatureEngineeringEngine(
+        input_adapter=CsvDatasetInputAdapter(repository, repository_root),
+        repository_root=repository_root,
+    )
+    definition = FeatureEngineeringDefinition.model_validate({
+        "mode": "fit_transform",
+        "inputs": [
+            {"input_id": "training", "role": "training", "dataset_id": "target-train"},
+            {"input_id": "validation", "role": "validation", "dataset_id": "target-validation"},
+        ],
+        "feature_columns": ["city"],
+        "target_column": "target",
+        "row_id_column": "id",
+        "transformations": [{
+            "transform_id": "target_encoding",
+            "type": "encode_categorical",
+            "columns": ["city"],
+            "config": {
+                "method": "target_mean", "min_frequency": 1, "max_categories": 10,
+                "handle_unknown": "other", "drop_original": True,
+                "target_column": "target", "row_id_column": "id",
+                "problem_type": "binary_classification", "cross_fit_folds": 3,
+                "smoothing": 2,
+            },
+        }],
+        "outputs": [
+            {"output_id": "training_features", "input_id": "training", "dataset_name": "Train", "business_case_role": "training"},
+            {"output_id": "validation_features", "input_id": "validation", "dataset_name": "Validation", "business_case_role": "validation"},
+        ],
+    })
+
+    result = engine.execute(
+        definition=definition, run_id="target-encoding", owner_id="owner-1", is_dry_run=True,
+    )
+    training = next(item for item in result.output_manifest if item["output_id"] == "training_features")
+    validation = next(item for item in result.output_manifest if item["output_id"] == "validation_features")
+    training_values = duckdb.connect().execute(
+        'SELECT "city__target_mean" FROM read_parquet(?) ORDER BY id',
+        [training["location_uri"].removeprefix("file://")],
+    ).fetchall()
+    validation_values = duckdb.connect().execute(
+        'SELECT "city__target_mean" FROM read_parquet(?) ORDER BY id',
+        [validation["location_uri"].removeprefix("file://")],
+    ).fetchall()
+    assert len({round(float(row[0]), 6) for row in training_values}) > 1
+    assert float(validation_values[0][0]) == pytest.approx(0.6)
+    assert float(validation_values[1][0]) == pytest.approx(0.5)

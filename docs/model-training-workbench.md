@@ -90,3 +90,19 @@ are persisted, so downstream monitoring keeps the original target vocabulary.
 The bounded model-parameter summary now supports both linear coefficients and
 tree feature importance. Training metrics and optimization provenance remain
 separate from row-level prediction datasets.
+
+## Training evaluation report
+
+Every successful final Training or AutoML fit emits an immutable
+`training_evaluation_report` artifact in addition to the model and metrics.
+Candidate AutoML fits do not generate reports. The report contains full-scope
+evaluation/search provenance, model parameters, the winning AutoFE recipe and
+selection decisions when applicable, plus bounded explainability. SHAP is used
+for supported linear and tree models; permutation importance remains the common
+fallback. The explanation sample size and selection method are explicit and do
+not redefine the scope of the model metrics.
+
+The report envelope also reserves a distinct `monitoring_performance_report`
+type. Training and monitoring reports intentionally have separate content and
+UI templates; introducing the shared envelope did not change the existing
+monitoring workflow.

@@ -50,6 +50,7 @@ class AutoFERecipeSpec:
     distribution_transforms: list[dict[str, Any]] | None = None
     numeric_interactions: list[dict[str, Any]] | None = None
     feature_budget: dict[str, Any] | None = None
+    categorical_encoding: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         result = {
@@ -67,6 +68,8 @@ class AutoFERecipeSpec:
             result["numeric_interactions"] = self.numeric_interactions
         if self.feature_budget is not None:
             result["feature_budget"] = self.feature_budget
+        if self.categorical_encoding is not None:
+            result["categorical_encoding"] = self.categorical_encoding
         return result
 
 
@@ -82,6 +85,81 @@ class AutoFECrossValidationPlan:
     strategy: str
     folds: list[AutoFECrossValidationFold]
     provenance: dict[str, Any]
+
+
+AutoFERecipeTuple = tuple[str, str, str, str, str]
+
+
+def _recipe_family(spec: AutoFERecipeTuple) -> str:
+    _, _, _, selection, categorical = spec
+    supervised = selection != "none"
+    categorical_recipe = categorical != "one_hot_frequency"
+    if supervised and categorical_recipe:
+        return "v3_v4_combined"
+    if supervised:
+        return "v3_supervised_selection"
+    if categorical_recipe:
+        return "v4_categorical"
+    return "base_numeric"
+
+
+def _schedule_recipe_specs(
+    specs: list[AutoFERecipeTuple],
+    *,
+    max_candidates: int,
+    supervised_feature_selection: bool,
+    categorical_recipe_search: bool,
+) -> tuple[list[AutoFERecipeTuple], dict[str, Any]]:
+    """Bound the recipe space without letting an earlier planner starve later ones."""
+
+    limit = max(1, max_candidates)
+    if not supervised_feature_selection and not categorical_recipe_search:
+        selected = specs[:limit]
+        return selected, {
+            "mode": "legacy_ordered_prefix",
+            "max_candidates": limit,
+            "generated_family_counts": {"base_numeric": len(specs)},
+            "scheduled_family_counts": {"base_numeric": len(selected)},
+        }
+
+    family_order = ["base_numeric"]
+    if supervised_feature_selection:
+        family_order.append("v3_supervised_selection")
+    if categorical_recipe_search:
+        family_order.append("v4_categorical")
+    if supervised_feature_selection and categorical_recipe_search:
+        family_order.append("v3_v4_combined")
+    buckets = {
+        family: [spec for spec in specs if _recipe_family(spec) == family]
+        for family in family_order
+    }
+    selected: list[AutoFERecipeTuple] = []
+    offsets = {family: 0 for family in family_order}
+    while len(selected) < limit:
+        progressed = False
+        for family in family_order:
+            offset = offsets[family]
+            if offset >= len(buckets[family]):
+                continue
+            selected.append(buckets[family][offset])
+            offsets[family] += 1
+            progressed = True
+            if len(selected) >= limit:
+                break
+        if not progressed:
+            break
+    return selected, {
+        "mode": "deterministic_family_round_robin",
+        "max_candidates": limit,
+        "family_order": family_order,
+        "generated_family_counts": {
+            family: len(buckets[family]) for family in family_order
+        },
+        "scheduled_family_counts": {
+            family: sum(_recipe_family(spec) == family for spec in selected)
+            for family in family_order
+        },
+    }
 
 
 def model_aware_autofe_plans(
@@ -105,6 +183,20 @@ def model_aware_autofe_plans(
     max_generated_features: int = 64,
     max_interaction_features: int = 12,
     skewness_threshold: float = 1.0,
+    supervised_feature_selection: bool = False,
+    feature_selection_methods: list[str] | None = None,
+    feature_selection_profiles: list[str] | None = None,
+    feature_redundancy_threshold: float = 0.98,
+    categorical_recipe_search: bool = False,
+    categorical_encoding_candidates: list[str] | None = None,
+    categorical_hash_bins: int = 32,
+    target_encoding_smoothing: float = 10.0,
+    target_encoding_folds: int = 5,
+    target_column: str = "",
+    row_id_column: str = "",
+    problem_type: str = "regression",
+    random_seed: int = 42,
+    max_memory_mb: int = 2048,
 ) -> list[AutoFEPlan]:
     """Derive model-compatible recipes from one full-scope profiling pass."""
 
@@ -164,7 +256,54 @@ def model_aware_autofe_plans(
             for variant in variants
             for profile in ordered_profiles
         ]
-    for profile, variant, scaling in candidate_specs[:max_candidates]:
+    expanded_specs: list[AutoFERecipeTuple] = [
+        (profile, variant, scaling, "none", "one_hot_frequency")
+        for profile, variant, scaling in candidate_specs
+    ]
+    base_specs = list(expanded_specs)
+    if supervised_feature_selection:
+        methods = feature_selection_methods or ["mutual_information", "l1", "importance"]
+        if problem_type == "regression":
+            methods = [method for method in methods if method != "chi_square"]
+        if not methods:
+            methods = ["mutual_information"]
+        selection_profiles = feature_selection_profiles or ["compact", "balanced", "wide"]
+        for index, selection_profile in enumerate(selection_profiles):
+            method = methods[index % len(methods)]
+            for profile, variant, scaling, _, categorical in base_specs:
+                expanded_specs.append((profile, variant, scaling, f"{selection_profile}:{method}", categorical))
+        for method in methods:
+            if any(spec[3].endswith(f":{method}") for spec in expanded_specs):
+                continue
+            profile, variant, scaling, _, categorical = base_specs[0]
+            expanded_specs.append((profile, variant, scaling, f"balanced:{method}", categorical))
+    if categorical_recipe_search:
+        categorical_candidates = categorical_encoding_candidates or [
+            "one_hot_frequency", "hashing", "target_mean", "ordered_target", "native",
+        ]
+        for categorical in categorical_candidates:
+            if categorical == "one_hot_frequency":
+                continue
+            for profile, variant, scaling, selection, _ in base_specs:
+                # Native categoricals are a real CatBoost-only adapter concern. Until
+                # that matrix adapter is active, retain the decision in provenance but
+                # never create a falsely-labelled encoded recipe.
+                if categorical == "native":
+                    continue
+                expanded_specs.append((profile, variant, scaling, selection, categorical))
+        if supervised_feature_selection:
+            combined_selection = "balanced:importance"
+            profile, variant, scaling, _, _ = base_specs[0]
+            for categorical in categorical_candidates:
+                if categorical not in {"one_hot_frequency", "native"}:
+                    expanded_specs.append((profile, variant, scaling, combined_selection, categorical))
+    scheduled_specs, scheduler_provenance = _schedule_recipe_specs(
+        expanded_specs,
+        max_candidates=max_candidates,
+        supervised_feature_selection=supervised_feature_selection,
+        categorical_recipe_search=categorical_recipe_search,
+    )
+    for profile, variant, scaling, selection_spec, categorical_variant in scheduled_specs:
         definition = base_plan.definition.model_copy(deep=True)
         transformations = [
             transform
@@ -176,7 +315,33 @@ def model_aware_autofe_plans(
                 "autofe_low_variance_selection",
             }
             and not transform.transform_id.startswith("autofe_generated_")
+            and transform.transform_id != "autofe_supervised_selection"
         ]
+        categorical_transforms: list[FeatureTransformation] = []
+        for transform in transformations:
+            if transform.type != "encode_categorical" or categorical_variant == "one_hot_frequency":
+                categorical_transforms.append(transform)
+                continue
+            method = {
+                "hashing": "hashing",
+                "target_mean": "target_mean",
+                "ordered_target": "ordered_target",
+            }[categorical_variant]
+            categorical_transforms.append(transform.model_copy(update={
+                "config": {
+                    **transform.config,
+                    "method": method,
+                    "hash_bins": categorical_hash_bins,
+                    "target_column": target_column,
+                    "row_id_column": row_id_column,
+                    "problem_type": problem_type,
+                    "cross_fit_folds": target_encoding_folds,
+                    "smoothing": target_encoding_smoothing,
+                    "output_suffix": "",
+                    "drop_original": True,
+                },
+            }))
+        transformations = categorical_transforms
         numeric_columns = [
             str(item["column"])
             for item in base_plan.provenance.get("column_decisions", [])
@@ -309,6 +474,30 @@ def model_aware_autofe_plans(
                 columns=selector_columns,
                 config={"threshold": variance_threshold},
             ))
+        selection_profile = "none"
+        selection_method = "none"
+        if selection_spec != "none":
+            selection_profile, selection_method = selection_spec.split(":", 1)
+            estimated_width = max(
+                len(selector_columns),
+                len(base_plan.definition.feature_columns) + len(generated_columns),
+            )
+            fractions = {"compact": 0.25, "balanced": 0.5, "wide": 0.8}
+            maximum = max(1, int(max(1, estimated_width) * fractions[selection_profile]))
+            transformations.append(FeatureTransformation(
+                transform_id="autofe_supervised_selection",
+                type="supervised_feature_selector",
+                config={
+                    "method": selection_method,
+                    "target_column": target_column,
+                    "problem_type": problem_type,
+                    "max_features": maximum,
+                    "correlation_threshold": feature_redundancy_threshold,
+                    "random_seed": random_seed,
+                    "max_memory_mb": max_memory_mb,
+                    "profile": selection_profile,
+                },
+            ))
         definition = definition.model_copy(update={"transformations": transformations})
         decisions = []
         for raw_decision in base_plan.provenance.get("column_decisions", []):
@@ -325,8 +514,16 @@ def model_aware_autofe_plans(
         recipe_id = profile if variant == "baseline" else f"{profile}__{variant}"
         if scaling != default_scaling:
             recipe_id = f"{recipe_id}__{scaling}"
+        if selection_spec != "none":
+            recipe_id = f"{recipe_id}__select_{selection_profile}_{selection_method}"
+        if categorical_variant != "one_hot_frequency":
+            recipe_id = f"{recipe_id}__categorical_{categorical_variant}"
         recipe_contract = AutoFERecipeSpec(
-            contract_version="3.0" if profile_aware else "2.0",
+            contract_version=(
+                "5.0" if categorical_variant != "one_hot_frequency"
+                else "4.0" if selection_spec != "none"
+                else "3.0" if profile_aware else "2.0"
+            ),
             capability_profile=profile,
             numeric_variant=variant,
             numeric_scaling=scaling,
@@ -339,6 +536,13 @@ def model_aware_autofe_plans(
             ),
             signed_log_features=bool(generated_columns),
             feature_selector=(
+                {
+                    "type": "supervised_feature_selector",
+                    "method": selection_method,
+                    "profile": selection_profile,
+                    "correlation_threshold": feature_redundancy_threshold,
+                }
+                if selection_spec != "none" else
                 {"type": "variance_filter", "threshold": variance_threshold}
                 if enhanced and low_variance_selection else None
             ),
@@ -355,18 +559,52 @@ def model_aware_autofe_plans(
                 }
                 if profile_aware else None
             ),
+            categorical_encoding=(
+                {
+                    "variant": categorical_variant,
+                    "hash_bins": (
+                        categorical_hash_bins if categorical_variant == "hashing" else None
+                    ),
+                    "cross_fit_folds": (
+                        target_encoding_folds
+                        if categorical_variant in {"target_mean", "ordered_target"} else None
+                    ),
+                    "smoothing": (
+                        target_encoding_smoothing
+                        if categorical_variant in {"target_mean", "ordered_target"} else None
+                    ),
+                    "unknown_policy": "prior_or_hash_bucket",
+                }
+                if categorical_recipe_search else None
+            ),
         ).as_dict()
         provenance = {
             **base_plan.provenance,
             "planner": (
+                "duckdb_categorical_planner_v4"
+                if categorical_variant != "one_hot_frequency" else
+                "duckdb_supervised_selector_v3"
+                if selection_spec != "none" else
                 "duckdb_profile_aware_tabular_v2"
                 if profile_aware else "duckdb_model_aware_tabular_v3"
             ),
             "recipe_search_mode": "joint_model_aware_holdout",
+            "candidate_family": _recipe_family(
+                (profile, variant, scaling, selection_spec, categorical_variant)
+            ),
+            "candidate_scheduler": scheduler_provenance,
             "recipe_id": recipe_id,
             "feature_capability_profile": profile,
             "compatible_algorithms": list(grouped[profile]),
             "numeric_scaling": scaling,
+            "feature_selection_profile": selection_profile,
+            "feature_selection_method": selection_method,
+            "categorical_encoding_variant": categorical_variant,
+            "native_categorical": {
+                "requested": "native" in (categorical_encoding_candidates or []),
+                "executed": False,
+                "reason": "requires a CatBoost-native matrix adapter; no encoded recipe is mislabelled as native",
+            },
             "numeric_recipe_space_version": (
                 "3.0" if profile_aware else "2.0" if numeric_recipe_search_v2 else "1.0"
             ),

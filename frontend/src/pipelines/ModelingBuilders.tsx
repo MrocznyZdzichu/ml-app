@@ -1,13 +1,14 @@
 import {
   AlertTriangle,
   BrainCircuit,
+  Info,
   ListChecks,
   Search,
   SlidersHorizontal,
   Sparkles,
   X
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { api } from "../api/client";
 import {
@@ -24,6 +25,78 @@ import type {
   TrainingDefinition
 } from "./modelingContract";
 import type { ModelArtifact } from "../api/client";
+
+function AutoFEHelp({ text }: { text: string }) {
+  return <span className="autofe-help" tabIndex={0} aria-label={text}>
+    <Info size={13} aria-hidden="true" />
+    <span className="autofe-tooltip" role="tooltip">{text}</span>
+  </span>;
+}
+
+function AutoFEFieldLabel({ children, help }: { children: ReactNode; help: string }) {
+  return <span className="autofe-field-label">{children}<AutoFEHelp text={help} /></span>;
+}
+
+function AutoFEGroup({ title, description, help, children }: {
+  title: string;
+  description: string;
+  help: string;
+  children: ReactNode;
+}) {
+  return <section className="autofe-group">
+    <header className="autofe-group-heading">
+      <div><strong>{title}</strong><small>{description}</small></div>
+      <AutoFEHelp text={help} />
+    </header>
+    <div className="autofe-group-content">{children}</div>
+  </section>;
+}
+
+function selectorLabel(method: string) {
+  return ({
+    mutual_information: "Mutual information",
+    f_test: "F-test",
+    chi_square: "Chi-square",
+    l1: "Sparse linear model (L1)",
+    importance: "Tree-based importance"
+  } as Record<string, string>)[method] ?? method;
+}
+
+function selectorHelp(method: string) {
+  return ({
+    mutual_information: "Finds both linear and nonlinear relationships between one feature and the target. Useful as a broad, model-independent signal detector.",
+    f_test: "Ranks numeric features by how strongly their average values differ with the target. Fast and effective for mostly linear relationships.",
+    chi_square: "For classification, checks whether non-negative feature values and target classes are statistically dependent. It is skipped for regression.",
+    l1: "Fits a regularized linear model that pushes weak feature coefficients to zero, leaving a sparse set of useful columns.",
+    importance: "Fits an Extra Trees model and ranks features by how much they improve its decisions. It can capture nonlinear effects and interactions."
+  } as Record<string, string>)[method] ?? "Scores features using training data only.";
+}
+
+function selectionWidthHelp(profile: string) {
+  return ({
+    compact: "Keeps roughly the strongest 25% of candidate features. Useful when simplicity, speed or a small scoring contract matters most.",
+    balanced: "Keeps roughly the strongest 50%. A middle ground between compactness and retaining weaker signals.",
+    wide: "Keeps roughly the strongest 80%. Useful when the model can exploit many weak signals and compute cost is acceptable."
+  } as Record<string, string>)[profile] ?? "Controls how many of the ranked features remain.";
+}
+
+function categoricalLabel(method: string) {
+  return ({
+    one_hot_frequency: "One-hot or frequency encoding",
+    hashing: "Feature hashing",
+    target_mean: "Cross-fitted target mean",
+    ordered_target: "Ordered target encoding"
+  } as Record<string, string>)[method] ?? method;
+}
+
+function categoricalHelp(method: string) {
+  return ({
+    one_hot_frequency: "One-hot creates a separate 0/1 column for each common category, for example region_Warsaw. Higher-cardinality columns use category frequency instead to avoid thousands of columns.",
+    hashing: "Maps categories deterministically into a fixed number of 0/1 buckets. Memory stays bounded even for many distinct values, but different categories may share a bucket.",
+    target_mean: "Replaces a category with its smoothed average target calculated without using the current row or validation fold. This captures category signal while limiting leakage.",
+    ordered_target: "Calculates each training row from earlier rows in a deterministic order, never from its own target. Validation and scoring reuse the fitted training statistics."
+  } as Record<string, string>)[method] ?? "Creates a numeric representation of categorical values.";
+}
 
 export function TrainingBuilder({ definition, defaults, disabled, onChange }: {
   definition: TrainingDefinition;
@@ -394,11 +467,15 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
         </span>
       </label>
       {definition.auto_feature_engineering.enabled && <>
+        <div className="autofe-groups">
+        <AutoFEGroup title="Data split and experiment size"
+          description="Define how data is separated and how many complete feature recipes AutoML may compare."
+          help="A feature recipe is one complete way of preparing columns before fitting a model. Every candidate is evaluated on the same validation split or cross-validation folds.">
         <label className="fe-toggle">
           <input type="checkbox" checked={definition.auto_feature_engineering.joint_search_enabled}
             disabled={disabled}
             onChange={(event) => updateAutoFE({ joint_search_enabled: event.target.checked })} />
-          <span><strong>Joint FE + model search</strong>
+          <span><strong>Search feature recipes together with models <AutoFEHelp text="When enabled, AutoML compares a complete pair: feature preparation plus model. This is more reliable than choosing features first and a model later." /></strong>
             <small>Compare complete model-aware FE recipe and algorithm pairs on the same holdout or fold-local CV plan.</small>
           </span>
         </label>
@@ -408,11 +485,11 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
             columns={defaults.available_columns.filter((item) => item !== definition.target_column)}
             disabled={disabled || defaults.has_validation}
             onChange={(row_id_column) => updateAutoFE({ row_id_column })} />
-          <label>Validation share<input type="number" min={0.01} max={0.49} step={0.01}
+          <label><AutoFEFieldLabel help="Fraction of training rows reserved for validation when no separate validation dataset exists. For example, 0.20 means 80% train and 20% validation.">Validation share</AutoFEFieldLabel><input type="number" min={0.01} max={0.49} step={0.01}
             value={definition.auto_feature_engineering.validation_size}
             disabled={disabled || defaults.has_validation}
             onChange={(event) => updateAutoFE({ validation_size: Number(event.target.value) })} /></label>
-          <label>Fixed numeric scaling<select value={definition.auto_feature_engineering.numeric_scaling}
+          <label><AutoFEFieldLabel help="Default way to put numeric columns on comparable scales. Standard uses mean and standard deviation; robust uses median and IQR; min-max maps values near 0–1.">Default numeric scaling</AutoFEFieldLabel><select value={definition.auto_feature_engineering.numeric_scaling}
             disabled={disabled || definition.auto_feature_engineering.numeric_scaling_search}
             onChange={(event) => updateAutoFE({
               numeric_scaling: event.target.value as TrainingDefinition["auto_feature_engineering"]["numeric_scaling"]
@@ -422,41 +499,43 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
             <option value="minmax">Min-max</option>
             <option value="none">None</option>
           </select></label>
-          <label>One-hot cardinality limit<input type="number" min={2} max={500}
-            value={definition.auto_feature_engineering.max_one_hot_categories} disabled={disabled}
-            onChange={(event) => updateAutoFE({ max_one_hot_categories: Number(event.target.value) })} /></label>
-          <label>Minimum category frequency<input type="number" min={1} max={1000000}
-            value={definition.auto_feature_engineering.min_category_frequency} disabled={disabled}
-            onChange={(event) => updateAutoFE({ min_category_frequency: Number(event.target.value) })} /></label>
-          <label>Maximum FE recipe candidates<input type="number" min={1} max={24}
+          <label><AutoFEFieldLabel help="Maximum number of complete feature-preparation variants admitted to the AutoML study. The budget is shared fairly between numeric, feature-selection and categorical families.">Maximum feature recipes</AutoFEFieldLabel><input type="number" min={1} max={24}
             value={definition.auto_feature_engineering.max_recipe_candidates}
             disabled={disabled || !definition.auto_feature_engineering.joint_search_enabled}
             onChange={(event) => updateAutoFE({ max_recipe_candidates: Number(event.target.value) })} /></label>
         </div>
+        </AutoFEGroup>
+        <AutoFEGroup title="Search budget allocation"
+          description="Control how the available AutoML trials and time are distributed between feature recipes."
+          help="Two-stage scheduling gives every recipe a small first chance, then spends the remaining budget on the strongest recipes. It changes compute allocation, not the data split.">
         <label className="fe-toggle">
           <input type="checkbox" checked={definition.auto_feature_engineering.two_phase_search_enabled}
             disabled={disabled || !definition.auto_feature_engineering.joint_search_enabled}
             onChange={(event) => updateAutoFE({ two_phase_search_enabled: event.target.checked })} />
-          <span><strong>Two-phase recipe scheduler</strong>
+          <span><strong>Explore first, then focus on winners <AutoFEHelp text="Stage 1 tests every recipe with a small budget. Stage 2 promotes the best recipes and gives them the remaining trials. This avoids spending most of the runtime on weak recipes." /></strong>
             <small>Explore every recipe, then spend the remaining global budget only on the strongest candidates.</small>
           </span>
         </label>
         {definition.auto_feature_engineering.two_phase_search_enabled && <div className="step-grid">
-          <label>Exploration trials per recipe<input type="number" min={1} max={10}
+          <label><AutoFEFieldLabel help="Number of model configurations tried for every feature recipe during the initial comparison stage.">Initial trials per recipe</AutoFEFieldLabel><input type="number" min={1} max={10}
             value={definition.auto_feature_engineering.exploration_trials_per_recipe} disabled={disabled}
             onChange={(event) => updateAutoFE({ exploration_trials_per_recipe: Number(event.target.value) })} /></label>
-          <label>Exploration time share<input type="number" min={0.1} max={0.8} step={0.05}
+          <label><AutoFEFieldLabel help="Part of the total time reserved for the initial comparison. For example, 0.35 reserves 35% for exploration and 65% for promoted recipes.">Initial time share</AutoFEFieldLabel><input type="number" min={0.1} max={0.8} step={0.05}
             value={definition.auto_feature_engineering.exploration_time_fraction} disabled={disabled}
             onChange={(event) => updateAutoFE({ exploration_time_fraction: Number(event.target.value) })} /></label>
-          <label>Recipes promoted<input type="number" min={1} max={12}
+          <label><AutoFEFieldLabel help="How many of the best feature recipes advance to the deeper second-stage model search.">Recipes kept for final search</AutoFEFieldLabel><input type="number" min={1} max={12}
             value={definition.auto_feature_engineering.promotion_top_k} disabled={disabled}
             onChange={(event) => updateAutoFE({ promotion_top_k: Number(event.target.value) })} /></label>
         </div>}
+        </AutoFEGroup>
+        <AutoFEGroup title="Numeric feature preparation"
+          description="Create robust numeric variants, transformations and interactions for AutoML to compare."
+          help="These options do not overwrite source columns. They define auditable candidate recipes fitted only on training data or the training part of each fold.">
         <label className="fe-toggle">
           <input type="checkbox" checked={definition.auto_feature_engineering.numeric_feature_search}
             disabled={disabled || !definition.auto_feature_engineering.joint_search_enabled}
             onChange={(event) => updateAutoFE({ numeric_feature_search: event.target.checked })} />
-          <span><strong>Numeric feature generation + selection</strong>
+          <span><strong>Try additional numeric features <AutoFEHelp text="AutoML compares the original numeric columns with safe variants such as capped outliers, logarithms and low-variance filtering." /></strong>
             <small>Compare baseline recipes with fold-local winsorization, signed-log features and low-variance filtering.</small>
           </span>
         </label>
@@ -464,7 +543,7 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
           <label className="fe-toggle"><input type="checkbox"
             checked={definition.auto_feature_engineering.numeric_scaling_search} disabled={disabled}
             onChange={(event) => updateAutoFE({ numeric_scaling_search: event.target.checked })} />
-            <span><strong>Search numeric scaling</strong><small>Compare compatible scaling methods as separate recipes.</small></span>
+            <span><strong>Compare scaling methods <AutoFEHelp text="Scaling changes the numeric range without changing row order. It often helps linear models and neural networks, while tree models usually work well without it." /></strong><small>Compare compatible scaling methods as separate recipes.</small></span>
           </label>
           {definition.auto_feature_engineering.numeric_scaling_search &&
             (["standard", "robust", "minmax", "none"] as const).map((method) => {
@@ -480,37 +559,37 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
                   <small>{method === "standard" ? "Mean/std scaling" : method === "robust" ? "Median/IQR scaling" : method === "minmax" ? "Bounded non-negative scaling" : "Unscaled numeric values"}</small></span>
               </label>;
             })}
-          <label>Winsor lower quantile<input type="number" min={0} max={0.49} step={0.01}
+          <label><AutoFEFieldLabel help="Values below this percentile are capped at the percentile value. Example: 0.01 caps only the lowest 1%, reducing the influence of extreme outliers.">Lower outlier cap</AutoFEFieldLabel><input type="number" min={0} max={0.49} step={0.01}
             value={definition.auto_feature_engineering.winsorization_lower_quantile} disabled={disabled}
             onChange={(event) => updateAutoFE({ winsorization_lower_quantile: Number(event.target.value) })} /></label>
-          <label>Winsor upper quantile<input type="number" min={0.51} max={1} step={0.01}
+          <label><AutoFEFieldLabel help="Values above this percentile are capped. Example: 0.99 caps only the highest 1% without deleting rows.">Upper outlier cap</AutoFEFieldLabel><input type="number" min={0.51} max={1} step={0.01}
             value={definition.auto_feature_engineering.winsorization_upper_quantile} disabled={disabled}
             onChange={(event) => updateAutoFE({ winsorization_upper_quantile: Number(event.target.value) })} /></label>
           <label className="fe-toggle"><input type="checkbox"
             checked={definition.auto_feature_engineering.signed_log_features} disabled={disabled}
             onChange={(event) => updateAutoFE({ signed_log_features: event.target.checked })} />
-            <span><strong>Signed-log features</strong><small>Keep originals and add sign(x) · log(1 + |x|).</small></span>
+            <span><strong>Logarithmic variants <AutoFEHelp text="Adds a compressed version of highly spread values while keeping the original column. It works with positive and negative numbers and can make long-tailed values easier to model." /></strong><small>Keep originals and add sign(x) · log(1 + |x|).</small></span>
           </label>
           <label className="fe-toggle"><input type="checkbox"
             checked={definition.auto_feature_engineering.profile_aware_generation} disabled={disabled}
             onChange={(event) => updateAutoFE({ profile_aware_generation: event.target.checked })} />
-            <span><strong>Profile-aware Planner v2</strong>
+            <span><strong>Suggest transforms from column distributions <AutoFEHelp text="The system inspects target-free statistics such as skewness and variability, then proposes only bounded transformations that fit the observed distribution." /></strong>
               <small>Use full-scope, target-free distribution statistics to propose bounded nonlinear features and interactions.</small></span>
           </label>
           {definition.auto_feature_engineering.profile_aware_generation && <>
             <label className="fe-toggle"><input type="checkbox"
               checked={definition.auto_feature_engineering.distribution_transformations} disabled={disabled}
               onChange={(event) => updateAutoFE({ distribution_transformations: event.target.checked })} />
-              <span><strong>Distribution-aware transforms</strong>
+              <span><strong>Transform skewed columns automatically <AutoFEHelp text="For strongly asymmetric columns the system may test log, square-root or signed-log variants. Constant and unsuitable columns are skipped." /></strong>
                 <small>Select log1p, square-root or signed-log only for sufficiently skewed, non-constant columns.</small></span>
             </label>
-            <label>Skewness threshold<input type="number" min={0.25} max={10} step={0.25}
+            <label><AutoFEFieldLabel help="Minimum asymmetry required before proposing a nonlinear transform. Lower values create more candidates; higher values restrict transforms to strongly skewed columns.">Minimum distribution skew</AutoFEFieldLabel><input type="number" min={0.25} max={10} step={0.25}
               value={definition.auto_feature_engineering.skewness_threshold} disabled={disabled}
               onChange={(event) => updateAutoFE({ skewness_threshold: Number(event.target.value) })} /></label>
             <label className="fe-toggle"><input type="checkbox"
               checked={definition.auto_feature_engineering.numeric_interactions} disabled={disabled}
               onChange={(event) => updateAutoFE({ numeric_interactions: event.target.checked })} />
-              <span><strong>Numeric interactions</strong>
+              <span><strong>Combine pairs of numeric columns <AutoFEHelp text="Creates bounded candidates such as area × quality or price ÷ area. Ratios are protected against division by zero." /></strong>
                 <small>Rank target-free column pairs by variability and coverage, then test a bounded interaction recipe.</small></span>
             </label>
             {definition.auto_feature_engineering.numeric_interactions &&
@@ -528,10 +607,10 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
                     <small>{operator === "divide" ? "Zero-safe ratios" : `Pairwise ${operator} features`}</small></span>
                 </label>;
               })}
-            <label>Maximum generated features<input type="number" min={0} max={500}
+            <label><AutoFEFieldLabel help="Hard cap for all automatically created numeric columns. The runtime may lower it further to respect the memory budget.">Maximum new numeric features</AutoFEFieldLabel><input type="number" min={0} max={500}
               value={definition.auto_feature_engineering.max_generated_features} disabled={disabled}
               onChange={(event) => updateAutoFE({ max_generated_features: Number(event.target.value) })} /></label>
-            <label>Maximum interaction features<input type="number" min={0} max={100}
+            <label><AutoFEFieldLabel help="Hard cap for features created by combining two numeric columns. This count is also included in the overall generated-feature limit.">Maximum pair combinations</AutoFEFieldLabel><input type="number" min={0} max={100}
               value={definition.auto_feature_engineering.max_interaction_features}
               disabled={disabled || !definition.auto_feature_engineering.numeric_interactions}
               onChange={(event) => updateAutoFE({ max_interaction_features: Number(event.target.value) })} /></label>
@@ -539,22 +618,103 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
           <label className="fe-toggle"><input type="checkbox"
             checked={definition.auto_feature_engineering.low_variance_selection} disabled={disabled}
             onChange={(event) => updateAutoFE({ low_variance_selection: event.target.checked })} />
-            <span><strong>Low-variance selection</strong><small>Fit the selector on train/fold-train only.</small></span>
+            <span><strong>Remove nearly constant columns <AutoFEHelp text="Columns that barely change usually add cost without useful signal. The threshold is learned from training data only." /></strong><small>Fit the selector on train/fold-train only.</small></span>
           </label>
           {definition.auto_feature_engineering.low_variance_selection &&
-            <label>Variance threshold<input type="number" min={0} step={0.000001}
+            <label><AutoFEFieldLabel help="Columns with variance at or below this value are removed. Zero removes only exactly constant columns; increasing it removes more low-changing columns.">Minimum variance</AutoFEFieldLabel><input type="number" min={0} step={0.000001}
               value={definition.auto_feature_engineering.variance_threshold} disabled={disabled}
               onChange={(event) => updateAutoFE({ variance_threshold: Number(event.target.value) })} /></label>}
         </div>}
+        </AutoFEGroup>
+        <AutoFEGroup title="Target-guided feature selection"
+          description="Compare several leakage-safe ways of retaining the most useful and least redundant columns."
+          help="These selectors may use the target, but they are fitted separately inside training data or each fold. Validation and test targets are never used to choose features.">
+          <label className="fe-toggle"><input type="checkbox"
+            checked={definition.auto_feature_engineering.supervised_feature_selection} disabled={disabled}
+            onChange={(event) => updateAutoFE({ supervised_feature_selection: event.target.checked })} />
+            <span><strong>Compare target-guided selectors <AutoFEHelp text="Each selected method scores columns using training targets. AutoML then compares the resulting compact, balanced and wide feature sets like any other recipe." /></strong>
+              <small>Compare leakage-safe selectors and correlation pruning inside train or every fold-train.</small></span>
+          </label>
+          {definition.auto_feature_engineering.supervised_feature_selection && <>
+            {(["mutual_information", "f_test", "chi_square", "l1", "importance"] as const).map((method) => {
+              const selected = definition.auto_feature_engineering.feature_selection_methods.includes(method);
+              return <label className="fe-toggle" key={method}><input type="checkbox" checked={selected}
+                disabled={disabled || (selected && definition.auto_feature_engineering.feature_selection_methods.length === 1)}
+                onChange={(event) => updateAutoFE({
+                  feature_selection_methods: event.target.checked
+                    ? [...definition.auto_feature_engineering.feature_selection_methods, method]
+                    : definition.auto_feature_engineering.feature_selection_methods.filter((item) => item !== method)
+                })} /><span><strong>{selectorLabel(method)} <AutoFEHelp text={selectorHelp(method)} /></strong>
+                  <small>{selectorHelp(method)}</small></span></label>;
+            })}
+            {(["compact", "balanced", "wide"] as const).map((profile) => {
+              const selected = definition.auto_feature_engineering.feature_selection_profiles.includes(profile);
+              return <label className="fe-toggle" key={profile}><input type="checkbox" checked={selected}
+                disabled={disabled || (selected && definition.auto_feature_engineering.feature_selection_profiles.length === 1)}
+                onChange={(event) => updateAutoFE({
+                  feature_selection_profiles: event.target.checked
+                    ? [...definition.auto_feature_engineering.feature_selection_profiles, profile]
+                    : definition.auto_feature_engineering.feature_selection_profiles.filter((item) => item !== profile)
+                })} /><span><strong>{profile[0].toUpperCase() + profile.slice(1)} feature set <AutoFEHelp text={selectionWidthHelp(profile)} /></strong>
+                  <small>{selectionWidthHelp(profile)}</small></span></label>;
+            })}
+            <label><AutoFEFieldLabel help="If two selected numeric features have an absolute correlation at or above this value, the weaker one is removed. Example: 0.85 removes highly similar columns; 0.98 removes only near-duplicates.">Maximum allowed similarity</AutoFEFieldLabel><input type="number" min={0.01} max={1} step={0.01}
+              value={definition.auto_feature_engineering.feature_redundancy_threshold} disabled={disabled}
+              onChange={(event) => updateAutoFE({ feature_redundancy_threshold: Number(event.target.value) })} /></label>
+          </>}
+        </AutoFEGroup>
+        <AutoFEGroup title="Categorical feature encoding"
+          description="Choose how text and category columns are converted into bounded numeric features."
+          help="Models require numeric input. These strategies convert values such as region or heating type into numbers while controlling memory and preventing target leakage.">
+          <div className="step-grid">
+            <label><AutoFEFieldLabel help="One-hot creates one 0/1 column per common category only while the distinct-category count stays below this limit. Wider columns use frequency encoding instead.">One-hot category limit</AutoFEFieldLabel><input type="number" min={2} max={500}
+              value={definition.auto_feature_engineering.max_one_hot_categories} disabled={disabled}
+              onChange={(event) => updateAutoFE({ max_one_hot_categories: Number(event.target.value) })} /></label>
+            <label><AutoFEFieldLabel help="Categories seen fewer times than this are grouped as rare. Increasing the value produces fewer, more stable encoded columns.">Minimum rows per category</AutoFEFieldLabel><input type="number" min={1} max={1000000}
+              value={definition.auto_feature_engineering.min_category_frequency} disabled={disabled}
+              onChange={(event) => updateAutoFE({ min_category_frequency: Number(event.target.value) })} /></label>
+          </div>
+          <label className="fe-toggle"><input type="checkbox"
+            checked={definition.auto_feature_engineering.categorical_recipe_search} disabled={disabled}
+            onChange={(event) => updateAutoFE({ categorical_recipe_search: event.target.checked })} />
+            <span><strong>Compare multiple categorical strategies <AutoFEHelp text="AutoML evaluates one-hot/frequency, hashing and leakage-safe target encodings as separate feature recipes instead of committing to one method upfront." /></strong>
+              <small>Compare bounded hashing, cross-fitted target mean and ordered target encoding.</small></span>
+          </label>
+          {definition.auto_feature_engineering.categorical_recipe_search && <>
+            {(["one_hot_frequency", "hashing", "target_mean", "ordered_target"] as const).map((method) => {
+              const selected = definition.auto_feature_engineering.categorical_encoding_candidates.includes(method);
+              return <label className="fe-toggle" key={method}><input type="checkbox" checked={selected}
+                disabled={disabled || (selected && definition.auto_feature_engineering.categorical_encoding_candidates.length === 1)}
+                onChange={(event) => updateAutoFE({
+                  categorical_encoding_candidates: event.target.checked
+                    ? [...definition.auto_feature_engineering.categorical_encoding_candidates, method]
+                    : definition.auto_feature_engineering.categorical_encoding_candidates.filter((item) => item !== method)
+                })} /><span><strong>{categoricalLabel(method)} <AutoFEHelp text={categoricalHelp(method)} /></strong>
+                  <small>{categoricalHelp(method)}</small></span></label>;
+            })}
+            <label className="fe-toggle"><input type="checkbox" checked={false} disabled />
+              <span><strong>native categorical</strong><small>Reserved for the dedicated CatBoost-native matrix adapter; never emulated.</small></span>
+            </label>
+            <label><AutoFEFieldLabel help="Number of output buckets per hashed categorical column. More buckets reduce collisions but create a wider feature matrix. 32 is a practical starting point.">Hash bucket count</AutoFEFieldLabel><input type="number" min={2} max={256}
+              value={definition.auto_feature_engineering.categorical_hash_bins} disabled={disabled}
+              onChange={(event) => updateAutoFE({ categorical_hash_bins: Number(event.target.value) })} /></label>
+            <label><AutoFEFieldLabel help="Pulls category averages toward the overall target average, especially for rare categories. Larger values are safer and more conservative; zero uses raw category averages.">Rare-category smoothing</AutoFEFieldLabel><input type="number" min={0} max={10000} step={1}
+              value={definition.auto_feature_engineering.target_encoding_smoothing} disabled={disabled}
+              onChange={(event) => updateAutoFE({ target_encoding_smoothing: Number(event.target.value) })} /></label>
+            <label><AutoFEFieldLabel help="Number of internal partitions used so a training row's target is never used to encode that same row. More folds use more data per estimate but increase computation.">Leakage-safe encoding folds</AutoFEFieldLabel><input type="number" min={2} max={20}
+              value={definition.auto_feature_engineering.target_encoding_folds} disabled={disabled}
+              onChange={(event) => updateAutoFE({ target_encoding_folds: Number(event.target.value) })} /></label>
+          </>}
+        </AutoFEGroup>
+        </div>
         {!defaults.has_validation && !definition.auto_feature_engineering.row_id_column
           && <div className="training-warning"><AlertTriangle size={16} /><span>
             Choose a stable row ID so AutoFE can create deterministic leakage-safe holdout or CV folds.
           </span></div>}
-        <div className="training-help"><strong>Model-aware AutoFE scope</strong><span>
-          Classification and regression only. Joint search compares baseline, robust numeric and profile-aware recipes,
-          including bounded nonlinear features and zero-safe interactions. The planner uses target-free full-scope
-          aggregates, applies the configured memory/width budget and records every generation decision. Cross-validation
-          fits learned transformations and selectors inside each fold, then refits the winning complete recipe and model.
+        <div className="training-help"><strong>How automatic feature engineering stays safe</strong><span>
+          Classification and regression only. Joint search compares numeric generation, target-guided selection and
+          categorical encoding under one global budget. Target-aware transformations and selectors are fitted only on train
+          or fold-train. Every selected, rejected and redundant feature is persisted with the winning inference state.
         </span></div>
       </>}
     </section>}
