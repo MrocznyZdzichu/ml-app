@@ -72,17 +72,17 @@ class ModelService:
                 model.pipeline_id = run.pipeline_id
                 model.lineage = {**model.lineage, "pipeline_id": run.pipeline_id}
 
-        fitted_by_run: dict[str, Artifact] = {}
+        fitted_by_run_step: dict[tuple[str, str], Artifact] = {}
         if any(model.pipeline_run_id for model in pipeline_models):
             for artifact in self.artifacts.list_artifacts(
                 principal.user_id,
                 ArtifactType.FEATURE_TRANSFORM,
             ):
-                run_id = str(
-                    dict(artifact.metadata.get("lineage") or {}).get("pipeline_run_id") or ""
-                )
-                if run_id:
-                    fitted_by_run.setdefault(run_id, artifact)
+                lineage = dict(artifact.metadata.get("lineage") or {})
+                run_id = str(lineage.get("pipeline_run_id") or "")
+                step_id = str(lineage.get("pipeline_step_id") or "")
+                if run_id and step_id:
+                    fitted_by_run_step.setdefault((run_id, step_id), artifact)
 
         pipeline_ids = sorted({
             model.pipeline_id for model in pipeline_models if model.pipeline_id
@@ -95,7 +95,7 @@ class ModelService:
             )
         }
         for model in pipeline_models:
-            self._enrich_batch_scoring_contract(model, fitted_by_run, versions_by_id)
+            self._enrich_batch_scoring_contract(model, fitted_by_run_step, versions_by_id)
             model.logical_id = model.logical_id or self._logical_model_id(model)
         known = {item.id for item in pipeline_models}
         models = [
@@ -157,18 +157,31 @@ class ModelService:
     @staticmethod
     def _enrich_batch_scoring_contract(
         model: ModelArtifact,
-        fitted_by_run: dict[str, Artifact],
+        fitted_by_run_step: dict[tuple[str, str], Artifact],
         versions_by_id: dict[str, PipelineVersion],
     ) -> None:
-        fitted = fitted_by_run.get(model.pipeline_run_id)
-        if fitted is not None:
-            model.fitted_transform_artifact_id = fitted.id
-
         if not model.pipeline_version_id:
             return
         version = versions_by_id.get(model.pipeline_version_id)
         if version is None or version.owner_id != model.owner_id:
             return
+        auto_fe = dict(model.training_config.get("auto_feature_engineering") or {})
+        resolved_recipe = auto_fe.get("resolved_recipe")
+        uses_autofe_recipe = isinstance(resolved_recipe, dict) and bool(resolved_recipe)
+        if uses_autofe_recipe:
+            # AutoML creates its fitted state inside the AutoML step itself.
+            fitted_step_id = model.pipeline_step_id
+            model.feature_engineering_definition = dict(resolved_recipe)
+        else:
+            # Traditional training consumes a fitted transform created by its
+            # upstream Feature Engineering step.
+            fitted_step_id = ModelService._upstream_feature_step_id(
+                version.definition, model.pipeline_step_id
+            )
+        fitted = fitted_by_run_step.get((model.pipeline_run_id, fitted_step_id))
+        if fitted is not None:
+            model.fitted_transform_artifact_id = fitted.id
+
         for step in version.definition.get("steps", []):
             if not isinstance(step, dict):
                 continue
@@ -181,8 +194,24 @@ class ModelService:
             )
             if step.get("type") == "data_engineering":
                 model.data_engineering_definition = dict(nested)
-            elif step.get("type") == "feature_engineering":
+            elif step.get("type") == "feature_engineering" and not uses_autofe_recipe:
                 model.feature_engineering_definition = dict(nested)
+
+    @staticmethod
+    def _upstream_feature_step_id(definition: dict, model_step_id: str) -> str:
+        model_step = next(
+            (
+                step for step in definition.get("steps", [])
+                if isinstance(step, dict) and step.get("step_id") == model_step_id
+            ),
+            {},
+        )
+        for item in model_step.get("inputs", []):
+            if isinstance(item, dict) and item.get("port_id") == "training":
+                source = item.get("source") or {}
+                if isinstance(source, dict):
+                    return str(source.get("step_id") or "")
+        return ""
 
     @staticmethod
     def _artifact_model(artifact: Artifact) -> ModelArtifact:
@@ -197,11 +226,7 @@ class ModelService:
             algorithm=str(metadata.get("algorithm") or "unknown"),
             artifact_uri=str(metadata.get("location_uri") or ""),
             logical_id=str(metadata.get("logical_model_id") or ""),
-            metrics={
-                str(key): float(value)
-                for key, value in dict(metadata.get("metrics") or {}).items()
-                if isinstance(value, (int, float))
-            },
+            metrics=dict(metadata.get("metrics") or {}),
             business_case_id=artifact.business_case_id or "",
             pipeline_id=str(lineage.get("pipeline_id") or ""),
             pipeline_version_id=str(lineage.get("pipeline_version_id") or ""),

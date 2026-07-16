@@ -1,5 +1,9 @@
 # Repository refactoring audit
 
+> Historical snapshot. Some follow-up items have since been implemented or
+> superseded. Use current architecture and feature documents as the source of
+> truth.
+
 ## Scope
 
 This audit focuses on execution paths that must remain viable for tens of

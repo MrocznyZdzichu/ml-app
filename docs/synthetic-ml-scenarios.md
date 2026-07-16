@@ -59,8 +59,7 @@ Files:
   `row_id` and the four measurement columns used by the reference Iris model. It
   deliberately contains no `species` target.
 - `examples/data/iris-batch-scoring-10k-actuals.csv`: separately held actuals with
-  `row_id` and `species`, intended only for a future target-joining and monitoring
-  pipeline.
+  `row_id` and `species`, intended for the target-joining and monitoring pipeline.
 
 The hidden population is balanced: 5,000 Versicolor and 5,000 Virginica records.
 For each class, the generator estimates the full four-dimensional sample covariance
@@ -74,3 +73,100 @@ This is a synthetic operational batch, not independent biological evidence. Its
 class balance is intentionally controlled and its distribution is derived from the
 small 100-row, two-class reference subset, so it is suitable for pipeline validation
 but not for estimating real-world prevalence or generalization.
+
+## Iris three-class scoring performance cohort
+
+Business case: stress-test the complete three-class batch-scoring and delayed-
+actuals path on a sizable but locally practical cohort. It is intended for the
+`Iris Species Recognition` Business Case, including a 3-class AutoML model.
+
+Files:
+
+- `examples/data/iris-3class-batch-scoring-200k.parquet`: exactly 200,000
+  scoring records with `row_id`, `sepal_length`, `sepal_width`, `petal_length`
+  and `petal_width`. It deliberately contains no `species` column.
+- `examples/data/iris-3class-batch-scoring-200k-actuals.parquet`: 200,000
+  delayed labels with `row_id`, `species` and `actual_observed_at`.
+
+Use `row_id` as the stable key in scoring and target joining. `species` is the
+actual target. The input contains 60,000 Setosa (30%), 72,000 Versicolor (36%)
+and 68,000 Virginica (34%) observations, so prevalence differs from the balanced
+reference set. Each species is generated from the full empirical four-dimensional
+covariance of `iris.csv`; measurements keep the original cross-feature
+correlations and botanical constraints. Four collection waves add a small bounded
+covariate drift (stronger in length measurements), while labels become available
+28, 35, 42 or 49 days after scoring. There are no missing values and actuals join
+one-to-one with inputs. This is a deterministic synthetic benchmark (seed
+`20260624`), not biological evidence or a real-world prevalence estimate.
+
+The files are Parquet compressed with Zstandard. The generator streams CSV staging
+rows and converts them with DuckDB, so generation does not materialize the 200k
+cohort as a Python object graph. A generator contract test verifies schema,
+counts, class allocation, key coverage and deterministic regenerated values on a
+smaller 4,000-row instance.
+
+## Customer churn batch scoring and delayed actuals
+
+Business case: a subscription-retention team trained a churn classifier on
+`examples/data/general-example.csv`. At the start of each monthly campaign it
+scores active customers without knowing their future outcome. After the observation
+window closes, the CRM supplies actual churn outcomes for performance monitoring.
+Batch scoring and target joining are deliberately separate workflows.
+
+Files:
+
+- `examples/data/general-churn-batch-scoring-10k.csv`: 10,000 customers from the
+  July-September 2026 scoring cohorts. Its schema matches the training features,
+  including the stable `customer_id`, and deliberately excludes `churned`.
+- `examples/data/general-churn-batch-scoring-10k-actuals.csv`: delayed outcomes
+  containing only `customer_id` and the binary `churned` target. It is the actuals
+  input for a monitoring pipeline, not an input to batch scoring.
+
+The generator uses the complete training file as a label-stratified empirical
+population model, creates new non-overlapping customer identifiers, perturbs every
+numeric observation, and applies mild operational drift: fees and usage increase,
+discounts contract, competitor pricing becomes slightly more attractive, and NPS
+softens. Categorical combinations and target relationships remain grounded in the
+training scenario. The scoring cohort has exactly 600 churners (6.0%), compared
+with 478 (4.78%) in the 10,000-row training dataset, making prevalence drift visible
+without turning the example into an extreme stress test.
+
+There are no missing values or sampled analysis results. The two files join
+one-to-one on `customer_id`; scoring contains 10,000 rows and monitoring actuals
+cover all 10,000. This synthetic batch is intended to validate scoring, lineage,
+target joining, and monitoring behavior. It is not evidence of production model
+quality or real customer prevalence.
+
+## Estates sale prices batch scoring and delayed actuals
+
+Business case: the `Estates Sell Prices` team uses a model trained on
+`examples/data/regression-example.csv` to estimate likely transaction prices for
+new listings. Scoring happens before the transaction closes. The final sale price
+arrives later from the notarial transaction feed and is joined only in the
+monitoring pipeline.
+
+Files:
+
+- `examples/data/estates-sale-prices-batch-scoring-100k.parquet`: exactly 100,000
+  scoring records. Its schema matches the regression training features, including
+  stable `property_id`, and deliberately excludes `sale_price_pln`.
+- `examples/data/estates-sale-prices-batch-scoring-100k-actuals.parquet`: exactly
+  100,000 delayed outcomes containing `property_id`, `sale_price_pln` and
+  `actual_observed_at`.
+
+The generator uses the complete 10,000-row training population as an empirical
+joint model, then perturbs floor area, rooms, building age, location accessibility,
+district and school quality, and listing duration. Property-type and infrastructure
+combinations remain internally consistent with observed training records. The
+hidden price responds to the changed attributes, regional appreciation of 4.1%
+to 7.5%, four monthly market waves and moderate log-normal transaction noise.
+This creates controlled out-of-time covariate and target drift without exposing
+the target to batch scoring or introducing an identifier disguised as a feature.
+
+Both files contain 100,000 unique keys and join one-to-one. Scoring covers January
+through April 2027; actual prices become available from March through July 2027.
+There are no missing values. Prices are PLN transaction amounts rounded to the
+nearest PLN 1,000. The files use Parquet with Zstandard compression and are produced
+through streaming staging files. This deterministic synthetic cohort (seed
+`20260624`) is suitable for full-dataset regression scoring, target joining and
+performance-monitoring tests, not for real property valuation or market inference.

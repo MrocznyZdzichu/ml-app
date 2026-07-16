@@ -1,4 +1,4 @@
-import type { DataAsset } from "../api/client";
+import type { DataAsset, ModelArtifact } from "../api/client";
 import type { WorkflowDefinition } from "./workflowContract";
 import {
   normalizeDatasetVersionPolicy,
@@ -12,6 +12,38 @@ export type PipelineRunInput = {
   logicalId: string;
   policy: DatasetVersionPolicy;
 };
+
+export type PipelineRunModel = {
+  key: string;
+  name: string;
+  logicalId: string;
+  configuredModelId: string;
+  versions: ModelArtifact[];
+};
+
+export function resolvePipelineRunModels(
+  definition: WorkflowDefinition,
+  models: ModelArtifact[]
+): PipelineRunModel[] {
+  return definition.steps.flatMap((step) => {
+    if (step.type !== "scoring") return [];
+    const nested = recordValue(recordValue(step.config).definition);
+    if (stringValue(nested.purpose) !== "batch") return [];
+    const configuredModelId = stringValue(nested.model_artifact_id);
+    const configured = models.find((model) => model.id === configuredModelId);
+    if (!configured) return [];
+    const versions = models
+      .filter((model) => model.logical_id === configured.logical_id)
+      .sort((left, right) => right.version_number - left.version_number);
+    return [{
+      key: step.step_id,
+      name: configured.name,
+      logicalId: configured.logical_id,
+      configuredModelId,
+      versions
+    }];
+  });
+}
 
 export function resolvePipelineRunInputs(
   definition: WorkflowDefinition,

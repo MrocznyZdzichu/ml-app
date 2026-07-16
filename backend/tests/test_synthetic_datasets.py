@@ -3,6 +3,8 @@ import math
 import statistics
 from pathlib import Path
 
+import duckdb
+
 from examples import generate_synthetic_datasets as generator
 
 
@@ -11,11 +13,13 @@ def test_synthetic_dataset_generator_is_reproducible_and_preserves_contract(tmp_
     generator.write_dynamic_reactor()
     generator.write_equipment_clustering()
     generator.write_iris_batch_scoring()
+    generator.write_churn_batch_scoring()
     first = {path.name: path.read_bytes() for path in tmp_path.glob("*.csv")}
 
     generator.write_dynamic_reactor()
     generator.write_equipment_clustering()
     generator.write_iris_batch_scoring()
+    generator.write_churn_batch_scoring()
     second = {path.name: path.read_bytes() for path in tmp_path.glob("*.csv")}
     assert first == second
 
@@ -99,6 +103,133 @@ def test_synthetic_dataset_generator_is_reproducible_and_preserves_contract(tmp_
                 [row[right_index] for row in generated[species]],
             )
             assert abs(generated_correlation - reference_correlation) < 0.12
+
+    generator.write_iris_three_class_scoring_large(row_count=4_000)
+    large_scoring_path = tmp_path / "iris-3class-batch-scoring-200k.parquet"
+    large_actuals_path = tmp_path / "iris-3class-batch-scoring-200k-actuals.parquet"
+    connection = duckdb.connect()
+    try:
+        large_scoring = connection.execute(
+            f"SELECT * FROM read_parquet('{str(large_scoring_path).replace(chr(39), chr(39) * 2)}') ORDER BY row_id"
+        ).fetchall()
+        large_actuals = connection.execute(
+            f"SELECT * FROM read_parquet('{str(large_actuals_path).replace(chr(39), chr(39) * 2)}') ORDER BY row_id"
+        ).fetchall()
+    finally:
+        connection.close()
+    assert len(large_scoring) == len(large_actuals) == 4_000
+    assert len({row[0] for row in large_scoring}) == 4_000
+    assert {row[1] for row in large_actuals} == {"setosa", "versicolor", "virginica"}
+    assert [row[1] for row in large_actuals].count("setosa") == 1_200
+    assert [row[1] for row in large_actuals].count("versicolor") == 1_440
+    assert [row[1] for row in large_actuals].count("virginica") == 1_360
+    assert all(row[2] for row in large_actuals)
+    assert all(len(row) == 5 for row in large_scoring)
+    generator.write_iris_three_class_scoring_large(row_count=4_000)
+    connection = duckdb.connect()
+    try:
+        regenerated = connection.execute(
+            f"SELECT * FROM read_parquet('{str(large_scoring_path).replace(chr(39), chr(39) * 2)}') ORDER BY row_id"
+        ).fetchall()
+    finally:
+        connection.close()
+    assert large_scoring == regenerated
+
+    with (tmp_path / "general-churn-batch-scoring-10k.csv").open(
+        encoding="utf-8", newline=""
+    ) as handle:
+        churn_scoring = list(csv.DictReader(handle))
+    with (tmp_path / "general-churn-batch-scoring-10k-actuals.csv").open(
+        encoding="utf-8", newline=""
+    ) as handle:
+        churn_actuals = list(csv.DictReader(handle))
+    with generator.GENERAL_SOURCE.open(encoding="utf-8", newline="") as handle:
+        churn_training = list(csv.DictReader(handle))
+
+    expected_features = [name for name in churn_training[0] if name != "churned"]
+    assert len(churn_scoring) == len(churn_actuals) == 10_000
+    assert list(churn_scoring[0]) == expected_features
+    assert list(churn_actuals[0]) == ["customer_id", "churned"]
+    assert "churned" not in churn_scoring[0]
+    assert len({row["customer_id"] for row in churn_scoring}) == 10_000
+    assert {row["customer_id"] for row in churn_scoring}.isdisjoint(
+        row["customer_id"] for row in churn_training
+    )
+    assert {row["customer_id"] for row in churn_scoring} == {
+        row["customer_id"] for row in churn_actuals
+    }
+    assert {row["snapshot_month"] for row in churn_scoring} == {
+        "2026-07", "2026-08", "2026-09"
+    }
+    assert sum(row["churned"] == "1" for row in churn_actuals) == 600
+    assert all(18 <= int(row["age"]) <= 85 for row in churn_scoring)
+    assert all(300 <= int(row["credit_score"]) <= 850 for row in churn_scoring)
+
+
+def test_estates_scoring_generator_preserves_regression_monitoring_contract(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(generator, "OUTPUT", tmp_path)
+    generator.write_estates_batch_scoring(row_count=4_000)
+    scoring_path = tmp_path / "estates-sale-prices-batch-scoring-100k.parquet"
+    actuals_path = tmp_path / "estates-sale-prices-batch-scoring-100k-actuals.parquet"
+
+    connection = duckdb.connect()
+    try:
+        scoring_columns = [
+            row[0]
+            for row in connection.execute(
+                f"DESCRIBE SELECT * FROM read_parquet('{str(scoring_path).replace(chr(39), chr(39) * 2)}')"
+            ).fetchall()
+        ]
+        actuals_columns = [
+            row[0]
+            for row in connection.execute(
+                f"DESCRIBE SELECT * FROM read_parquet('{str(actuals_path).replace(chr(39), chr(39) * 2)}')"
+            ).fetchall()
+        ]
+        contract = connection.execute(
+            f"""
+            SELECT
+                count(*) AS scoring_count,
+                count(DISTINCT s.property_id) AS scoring_keys,
+                count(a.property_id) AS joined_count,
+                count(DISTINCT a.property_id) AS actual_keys,
+                min(a.sale_price_pln) AS min_price,
+                max(a.sale_price_pln) AS max_price,
+                corr(s.floor_area_sqm, a.sale_price_pln) AS area_price_correlation,
+                count(DISTINCT s.snapshot_month) AS scoring_months,
+                count(*) FILTER (WHERE a.actual_observed_at IS NULL) AS missing_observation_dates
+            FROM read_parquet('{str(scoring_path).replace(chr(39), chr(39) * 2)}') s
+            LEFT JOIN read_parquet('{str(actuals_path).replace(chr(39), chr(39) * 2)}') a USING (property_id)
+            """
+        ).fetchone()
+        first_values = connection.execute(
+            f"SELECT * FROM read_parquet('{str(scoring_path).replace(chr(39), chr(39) * 2)}') ORDER BY property_id LIMIT 20"
+        ).fetchall()
+    finally:
+        connection.close()
+
+    with generator.REGRESSION_SOURCE.open(encoding="utf-8", newline="") as handle:
+        training_columns = list(next(csv.DictReader(handle)))
+    assert scoring_columns == [name for name in training_columns if name != "sale_price_pln"]
+    assert actuals_columns == ["property_id", "sale_price_pln", "actual_observed_at"]
+    assert "sale_price_pln" not in scoring_columns
+    assert contract is not None
+    assert contract[:4] == (4_000, 4_000, 4_000, 4_000)
+    assert 90_000 <= contract[4] < contract[5] <= 15_000_000
+    assert contract[6] > 0.60
+    assert contract[7:] == (4, 0)
+
+    generator.write_estates_batch_scoring(row_count=4_000)
+    connection = duckdb.connect()
+    try:
+        regenerated_values = connection.execute(
+            f"SELECT * FROM read_parquet('{str(scoring_path).replace(chr(39), chr(39) * 2)}') ORDER BY property_id LIMIT 20"
+        ).fetchall()
+    finally:
+        connection.close()
+    assert first_values == regenerated_values
 
 
 def iris_reference_by_species() -> dict[str, list[list[float]]]:

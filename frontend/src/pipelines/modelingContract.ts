@@ -16,14 +16,126 @@ export type TrainingDefinition = {
   batch_size: number;
   random_seed: number;
   parameters: Record<string, unknown>;
+  optimization: TrainingOptimization;
+  resource_limits: TrainingResourceLimits;
+  auto_feature_engineering: AutoFeatureEngineeringDefinition;
 };
 
-export type TrainingAlgorithm =
-  | "sgd_classifier"
-  | "passive_aggressive_classifier"
-  | "perceptron_classifier"
-  | "sgd_regressor"
-  | "passive_aggressive_regressor";
+export type AutoFeatureEngineeringDefinition = {
+  enabled: boolean;
+  strategy: "balanced";
+  joint_search_enabled: boolean;
+  max_recipe_candidates: number;
+  row_id_column: string;
+  excluded_columns: string[];
+  validation_size: number;
+  numeric_scaling: "none" | "standard" | "minmax" | "robust";
+  add_missing_indicators: boolean;
+  include_datetime_features: boolean;
+  detect_identifier_columns: boolean;
+  min_category_frequency: number;
+  max_one_hot_categories: number;
+  max_frequency_categories: number;
+  numeric_feature_search: boolean;
+  numeric_recipe_search_v2: boolean;
+  numeric_scaling_search: boolean;
+  numeric_scaling_candidates: Array<"none" | "standard" | "minmax" | "robust">;
+  two_phase_search_enabled: boolean;
+  exploration_trials_per_recipe: number;
+  exploration_time_fraction: number;
+  promotion_top_k: number;
+  winsorization_lower_quantile: number;
+  winsorization_upper_quantile: number;
+  signed_log_features: boolean;
+  low_variance_selection: boolean;
+  variance_threshold: number;
+  profile_aware_generation: boolean;
+  distribution_transformations: boolean;
+  numeric_interactions: boolean;
+  interaction_operators: Array<"multiply" | "divide" | "subtract">;
+  max_generated_features: number;
+  max_interaction_features: number;
+  skewness_threshold: number;
+  supervised_feature_selection: boolean;
+  feature_selection_methods: Array<"mutual_information" | "f_test" | "chi_square" | "l1" | "importance">;
+  feature_selection_profiles: Array<"compact" | "balanced" | "wide">;
+  feature_redundancy_threshold: number;
+  categorical_recipe_search: boolean;
+  categorical_encoding_candidates: Array<"one_hot_frequency" | "hashing" | "target_mean" | "ordered_target" | "native">;
+  categorical_hash_bins: number;
+  target_encoding_smoothing: number;
+  target_encoding_folds: number;
+};
+
+export type TrainingAlgorithm = string;
+
+export type TrainingOptimization = {
+  mode: "single" | "grid_search" | "random_search" | "optuna" | "automl";
+  validation_strategy: "auto" | "holdout" | "cross_validation";
+  primary_metric: string;
+  cv_folds: number;
+  max_trials: number;
+  timeout_seconds: number;
+  candidate_algorithms: string[];
+  search_space: Record<string, Record<string, unknown>>;
+};
+
+export type TrainingResourceLimits = {
+  max_memory_mb: number;
+  max_parallel_jobs: number;
+};
+
+export type TrainingParameterSpec = {
+  id: string;
+  label: string;
+  kind: "integer" | "number" | "boolean" | "select" | "integer_list";
+  default: unknown;
+  description: string;
+  minimum: number | null;
+  maximum: number | null;
+  step: number | null;
+  options: unknown[];
+  nullable: boolean;
+  search: Record<string, unknown> | null;
+  active_when: Record<string, unknown[]> | null;
+};
+
+export type TrainingAlgorithmSpec = {
+  id: string;
+  label: string;
+  family: string;
+  problem_types: TrainingDefinition["problem_type"][];
+  description: string;
+  execution_mode: "incremental" | "in_memory";
+  scale_profile: "streaming" | "large" | "medium" | "small";
+  dependency: string;
+  available: boolean;
+  supports_probability: boolean;
+  supports_early_stopping: boolean;
+  automl_default: boolean;
+  feature_capabilities: {
+    profile: "scaled_dense" | "tree_unscaled" | "non_negative";
+    numeric_scaling: "standard" | "none" | "minmax";
+    requires_numeric_matrix: boolean;
+    requires_non_negative_features: boolean;
+    supports_native_categorical: boolean;
+    categorical_strategy: string;
+  };
+  notes: string[];
+  parameters: TrainingParameterSpec[];
+};
+
+export type TrainingCatalog = {
+  contract_version: "1.0";
+  algorithm_count: number;
+  algorithms: TrainingAlgorithmSpec[];
+  optimization_modes: Array<{ id: TrainingOptimization["mode"]; label: string; description: string }>;
+  metrics: Record<TrainingDefinition["problem_type"], Array<{
+    id: string;
+    label: string;
+    direction: "maximize" | "minimize";
+  }>>;
+};
 
 export const classificationAlgorithms: TrainingAlgorithm[] = [
   "sgd_classifier",
@@ -62,7 +174,66 @@ export const emptyTrainingDefinition = (): TrainingDefinition => ({
   early_stopping_min_delta: 0.0001,
   batch_size: 10000,
   random_seed: 42,
-  parameters: defaultTrainingParameters("sgd_classifier")
+  parameters: defaultTrainingParameters("sgd_classifier"),
+  optimization: {
+    mode: "single",
+    validation_strategy: "auto",
+    primary_metric: "auto",
+    cv_folds: 5,
+    max_trials: 30,
+    timeout_seconds: 3600,
+    candidate_algorithms: [],
+    search_space: {}
+  },
+  resource_limits: {
+    max_memory_mb: 2048,
+    max_parallel_jobs: 1
+  },
+  auto_feature_engineering: {
+    enabled: false,
+    strategy: "balanced",
+    joint_search_enabled: true,
+    max_recipe_candidates: 24,
+    row_id_column: "",
+    excluded_columns: [],
+    validation_size: 0.2,
+    numeric_scaling: "standard",
+    add_missing_indicators: true,
+    include_datetime_features: true,
+    detect_identifier_columns: true,
+    min_category_frequency: 2,
+    max_one_hot_categories: 32,
+    max_frequency_categories: 500,
+    numeric_feature_search: true,
+    numeric_recipe_search_v2: true,
+    numeric_scaling_search: true,
+    numeric_scaling_candidates: ["standard", "robust", "minmax", "none"],
+    two_phase_search_enabled: true,
+    exploration_trials_per_recipe: 1,
+    exploration_time_fraction: 0.35,
+    promotion_top_k: 3,
+    winsorization_lower_quantile: 0.01,
+    winsorization_upper_quantile: 0.99,
+    signed_log_features: true,
+    low_variance_selection: true,
+    variance_threshold: 0,
+    profile_aware_generation: true,
+    distribution_transformations: true,
+    numeric_interactions: true,
+    interaction_operators: ["multiply", "divide"],
+    max_generated_features: 64,
+    max_interaction_features: 12,
+    skewness_threshold: 1,
+    supervised_feature_selection: true,
+    feature_selection_methods: ["mutual_information", "f_test", "chi_square", "l1", "importance"],
+    feature_selection_profiles: ["compact", "balanced", "wide"],
+    feature_redundancy_threshold: 0.98,
+    categorical_recipe_search: true,
+    categorical_encoding_candidates: ["one_hot_frequency", "hashing", "target_mean", "ordered_target"],
+    categorical_hash_bins: 32,
+    target_encoding_smoothing: 10,
+    target_encoding_folds: 5
+  }
 });
 
 export const emptyScoringDefinition = (): ScoringDefinition => ({
@@ -85,6 +256,9 @@ export type ModelingDefaults = {
   available_columns: string[];
   model_name: string;
   has_validation: boolean;
+  has_fitted_transformations: boolean;
+  has_cv_plan: boolean;
+  cv_folds: number;
 };
 
 export function deriveModelingDefaults({
@@ -135,7 +309,10 @@ export function deriveModelingDefaults({
     feature_columns,
     available_columns,
     model_name: `${baseName} model`,
-    has_validation: hasValidation
+    has_validation: hasValidation,
+    has_fitted_transformations: Boolean(featureDefinition?.transformations.length),
+    has_cv_plan: Boolean(featureDefinition?.evaluation.cross_validation.enabled),
+    cv_folds: featureDefinition?.evaluation.cross_validation.folds ?? 5
   };
 }
 
@@ -145,12 +322,9 @@ export function trainingWithDefaults(
 ): TrainingDefinition {
   const unconfigured = !current.target_column && current.feature_columns.length === 0;
   const problem_type = unconfigured ? defaults.problem_type : current.problem_type;
-  const allowedAlgorithms = problem_type === "regression"
-    ? regressionAlgorithms
-    : classificationAlgorithms;
-  const algorithm = allowedAlgorithms.includes(current.algorithm)
-    ? current.algorithm
-    : allowedAlgorithms[0];
+  const algorithm = current.algorithm || (problem_type === "regression"
+    ? regressionAlgorithms[0]
+    : classificationAlgorithms[0]);
   return {
     ...current,
     problem_type,
@@ -158,9 +332,14 @@ export function trainingWithDefaults(
     target_column: current.target_column || defaults.target_column,
     feature_columns: current.feature_columns.length ? current.feature_columns : defaults.feature_columns,
     epochs: unconfigured && current.epochs === 5 ? 50 : current.epochs,
-    early_stopping: unconfigured && defaults.has_validation
+    // Step-level early stopping is a single-estimator control. AutoML and
+    // other search modes evaluate multiple candidates and must not inherit it
+    // merely because an FE validation split exists.
+    early_stopping: unconfigured && defaults.has_validation && current.optimization.mode === "single"
       ? true
-      : current.early_stopping && defaults.has_validation,
+      : current.early_stopping
+        && defaults.has_validation
+        && current.optimization.mode === "single",
     parameters: current.parameters && Object.keys(current.parameters).length
       ? current.parameters
       : defaultTrainingParameters(algorithm),
@@ -196,11 +375,11 @@ export function normalizeTrainingDefinition(value: unknown): TrainingDefinition 
     : raw.problem_type === "multiclass_classification"
       ? "multiclass_classification"
       : "binary_classification";
-  const allowedAlgorithms = problem === "regression" ? regressionAlgorithms : classificationAlgorithms;
   const requestedAlgorithm = String(raw.algorithm ?? "");
-  const algorithm = allowedAlgorithms.includes(requestedAlgorithm as TrainingAlgorithm)
-    ? requestedAlgorithm as TrainingAlgorithm
-    : allowedAlgorithms[0];
+  const algorithm = requestedAlgorithm || (
+    problem === "regression" ? regressionAlgorithms[0] : classificationAlgorithms[0]
+  );
+  const optimization = normalizeOptimization(raw.optimization);
   return {
     contract_version: "1.0",
     problem_type: problem,
@@ -210,14 +389,162 @@ export function normalizeTrainingDefinition(value: unknown): TrainingDefinition 
     feature_selection: raw.feature_selection === "explicit" ? "explicit" : "upstream_contract",
     model_name: String(raw.model_name ?? "Trained model"),
     epochs: boundedNumber(raw.epochs, 50, 1, 100),
-    early_stopping: raw.early_stopping === true,
+    // Recover older AutoML/search drafts that stored this single-estimator
+    // setting. It is not applicable while candidates are being optimized.
+    early_stopping: raw.early_stopping === true && optimization.mode === "single",
     early_stopping_patience: boundedNumber(raw.early_stopping_patience, 5, 1, 50),
     early_stopping_min_delta: boundedNumber(raw.early_stopping_min_delta, 0.0001, 0, 1),
     batch_size: boundedNumber(raw.batch_size, 10000, 100, 100000),
     random_seed: boundedNumber(raw.random_seed, 42, -2147483648, 2147483647),
     parameters: Object.keys(record(raw.parameters)).length
       ? record(raw.parameters)
-      : defaultTrainingParameters(algorithm)
+      : defaultTrainingParameters(algorithm),
+    optimization,
+    resource_limits: normalizeResourceLimits(raw.resource_limits),
+    auto_feature_engineering: normalizeAutoFeatureEngineering(raw.auto_feature_engineering)
+  };
+}
+
+function normalizeAutoFeatureEngineering(value: unknown): AutoFeatureEngineeringDefinition {
+  const raw = record(value);
+  const scaling = ["none", "standard", "minmax", "robust"].includes(String(raw.numeric_scaling))
+    ? raw.numeric_scaling as AutoFeatureEngineeringDefinition["numeric_scaling"]
+    : "standard";
+  const oneHot = boundedNumber(raw.max_one_hot_categories, 32, 2, 500);
+  return {
+    enabled: raw.enabled === true,
+    strategy: "balanced",
+    joint_search_enabled: raw.joint_search_enabled !== false,
+    max_recipe_candidates: boundedNumber(raw.max_recipe_candidates, 24, 1, 24),
+    row_id_column: String(raw.row_id_column ?? ""),
+    excluded_columns: Array.isArray(raw.excluded_columns) ? raw.excluded_columns.map(String) : [],
+    validation_size: boundedNumber(raw.validation_size, 0.2, 0.01, 0.49),
+    numeric_scaling: scaling,
+    add_missing_indicators: raw.add_missing_indicators !== false,
+    include_datetime_features: raw.include_datetime_features !== false,
+    detect_identifier_columns: raw.detect_identifier_columns !== false,
+    min_category_frequency: boundedNumber(raw.min_category_frequency, 2, 1, 1000000),
+    max_one_hot_categories: oneHot,
+    max_frequency_categories: Math.max(
+      oneHot,
+      boundedNumber(raw.max_frequency_categories, 500, 2, 500)
+    ),
+    numeric_feature_search: raw.numeric_feature_search !== false,
+    numeric_recipe_search_v2: raw.numeric_recipe_search_v2 !== false,
+    numeric_scaling_search: raw.numeric_scaling_search !== false,
+    numeric_scaling_candidates: normalizeScalingCandidates(raw.numeric_scaling_candidates),
+    two_phase_search_enabled: raw.two_phase_search_enabled !== false,
+    exploration_trials_per_recipe: boundedNumber(raw.exploration_trials_per_recipe, 1, 1, 10),
+    exploration_time_fraction: boundedNumber(raw.exploration_time_fraction, 0.35, 0.1, 0.8),
+    promotion_top_k: boundedNumber(raw.promotion_top_k, 3, 1, 12),
+    winsorization_lower_quantile: boundedNumber(
+      raw.winsorization_lower_quantile, 0.01, 0, 0.49
+    ),
+    winsorization_upper_quantile: boundedNumber(
+      raw.winsorization_upper_quantile, 0.99, 0.51, 1
+    ),
+    signed_log_features: raw.signed_log_features !== false,
+    low_variance_selection: raw.low_variance_selection !== false,
+    variance_threshold: boundedNumber(raw.variance_threshold, 0, 0, Number.MAX_SAFE_INTEGER),
+    profile_aware_generation: raw.profile_aware_generation !== false,
+    distribution_transformations: raw.distribution_transformations !== false,
+    numeric_interactions: raw.numeric_interactions !== false,
+    interaction_operators: normalizeInteractionOperators(raw.interaction_operators),
+    max_generated_features: boundedNumber(raw.max_generated_features, 64, 0, 500),
+    max_interaction_features: boundedNumber(raw.max_interaction_features, 12, 0, 100),
+    skewness_threshold: boundedNumber(raw.skewness_threshold, 1, 0.25, 10),
+    supervised_feature_selection: raw.supervised_feature_selection === true,
+    feature_selection_methods: normalizeStringCandidates(
+      raw.feature_selection_methods,
+      ["mutual_information", "f_test", "chi_square", "l1", "importance"],
+      ["mutual_information", "f_test", "chi_square", "l1", "importance"]
+    ) as AutoFeatureEngineeringDefinition["feature_selection_methods"],
+    feature_selection_profiles: normalizeStringCandidates(
+      raw.feature_selection_profiles,
+      ["compact", "balanced", "wide"],
+      ["compact", "balanced", "wide"]
+    ) as AutoFeatureEngineeringDefinition["feature_selection_profiles"],
+    feature_redundancy_threshold: boundedNumber(raw.feature_redundancy_threshold, 0.98, 0.01, 1),
+    categorical_recipe_search: raw.categorical_recipe_search === true,
+    categorical_encoding_candidates: normalizeStringCandidates(
+      raw.categorical_encoding_candidates,
+      ["one_hot_frequency", "hashing", "target_mean", "ordered_target", "native"],
+      ["one_hot_frequency", "hashing", "target_mean", "ordered_target"]
+    ) as AutoFeatureEngineeringDefinition["categorical_encoding_candidates"],
+    categorical_hash_bins: boundedNumber(raw.categorical_hash_bins, 32, 2, 256),
+    target_encoding_smoothing: boundedNumber(raw.target_encoding_smoothing, 10, 0, 10000),
+    target_encoding_folds: boundedNumber(raw.target_encoding_folds, 5, 2, 20)
+  };
+}
+
+function normalizeStringCandidates(
+  value: unknown,
+  allowedValues: string[],
+  defaults: string[]
+): string[] {
+  const allowed = new Set(allowedValues);
+  const normalized = Array.isArray(value)
+    ? Array.from(new Set(value.map(String).filter((item) => allowed.has(item))))
+    : defaults;
+  return normalized.length ? normalized : [defaults[0]];
+}
+
+function normalizeInteractionOperators(
+  value: unknown
+): AutoFeatureEngineeringDefinition["interaction_operators"] {
+  const allowed = new Set(["multiply", "divide", "subtract"]);
+  const normalized = Array.isArray(value)
+    ? Array.from(new Set(value.map(String).filter((item) => allowed.has(item))))
+    : ["multiply", "divide"];
+  return (normalized.length ? normalized : ["multiply"]) as
+    AutoFeatureEngineeringDefinition["interaction_operators"];
+}
+
+function normalizeScalingCandidates(
+  value: unknown
+): AutoFeatureEngineeringDefinition["numeric_scaling_candidates"] {
+  const allowed = new Set(["none", "standard", "minmax", "robust"]);
+  const normalized = Array.isArray(value)
+    ? Array.from(new Set(value.map(String).filter((item) => allowed.has(item))))
+    : ["standard", "robust", "minmax", "none"];
+  return (normalized.length ? normalized : ["standard"]) as
+    AutoFeatureEngineeringDefinition["numeric_scaling_candidates"];
+}
+
+function normalizeOptimization(value: unknown): TrainingOptimization {
+  const raw = record(value);
+  const mode = ["grid_search", "random_search", "optuna", "automl"].includes(String(raw.mode))
+    ? raw.mode as TrainingOptimization["mode"]
+    : "single";
+  const validation = ["holdout", "cross_validation"].includes(String(raw.validation_strategy))
+    ? raw.validation_strategy as TrainingOptimization["validation_strategy"]
+    : "auto";
+  return {
+    mode,
+    validation_strategy: validation,
+    primary_metric: String(raw.primary_metric ?? "auto"),
+    cv_folds: boundedNumber(raw.cv_folds, 5, 2, 20),
+    max_trials: boundedNumber(raw.max_trials, 30, 1, mode === "grid_search" ? 100000 : 1000),
+    timeout_seconds: boundedNumber(raw.timeout_seconds, 3600, 10, 604800),
+    candidate_algorithms: Array.isArray(raw.candidate_algorithms)
+      ? raw.candidate_algorithms.map(String)
+      : [],
+    search_space: normalizeSearchSpace(raw.search_space)
+  };
+}
+
+function normalizeSearchSpace(value: unknown): Record<string, Record<string, unknown>> {
+  const raw = record(value);
+  return Object.fromEntries(Object.entries(raw)
+    .filter(([key, spec]) => key && spec && typeof spec === "object" && !Array.isArray(spec))
+    .map(([key, spec]) => [key, record(spec)]));
+}
+
+function normalizeResourceLimits(value: unknown): TrainingResourceLimits {
+  const raw = record(value);
+  return {
+    max_memory_mb: boundedNumber(raw.max_memory_mb, 2048, 128, 262144),
+    max_parallel_jobs: boundedNumber(raw.max_parallel_jobs, 1, 1, 64)
   };
 }
 
@@ -237,12 +564,15 @@ export function defaultTrainingParameters(algorithm: TrainingAlgorithm): Record<
   if (algorithm === "perceptron_classifier") {
     return { alpha: 0.0001, penalty: null, eta0: 1, fit_intercept: true };
   }
-  return {
-    alpha: 0.0001,
-    penalty: "l2",
-    learning_rate: "optimal",
-    fit_intercept: true
-  };
+  if (algorithm === "sgd_classifier" || algorithm === "sgd_regressor") {
+    return {
+      alpha: 0.0001,
+      penalty: "l2",
+      learning_rate: "optimal",
+      fit_intercept: true
+    };
+  }
+  return {};
 }
 
 export function normalizeScoringDefinition(value: unknown): ScoringDefinition {
@@ -258,6 +588,82 @@ export function normalizeScoringDefinition(value: unknown): ScoringDefinition {
     report_name: String(raw.report_name ?? "Test scoring report"),
     batch_size: boundedNumber(raw.batch_size, 10000, 100, 100000)
   };
+}
+
+export function validateTrainingConfiguration(definition: TrainingDefinition): string[] {
+  const issues: string[] = [];
+  const featureColumns = definition.feature_columns.map((item) => item.trim()).filter(Boolean);
+  const uniqueFeatures = new Set(featureColumns);
+  if (!definition.model_name.trim()) issues.push("Training model name is required.");
+  if (!definition.target_column.trim()) issues.push("Training target column is required before publish or dry-run.");
+  if (definition.target_column && uniqueFeatures.has(definition.target_column)) {
+    issues.push("Training target column cannot also be selected as a model feature.");
+  }
+  if (featureColumns.length !== definition.feature_columns.length) {
+    issues.push("Training feature list contains an empty column name.");
+  }
+  if (uniqueFeatures.size !== featureColumns.length) {
+    issues.push("Training feature columns must be unique.");
+  }
+  if (!featureColumns.length && !definition.auto_feature_engineering.enabled) {
+    issues.push("Training requires at least one model feature before publish or dry-run.");
+  }
+  if (definition.auto_feature_engineering.enabled && definition.optimization.mode !== "automl") {
+    issues.push("AutoFE is available only with AutoML optimization.");
+  }
+  if (
+    definition.auto_feature_engineering.numeric_feature_search
+    && definition.auto_feature_engineering.winsorization_lower_quantile
+      >= definition.auto_feature_engineering.winsorization_upper_quantile
+  ) {
+    issues.push("AutoFE winsorization lower quantile must be below the upper quantile.");
+  }
+  if (
+    definition.auto_feature_engineering.max_interaction_features
+    > definition.auto_feature_engineering.max_generated_features
+  ) {
+    issues.push("AutoFE interaction limit cannot exceed the total generated-feature limit.");
+  }
+  if (definition.early_stopping && definition.optimization.mode !== "single") {
+    issues.push("Training early stopping cannot be combined with hyperparameter optimization.");
+  }
+  if (definition.optimization.mode !== "single" && definition.optimization.mode !== "automl") {
+    for (const [parameterId, search] of Object.entries(definition.optimization.search_space)) {
+      const kind = String(search.kind ?? "");
+      if (kind === "categorical") {
+        const values = Array.isArray(search.values)
+          ? search.values.filter((value) => !(typeof value === "string" && !value.trim()))
+          : [];
+        if (!values.length) issues.push(`Search space for '${parameterId}' must contain at least one value.`);
+      } else if (kind === "int" || kind === "float") {
+        const low = Number(search.low);
+        const high = Number(search.high);
+        const points = Number(search.points ?? 3);
+        const step = search.step == null ? null : Number(search.step);
+        if (!Number.isFinite(low) || !Number.isFinite(high)) {
+          issues.push(`Search space for '${parameterId}' requires numeric From and To values.`);
+        }
+        if (Number.isFinite(low) && Number.isFinite(high) && low > high) {
+          issues.push(`Search space for '${parameterId}' has From greater than To.`);
+        }
+        if (!Number.isFinite(points) || points < 1) {
+          issues.push(`Search space for '${parameterId}' requires at least one value.`);
+        }
+        if (search.log === true && (low <= 0 || high <= 0)) {
+          issues.push(`Search space for '${parameterId}' uses logarithmic scale, so From and To must be greater than zero.`);
+        }
+        if (step != null && (!Number.isFinite(step) || step <= 0)) {
+          issues.push(`Search space for '${parameterId}' uses a step that must be greater than zero.`);
+        }
+        if (step != null && search.log === true) {
+          issues.push(`Search space for '${parameterId}' cannot combine a step with logarithmic scale.`);
+        }
+      } else {
+        issues.push(`Search space for '${parameterId}' has unsupported mode '${kind || "blank"}'.`);
+      }
+    }
+  }
+  return issues;
 }
 
 function record(value: unknown): Record<string, unknown> {

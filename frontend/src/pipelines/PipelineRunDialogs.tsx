@@ -1,15 +1,18 @@
-import { BarChart3, Box, Brain, Check, ChevronLeft, ChevronRight, Clipboard, Database, Download, Eye, RotateCcw, Search, X } from "lucide-react";
+import { BarChart3, Box, Brain, Check, ChevronLeft, ChevronRight, Clipboard, Database, Download, Eye, GitBranch, RotateCcw, Search, X } from "lucide-react";
 import type { CSSProperties } from "react";
 import { lazy, Suspense, useEffect, useState } from "react";
 
 import { api } from "../api/client";
+import { ArtifactDependenciesDialog } from "../operational/ArtifactDependenciesDialog";
 import type {
   BusinessCase,
   ModelArtifact,
   ModelEvaluationSnapshot,
+  TrainingEvaluationReport,
   Pipeline,
   PipelineVersion,
   PipelineRun,
+  PipelineRunEvent,
   PipelineRunDetails,
   PipelineRunOutputPreview,
   PipelineRunOutputProfile
@@ -17,6 +20,11 @@ import type {
 const ModelDetailsDialog = lazy(() =>
   import("../operational/LifecyclePanels").then((module) => ({
     default: module.ModelDetailsDialog
+  }))
+);
+const ScoringReportDialog = lazy(() =>
+  import("../operational/ScoringReportsPanel").then((module) => ({
+    default: module.ScoringReportDialog
   }))
 );
 
@@ -164,6 +172,10 @@ export function PipelineRunHistoryDialog({
   pipelines,
   businessCases,
   refreshKey,
+  includeDryRuns = true,
+  initialPipelineId = "all",
+  title = "Pipeline runs",
+  description = "Latest 200 runs across your available pipelines.",
   onClose,
   onDetails,
   onExamineDataset
@@ -171,17 +183,22 @@ export function PipelineRunHistoryDialog({
   pipelines: Pipeline[];
   businessCases: BusinessCase[];
   refreshKey: number;
+  includeDryRuns?: boolean;
+  initialPipelineId?: string;
+  title?: string;
+  description?: string;
   onClose: () => void;
   onDetails: (run: PipelineRun) => void;
   onExamineDataset: (datasetId: string) => void;
 }) {
   const [historyRuns, setHistoryRuns] = useState<PipelineRun[]>([]);
-  const [pipelineFilter, setPipelineFilter] = useState("all");
+  const [pipelineFilter, setPipelineFilter] = useState(initialPipelineId);
   const [statusFilter, setStatusFilter] = useState("all");
   const [reloadKey, setReloadKey] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [artifactsRun, setArtifactsRun] = useState<PipelineRun | null>(null);
+  const [dependenciesRun, setDependenciesRun] = useState<PipelineRun | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -204,8 +221,11 @@ export function PipelineRunHistoryDialog({
     };
   }, [refreshKey, reloadKey]);
 
+  const allowedPipelineIds = new Set(pipelines.map((pipeline) => pipeline.id));
   const visibleRuns = historyRuns.filter((run) =>
-    (pipelineFilter === "all" || run.pipeline_id === pipelineFilter)
+    allowedPipelineIds.has(run.pipeline_id)
+    && (includeDryRuns || !run.is_dry_run)
+    && (pipelineFilter === "all" || run.pipeline_id === pipelineFilter)
     && (statusFilter === "all" || run.status === statusFilter)
   );
   const pipelineById = new Map(pipelines.map((pipeline) => [pipeline.id, pipeline]));
@@ -225,8 +245,8 @@ export function PipelineRunHistoryDialog({
         <div className="modal-header">
           <div>
             <span className="builder-kicker">Execution history</span>
-            <h2>Pipeline runs</h2>
-            <p>Latest 200 runs across your available pipelines.</p>
+            <h2>{title}</h2>
+            <p>{description}</p>
           </div>
           <div className="run-details-actions">
             <button
@@ -316,6 +336,13 @@ export function PipelineRunHistoryDialog({
                       >
                         Details
                       </button>
+                      <button
+                        className="secondary-button compact-button"
+                        type="button"
+                        onClick={() => setDependenciesRun(run)}
+                      >
+                        <GitBranch size={14} /> Dependencies
+                      </button>
                     </div>
                   </span>
                 </div>
@@ -337,6 +364,19 @@ export function PipelineRunHistoryDialog({
             }}
           />
         )}
+        {dependenciesRun && (
+          <ArtifactDependenciesDialog
+            referenceId={dependenciesRun.id}
+            artifactType="pipeline_run"
+            title={`Run ${shortId(dependenciesRun.id)}`}
+            onClose={() => setDependenciesRun(null)}
+            onOpenDataset={(datasetId) => {
+              setDependenciesRun(null);
+              onClose();
+              onExamineDataset(datasetId);
+            }}
+          />
+        )}
       </div>
     </div>
   );
@@ -353,6 +393,10 @@ function GeneratedArtifactsDialog({
 }) {
   const [details, setDetails] = useState<PipelineRunDetails | null>(null);
   const [error, setError] = useState("");
+  const [selectedModel, setSelectedModel] = useState<ModelArtifact | null>(null);
+  const [selectedReport, setSelectedReport] = useState<import("../api/client").ScoringReport | null>(null);
+  const [selectedTrainingReport, setSelectedTrainingReport] = useState<TrainingEvaluationReport | null>(null);
+  const [openingArtifactId, setOpeningArtifactId] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -367,6 +411,26 @@ function GeneratedArtifactsDialog({
   const artifactByReference = new Map(
     (details?.lineage ?? []).map((item) => [item.reference_id, item])
   );
+
+  async function openDomainArtifact(artifactId: string, artifactType: string) {
+    setOpeningArtifactId(artifactId);
+    setError("");
+    try {
+      if (artifactType === "model_version") {
+        const model = (await api.listModels()).find((item) => item.id === artifactId);
+        if (!model) throw new Error("The registered model could not be found");
+        setSelectedModel(model);
+      } else if (artifactType === "report") {
+        const report = (await api.listScoringReports(run.business_case_id)).find((item) => item.id === artifactId);
+        if (!report) throw new Error("The registered scoring report could not be found");
+        setSelectedReport(report);
+      }
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Could not open artifact");
+    } finally {
+      setOpeningArtifactId("");
+    }
+  }
   return (
     <div className="modal-backdrop nested-modal" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <div className="modal-dialog generated-artifacts-dialog" role="dialog" aria-modal="true" aria-label="Generated artifacts">
@@ -374,7 +438,7 @@ function GeneratedArtifactsDialog({
           <div>
             <span className="builder-kicker">Pipeline run {shortId(run.id)}</span>
             <h2>Generated artifacts</h2>
-            <p>{run.output_artifact_ids.length} registered objects · {run.output_row_count ?? 0} output rows processed at full scope.</p>
+            <p>{details?.run.output_artifact_ids.length ?? 0} registered objects · {details?.run.output_row_count ?? run.output_row_count ?? 0} output rows processed at full scope.</p>
           </div>
           <button className="icon-button" type="button" onClick={onClose} aria-label="Close generated artifacts"><X size={18} /></button>
         </div>
@@ -386,6 +450,8 @@ function GeneratedArtifactsDialog({
               const lineage = details.lineage.find((item) => item.artifact_id === output.artifact_id)
                 ?? artifactByReference.get(output.dataset_id ?? "");
               const isDataset = ["dataset", "prediction_dataset"].includes(output.artifact_type ?? "");
+              const isBrowsableDomainArtifact = ["model_version", "report"].includes(output.artifact_type ?? "");
+              const isTrainingReport = output.report_type === "training_evaluation_report";
               return (
                 <article key={`${output.pipeline_step_id}:${output.output_id}`}>
                   <div className="generated-artifact-icon">
@@ -408,6 +474,15 @@ function GeneratedArtifactsDialog({
                       <Eye size={14} /> Examine
                     </button>
                   )}
+                  {isBrowsableDomainArtifact && output.artifact_id && (
+                    <button className="primary-button compact-button" type="button"
+                      disabled={openingArtifactId === output.artifact_id}
+                      onClick={() => isTrainingReport
+                        ? setSelectedTrainingReport(output.report as TrainingEvaluationReport)
+                        : void openDomainArtifact(output.artifact_id!, output.artifact_type!)}>
+                      <Eye size={14} /> {openingArtifactId === output.artifact_id ? "Opening…" : "View"}
+                    </button>
+                  )}
                 </article>
               );
             })}
@@ -415,6 +490,29 @@ function GeneratedArtifactsDialog({
               <div className="empty-state">This run did not register persistent output artifacts.</div>
             )}
           </div>
+        )}
+        {selectedModel && (
+          <Suspense fallback={null}>
+            <ModelDetailsDialog
+              model={selectedModel}
+              businessCaseName={`Business Case ${shortId(run.business_case_id)}`}
+              pipelineName={`Pipeline ${shortId(run.pipeline_id)}`}
+              onOpenDataset={onExamineDataset}
+              onClose={() => setSelectedModel(null)}
+            />
+          </Suspense>
+        )}
+        {selectedReport && (
+          <Suspense fallback={null}>
+            <ScoringReportDialog
+              report={selectedReport}
+              onOpenDataset={onExamineDataset}
+              onClose={() => setSelectedReport(null)}
+            />
+          </Suspense>
+        )}
+        {selectedTrainingReport && (
+          <TrainingReportDialog report={selectedTrainingReport} onClose={() => setSelectedTrainingReport(null)} />
         )}
       </div>
     </div>
@@ -445,6 +543,13 @@ export function PipelineRunDetailsDialog({
   };
 
   useEffect(load, [run.pipeline_id, runId]);
+
+  useEffect(() => {
+    const status = details?.run.status;
+    if (status !== "queued" && status !== "running") return;
+    const interval = window.setInterval(load, 1500);
+    return () => window.clearInterval(interval);
+  }, [details?.run.status, run.pipeline_id, runId]);
 
   async function cancelRun() {
     setBusy(true);
@@ -533,6 +638,11 @@ export function PipelineRunDetailsDialog({
             </div>
 
             <section>
+              <h3>Execution log</h3>
+              <RunEventTimeline events={runDetailEvents(details)} />
+            </section>
+
+            <section>
               <h3>Step execution</h3>
               <div className="run-step-timeline">
                 {details.steps.map((step) => (
@@ -550,6 +660,7 @@ export function PipelineRunDetailsDialog({
                     {step.warnings.map((warning) => (
                       <p className="warning-text" key={warning}>{warning}</p>
                     ))}
+                    {step.events.length > 0 && <small>{step.events.length} log events captured</small>}
                     {step.error_message && <p className="error-text">{step.error_message}</p>}
                   </article>
                 ))}
@@ -666,9 +777,13 @@ export function DryRunPreview({
   const outputs = browsableDryRunOutputs(run);
   const modelOutput = run.output_manifest.find((item) => item.artifact_type === "model_version");
   const scoringReportOutput = run.output_manifest.find(isScoringReportOutput);
+  const trainingReportOutput = run.output_manifest.find(
+    (item) => item.report_type === "training_evaluation_report" && item.report
+  );
   const [selectedOutputIndex, setSelectedOutputIndex] = useState(0);
   const [selectedModel, setSelectedModel] = useState<ModelArtifact | null>(null);
   const [selectedReport, setSelectedReport] = useState<ModelEvaluationSnapshot | null>(null);
+  const [selectedTrainingReport, setSelectedTrainingReport] = useState<TrainingEvaluationReport | null>(null);
   const output = outputs[selectedOutputIndex] ?? outputs[0];
   const outputId = output?.output_id ?? "";
   const pipelineStepId = output?.pipeline_step_id ?? "";
@@ -686,6 +801,7 @@ export function DryRunPreview({
     setSelectedOutputIndex(0);
     setSelectedModel(null);
     setSelectedReport(null);
+    setSelectedTrainingReport(null);
   }, [run.id]);
 
   useEffect(() => {
@@ -778,7 +894,7 @@ export function DryRunPreview({
           </button>
         </div>
       </div>
-      {(modelOutput || scoringReportOutput) && (
+      {(modelOutput || scoringReportOutput || trainingReportOutput) && (
         <div className="dry-run-artifact-actions" aria-label="Temporary dry-run artifacts">
           <span>Temporary artifacts</span>
           {modelOutput && (
@@ -797,6 +913,12 @@ export function DryRunPreview({
               onClick={() => setSelectedReport(scoringReportOutput.evaluation as ModelEvaluationSnapshot)}
             >
               <BarChart3 size={14} /> Preview scoring report
+            </button>
+          )}
+          {trainingReportOutput && (
+            <button className="secondary-button compact-button" type="button"
+              onClick={() => setSelectedTrainingReport(trainingReportOutput.report as TrainingEvaluationReport)}>
+              <BarChart3 size={14} /> Preview training report
             </button>
           )}
         </div>
@@ -955,8 +1077,124 @@ export function DryRunPreview({
           onClose={() => setSelectedReport(null)}
         />
       )}
+      {selectedTrainingReport && (
+        <TrainingReportDialog report={selectedTrainingReport} onClose={() => setSelectedTrainingReport(null)} />
+      )}
     </section>
   );
+}
+
+function RunEventTimeline({ events }: { events: PipelineRunEvent[] }) {
+  if (!events.length) {
+    return <div className="empty-state">No worker log events have been captured yet.</div>;
+  }
+  return (
+    <div className="run-event-log" role="log" aria-label="Pipeline worker execution log">
+      {events.slice(-300).map((event, index) => (
+        <article className={`run-event ${event.level}`} key={`${event.timestamp}-${event.type}-${index}`}>
+          <time dateTime={event.timestamp}>{formatDateTimeWithSeconds(event.timestamp)}</time>
+          <div>
+            <strong>{event.message}</strong>
+            <span>
+              {event.type}
+              {event.step_id ? ` · ${event.step_id}` : ""}
+            </span>
+            {eventDetails(event).length > 0 && (
+              <dl>
+                {eventDetails(event).map(([key, value]) => (
+                  <div key={key}>
+                    <dt>{key.replaceAll("_", " ")}</dt>
+                    <dd>{formatEventValue(value)}</dd>
+                  </div>
+                ))}
+              </dl>
+            )}
+          </div>
+        </article>
+      ))}
+    </div>
+  );
+}
+
+function TrainingReportDialog({
+  report,
+  onClose
+}: {
+  report: TrainingEvaluationReport;
+  onClose: () => void;
+}) {
+  const summary = report.sections.summary ?? {};
+  const metrics = report.sections.metrics ?? {};
+  const validation = report.sections.validation ?? {};
+  const autoFE = report.sections.feature_engineering ?? {};
+  const jointStudy = autoFE.joint_study && typeof autoFE.joint_study === "object"
+    ? autoFE.joint_study as Record<string, unknown> : {};
+  const explainability = report.sections.explainability ?? {};
+  const shapValues = explainability.shap?.values ?? [];
+  const permutation = explainability.permutation_importance ?? [];
+  return (
+    <div className="modal-backdrop nested-modal" role="presentation"
+      onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <div className="modal-dialog generated-artifacts-dialog" role="dialog" aria-modal="true"
+        aria-label="Training evaluation report">
+        <div className="modal-header"><div><span className="builder-kicker">Training report</span>
+          <h2>{report.name}</h2><p>Immutable model-selection and explainability snapshot.</p></div>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close"><X size={18} /></button>
+        </div>
+        <div className="evaluation-report">
+          <div className="evaluation-scope">
+            <span><strong>{report.data_scope.row_count.toLocaleString()}</strong> evaluated rows</span>
+            <span><strong>Full dataset</strong> metric scope</span>
+            <span><strong>{String(summary.algorithm ?? "model")}</strong> winner</span>
+            <span><strong>{String(summary.feature_count ?? "—")}</strong> resolved features</span>
+          </div>
+          <section className="evaluation-section"><header><div><h4>Selection summary</h4>
+            <p>Validation, search and selected AutoFE recipe.</p></div></header>
+            <div className="evaluation-residual-summary">
+              <span>Strategy <strong>{String(validation.strategy ?? "training")}</strong></span>
+              <span>Primary metric <strong>{String(validation.primary_metric ?? "auto")}</strong></span>
+              <span>Best score <strong>{formatReportValue(validation.best_score)}</strong></span>
+              <span>Recipe <strong>{String(autoFE.recipe_id ?? "manual FE")}</strong></span>
+              <span>Candidates <strong>{String(jointStudy.recipe_candidate_count ?? 1)}</strong></span>
+            </div>
+          </section>
+          <section className="evaluation-section"><header><div><h4>Training metrics</h4>
+            <p>Full declared evaluation scope.</p></div></header>
+            <div className="evaluation-metrics">
+              {Object.entries(metrics).filter(([, value]) => typeof value === "number").slice(0, 12).map(([key, value]) =>
+                <article key={key}><span>{key.replaceAll("_", " ")}</span>
+                  <strong>{formatReportValue(value)}</strong></article>)}
+            </div>
+          </section>
+          <div className="evaluation-chart-grid">
+            <ImportanceTable title={`SHAP · ${explainability.shap?.explainer ?? explainability.shap?.status ?? "unavailable"}`}
+              rows={shapValues.map((item) => ({ feature: item.feature, value: item.mean_absolute_shap }))} />
+            <ImportanceTable title="Permutation importance"
+              rows={permutation.map((item) => ({ feature: item.feature, value: item.mean_importance }))} />
+          </div>
+          <div className="evaluation-notes">
+            {explainability.notes?.map((note) => <p key={note}>{note}</p>)}
+            {explainability.reason && <p>{explainability.reason}</p>}
+            {report.warnings.map((warning) => <p key={warning}>{warning}</p>)}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ImportanceTable({ title, rows }: { title: string; rows: Array<{ feature: string; value: number }> }) {
+  return <section className="evaluation-section"><header><div><h4>{title}</h4>
+    <p>Bounded deterministic explanation sample; metrics above remain full-scope.</p></div></header>
+    {rows.length ? <div className="evaluation-class-table"><table><thead><tr><th>Feature</th><th>Importance</th></tr></thead>
+      <tbody>{rows.slice(0, 20).map((item) => <tr key={item.feature}><td>{item.feature}</td>
+        <td>{item.value.toPrecision(5)}</td></tr>)}</tbody></table></div>
+      : <div className="evaluation-empty"><p>No bounded importance output is available for this estimator.</p></div>}
+  </section>;
+}
+
+function formatReportValue(value: unknown) {
+  return typeof value === "number" ? value.toPrecision(6) : String(value ?? "—");
 }
 
 export function ModelPerformanceReport({ report }: { report: ModelEvaluationSnapshot }) {
@@ -1343,7 +1581,7 @@ function isScoringReportOutput(
 ): boolean {
   const evaluation = output.evaluation as ModelEvaluationSnapshot | undefined;
   return (
-    output.artifact_type === "prediction_dataset"
+    ["prediction_dataset", "report_source"].includes(output.artifact_type ?? "")
     && evaluation?.kind === "model_performance"
   );
 }
@@ -1421,6 +1659,55 @@ function durationLabel(
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   return `${minutes}m ${seconds % 60}s`;
+}
+
+function formatDateTimeWithSeconds(value: string) {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "short",
+    timeStyle: "medium"
+  }).format(new Date(value));
+}
+
+function runDetailEvents(details: PipelineRunDetails): PipelineRunEvent[] {
+  const seen = new Set<string>();
+  const events = [
+    ...(details.run.events ?? []),
+    ...details.steps.flatMap((step) => step.events ?? [])
+  ];
+  return events
+    .filter((event) => {
+      const key = `${event.timestamp}:${event.type}:${event.step_id}:${event.message}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((left, right) => new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime());
+}
+
+function eventDetails(event: PipelineRunEvent): Array<[string, unknown]> {
+  return Object.entries(event.details ?? {}).filter(([key]) => (
+    !["metrics"].includes(key)
+  )).slice(0, 12);
+}
+
+function formatEventValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "—";
+  if (typeof value === "number") {
+    return Number.isInteger(value)
+      ? value.toLocaleString()
+      : value.toLocaleString(undefined, { maximumFractionDigits: 6 });
+  }
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  if (Array.isArray(value)) {
+    return value.length > 8
+      ? `${value.slice(0, 8).map(formatEventValue).join(", ")} … +${value.length - 8}`
+      : value.map(formatEventValue).join(", ");
+  }
+  if (typeof value === "object") {
+    const json = JSON.stringify(value);
+    return json.length > 320 ? `${json.slice(0, 320)}…` : json;
+  }
+  return String(value);
 }
 
 function shortId(value: string) {

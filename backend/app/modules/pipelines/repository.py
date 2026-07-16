@@ -73,6 +73,7 @@ pipeline_runs_table = Table(
     Column("output_row_count", Integer, nullable=True),
     Column("rejected_row_count", Integer, nullable=True),
     Column("warnings", JSON, nullable=False, default=list),
+    Column("events", JSON, nullable=False, default=list),
     Column("output_artifact_ids", JSON, nullable=False, default=list),
     Column("output_manifest", JSON, nullable=False, default=list),
     Column("error_message", Text, nullable=False, default=""),
@@ -106,6 +107,7 @@ pipeline_step_runs_table = Table(
     Column("processed_row_count", Integer, nullable=True),
     Column("output_row_count", Integer, nullable=True),
     Column("warnings", JSON, nullable=False, default=list),
+    Column("events", JSON, nullable=False, default=list),
     Column("output_manifest", JSON, nullable=False, default=list),
     Column("error_message", Text, nullable=False, default=""),
     Column("started_at", DateTime(timezone=True), nullable=True),
@@ -163,6 +165,15 @@ class PipelineRepository(Protocol):
     def list_runs(
         self,
         pipeline_id: str | None,
+        owner_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[PipelineRun]:
+        ...
+
+    def list_run_summaries(
+        self,
         owner_id: str,
         *,
         limit: int = 200,
@@ -276,6 +287,15 @@ class InMemoryPipelineRepository:
         ]
         matching.sort(key=lambda item: item.created_at, reverse=True)
         return matching[offset:offset + limit]
+
+    def list_run_summaries(
+        self,
+        owner_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[PipelineRun]:
+        return self.list_runs(None, owner_id, limit=limit, offset=offset)
 
     def add_step_run(self, step_run: PipelineStepRun) -> PipelineStepRun:
         self._step_runs[step_run.id] = step_run
@@ -464,6 +484,47 @@ class PostgresPipelineRepository:
         with self.engine.begin() as connection:
             return [self._run_from_record(row._mapping) for row in connection.execute(statement)]
 
+    def list_run_summaries(
+        self,
+        owner_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[PipelineRun]:
+        self._ensure_initialized()
+        columns = [
+            pipeline_runs_table.c.id,
+            pipeline_runs_table.c.owner_id,
+            pipeline_runs_table.c.pipeline_id,
+            pipeline_runs_table.c.pipeline_version_id,
+            pipeline_runs_table.c.business_case_id,
+            pipeline_runs_table.c.status,
+            pipeline_runs_table.c.trigger_type,
+            pipeline_runs_table.c.is_dry_run,
+            pipeline_runs_table.c.requested_step_id,
+            pipeline_runs_table.c.input_row_count,
+            pipeline_runs_table.c.processed_row_count,
+            pipeline_runs_table.c.output_row_count,
+            pipeline_runs_table.c.rejected_row_count,
+            pipeline_runs_table.c.error_message,
+            pipeline_runs_table.c.created_by,
+            pipeline_runs_table.c.created_at,
+            pipeline_runs_table.c.started_at,
+            pipeline_runs_table.c.finished_at,
+        ]
+        statement = (
+            select(*columns)
+            .where(pipeline_runs_table.c.owner_id == owner_id)
+            .order_by(pipeline_runs_table.c.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        with self.engine.begin() as connection:
+            return [
+                self._run_from_record(row._mapping)
+                for row in connection.execute(statement)
+            ]
+
     def add_step_run(self, step_run: PipelineStepRun) -> PipelineStepRun:
         self._ensure_initialized()
         with self.engine.begin() as connection:
@@ -505,6 +566,14 @@ class PostgresPipelineRepository:
         with self.engine.begin() as connection:
             connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {PIPELINE_SCHEMA}"))
             metadata.create_all(connection)
+            connection.execute(text(
+                f"ALTER TABLE {PIPELINE_SCHEMA}.pipeline_runs "
+                "ADD COLUMN IF NOT EXISTS events JSON NOT NULL DEFAULT '[]'"
+            ))
+            connection.execute(text(
+                f"ALTER TABLE {PIPELINE_SCHEMA}.pipeline_step_runs "
+                "ADD COLUMN IF NOT EXISTS events JSON NOT NULL DEFAULT '[]'"
+            ))
         self._initialized = True
 
     def _pipeline_to_record(self, pipeline: Pipeline) -> dict[str, object]:
@@ -586,6 +655,7 @@ class PostgresPipelineRepository:
             "output_row_count": run.output_row_count,
             "rejected_row_count": run.rejected_row_count,
             "warnings": run.warnings,
+            "events": run.events,
             "output_artifact_ids": run.output_artifact_ids,
             "output_manifest": run.output_manifest,
             "error_message": run.error_message,
@@ -604,16 +674,17 @@ class PostgresPipelineRepository:
             business_case_id=record["business_case_id"],
             status=PipelineRunStatus(record["status"]),
             trigger_type=PipelineRunTrigger(record["trigger_type"]),
-            runtime_parameters=dict(record["runtime_parameters"] or {}),
+            runtime_parameters=dict(record.get("runtime_parameters") or {}),
             is_dry_run=record["is_dry_run"],
             requested_step_id=record["requested_step_id"] or "",
             input_row_count=record["input_row_count"],
             processed_row_count=record["processed_row_count"],
             output_row_count=record["output_row_count"],
             rejected_row_count=record["rejected_row_count"],
-            warnings=list(record["warnings"] or []),
-            output_artifact_ids=list(record["output_artifact_ids"] or []),
-            output_manifest=list(record["output_manifest"] or []),
+            warnings=list(record.get("warnings") or []),
+            events=list(record.get("events") or []),
+            output_artifact_ids=list(record.get("output_artifact_ids") or []),
+            output_manifest=list(record.get("output_manifest") or []),
             error_message=record["error_message"] or "",
             created_by=record["created_by"],
             created_at=record["created_at"],
@@ -634,6 +705,7 @@ class PostgresPipelineRepository:
             "processed_row_count": step_run.processed_row_count,
             "output_row_count": step_run.output_row_count,
             "warnings": step_run.warnings,
+            "events": step_run.events,
             "output_manifest": step_run.output_manifest,
             "error_message": step_run.error_message,
             "started_at": step_run.started_at,
@@ -653,6 +725,7 @@ class PostgresPipelineRepository:
             processed_row_count=record["processed_row_count"],
             output_row_count=record["output_row_count"],
             warnings=list(record["warnings"] or []),
+            events=list(record.get("events") or []),
             output_manifest=list(record["output_manifest"] or []),
             error_message=record["error_message"] or "",
             started_at=record["started_at"],

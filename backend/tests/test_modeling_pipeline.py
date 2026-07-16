@@ -1,10 +1,17 @@
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 import duckdb
 import joblib
 import numpy as np
 import pytest
+from fastapi import HTTPException
 
+from app.core.security import Principal
+from app.modules.business_cases.domain import Artifact, ArtifactOrigin, ArtifactType
+from app.modules.business_cases.repository import InMemoryBusinessCaseRepository
+from app.modules.pipelines.repository import InMemoryPipelineRepository
+from app.modules.pipelines.service import PipelineService
 from app.modules.pipelines.modeling import (
     ModelingResult,
     ScoringDefinition,
@@ -12,15 +19,240 @@ from app.modules.pipelines.modeling import (
     SklearnTrainingEngine,
     TrainingDefinition,
 )
+from app.modules.pipelines.modeling_catalog import (
+    ALGORITHM_SPECS,
+    LabelEncodedClassifier,
+    build_estimator,
+    curated_search_space,
+    training_catalog,
+    validate_algorithm_parameters,
+)
+from app.modules.pipelines.model_training import ModelOptimizationEngine
 from app.modules.pipelines.runtime import SourceRelation
 from app.modules.pipelines.step_handlers import StepExecutionContext, TrainingStepHandler
-from app.modules.pipelines.workflow import WorkflowStep, validate_workflow_definition
+from app.modules.pipelines.workflow import (
+    WorkflowDefinition,
+    WorkflowStep,
+    validate_workflow_definition,
+)
 from app.worker.tasks import _definition_with_resolved_inputs
 
 
 def _relation(path: Path, rows: int) -> SourceRelation:
     escaped = str(path).replace("'", "''")
     return SourceRelation(sql=f"read_parquet('{escaped}')", row_count=rows)
+
+
+def test_catalog_exposes_conditional_tuning_for_perceptron_and_sgd() -> None:
+    catalog = training_catalog()
+    algorithms = {item["id"]: item for item in catalog["algorithms"]}
+    perceptron = {item["id"]: item for item in algorithms["perceptron_classifier"]["parameters"]}
+    sgd = {item["id"]: item for item in algorithms["sgd_classifier"]["parameters"]}
+
+    assert perceptron["penalty"]["search"]["values"] == [None, "l2", "l1", "elasticnet"]
+    assert perceptron["eta0"]["search"] is not None
+    assert perceptron["l1_ratio"]["active_when"] == {"penalty": ["elasticnet"]}
+    assert sgd["eta0"]["active_when"] == {
+        "learning_rate": ["constant", "invscaling", "adaptive"]
+    }
+    assert sgd["power_t"]["active_when"] == {"learning_rate": ["invscaling"]}
+
+
+def test_mlp_uses_declared_epoch_budget_unless_max_iter_is_explicit() -> None:
+    bounded = ModelOptimizationEngine._build(
+        "mlp_regressor",
+        "regression",
+        {"hidden_layer_sizes": [8]},
+        random_seed=42,
+        max_parallel_jobs=1,
+        epochs=17,
+    )
+    explicit = ModelOptimizationEngine._build(
+        "mlp_regressor",
+        "regression",
+        {"hidden_layer_sizes": [8], "max_iter": 31},
+        random_seed=42,
+        max_parallel_jobs=1,
+        epochs=17,
+    )
+
+    assert bounded.max_iter == 17
+    assert explicit.max_iter == 31
+
+
+def test_optuna_prunes_weak_trial_after_deterministic_fold_warmup() -> None:
+    callback_calls = 0
+
+    def score_callback(estimator, metric, progress_callback):
+        nonlocal callback_calls
+        callback_calls += 1
+        score = 1.0 if callback_calls <= 5 else -100.0
+        fold_scores = [score]
+        progress_callback(0, score, list(fold_scores))
+        fold_scores.append(score)
+        progress_callback(1, score, list(fold_scores))
+        return score, fold_scores
+
+    result = ModelOptimizationEngine().fit(
+        algorithm="ridge_regression",
+        problem_type="regression",
+        parameters={},
+        random_seed=42,
+        epochs=10,
+        x_train=np.empty((0, 1)),
+        y_train=np.empty((0,)),
+        x_validation=None,
+        y_validation=None,
+        mode="optuna",
+        validation_strategy="cross_validation",
+        primary_metric="neg_mean_absolute_error",
+        cv_folds=2,
+        max_trials=6,
+        timeout_seconds=60,
+        max_parallel_jobs=1,
+        candidate_algorithms=[],
+        score_callback=score_callback,
+        refit_best_model=False,
+    )
+
+    summary = result.optimization_summary
+    assert summary["successful_trial_count"] == 5
+    assert summary["pruned_trial_count"] == 1
+    assert summary["failed_trial_count"] == 0
+    assert summary["trials"][-1]["status"] == "pruned"
+    assert summary["trials"][-1]["fold_scores"] == [-100.0, -100.0]
+
+
+def test_hist_gradient_boosting_automl_does_not_sample_incomplete_quantile_loss() -> None:
+    catalog = training_catalog()
+    algorithm = next(
+        item for item in catalog["algorithms"]
+        if item["id"] == "hist_gradient_boosting_regressor"
+    )
+    loss = next(item for item in algorithm["parameters"] if item["id"] == "loss")
+
+    assert "quantile" in loss["options"]
+    assert "quantile" not in loss["search"]["values"]
+
+
+def test_conditional_search_space_does_not_expand_inactive_sgd_parameters() -> None:
+    engine = ModelOptimizationEngine()
+    raw_space = curated_search_space("sgd_classifier")
+    space = {key: engine._discrete_values(value) for key, value in raw_space.items()}
+    candidates = list(
+        engine._iter_conditional_candidates(
+            "sgd_classifier",
+            space,
+            {},
+            limit=10_000,
+        )
+    )
+
+    assert len(candidates) == engine._conditional_candidate_count(
+        "sgd_classifier",
+        space,
+        {},
+    )
+    assert all(
+        ("l1_ratio" in candidate) == (candidate["penalty"] == "elasticnet")
+        for candidate in candidates
+    )
+    assert all(
+        ("eta0" in candidate)
+        == (candidate["learning_rate"] in {"constant", "invscaling", "adaptive"})
+        for candidate in candidates
+    )
+    assert all(
+        ("power_t" in candidate) == (candidate["learning_rate"] == "invscaling")
+        for candidate in candidates
+    )
+
+
+def test_inactive_parameters_are_removed_before_estimator_construction() -> None:
+    normalized = validate_algorithm_parameters(
+        "sgd_classifier",
+        "binary_classification",
+        {
+            "penalty": "l2",
+            "l1_ratio": 0.9,
+            "learning_rate": "optimal",
+            "eta0": 0.5,
+            "power_t": 0.7,
+        },
+    )
+
+    assert normalized["penalty"] == "l2"
+    assert "l1_ratio" not in normalized
+    assert "eta0" not in normalized
+    assert "power_t" not in normalized
+
+
+def test_optuna_suggests_only_active_sgd_parameters() -> None:
+    class Trial:
+        def suggest_categorical(self, name, choices):
+            if name == "penalty":
+                return "l2"
+            if name == "learning_rate":
+                return "optimal"
+            return choices[0]
+
+        def suggest_int(self, name, low, high, *, step, log):
+            return low
+
+        def suggest_float(self, name, low, high, *, step, log):
+            return low
+
+    suggested = ModelOptimizationEngine._suggest_parameters(
+        Trial(),
+        "sgd_classifier",
+        search_space={},
+        base_parameters={},
+        prefix="",
+    )
+
+    assert suggested["penalty"] == "l2"
+    assert suggested["learning_rate"] == "optimal"
+    assert "l1_ratio" not in suggested
+    assert "eta0" not in suggested
+    assert "power_t" not in suggested
+
+
+def test_automl_ignores_unscoped_search_overrides_from_another_algorithm() -> None:
+    resolved = ModelOptimizationEngine._resolved_search_space(
+        "sgd_classifier",
+        {
+            "learning_rate": {"kind": "float", "low": 0.005, "high": 0.3, "log": True},
+            "sgd_classifier__learning_rate": {
+                "kind": "categorical", "values": ["optimal", "adaptive"]
+            },
+        },
+        allow_unscoped_overrides=False,
+    )
+
+    assert resolved["learning_rate"] == {
+        "kind": "categorical", "values": ["optimal", "adaptive"]
+    }
+
+
+def test_label_encoded_classifier_falls_back_to_probability_scores() -> None:
+    class ProbabilityOnlyClassifier:
+        def fit(self, x, y):
+            return self
+
+        def predict(self, x):
+            return np.ones(len(x), dtype=int)
+
+        def predict_proba(self, x):
+            return np.column_stack((np.full(len(x), 0.2), np.full(len(x), 0.8)))
+
+    classifier = LabelEncodedClassifier(ProbabilityOnlyClassifier()).fit(
+        np.array([[0.0], [1.0]]), np.array(["no", "yes"])
+    )
+
+    np.testing.assert_allclose(
+        classifier.decision_function(np.array([[2.0], [3.0]])),
+        np.array([0.8, 0.8]),
+    )
 
 
 def test_training_resolves_dynamic_one_hot_features_from_upstream_contract() -> None:
@@ -72,6 +304,53 @@ def test_training_resolves_dynamic_one_hot_features_from_upstream_contract() -> 
     assert captured["definition"].feature_columns == ["age", "segment_0", "segment_1"]
 
 
+def test_training_exposes_declared_test_output_as_relation_passthrough() -> None:
+    class Engine:
+        def execute(self, definition, training, validation, **kwargs):
+            return ModelingResult(10, 10, 1, [], [])
+
+    step = WorkflowStep.model_validate({
+        "step_id": "automl_1",
+        "name": "AutoML",
+        "type": "automl",
+        "inputs": [
+            {
+                "port_id": "training",
+                "source": {"step_id": "fe_1", "port_id": "training"},
+            },
+            {
+                "port_id": "test",
+                "source": {"step_id": "fe_1", "port_id": "test"},
+            },
+        ],
+        "output_port_id": "model",
+        "additional_output_port_ids": ["metrics", "test"],
+        "config": {"definition": {
+            "problem_type": "binary_classification",
+            "algorithm": "sgd_classifier",
+            "target_column": "churned",
+            "feature_columns": ["age"],
+            "optimization": {"mode": "automl"},
+        }},
+    })
+    relation = SourceRelation(sql="input", row_count=10)
+
+    result = TrainingStepHandler(Engine()).execute(
+        step,
+        StepExecutionContext(
+            run_id="run-1",
+            owner_id="owner-1",
+            is_dry_run=True,
+            upstream_relations={
+                ("fe_1", "training"): relation,
+                ("fe_1", "test"): relation,
+            },
+        ),
+    )
+
+    assert result.relation_passthroughs == {"test": ("fe_1", "test")}
+
+
 def test_training_and_scoring_process_full_declared_inputs(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     source = repository / "users" / "owner-1" / "source"
@@ -120,6 +399,20 @@ def test_training_and_scoring_process_full_declared_inputs(tmp_path: Path) -> No
     assert model["model_parameters"]["weights"][0]["feature"] == "x"
     assert model["model_parameters"]["returned_weight_count"] == 1
     assert model["model_parameters"]["truncated"] is False
+    report_output = next(
+        item for item in trained.output_manifest if item["output_id"] == "training_report"
+    )
+    assert report_output["artifact_type"] == "report"
+    assert report_output["report_type"] == "training_evaluation_report"
+    report = report_output["report"]
+    assert report["data_scope"]["mode"] == "full"
+    assert report["data_scope"]["row_count"] == 20
+    assert report["sections"]["summary"]["feature_count"] == 1
+    assert report["sections"]["explainability"]["scope"]["sampled"] is True
+    assert report["sections"]["explainability"]["permutation_importance"][0]["feature"] == "x"
+    assert report["sections"]["explainability"]["shap"]["status"] == "completed"
+    assert report["sections"]["explainability"]["shap"]["values"][0]["feature"] == "x"
+    assert Path(report_output["location_uri"].removeprefix("file://")).is_file()
 
     scored = SklearnScoringEngine(repository).execute(
         ScoringDefinition(
@@ -401,6 +694,51 @@ def test_supported_incremental_estimators_fit_full_input(
         assert scored.output_manifest[0]["score_contract"]["problem_type"] == "regression"
 
 
+def test_incremental_balanced_class_weight_uses_exact_full_scope_counts(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    source = repository / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    path = source / "imbalanced.parquet"
+    escaped_path = str(path).replace("'", "''")
+    duckdb.connect().execute(
+        "COPY (SELECT range AS row_id, range::DOUBLE AS x, "
+        "CASE WHEN range < 30 THEN 0 ELSE 1 END AS target FROM range(40)) "
+        f"TO '{escaped_path}' (FORMAT PARQUET)"
+    ).close()
+
+    result = SklearnTrainingEngine(repository).execute(
+        TrainingDefinition(
+            problem_type="binary_classification",
+            algorithm="sgd_classifier",
+            target_column="target",
+            feature_columns=["x"],
+            epochs=2,
+            batch_size=100,
+            parameters={"class_weight": "balanced"},
+        ),
+        _relation(path, 40),
+        None,
+        run_id="balanced-incremental",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    resolution = model["metrics"]["optimization"]["parameter_resolution"]
+    assert resolution["data_scope"] == "full_training"
+    assert resolution["row_count"] == 40
+    assert resolution["class_counts"] == {"0": 30, "1": 10}
+    assert resolution["resolved_weights"] == pytest.approx({"0": 2 / 3, "1": 2.0})
+    assert model["training_config"]["resolved_parameters"]["class_weight"] == pytest.approx({
+        "0": 2 / 3,
+        "1": 2.0,
+    })
+    assert result.processed_row_count == 80
+    assert any("exact full-training-scope" in warning for warning in result.warnings)
+
+
 def test_multiclass_scoring_persists_per_class_probabilities(tmp_path: Path) -> None:
     repository = tmp_path / "repository"
     source = repository / "users" / "owner-1" / "source"
@@ -449,6 +787,16 @@ def test_multiclass_scoring_persists_per_class_probabilities(tmp_path: Path) -> 
     assert [item["label"] for item in output["score_contract"]["classes"]] == [0, 1, 2]
 
 
+def test_scoring_normalizes_multiclass_predict_matrices_to_labels() -> None:
+    predictions = SklearnScoringEngine._prediction_vector(
+        np.asarray([[0.1, 0.8, 0.1], [0.7, 0.2, 0.1]]),
+        problem_type="multiclass_classification",
+        class_labels=["setosa", "versicolor", "virginica"],
+    )
+
+    assert predictions.tolist() == ["versicolor", "setosa"]
+
+
 def test_training_parameters_are_scoped_to_selected_algorithm() -> None:
     with pytest.raises(ValueError, match="Unsupported training parameters"):
         TrainingDefinition(
@@ -457,6 +805,768 @@ def test_training_parameters_are_scoped_to_selected_algorithm() -> None:
             target_column="target",
             feature_columns=["x"],
             parameters={"C": 2},
+        )
+
+
+def test_training_catalog_exposes_a_broad_executable_algorithm_registry() -> None:
+    catalog = training_catalog()
+    classification = [
+        item for item in catalog["algorithms"]
+        if "binary_classification" in item["problem_types"]
+    ]
+    regression = [
+        item for item in catalog["algorithms"]
+        if "regression" in item["problem_types"]
+    ]
+
+    assert catalog["algorithm_count"] >= 50
+    assert len(classification) >= 25
+    assert len(regression) >= 20
+    assert {
+        "Linear models",
+        "Support vector machines",
+        "Tree ensembles",
+        "Modern boosting",
+        "Neural networks",
+    } <= {item["family"] for item in catalog["algorithms"]}
+    assert {
+        "single", "grid_search", "random_search", "optuna", "automl"
+    } == {item["id"] for item in catalog["optimization_modes"]}
+    assert all(item["parameters"] is not None for item in catalog["algorithms"])
+
+
+def test_passive_aggressive_classifier_loss_is_tunable() -> None:
+    catalog = training_catalog()
+    algorithm = next(
+        item for item in catalog["algorithms"]
+        if item["id"] == "passive_aggressive_classifier"
+    )
+    loss = next(item for item in algorithm["parameters"] if item["id"] == "loss")
+
+    assert loss["search"] == {
+        "kind": "categorical",
+        "values": ["hinge", "squared_hinge"],
+    }
+
+
+def test_every_available_catalog_entry_has_an_estimator_factory() -> None:
+    built = [
+        build_estimator(
+            spec.id,
+            spec.problem_types[0],
+            {},
+            random_seed=42,
+            n_jobs=1,
+        )
+        for spec in ALGORITHM_SPECS
+        if spec.available
+    ]
+
+    assert len(built) >= 40
+
+
+@pytest.mark.parametrize(
+    ("problem_type", "algorithm", "parameters"),
+    [
+        ("binary_classification", "logistic_regression", {}),
+        ("binary_classification", "linear_svc", {}),
+        (
+            "binary_classification",
+            "random_forest_classifier",
+            {"n_estimators": 20, "max_depth": 4},
+        ),
+        (
+            "binary_classification",
+            "hist_gradient_boosting_classifier",
+            {"max_iter": 20, "max_depth": 4},
+        ),
+        (
+            "binary_classification",
+            "mlp_classifier",
+            {"hidden_layer_sizes": [8], "max_iter": 40, "early_stopping": False},
+        ),
+        ("regression", "ridge_regression", {}),
+        ("regression", "linear_svr", {}),
+        (
+            "regression",
+            "random_forest_regressor",
+            {"n_estimators": 20, "max_depth": 4},
+        ),
+        (
+            "regression",
+            "hist_gradient_boosting_regressor",
+            {"max_iter": 20, "max_depth": 4},
+        ),
+        (
+            "regression",
+            "mlp_regressor",
+            {"hidden_layer_sizes": [8], "max_iter": 40, "early_stopping": False},
+        ),
+    ],
+)
+def test_representative_advanced_estimators_train_on_the_complete_scope(
+    tmp_path: Path,
+    problem_type: str,
+    algorithm: str,
+    parameters: dict,
+) -> None:
+    repository = tmp_path / "repository"
+    source = repository / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    path = source / f"{algorithm}.parquet"
+    target = (
+        "range::DOUBLE * 2.5 + sin(range::DOUBLE / 3)"
+        if problem_type == "regression"
+        else "CASE WHEN range % 17 < 8 THEN 1 ELSE 0 END"
+    )
+    escaped_path = str(path).replace("'", "''")
+    duckdb.connect().execute(
+        f"COPY (SELECT range AS row_id, range::DOUBLE AS x, "
+        f"sin(range::DOUBLE / 5) AS wave, {target} AS target FROM range(80)) "
+        f"TO '{escaped_path}' (FORMAT PARQUET)"
+    ).close()
+
+    result = SklearnTrainingEngine(repository).execute(
+        TrainingDefinition(
+            problem_type=problem_type,
+            algorithm=algorithm,
+            target_column="target",
+            feature_columns=["x", "wave"],
+            parameters=parameters,
+            resource_limits={"max_memory_mb": 128, "max_parallel_jobs": 1},
+        ),
+        _relation(path, 80),
+        None,
+        run_id=f"run-{algorithm}",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    assert model["algorithm"] == algorithm
+    assert model["data_scope"] == "full"
+    assert model["metrics"]["evaluated_row_count"] == 80
+    assert result.input_row_count == 80
+    assert result.processed_row_count == 80
+    assert "materialized in worker memory" in result.warnings[0]
+
+
+def test_grid_search_records_trials_and_refits_the_best_full_data_model(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    source = repository / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    path = source / "grid.parquet"
+    escaped_path = str(path).replace("'", "''")
+    duckdb.connect().execute(
+        "COPY (SELECT range AS row_id, range::DOUBLE AS x, "
+        "CASE WHEN range >= 30 THEN 1 ELSE 0 END AS target FROM range(60)) "
+        f"TO '{escaped_path}' (FORMAT PARQUET)"
+    ).close()
+
+    result = SklearnTrainingEngine(repository).execute(
+        TrainingDefinition(
+            problem_type="binary_classification",
+            algorithm="logistic_regression",
+            target_column="target",
+            feature_columns=["x"],
+            optimization={
+                "mode": "grid_search",
+                "validation_strategy": "cross_validation",
+                "primary_metric": "accuracy",
+                "cv_folds": 3,
+                "max_trials": 4,
+                "timeout_seconds": 60,
+            },
+            resource_limits={"max_memory_mb": 128, "max_parallel_jobs": 1},
+        ),
+        _relation(path, 60),
+        None,
+        run_id="grid-run",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    optimization = model["metrics"]["optimization"]
+    assert optimization["mode"] == "grid_search"
+    assert optimization["trial_count"] == 4
+    assert optimization["planned_trial_count"] == 4
+    assert optimization["total_candidate_count"] >= 4
+    assert optimization["max_trials"] == 4
+    assert optimization["successful_trial_count"] == 4
+    assert optimization["best_score"] is not None
+    assert optimization["best_algorithm"] == "logistic_regression"
+    assert len(optimization["trials"]) == 4
+    assert result.processed_row_count == 60 + 60 * 2 * 4
+
+
+def test_grid_search_uses_user_configured_search_space(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    source = repository / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    path = source / "custom-grid.parquet"
+    escaped_path = str(path).replace("'", "''")
+    duckdb.connect().execute(
+        "COPY (SELECT range AS row_id, range::DOUBLE AS x, "
+        "CASE WHEN range >= 20 THEN 1 ELSE 0 END AS target FROM range(40)) "
+        f"TO '{escaped_path}' (FORMAT PARQUET)"
+    ).close()
+
+    result = SklearnTrainingEngine(repository).execute(
+        TrainingDefinition(
+            problem_type="binary_classification",
+            algorithm="logistic_regression",
+            target_column="target",
+            feature_columns=["x"],
+            optimization={
+                "mode": "grid_search",
+                "validation_strategy": "cross_validation",
+                "primary_metric": "accuracy",
+                "cv_folds": 2,
+                "max_trials": 2,
+                "timeout_seconds": 60,
+                "search_space": {
+                    "C": {"kind": "float", "low": 0.25, "high": 0.5, "points": 2},
+                    "penalty": {"kind": "categorical", "values": ["l2"]},
+                },
+            },
+            resource_limits={"max_memory_mb": 128, "max_parallel_jobs": 1},
+        ),
+        _relation(path, 40),
+        None,
+        run_id="custom-grid-run",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    optimization = model["metrics"]["optimization"]
+    assert optimization["search_space"]["C"] == [0.25, 0.5]
+    assert optimization["search_space"]["penalty"] == ["l2"]
+    assert {
+        trial["parameters"]["C"]
+        for trial in optimization["trials"]
+        if trial["status"] == "succeeded"
+    }.issubset({0.25, 0.5})
+
+
+def test_grid_search_allows_single_numeric_value_from_range(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    source = repository / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    path = source / "single-grid-value.parquet"
+    escaped_path = str(path).replace("'", "''")
+    duckdb.connect().execute(
+        "COPY (SELECT range AS row_id, range::DOUBLE AS x, "
+        "CASE WHEN range >= 20 THEN 1 ELSE 0 END AS target FROM range(40)) "
+        f"TO '{escaped_path}' (FORMAT PARQUET)"
+    ).close()
+
+    result = SklearnTrainingEngine(repository).execute(
+        TrainingDefinition(
+            problem_type="binary_classification",
+            algorithm="logistic_regression",
+            target_column="target",
+            feature_columns=["x"],
+            optimization={
+                "mode": "grid_search",
+                "validation_strategy": "cross_validation",
+                "primary_metric": "accuracy",
+                "cv_folds": 2,
+                "max_trials": 10,
+                "timeout_seconds": 60,
+                "search_space": {
+                    "C": {"kind": "float", "low": 0.25, "high": 0.5, "points": 1},
+                    "penalty": {"kind": "categorical", "values": ["l2"]},
+                },
+            },
+            resource_limits={"max_memory_mb": 128, "max_parallel_jobs": 1},
+        ),
+        _relation(path, 40),
+        None,
+        run_id="single-grid-value-run",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    optimization = model["metrics"]["optimization"]
+    assert optimization["search_space"]["C"] == [0.25]
+    assert optimization["trial_count"] == optimization["total_candidate_count"]
+    assert {
+        trial["parameters"]["C"]
+        for trial in optimization["trials"]
+        if trial["status"] == "succeeded"
+    } == {0.25}
+
+
+def test_grid_search_appends_real_none_to_numeric_range(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    source = repository / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    path = source / "range-with-none.parquet"
+    escaped_path = str(path).replace("'", "''")
+    duckdb.connect().execute(
+        "COPY (SELECT range AS row_id, range::DOUBLE AS x, "
+        "CASE WHEN range >= 20 THEN 1 ELSE 0 END AS target FROM range(40)) "
+        f"TO '{escaped_path}' (FORMAT PARQUET)"
+    ).close()
+
+    result = SklearnTrainingEngine(repository).execute(
+        TrainingDefinition(
+            problem_type="binary_classification",
+            algorithm="random_forest_classifier",
+            target_column="target",
+            feature_columns=["x"],
+            parameters={"n_estimators": 20},
+            optimization={
+                "mode": "grid_search",
+                "validation_strategy": "cross_validation",
+                "primary_metric": "accuracy",
+                "cv_folds": 2,
+                "max_trials": 10,
+                "timeout_seconds": 60,
+                "search_space": {
+                    "n_estimators": {"kind": "categorical", "values": [20]},
+                    "max_depth": {"kind": "int", "low": 2, "high": 2, "points": 1, "include_null": True},
+                    "min_samples_split": {"kind": "categorical", "values": [2]},
+                    "min_samples_leaf": {"kind": "categorical", "values": [1]},
+                    "max_features": {"kind": "categorical", "values": ["None"]},
+                },
+            },
+            resource_limits={"max_memory_mb": 128, "max_parallel_jobs": 1},
+        ),
+        _relation(path, 40),
+        None,
+        run_id="range-with-none-run",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    optimization = model["metrics"]["optimization"]
+    assert optimization["search_space"]["max_depth"] == [2, None]
+    assert optimization["search_space"]["max_features"] == [None]
+    assert {
+        trial["parameters"]["max_depth"]
+        for trial in optimization["trials"]
+        if trial["status"] == "succeeded"
+    } == {2, None}
+    assert all(
+        trial["parameters"]["max_features"] is None
+        for trial in optimization["trials"]
+        if trial["status"] == "succeeded"
+    )
+
+
+def test_grid_search_ignores_empty_legacy_select_values(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    source = repository / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    path = source / "legacy-empty-select.parquet"
+    escaped_path = str(path).replace("'", "''")
+    duckdb.connect().execute(
+        "COPY (SELECT range AS row_id, range::DOUBLE AS x, "
+        "CASE WHEN range >= 20 THEN 1 ELSE 0 END AS target FROM range(40)) "
+        f"TO '{escaped_path}' (FORMAT PARQUET)"
+    ).close()
+
+    result = SklearnTrainingEngine(repository).execute(
+        TrainingDefinition(
+            problem_type="binary_classification",
+            algorithm="random_forest_classifier",
+            target_column="target",
+            feature_columns=["x"],
+            parameters={"n_estimators": 20},
+            optimization={
+                "mode": "grid_search",
+                "validation_strategy": "cross_validation",
+                "primary_metric": "accuracy",
+                "cv_folds": 2,
+                "max_trials": 10,
+                "timeout_seconds": 60,
+                "search_space": {
+                    "n_estimators": {"kind": "categorical", "values": [20]},
+                    "max_depth": {"kind": "categorical", "values": [2]},
+                    "min_samples_split": {"kind": "categorical", "values": [2]},
+                    "min_samples_leaf": {"kind": "categorical", "values": [1]},
+                    "max_features": {"kind": "categorical", "values": ["", "log2", "sqrt"]},
+                },
+            },
+            resource_limits={"max_memory_mb": 128, "max_parallel_jobs": 1},
+        ),
+        _relation(path, 40),
+        None,
+        run_id="legacy-empty-select-run",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    optimization = model["metrics"]["optimization"]
+    assert optimization["search_space"]["max_features"] == ["log2", "sqrt"]
+    assert {
+        trial["parameters"]["max_features"]
+        for trial in optimization["trials"]
+        if trial["status"] == "succeeded"
+    } == {"log2", "sqrt"}
+
+
+def test_grid_search_allows_large_deterministic_combination_cap() -> None:
+    definition = TrainingDefinition(
+        problem_type="binary_classification",
+        algorithm="random_forest_classifier",
+        target_column="target",
+        feature_columns=["x"],
+        optimization={"mode": "grid_search", "max_trials": 100000},
+    )
+
+    assert definition.optimization.max_trials == 100000
+
+
+def test_non_grid_optimization_rejects_excessive_trial_cap() -> None:
+    with pytest.raises(ValueError, match="limited to 1000 trials"):
+        TrainingDefinition(
+            problem_type="binary_classification",
+            algorithm="random_forest_classifier",
+            target_column="target",
+            feature_columns=["x"],
+            optimization={"mode": "optuna", "max_trials": 100000},
+        )
+
+
+def test_in_memory_training_rejects_scope_above_explicit_budget_without_sampling(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    source = repository / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    path = source / "too-large.parquet"
+    escaped_path = str(path).replace("'", "''")
+    duckdb.connect().execute(
+        "COPY (SELECT range::DOUBLE AS x, range % 2 AS target FROM range(10)) "
+        f"TO '{escaped_path}' (FORMAT PARQUET)"
+    ).close()
+
+    with pytest.raises(ValueError, match="data was not sampled"):
+        SklearnTrainingEngine(repository).execute(
+            TrainingDefinition(
+                problem_type="binary_classification",
+                algorithm="random_forest_classifier",
+                target_column="target",
+                feature_columns=["x"],
+                resource_limits={"max_memory_mb": 128, "max_parallel_jobs": 1},
+            ),
+            _relation(path, 100_000_000),
+            None,
+            run_id="memory-run",
+            owner_id="owner-1",
+            is_dry_run=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("problem_type", "algorithm", "parameters"),
+    [
+        (
+            "binary_classification",
+            "xgboost_classifier",
+            {"n_estimators": 20, "max_depth": 3},
+        ),
+        (
+            "binary_classification",
+            "lightgbm_classifier",
+            {"n_estimators": 20, "max_depth": 3},
+        ),
+        (
+            "binary_classification",
+            "catboost_classifier",
+            {"iterations": 20, "depth": 3},
+        ),
+        (
+            "regression",
+            "xgboost_regressor",
+            {"n_estimators": 20, "max_depth": 3},
+        ),
+        (
+            "regression",
+            "lightgbm_regressor",
+            {"n_estimators": 20, "max_depth": 3},
+        ),
+        (
+            "regression",
+            "catboost_regressor",
+            {"iterations": 20, "depth": 3},
+        ),
+    ],
+)
+def test_external_boosters_train_and_persist_full_scope_models(
+    tmp_path: Path,
+    problem_type: str,
+    algorithm: str,
+    parameters: dict,
+) -> None:
+    repository = tmp_path / "repository"
+    source = repository / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    path = source / f"{algorithm}.parquet"
+    target = (
+        "range::DOUBLE * 1.7 + cos(range::DOUBLE / 5)"
+        if problem_type == "regression"
+        else "CASE WHEN range % 11 < 5 THEN 'yes' ELSE 'no' END"
+    )
+    escaped_path = str(path).replace("'", "''")
+    duckdb.connect().execute(
+        f"COPY (SELECT range AS row_id, range::DOUBLE AS x, "
+        f"cos(range::DOUBLE / 4) AS wave, {target} AS target FROM range(70)) "
+        f"TO '{escaped_path}' (FORMAT PARQUET)"
+    ).close()
+
+    result = SklearnTrainingEngine(repository).execute(
+        TrainingDefinition(
+            problem_type=problem_type,
+            algorithm=algorithm,
+            target_column="target",
+            feature_columns=["x", "wave"],
+            parameters=parameters,
+            resource_limits={"max_memory_mb": 128, "max_parallel_jobs": 1},
+        ),
+        _relation(path, 70),
+        None,
+        run_id=f"run-{algorithm}",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    assert model["algorithm"] == algorithm
+    assert model["metrics"]["evaluated_row_count"] == 70
+    assert model["model_hash"]
+    assert result.processed_row_count == 70
+    scored = SklearnScoringEngine(repository).execute(
+        ScoringDefinition(
+            row_id_column="row_id",
+            target_column="target",
+            dataset_name=f"{algorithm} predictions",
+            batch_size=100,
+        ),
+        _relation(path, 70),
+        model,
+        run_id=f"score-{algorithm}",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+    output = scored.output_manifest[0]
+    assert output["row_count"] == 70
+    assert output["score_contract"]["problem_type"] == problem_type
+    if problem_type != "regression":
+        assert output["score_contract"]["positive_class"] == "yes"
+
+
+def test_optuna_search_is_reproducible_and_persists_trial_history(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    source = repository / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    path = source / "optuna.parquet"
+    escaped_path = str(path).replace("'", "''")
+    duckdb.connect().execute(
+        "COPY (SELECT range AS row_id, range::DOUBLE AS x, "
+        "CASE WHEN range % 13 < 6 THEN 1 ELSE 0 END AS target FROM range(78)) "
+        f"TO '{escaped_path}' (FORMAT PARQUET)"
+    ).close()
+
+    result = SklearnTrainingEngine(repository).execute(
+        TrainingDefinition(
+            problem_type="binary_classification",
+            algorithm="hist_gradient_boosting_classifier",
+            target_column="target",
+            feature_columns=["x"],
+            optimization={
+                "mode": "optuna",
+                "validation_strategy": "cross_validation",
+                "primary_metric": "balanced_accuracy",
+                "cv_folds": 3,
+                "max_trials": 3,
+                "timeout_seconds": 60,
+            },
+            resource_limits={"max_memory_mb": 128, "max_parallel_jobs": 1},
+        ),
+        _relation(path, 78),
+        None,
+        run_id="optuna-run",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    optimization = model["metrics"]["optimization"]
+    assert optimization["mode"] == "optuna"
+    assert optimization["trial_count"] == 3
+    assert optimization["successful_trial_count"] == 3
+    assert optimization["best_algorithm"] == "hist_gradient_boosting_classifier"
+    assert all(item["fold_scores"] for item in optimization["trials"])
+
+
+def test_automl_selects_and_refits_one_of_the_explicit_candidates(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    source = repository / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    path = source / "automl.parquet"
+    escaped_path = str(path).replace("'", "''")
+    duckdb.connect().execute(
+        "COPY (SELECT range AS row_id, range::DOUBLE AS x, "
+        "sin(range::DOUBLE / 4) AS wave, "
+        "range::DOUBLE * 2 + sin(range::DOUBLE / 3) AS target FROM range(75)) "
+        f"TO '{escaped_path}' (FORMAT PARQUET)"
+    ).close()
+
+    result = SklearnTrainingEngine(repository).execute(
+        TrainingDefinition(
+            problem_type="regression",
+            algorithm="ridge_regression",
+            target_column="target",
+            feature_columns=["x", "wave"],
+            optimization={
+                "mode": "automl",
+                "validation_strategy": "cross_validation",
+                "primary_metric": "neg_root_mean_squared_error",
+                "cv_folds": 3,
+                "max_trials": 4,
+                "timeout_seconds": 60,
+                "candidate_algorithms": [
+                    "ridge_regression",
+                    "decision_tree_regressor",
+                ],
+            },
+            resource_limits={"max_memory_mb": 128, "max_parallel_jobs": 1},
+        ),
+        _relation(path, 75),
+        None,
+        run_id="automl-run",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    optimization = model["metrics"]["optimization"]
+    assert optimization["mode"] == "automl"
+    assert optimization["trial_count"] == 4
+    assert optimization["best_algorithm"] in {
+        "ridge_regression", "decision_tree_regressor"
+    }
+    assert model["algorithm"] == optimization["best_algorithm"]
+    assert model["training_config"]["resolved_algorithm"] == model["algorithm"]
+
+
+def test_optimization_uses_auditable_upstream_cv_fold_assignments(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    source = repository / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    path = source / "planned-folds.parquet"
+    escaped_path = str(path).replace("'", "''")
+    duckdb.connect().execute(
+        "COPY (SELECT range AS row_id, range::DOUBLE AS x, "
+        "range % 3 AS __mlapp_cv_fold, "
+        "CASE WHEN range % 7 < 3 THEN 1 ELSE 0 END AS target FROM range(60)) "
+        f"TO '{escaped_path}' (FORMAT PARQUET)"
+    ).close()
+    relation = _relation(path, 60)
+    relation = SourceRelation(
+        sql=relation.sql,
+        row_count=relation.row_count,
+        metadata={
+            "feature_manifest": [
+                {"name": "x", "role": "feature"},
+                {"name": "target", "role": "target"},
+                {"name": "__mlapp_cv_fold", "role": "cv_fold"},
+            ],
+            "split_evaluation": {
+                "cross_validation": {
+                    "enabled": True,
+                    "strategy": "stratified",
+                    "folds": 3,
+                }
+            },
+            "fitted_transform_count": 0,
+        },
+    )
+
+    result = SklearnTrainingEngine(repository).execute(
+        TrainingDefinition(
+            problem_type="binary_classification",
+            algorithm="logistic_regression",
+            target_column="target",
+            feature_columns=["x"],
+            optimization={
+                "mode": "grid_search",
+                "validation_strategy": "cross_validation",
+                "primary_metric": "accuracy",
+                "cv_folds": 5,
+                "max_trials": 2,
+                "timeout_seconds": 60,
+            },
+            resource_limits={"max_memory_mb": 128, "max_parallel_jobs": 1},
+        ),
+        relation,
+        None,
+        run_id="planned-fold-run",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    model = next(item for item in result.output_manifest if item["output_id"] == "model")
+    assert model["metrics"]["optimization"]["cv_fold_source"] == "upstream_plan"
+    assert any("upstream CV fold plan with 3 folds" in warning for warning in result.warnings)
+    assert result.processed_row_count == 60 + 60 * 2 * 2
+
+
+def test_cross_validation_rejects_reused_full_training_fe_state(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    source = repository / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    path = source / "leaky-fe.parquet"
+    escaped_path = str(path).replace("'", "''")
+    duckdb.connect().execute(
+        "COPY (SELECT range::DOUBLE AS x, range % 2 AS target FROM range(20)) "
+        f"TO '{escaped_path}' (FORMAT PARQUET)"
+    ).close()
+    relation = _relation(path, 20)
+    relation = SourceRelation(
+        sql=relation.sql,
+        row_count=relation.row_count,
+        metadata={"fitted_transform_count": 2},
+    )
+
+    with pytest.raises(ValueError, match="no potentially leaked CV score"):
+        SklearnTrainingEngine(repository).execute(
+            TrainingDefinition(
+                problem_type="binary_classification",
+                algorithm="logistic_regression",
+                target_column="target",
+                feature_columns=["x"],
+                optimization={
+                    "mode": "optuna",
+                    "validation_strategy": "cross_validation",
+                    "max_trials": 2,
+                    "timeout_seconds": 60,
+                },
+                resource_limits={"max_memory_mb": 128, "max_parallel_jobs": 1},
+            ),
+            relation,
+            None,
+            run_id="leakage-guard-run",
+            owner_id="owner-1",
+            is_dry_run=True,
         )
 
 
@@ -510,6 +1620,138 @@ def test_runtime_input_resolution_does_not_inject_inputs_into_training_definitio
 
     assert resolved["steps"][0]["config"]["definition"]["inputs"][0]["dataset_id"] == "physical-version"
     assert "inputs" not in resolved["steps"][1]["config"]["definition"]
+
+
+def test_runtime_model_resolution_applies_matching_recipe_and_fitted_state() -> None:
+    definition = {
+        "steps": [
+            {
+                "step_id": "fe_1",
+                "type": "feature_engineering",
+                "config": {"definition": {
+                    "mode": "transform",
+                    "inputs": [{"input_id": "scoring", "dataset_id": "logical"}],
+                    "outputs": [{"output_id": "features", "input_id": "scoring"}],
+                    "transformations": [{"type": "scale_numeric", "method": "standard"}],
+                    "fitted_state_artifact_id": "old-transform",
+                }},
+            },
+            {
+                "step_id": "score_1",
+                "type": "scoring",
+                "config": {"definition": {"model_artifact_id": "old-model"}},
+            },
+        ]
+    }
+    resolved = _definition_with_resolved_inputs(definition, {
+        "resolved_input_versions": {
+            "fe_1:scoring": {"dataset_id": "physical-version"}
+        },
+        "resolved_model_versions": {
+            "score_1": {
+                "model_artifact_id": "new-model",
+                "feature_step_id": "fe_1",
+                "fitted_transform_artifact_id": "new-transform",
+                "feature_engineering_definition": {
+                    "mode": "fit_transform",
+                    "transformations": [{"type": "scale_numeric", "method": "robust"}],
+                    "feature_columns": ["x"],
+                },
+            }
+        },
+    })
+
+    feature = resolved["steps"][0]["config"]["definition"]
+    scoring = resolved["steps"][1]["config"]["definition"]
+    assert feature["mode"] == "transform"
+    assert feature["fitted_state_artifact_id"] == "new-transform"
+    assert feature["transformations"][0]["method"] == "robust"
+    assert feature["inputs"][0]["dataset_id"] == "physical-version"
+    assert scoring["model_artifact_id"] == "new-model"
+
+
+def test_model_version_resolution_pins_latest_model_and_its_autofe_transform() -> None:
+    artifacts = InMemoryBusinessCaseRepository()
+    repository = InMemoryPipelineRepository()
+    now = datetime.now(timezone.utc)
+    recipe_v1 = {"contract_version": "1.0", "mode": "fit_transform", "transformations": []}
+    recipe_v2 = {
+        "contract_version": "1.0",
+        "mode": "fit_transform",
+        "transformations": [{"type": "scale_numeric", "method": "robust"}],
+    }
+    for version, recipe in ((1, recipe_v1), (2, recipe_v2)):
+        run_id = f"run-{version}"
+        artifacts.add_artifact(Artifact(
+            id=f"model-{version}", owner_id="owner", type=ArtifactType.MODEL_VERSION,
+            reference_id=f"model-{version}", origin=ArtifactOrigin.PLATFORM_GENERATED,
+            business_case_id="bc", created_by="owner",
+            created_at=now + timedelta(minutes=version),
+            metadata={
+                "logical_model_id": "family", "model_name": "Iris", "feature_columns": ["x"],
+                "training_config": {"auto_feature_engineering": {"resolved_recipe": recipe}},
+                "lineage": {
+                    "pipeline_run_id": run_id, "pipeline_version_id": "training-version",
+                    "pipeline_step_id": "automl_1",
+                },
+            },
+        ))
+        artifacts.add_artifact(Artifact(
+            id=f"transform-{version}", owner_id="owner",
+            type=ArtifactType.FEATURE_TRANSFORM, reference_id=f"transform-{version}",
+            origin=ArtifactOrigin.PLATFORM_GENERATED, business_case_id="bc",
+            created_by="owner", metadata={
+                "state_hash": f"state-{version}",
+                "feature_manifest": [{"name": "x", "role": "feature"}],
+                "lineage": {"pipeline_run_id": run_id, "pipeline_step_id": "automl_1"},
+            },
+        ))
+    workflow = WorkflowDefinition.model_validate({
+        "contract_version": "2.0",
+        "steps": [
+            {
+                "step_id": "fe_1", "name": "Feature Engineering",
+                "type": "feature_engineering", "inputs": [], "output_port_id": "dataset",
+                "config": {"definition": {}},
+            },
+            {
+                "step_id": "score_1", "name": "Batch Scoring", "type": "scoring",
+                "inputs": [{"port_id": "data", "source": {"step_id": "fe_1", "port_id": "dataset"}}],
+                "output_port_id": "predictions",
+                "config": {"definition": {"purpose": "batch", "model_artifact_id": "model-1"}},
+            },
+        ],
+        "outputs": [{"output_id": "predictions", "source": {"step_id": "score_1", "port_id": "predictions"}}],
+    })
+    service = PipelineService(repository=repository, artifacts=artifacts)
+
+    resolved = service._resolve_model_versions(
+        workflow, {}, Principal("owner", "owner@example.test", "Owner"), "bc"
+    )["score_1"]
+
+    assert resolved["model_artifact_id"] == "model-2"
+    assert resolved["fitted_transform_artifact_id"] == "transform-2"
+    assert resolved["feature_engineering_definition"] == recipe_v2
+    assert resolved["feature_step_id"] == "fe_1"
+
+    artifacts.add_artifact(Artifact(
+        id="model-3", owner_id="owner", type=ArtifactType.MODEL_VERSION,
+        reference_id="model-3", origin=ArtifactOrigin.PLATFORM_GENERATED,
+        business_case_id="bc", created_by="owner", created_at=now + timedelta(minutes=3),
+        metadata={
+            "logical_model_id": "family", "model_name": "Iris", "feature_columns": ["x"],
+            "training_config": {"auto_feature_engineering": {"resolved_recipe": recipe_v2}},
+            "lineage": {
+                "pipeline_run_id": "run-3", "pipeline_version_id": "training-version",
+                "pipeline_step_id": "automl_1",
+            },
+        },
+    ))
+    with pytest.raises(HTTPException, match="complete fitted Feature Engineering bundle") as error:
+        service._resolve_model_versions(
+            workflow, {}, Principal("owner", "owner@example.test", "Owner"), "bc"
+        )
+    assert error.value.status_code == 422
 
 
 def test_training_and_scoring_workflow_requires_typed_ports() -> None:

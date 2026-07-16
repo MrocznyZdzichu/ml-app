@@ -1,9 +1,10 @@
 # ML App
 
-ML App is a containerized analytics workbench for CSV ingestion, metadata
-management, exploratory analysis, reusable SQL/browser views, full-dataset
-profiling, and visualization. It also contains prototype interfaces for future
-model-training, serving, sharing, and export workflows.
+ML App is a containerized data-science and machine-learning workbench. It covers
+file ingestion, metadata, full-dataset analysis, reusable Data Views, versioned
+Data/Feature Engineering pipelines, Training, AutoML, scoring, model registry,
+and monitoring. Serving, sharing, export, and some external-source integrations
+remain provisional.
 
 > **AI-developed project:** This application has been designed and implemented
 > with substantial AI assistance. Treat the codebase as an actively evolving
@@ -18,10 +19,11 @@ The current product slice focuses on a practical analyst workflow:
 - profile datasets with descriptive, target-aware, and comparison summaries,
 - run read-only Custom SQL,
 - save reusable Data Views,
-- execute versioned Data Engineering → Feature Engineering workflows,
+- execute versioned Data Engineering → Feature Engineering → Training/AutoML workflows,
 - continue from saved views into browsing, visualization, and descriptive analysis,
 - compose reusable interactive dashboards over full datasets and Data Views,
-- exercise placeholder model registry, deployment, sharing, and export contracts.
+- register immutable models and reports, run Test/Batch Scoring and Monitoring,
+- exercise provisional deployment, sharing, and export contracts.
 
 The analytics paths described as full-dataset below execute against all rows.
 The explicitly identified preview and prototype paths have important limitations;
@@ -89,8 +91,8 @@ For a clean no-cache rebuild:
 
 ### Data Assets
 
-- UTF-8 CSV upload with delimiter/header detection, a streaming row/schema scan,
-  file metadata, tags, and status.
+- UTF-8 CSV upload with delimiter/header detection and flat tabular Parquet
+  upload, including schema/row validation, metadata, tags, and status.
 - Dataset metadata persisted in PostgreSQL.
 - Uploaded file content stored under local `data/repository` in development.
 - Soft deletion of dataset metadata with physical local file cleanup.
@@ -214,14 +216,14 @@ recursion, and caches are invalidated when the definition or source changes.
 
 Views are shown in Overview, Data, and Analysis, and they can be used in Data
 Roles, Data Browsing, Visualization and Trends, and Descriptive Analysis.
-Visualization queries operate on the full transformed relation. Descriptive
-Analysis for a Data View currently uses its explicitly bounded preview range and
-must not be interpreted as a full-view profile.
+Visualization and Descriptive Analysis query the full transformed relation and
+return bounded aggregates or chart payloads. A bounded browser preview is never
+reported as a full-view profile.
 
 When possible, data roles are inherited from the source dataset for columns that
 survive in the view.
 
-### Pipelines: Data, Feature Engineering, Training, and Test Scoring
+### Pipelines: Data, Feature Engineering, AutoML, Training, and Scoring
 
 Versioned high-level workflows can execute Data Engineering followed by Feature
 Engineering. DE performs full-row DuckDB transformations and passes its Parquet
@@ -234,24 +236,35 @@ plus a separate engine-neutral `feature_transform` artifact. Every high-level
 step has its own auditable StepRun. See
 [`docs/feature-engineering-stage-1.md`](docs/feature-engineering-stage-1.md).
 
-Training and Test Scoring complete the first executable ML path. Controlled
-incremental estimators consume every declared training row in bounded batches,
-create immutable model and metrics artifacts, and score an explicitly wired
-test dataset to a lineage-backed Parquet prediction dataset. No deployment or
-online endpoint is created. See
-[`docs/model-training-scoring-stage-1.md`](docs/model-training-scoring-stage-1.md).
+Training and AutoML are executable alternatives. AutoML jointly searches a
+bounded, model-aware path of numeric preparation, target-guided feature
+selection, categorical encoding, estimator family, and hyperparameters. Learned
+transformations are fitted only on training or fold-training rows. The current
+tabular scope covers binary classification, multiclass classification, and
+regression; clustering and time-series AutoML remain separate future scopes.
+
+Successful Training and AutoML runs create immutable model, metrics, fitted FE,
+Feature Manifest, and `training_evaluation_report` artifacts. Model metrics use
+the complete evaluation scope; SHAP and permutation importance use a separately
+reported bounded explanation sample and are generated only for the final
+winner. Test Scoring writes an explicitly wired, lineage-backed Parquet
+prediction dataset. See
+[`docs/model-training-scoring-stage-1.md`](docs/model-training-scoring-stage-1.md)
+and [`docs/automl-autofe-stage-1.md`](docs/automl-autofe-stage-1.md).
 
 Deleted datasets and views remain visible in the Data workspace deletion history
 but are excluded from Overview metrics, Recent assets, and Analysis selectors.
 
-### Prototype ML, Serving, Sharing, and Export
+### Model Registry, prototype Serving, Sharing, and Export
 
-The Models, Serving, and Share tabs expose the intended API and UI contracts,
-but they are scaffolding rather than production workflows:
+The Models workspace consumes real immutable artifacts produced by Training and
+AutoML pipeline runs, including versions, metrics and lineage. The legacy
+standalone training form and the Serving, Share, and Export paths remain
+provisional:
 
-- the legacy standalone training form still creates prototype metadata; real
-  fitting and artifact registration run through pipeline Training and Test
-  Scoring steps,
+- the legacy standalone training form creates prototype metadata; real fitting,
+  report generation and artifact registration run through Training/AutoML and
+  Scoring pipeline steps,
 - deployment requests create in-memory metadata but do not start a runtime,
 - online scoring returns placeholder `0.0` predictions,
 - sharing grants, batch-score jobs, and export jobs are metadata-only and are
@@ -288,7 +301,11 @@ Use these files for manual testing:
 
 - `examples/data/iris.csv`
 - `examples/data/general-example.csv`
+- `examples/data/general-churn-batch-scoring-10k.csv`
+- `examples/data/general-churn-batch-scoring-10k-actuals.csv`
 - `examples/data/regression-example.csv`
+- `examples/data/estates-sale-prices-batch-scoring-100k.parquet`
+- `examples/data/estates-sale-prices-batch-scoring-100k-actuals.parquet`
 - `examples/data/dynamic-reactor-timeseries.csv`
 - `examples/data/equipment-operating-regimes.csv`
 
@@ -296,8 +313,18 @@ Use these files for manual testing:
 mixed numeric and categorical columns, useful for testing filtering, grouping,
 aggregation, sorting, Custom SQL, and Data Views.
 
+The two `general-churn-batch-scoring` files form an out-of-time scoring cohort
+without the target and a separately held actuals delivery joined by `customer_id`.
+Their business context, controlled drift, and limitations are documented in
+`docs/synthetic-ml-scenarios.md`.
+
 `regression-example.csv` contains 10,000 synthetic real-estate transaction rows
 for a regression task where the target is `sale_price_pln`.
+
+The two `estates-sale-prices-batch-scoring` Parquet files provide a 100,000-row
+out-of-time scoring cohort and delayed sale-price actuals for the `Estates Sell
+Prices` Business Case. Their contract and generation assumptions are documented
+in `docs/synthetic-ml-scenarios.md`.
 
 `dynamic-reactor-timeseries.csv` is a dynamic, delayed thermal-process forecasting
 case. `equipment-operating-regimes.csv` is an unlabeled machine-telemetry clustering
@@ -348,11 +375,15 @@ separate from the placeholder deployment records in the application UI.
 
 ## Documentation
 
+- [Documentation map](docs/README.md)
 - [Architecture](docs/architecture.md)
 - [Development notes](docs/development.md)
 - [Analysis and Data Browser reference](docs/analysis-data-browser-reference.md)
 - [Descriptive profiling performance](docs/descriptive-profiling-performance.md)
-- [Feature Engineering Stage 1](docs/feature-engineering-stage-1.md)
+- [Feature Engineering contract](docs/feature-engineering-stage-1.md)
+- [AutoML + AutoFE current implementation](docs/automl-autofe-stage-1.md)
+- [Model Training workbench](docs/model-training-workbench.md)
+- [Model Training and Test Scoring](docs/model-training-scoring-stage-1.md)
 
 ## Git Notes
 

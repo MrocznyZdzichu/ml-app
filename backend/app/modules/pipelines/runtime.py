@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import duckdb
@@ -47,10 +48,18 @@ def safe_filename(value: str) -> str:
 
 
 def json_safe(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [json_safe(item) for item in value]
     if isinstance(value, Decimal):
         return float(value)
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     if isinstance(value, bytes):
         return value.hex()
+    if hasattr(value, "tolist"):
+        return json_safe(value.tolist())
+    if hasattr(value, "item"):
+        return json_safe(value.item())
     return value

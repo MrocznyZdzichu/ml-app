@@ -102,6 +102,7 @@ class PipelineRunCreate(BaseModel):
     trigger_type: PipelineRunTrigger = PipelineRunTrigger.MANUAL
     runtime_parameters: dict[str, Any] = Field(default_factory=dict)
     input_versions: dict[str, str] = Field(default_factory=dict)
+    model_versions: dict[str, str] = Field(default_factory=dict)
     is_dry_run: bool = False
     step_id: str | None = Field(default=None, min_length=1, max_length=128)
 
@@ -131,10 +132,32 @@ class PipelineRunRead(BaseModel):
     output_row_count: int | None
     rejected_row_count: int | None
     warnings: list[str]
+    events: list[dict[str, Any]]
     output_artifact_ids: list[str]
     output_manifest: list[dict[str, Any]]
     error_message: str
     created_by: str
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class PipelineRunSummaryRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    pipeline_id: str
+    pipeline_version_id: str
+    business_case_id: str
+    status: PipelineRunStatus
+    trigger_type: PipelineRunTrigger
+    is_dry_run: bool
+    requested_step_id: str
+    input_row_count: int | None
+    processed_row_count: int | None
+    output_row_count: int | None
+    rejected_row_count: int | None
+    error_message: str
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
@@ -162,6 +185,7 @@ class PipelineStepRunRead(BaseModel):
     processed_row_count: int | None
     output_row_count: int | None
     warnings: list[str]
+    events: list[dict[str, Any]]
     output_manifest: list[dict[str, Any]]
     error_message: str
     started_at: datetime | None

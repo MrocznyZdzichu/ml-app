@@ -57,6 +57,9 @@ class CsvDatasetInputAdapter:
                 metadata={
                     "dataset_id": asset.id,
                     "feature_manifest": list(asset.metadata.get("feature_manifest") or []),
+                    "split_evaluation": dict(asset.metadata.get("split_evaluation") or {}),
+                    "fitted_transform_count": int(asset.metadata.get("fitted_transform_count") or 0),
+                    "feature_recipe_hash": str(asset.metadata.get("feature_recipe_hash") or ""),
                     "score_contract": dict(asset.metadata.get("score_contract") or {}),
                     "model_artifact_id": str(asset.metadata.get("model_artifact_id") or ""),
                 },
@@ -73,6 +76,9 @@ class CsvDatasetInputAdapter:
             metadata={
                 "dataset_id": asset.id,
                 "feature_manifest": list(asset.metadata.get("feature_manifest") or []),
+                "split_evaluation": dict(asset.metadata.get("split_evaluation") or {}),
+                "fitted_transform_count": int(asset.metadata.get("fitted_transform_count") or 0),
+                "feature_recipe_hash": str(asset.metadata.get("feature_recipe_hash") or ""),
                 "score_contract": dict(asset.metadata.get("score_contract") or {}),
                 "model_artifact_id": str(asset.metadata.get("model_artifact_id") or ""),
             },

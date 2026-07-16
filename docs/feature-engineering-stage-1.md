@@ -1,4 +1,4 @@
-# Feature Engineering — Stage 1 contract
+# Feature Engineering contract
 
 The first Feature Engineering increment adds a second executable high-level
 pipeline step. A workflow may contain Data Engineering followed by Feature
@@ -42,10 +42,11 @@ Optional cross-validation adds `__mlapp_cv_fold` to the training output.
 Supported plans are K-fold, stratified K-fold, group folds, and ordered time
 folds. Fold counts and row counts are persisted for audit. This is a **fold
 plan**, not model evaluation: no estimator is trained in Feature Engineering.
-The future Training step must join the plan to the prepared input and fit a
-fresh copy of the FE recipe inside each fold. Using one preprocessing state
-fitted on the whole training partition to report CV metrics would leak
-information between folds.
+Training joins the plan to the prepared input and fits a fresh preprocessing
+state inside each fold. Reusing one state fitted on the whole training partition
+would leak information between folds. Integrated AutoFE performs this fold-local
+replay for generated recipes; manually authored FE requires an explicit holdout
+unless it enters through an equivalent fold-local contract.
 
 ## Supported operations
 
@@ -74,10 +75,14 @@ on the bounded feature-by-feature covariance matrix. A block accepts at most
 in recipe order. Means, components, explained variance, and optional whitening
 state are stored in the fitted transform artifact.
 
-The current increment deliberately excludes target encoding, WoE, supervised
-feature selection, arbitrary Python, embeddings, historical windows, and
-point-in-time joins. Those require cross-fitting, entity/event-time contracts,
-or a separate resource and security model.
+The manually authored Stage 1 FE block deliberately excludes target encoding,
+WoE, supervised feature selection, arbitrary Python, embeddings, historical
+windows, and point-in-time joins. Integrated AutoFE now provides a separate,
+bounded fold-local implementation of cross-fitted target mean, ordered target
+encoding, supervised selection, and correlation pruning. Those target-aware
+operations are generated and executed only through the AutoFE experiment
+contract; they are not yet exposed as unrestricted manual FE blocks. See
+`automl-autofe-stage-1.md`.
 
 ## Fit and transform modes
 
@@ -131,8 +136,10 @@ relations, intermediate DE output is passed to FE as Parquet, and no full table
 crosses the API or browser boundary. Fitted statistics are aggregate queries
 over all training rows.
 
-Actual estimator fitting and fold-metric aggregation are not implemented yet.
-A feature dataset fitted once on all training rows is appropriate for an
-explicit holdout workflow and final model fit, but must not be used to report
-fold-based metrics as though preprocessing had been fitted independently in
-each fold.
+Estimator fitting and fold-metric aggregation are implemented by the Training
+and AutoML execution engines, not by this standalone FE block. A manually
+authored feature dataset fitted once on all training rows remains appropriate
+for an explicit holdout workflow and final model fit, but must not be used to
+report fold-based metrics as though preprocessing had been fitted independently
+in each fold. Integrated AutoFE solves this for its generated recipes by fitting
+the complete recipe independently inside every raw-data fold.

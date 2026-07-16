@@ -5,37 +5,181 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import duckdb
 import joblib
 import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sklearn.linear_model import (
-    Perceptron,
-    SGDClassifier,
-    SGDRegressor,
-)
 
 from app.modules.pipelines.model_evaluation import ModelEvaluationSnapshotBuilder
+from app.modules.pipelines.model_training import (
+    ModelOptimizationEngine,
+    OptimizationScoreCallback,
+    OptimizationMode,
+    ValidationStrategy,
+)
+from app.modules.pipelines.modeling_catalog import (
+    ProblemType,
+    algorithm_spec,
+    build_estimator,
+    validate_algorithm_parameters,
+)
 from app.modules.pipelines.runtime import SourceRelation, json_safe, safe_filename, sql_literal
+from app.modules.pipelines.reports import TrainingReportBuilder
 from app.shared.duckdb_runtime import configured_duckdb_connection, write_parquet_atomic
 from app.shared.sql_security import identifier
+
+
+class OptimizationDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: OptimizationMode = "single"
+    validation_strategy: ValidationStrategy = "auto"
+    primary_metric: str = Field(default="auto", min_length=1, max_length=100)
+    cv_folds: int = Field(default=5, ge=2, le=20)
+    max_trials: int = Field(default=30, ge=1, le=100_000)
+    timeout_seconds: int = Field(default=3600, ge=10, le=604_800)
+    candidate_algorithms: list[str] = Field(default_factory=list, max_length=100)
+    search_space: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_candidates(self) -> "OptimizationDefinition":
+        if len(self.candidate_algorithms) != len(set(self.candidate_algorithms)):
+            raise ValueError("AutoML candidate algorithms must be unique")
+        if self.mode != "grid_search" and self.max_trials > 1000:
+            raise ValueError(
+                "Random search, Optuna and AutoML are limited to 1000 trials; "
+                "only grid search can evaluate up to 100000 deterministic combinations"
+            )
+        return self
+
+
+class TrainingResourceLimits(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_memory_mb: int = Field(default=2048, ge=128, le=262_144)
+    max_parallel_jobs: int = Field(default=1, ge=1, le=64)
+
+
+class AutoFeatureEngineeringDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    strategy: Literal["balanced"] = "balanced"
+    joint_search_enabled: bool = True
+    max_recipe_candidates: int = Field(default=3, ge=1, le=24)
+    row_id_column: str = Field(default="", max_length=255)
+    excluded_columns: list[str] = Field(default_factory=list, max_length=500)
+    validation_size: float = Field(default=0.2, gt=0, lt=0.5)
+    numeric_scaling: Literal["none", "standard", "minmax", "robust"] = "standard"
+    add_missing_indicators: bool = True
+    include_datetime_features: bool = True
+    detect_identifier_columns: bool = True
+    min_category_frequency: int = Field(default=2, ge=1, le=1_000_000)
+    max_one_hot_categories: int = Field(default=32, ge=2, le=500)
+    max_frequency_categories: int = Field(default=500, ge=2, le=500)
+    # Kept disabled for definitions created before this field existed; new UI drafts
+    # opt in explicitly so published versions retain their historical search space.
+    numeric_feature_search: bool = False
+    # V2 expands transformations into independently scored candidates. It is
+    # opt-in so already published definitions preserve their historical space.
+    numeric_recipe_search_v2: bool = False
+    numeric_scaling_search: bool = False
+    numeric_scaling_candidates: list[
+        Literal["none", "standard", "minmax", "robust"]
+    ] = Field(default_factory=lambda: ["standard", "robust", "minmax", "none"])
+    # Kept opt-in at the backend contract so published definitions retain the
+    # historical flat allocation. New UI drafts explicitly enable it.
+    two_phase_search_enabled: bool = False
+    exploration_trials_per_recipe: int = Field(default=1, ge=1, le=10)
+    exploration_time_fraction: float = Field(default=0.35, ge=0.1, le=0.8)
+    promotion_top_k: int = Field(default=3, ge=1, le=12)
+    winsorization_lower_quantile: float = Field(default=0.01, ge=0, lt=0.5)
+    winsorization_upper_quantile: float = Field(default=0.99, gt=0.5, le=1)
+    signed_log_features: bool = True
+    low_variance_selection: bool = True
+    variance_threshold: float = Field(default=0.0, ge=0)
+    # Planner v2 is opt-in in the backend contract so immutable historical
+    # pipeline definitions retain their original recipe space. New UI drafts
+    # enable it explicitly.
+    profile_aware_generation: bool = False
+    distribution_transformations: bool = True
+    numeric_interactions: bool = True
+    interaction_operators: list[
+        Literal["multiply", "divide", "subtract"]
+    ] = Field(default_factory=lambda: ["multiply", "divide"])
+    max_generated_features: int = Field(default=64, ge=0, le=500)
+    max_interaction_features: int = Field(default=12, ge=0, le=100)
+    skewness_threshold: float = Field(default=1.0, ge=0.25, le=10)
+    # Planner v3: immutable historical definitions remain unchanged; new UI
+    # drafts opt in explicitly.
+    supervised_feature_selection: bool = False
+    feature_selection_methods: list[
+        Literal["mutual_information", "f_test", "chi_square", "l1", "importance"]
+    ] = Field(default_factory=lambda: ["mutual_information", "l1", "importance"])
+    feature_selection_profiles: list[
+        Literal["compact", "balanced", "wide"]
+    ] = Field(default_factory=lambda: ["compact", "balanced", "wide"])
+    feature_redundancy_threshold: float = Field(default=0.98, gt=0, le=1)
+    # Planner v4: bounded categorical strategies. Native categorical execution
+    # is advertised only when an estimator adapter can consume it directly.
+    categorical_recipe_search: bool = False
+    categorical_encoding_candidates: list[
+        Literal["one_hot_frequency", "hashing", "target_mean", "ordered_target", "native"]
+    ] = Field(default_factory=lambda: [
+        "one_hot_frequency", "hashing", "target_mean", "ordered_target", "native",
+    ])
+    categorical_hash_bins: int = Field(default=32, ge=2, le=256)
+    target_encoding_smoothing: float = Field(default=10.0, ge=0, le=10_000)
+    target_encoding_folds: int = Field(default=5, ge=2, le=20)
+
+    @model_validator(mode="after")
+    def validate_columns_and_bounds(self) -> "AutoFeatureEngineeringDefinition":
+        if len(self.excluded_columns) != len(set(self.excluded_columns)):
+            raise ValueError("AutoFE excluded columns must be unique")
+        if self.max_frequency_categories < self.max_one_hot_categories:
+            raise ValueError(
+                "AutoFE max_frequency_categories cannot be lower than max_one_hot_categories"
+            )
+        if self.winsorization_lower_quantile >= self.winsorization_upper_quantile:
+            raise ValueError(
+                "AutoFE winsorization lower quantile must be below the upper quantile"
+            )
+        if not self.numeric_scaling_candidates:
+            raise ValueError("AutoFE numeric scaling search requires at least one candidate")
+        if len(self.numeric_scaling_candidates) != len(set(self.numeric_scaling_candidates)):
+            raise ValueError("AutoFE numeric scaling candidates must be unique")
+        if self.numeric_interactions and not self.interaction_operators:
+            raise ValueError("AutoFE numeric interactions require at least one operator")
+        if len(self.interaction_operators) != len(set(self.interaction_operators)):
+            raise ValueError("AutoFE interaction operators must be unique")
+        if self.max_interaction_features > self.max_generated_features:
+            raise ValueError(
+                "AutoFE max_interaction_features cannot exceed max_generated_features"
+            )
+        if not self.feature_selection_methods:
+            raise ValueError("Planner v3 requires at least one feature-selection method")
+        if len(self.feature_selection_methods) != len(set(self.feature_selection_methods)):
+            raise ValueError("Planner v3 feature-selection methods must be unique")
+        if not self.feature_selection_profiles:
+            raise ValueError("Planner v3 requires at least one selection profile")
+        if len(self.feature_selection_profiles) != len(set(self.feature_selection_profiles)):
+            raise ValueError("Planner v3 selection profiles must be unique")
+        if not self.categorical_encoding_candidates:
+            raise ValueError("Planner v4 requires at least one categorical encoding candidate")
+        if len(self.categorical_encoding_candidates) != len(set(self.categorical_encoding_candidates)):
+            raise ValueError("Planner v4 categorical candidates must be unique")
+        return self
 
 
 class TrainingDefinition(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     contract_version: Literal["1.0"] = "1.0"
-    problem_type: Literal["binary_classification", "multiclass_classification", "regression"]
-    algorithm: Literal[
-        "sgd_classifier",
-        "passive_aggressive_classifier",
-        "perceptron_classifier",
-        "sgd_regressor",
-        "passive_aggressive_regressor",
-    ]
+    problem_type: ProblemType
+    algorithm: str = Field(min_length=1, max_length=100)
     target_column: str = Field(default="", max_length=255)
     feature_columns: list[str] = Field(default_factory=list, max_length=500)
     feature_selection: Literal["upstream_contract", "explicit"] = "upstream_contract"
@@ -47,60 +191,54 @@ class TrainingDefinition(BaseModel):
     batch_size: int = Field(default=10_000, ge=100, le=100_000)
     random_seed: int = 42
     parameters: dict[str, Any] = Field(default_factory=dict)
+    optimization: OptimizationDefinition = Field(default_factory=OptimizationDefinition)
+    resource_limits: TrainingResourceLimits = Field(default_factory=TrainingResourceLimits)
+    auto_feature_engineering: AutoFeatureEngineeringDefinition = Field(
+        default_factory=AutoFeatureEngineeringDefinition
+    )
 
     @model_validator(mode="after")
     def validate_algorithm(self) -> TrainingDefinition:
-        regression_algorithms = {"sgd_regressor", "passive_aggressive_regressor"}
-        classification_algorithms = {
-            "sgd_classifier",
-            "passive_aggressive_classifier",
-            "perceptron_classifier",
-        }
-        if self.problem_type == "regression" and self.algorithm not in regression_algorithms:
-            raise ValueError("Regression requires a regression algorithm")
-        if self.problem_type != "regression" and self.algorithm not in classification_algorithms:
-            raise ValueError("Classification requires a classification algorithm")
+        spec = algorithm_spec(self.algorithm)
+        validate_algorithm_parameters(
+            self.algorithm,
+            self.problem_type,
+            self.parameters,
+        )
         if len(self.feature_columns) != len(set(self.feature_columns)):
             raise ValueError("Training feature columns must be unique")
         if self.target_column in self.feature_columns:
             raise ValueError("The target column cannot also be a feature")
-        allowed_by_algorithm = {
-            "sgd_classifier": {"alpha", "penalty", "l1_ratio", "learning_rate", "eta0", "fit_intercept"},
-            "sgd_regressor": {"alpha", "penalty", "l1_ratio", "learning_rate", "eta0", "fit_intercept"},
-            "passive_aggressive_classifier": {"C", "loss", "average", "fit_intercept"},
-            "passive_aggressive_regressor": {"C", "epsilon", "loss", "average", "fit_intercept"},
-            "perceptron_classifier": {"alpha", "penalty", "eta0", "fit_intercept"},
-        }
-        allowed = allowed_by_algorithm[self.algorithm]
-        unsupported = set(self.parameters) - allowed
-        if unsupported:
-            raise ValueError(f"Unsupported training parameters: {', '.join(sorted(unsupported))}")
-        if self.parameters.get("penalty") not in {None, "l1", "l2", "elasticnet"}:
-            raise ValueError("Penalty must be none, l1, l2 or elasticnet")
-        if self.algorithm == "passive_aggressive_classifier" and self.parameters.get("loss", "hinge") not in {
-            "hinge", "squared_hinge"
-        }:
-            raise ValueError("Passive-Aggressive classifier loss must be hinge or squared_hinge")
-        if self.algorithm == "passive_aggressive_regressor" and self.parameters.get(
-            "loss", "epsilon_insensitive"
-        ) not in {"epsilon_insensitive", "squared_epsilon_insensitive"}:
-            raise ValueError("Passive-Aggressive regressor loss is invalid")
-        if self.algorithm in {"sgd_classifier", "sgd_regressor"} and self.parameters.get(
-            "learning_rate", "optimal"
-        ) not in {"optimal", "constant", "invscaling", "adaptive"}:
-            raise ValueError("SGD learning_rate is invalid")
-        for positive_key in {"C", "eta0"} & set(self.parameters):
-            if float(self.parameters[positive_key]) <= 0:
-                raise ValueError(f"{positive_key} must be greater than zero")
-        for non_negative_key in {"alpha", "epsilon", "l1_ratio"} & set(self.parameters):
-            if float(self.parameters[non_negative_key]) < 0:
-                raise ValueError(f"{non_negative_key} cannot be negative")
+        if self.early_stopping and spec.execution_mode != "incremental":
+            raise ValueError(
+                "Step-level early stopping is available for incremental estimators; "
+                "use the selected estimator's own early-stopping parameter otherwise"
+            )
+        if self.early_stopping and self.optimization.mode != "single":
+            raise ValueError(
+                "Step-level early stopping cannot be combined with hyperparameter optimization"
+            )
+        if self.optimization.mode == "automl":
+            for candidate in self.optimization.candidate_algorithms:
+                candidate_spec = algorithm_spec(candidate)
+                if self.problem_type not in candidate_spec.problem_types:
+                    raise ValueError(
+                        f"AutoML candidate '{candidate}' does not support "
+                        f"{self.problem_type}"
+                    )
+        if self.auto_feature_engineering.enabled and self.optimization.mode != "automl":
+            raise ValueError("AutoFE can currently be enabled only for AutoML optimization")
+        if (
+            self.auto_feature_engineering.row_id_column
+            and self.auto_feature_engineering.row_id_column == self.target_column
+        ):
+            raise ValueError("AutoFE row ID column cannot be the target column")
         return self
 
     def validate_executable(self) -> None:
         if not self.target_column:
             raise ValueError("Training requires a target column")
-        if not self.feature_columns:
+        if not self.feature_columns and not self.auto_feature_engineering.enabled:
             raise ValueError("Training requires at least one model feature")
 
 
@@ -158,15 +296,30 @@ class SklearnTrainingEngine:
         run_id: str,
         owner_id: str,
         is_dry_run: bool,
+        emit_event: Callable[[str, dict[str, Any]], None] | None = None,
+        is_cancel_requested: Callable[[], bool] | None = None,
+        optimization_score_callback: OptimizationScoreCallback | None = None,
+        create_training_report: bool = True,
+        study_only: bool = False,
     ) -> ModelingResult:
         directory = self._run_directory(owner_id, run_id)
         connection = configured_duckdb_connection(directory / ".training-duckdb")
         try:
             self._validate_columns(connection, training, definition)
             row_count = self._count(connection, training)
+            if emit_event:
+                emit_event(
+                    "training.matrix_preflight",
+                    {
+                        "message": "Training data preflight completed",
+                        "row_count": row_count,
+                        "feature_count": len(definition.feature_columns),
+                        "algorithm": definition.algorithm,
+                        "optimization_mode": definition.optimization.mode,
+                    },
+                )
             if row_count < 2:
                 raise ValueError("Training requires at least two rows")
-            estimator = self._estimator(definition)
             classes: np.ndarray | None = None
             if definition.problem_type != "regression":
                 class_rows = connection.execute(
@@ -180,64 +333,288 @@ class SklearnTrainingEngine:
                     raise ValueError("Classification target has more than 1000 classes")
                 classes = np.asarray([row[0] for row in class_rows])
 
-            selection = [*definition.feature_columns, definition.target_column]
-            query = f"SELECT {', '.join(identifier(item) for item in selection)} FROM {training.sql}"
-            best_estimator = None
-            best_score: float | None = None
-            best_epoch: int | None = None
-            epochs_without_improvement = 0
-            validation_history: list[dict[str, Any]] = []
-            actual_epochs = 0
+            spec = algorithm_spec(definition.algorithm)
+            optimization_summary: dict[str, Any]
+            actual_epochs = 1
             stopped_early = False
-            for epoch in range(definition.epochs):
-                cursor = connection.execute(query)
-                first_batch = True
-                while frame := cursor.fetchmany(definition.batch_size):
-                    values = np.asarray(frame, dtype=object)
-                    x = values[:, :-1].astype(np.float64)
-                    y = values[:, -1]
-                    if not np.isfinite(x).all():
-                        raise ValueError("Training features contain null, NaN or infinite values")
-                    if any(value is None for value in y):
-                        raise ValueError("Training target contains null values")
-                    if definition.problem_type == "regression":
-                        estimator.partial_fit(x, y.astype(np.float64))
-                    else:
-                        estimator.partial_fit(x, y, classes=classes if first_batch else None)
-                    first_batch = False
-                actual_epochs = epoch + 1
-                if definition.early_stopping:
-                    if validation is None:
-                        raise ValueError("Early stopping requires an explicit validation input")
-                    epoch_metrics = self._evaluate(connection, estimator, validation, definition)
-                    validation_history.append({"epoch": actual_epochs, **epoch_metrics})
-                    score = float(
-                        epoch_metrics["rmse"]
-                        if definition.problem_type == "regression"
-                        else epoch_metrics["accuracy"]
+            best_epoch: int | None = None
+            validation_history: list[dict[str, Any]] = []
+            warnings: list[str] = []
+            if (
+                spec.execution_mode == "incremental"
+                and definition.optimization.mode == "single"
+            ):
+                incremental_parameters, parameter_resolution = (
+                    self._resolve_incremental_parameters(
+                        connection,
+                        definition,
+                        training,
                     )
-                    improved = (
-                        best_score is None
+                )
+                (
+                    estimator,
+                    actual_epochs,
+                    stopped_early,
+                    best_epoch,
+                    validation_history,
+                ) = self._fit_incremental(
+                    connection,
+                    definition,
+                    training,
+                    validation,
+                    classes,
+                    parameters=incremental_parameters,
+                )
+                processed_row_count = row_count * actual_epochs
+                resolved_algorithm = definition.algorithm
+                resolved_parameters = incremental_parameters
+                optimization_summary = {
+                    "mode": "single",
+                    "primary_metric": (
+                        "rmse"
+                        if definition.problem_type == "regression"
+                        else "accuracy"
+                    ),
+                    "validation_strategy": (
+                        "holdout" if validation is not None else "training"
+                    ),
+                    "trial_count": 1,
+                    "successful_trial_count": 1,
+                    "failed_trial_count": 0,
+                    "best_score": None,
+                    "best_algorithm": resolved_algorithm,
+                    "best_parameters": resolved_parameters,
+                    "parameter_resolution": parameter_resolution,
+                    "trials": [],
+                }
+                if parameter_resolution:
+                    warnings.append(
+                        "Resolved class_weight='balanced' from exact full-training-scope "
+                        "class counts for incremental partial_fit execution"
+                    )
+            else:
+                uses_cross_validation = (
+                    definition.optimization.mode != "single"
+                    and (
+                        definition.optimization.validation_strategy
+                        == "cross_validation"
                         or (
-                            score < best_score - definition.early_stopping_min_delta
-                            if definition.problem_type == "regression"
-                            else score > best_score + definition.early_stopping_min_delta
+                            definition.optimization.validation_strategy == "auto"
+                            and validation is None
                         )
                     )
-                    if improved:
-                        best_score = score
-                        best_epoch = actual_epochs
-                        best_estimator = deepcopy(estimator)
-                        epochs_without_improvement = 0
-                    else:
-                        epochs_without_improvement += 1
-                        if epochs_without_improvement >= definition.early_stopping_patience:
-                            stopped_early = True
-                            break
-
-            if best_estimator is not None:
-                estimator = best_estimator
+                )
+                fitted_transform_count = int(
+                    training.metadata.get("fitted_transform_count") or 0
+                )
+                if (
+                    uses_cross_validation
+                    and fitted_transform_count
+                    and optimization_score_callback is None
+                ):
+                    raise ValueError(
+                        "Leakage-safe cross-validation cannot reuse Feature Engineering "
+                        f"state fitted on the complete training partition "
+                        f"({fitted_transform_count} fitted transformation(s) detected). "
+                        "Provide an explicit validation output for holdout optimization "
+                        "or remove fitted FE transformations. Data was not sampled and "
+                        "no potentially leaked CV score was produced."
+                    )
+                cv_fold_column = next(
+                    (
+                        str(item.get("name"))
+                        for item in training.metadata.get("feature_manifest", [])
+                        if item.get("role") == "cv_fold" and item.get("name")
+                    ),
+                    "",
+                )
+                cv_fold_assignments = (
+                    self._load_cv_fold_assignments(
+                        connection,
+                        training,
+                        cv_fold_column,
+                        row_count,
+                    )
+                    if uses_cross_validation and cv_fold_column
+                    else None
+                )
+                split_evaluation = (
+                    training.metadata.get("split_evaluation")
+                    if isinstance(training.metadata.get("split_evaluation"), dict)
+                    else {}
+                )
+                cross_validation_metadata = (
+                    split_evaluation.get("cross_validation")
+                    if isinstance(split_evaluation.get("cross_validation"), dict)
+                    else {}
+                )
+                cv_strategy = str(
+                    cross_validation_metadata.get("strategy") or ""
+                )
+                validation_rows = (
+                    self._count(connection, validation)
+                    if validation is not None
+                    else 0
+                )
+                needs_validation_matrix = (
+                    definition.optimization.mode != "single"
+                    and validation is not None
+                    and definition.optimization.validation_strategy
+                    in {"auto", "holdout"}
+                )
+                preflight_rows = (
+                    row_count + validation_rows
+                    if needs_validation_matrix
+                    else row_count
+                )
+                self._enforce_memory_budget(
+                    self._preflight_memory_bytes(
+                        preflight_rows,
+                        len(definition.feature_columns),
+                    ),
+                    definition.resource_limits.max_memory_mb,
+                    preflight_rows,
+                    len(definition.feature_columns),
+                )
+                callback_only_study = (
+                    study_only and optimization_score_callback is not None
+                )
+                if callback_only_study:
+                    x_train = np.empty((0, len(definition.feature_columns)))
+                    y_train = np.empty((0,))
+                    estimated_bytes = 0
+                else:
+                    x_train, y_train, estimated_bytes = self._load_matrix(
+                        connection,
+                        training,
+                        definition,
+                        row_count=row_count,
+                    )
+                if emit_event:
+                    emit_event(
+                        "training.matrix_loaded",
+                        {
+                            "message": "Training matrix loaded into worker memory",
+                            "row_count": 0 if callback_only_study else row_count,
+                            "feature_count": len(definition.feature_columns),
+                            "estimated_bytes": estimated_bytes,
+                            "memory_budget_mb": definition.resource_limits.max_memory_mb,
+                            "study_only": callback_only_study,
+                        },
+                    )
+                x_validation: np.ndarray | None = None
+                y_validation: np.ndarray | None = None
+                if needs_validation_matrix and validation is not None:
+                    (
+                        x_validation,
+                        y_validation,
+                        validation_estimated_bytes,
+                    ) = self._load_matrix(
+                        connection,
+                        validation,
+                        definition,
+                        row_count=validation_rows,
+                    )
+                    estimated_bytes += validation_estimated_bytes
+                self._enforce_memory_budget(
+                    estimated_bytes,
+                    definition.resource_limits.max_memory_mb,
+                    (
+                        row_count + validation_rows
+                        if needs_validation_matrix
+                        else row_count
+                    ),
+                    len(definition.feature_columns),
+                )
+                fit_result = ModelOptimizationEngine().fit(
+                    algorithm=definition.algorithm,
+                    problem_type=definition.problem_type,
+                    parameters=definition.parameters,
+                    random_seed=definition.random_seed,
+                    epochs=definition.epochs,
+                    x_train=x_train,
+                    y_train=y_train,
+                    x_validation=x_validation,
+                    y_validation=y_validation,
+                    mode=definition.optimization.mode,
+                    validation_strategy=definition.optimization.validation_strategy,
+                    primary_metric=definition.optimization.primary_metric,
+                    cv_folds=definition.optimization.cv_folds,
+                    max_trials=definition.optimization.max_trials,
+                    timeout_seconds=definition.optimization.timeout_seconds,
+                    max_parallel_jobs=definition.resource_limits.max_parallel_jobs,
+                    candidate_algorithms=(
+                        definition.optimization.candidate_algorithms
+                    ),
+                    search_space=definition.optimization.search_space,
+                    cv_fold_assignments=cv_fold_assignments,
+                    cv_strategy=cv_strategy,
+                    emit_event=emit_event,
+                    is_cancel_requested=is_cancel_requested,
+                    score_callback=optimization_score_callback,
+                    refit_best_model=not study_only,
+                )
+                estimator = fit_result.estimator
+                processed_row_count = fit_result.processed_row_count
+                resolved_algorithm = fit_result.algorithm
+                resolved_parameters = fit_result.parameters
+                optimization_summary = fit_result.optimization_summary
+                if study_only:
+                    metrics = {"optimization": optimization_summary}
+                    return ModelingResult(
+                        input_row_count=row_count,
+                        processed_row_count=processed_row_count,
+                        output_row_count=1,
+                        warnings=warnings,
+                        output_manifest=[{
+                            "output_id": "model",
+                            "artifact_type": "model_version",
+                            "materialization": "temporary",
+                            "algorithm": resolved_algorithm,
+                            "problem_type": definition.problem_type,
+                            "feature_columns": definition.feature_columns,
+                            "target_column": definition.target_column,
+                            "metrics": metrics,
+                            "training_config": {
+                                **definition.model_dump(mode="json"),
+                                "resolved_algorithm": resolved_algorithm,
+                                "resolved_parameters": json_safe(resolved_parameters),
+                            },
+                            "row_count": 1,
+                            "data_scope": "full",
+                            "is_dry_run": True,
+                            "study_only": True,
+                        }],
+                    )
+                warnings.append(
+                    "Full training matrix was materialized in worker memory "
+                    f"within the configured "
+                    f"{definition.resource_limits.max_memory_mb} MiB budget"
+                )
+                if resolved_algorithm != definition.algorithm:
+                    warnings.append(
+                        f"AutoML selected '{resolved_algorithm}' instead of the "
+                        f"initial '{definition.algorithm}' candidate"
+                    )
+                if cv_fold_assignments is not None:
+                    resolved_fold_count = len(np.unique(cv_fold_assignments))
+                    warnings.append(
+                        "Hyperparameter optimization used the auditable upstream "
+                        f"CV fold plan with {resolved_fold_count} folds"
+                    )
             metrics = self._evaluate(connection, estimator, validation or training, definition)
+            if emit_event:
+                emit_event(
+                    "training.evaluation_completed",
+                    {
+                        "message": "Model evaluation completed",
+                        "algorithm": resolved_algorithm,
+                        "processed_row_count": processed_row_count,
+                        "evaluated_row_count": metrics.get("evaluated_row_count"),
+                        "optimization_mode": optimization_summary.get("mode"),
+                        "best_score": optimization_summary.get("best_score"),
+                    },
+                )
             metrics.update({
                 "configured_max_epochs": definition.epochs,
                 "executed_epochs": actual_epochs,
@@ -247,17 +624,19 @@ class SklearnTrainingEngine:
                 "early_stopping_patience": definition.early_stopping_patience,
                 "early_stopping_min_delta": definition.early_stopping_min_delta,
                 "validation_history": validation_history,
+                "optimization": optimization_summary,
             })
             model_path = directory / f"{safe_filename(definition.model_name)}.joblib"
             bundle = {
                 "contract_version": "1.0",
                 "estimator": estimator,
                 "problem_type": definition.problem_type,
-                "algorithm": definition.algorithm,
+                "algorithm": resolved_algorithm,
                 "feature_columns": definition.feature_columns,
                 "target_column": definition.target_column,
                 "classes": classes.tolist() if classes is not None else [],
                 "definition": definition.model_dump(mode="json"),
+                "resolved_parameters": resolved_parameters,
             }
             joblib.dump(bundle, model_path, compress=3)
             model_hash = hashlib.sha256(model_path.read_bytes()).hexdigest()
@@ -266,23 +645,67 @@ class SklearnTrainingEngine:
                 json.dumps(metrics, sort_keys=True, ensure_ascii=True),
                 encoding="utf-8",
             )
-            training_config = definition.model_dump(mode="json")
+            training_config = {
+                **definition.model_dump(mode="json"),
+                "resolved_algorithm": resolved_algorithm,
+                "resolved_parameters": json_safe(resolved_parameters),
+            }
             model_parameters = self._model_parameter_summary(
                 estimator,
                 definition.feature_columns,
                 classes.tolist() if classes is not None else [],
             )
+            report_outputs: list[dict[str, Any]] = []
+            if create_training_report:
+                training_report = TrainingReportBuilder().build(
+                    connection,
+                    estimator,
+                    validation or training,
+                    feature_columns=definition.feature_columns,
+                    target_column=definition.target_column,
+                    problem_type=definition.problem_type,
+                    model_name=definition.model_name,
+                    algorithm=resolved_algorithm,
+                    metrics=metrics,
+                    model_parameters=model_parameters,
+                    random_seed=definition.random_seed,
+                )
+                report_path = directory / "training_report.json"
+                report_path.write_text(
+                    json.dumps(training_report, sort_keys=True, ensure_ascii=True),
+                    encoding="utf-8",
+                )
+                report_outputs.append({
+                    "output_id": "training_report",
+                    "artifact_type": "report",
+                    "report_type": "training_evaluation_report",
+                    "materialization": "temporary" if is_dry_run else "artifact",
+                    "location_uri": f"file://{report_path.as_posix()}",
+                    "report_name": training_report["name"],
+                    "report": training_report,
+                    "row_count": row_count,
+                    "data_scope": "full",
+                    "is_dry_run": is_dry_run,
+                    "internal_input_outputs": [
+                        {"input_port_id": "model", "output_id": "model"},
+                        {"input_port_id": "metrics", "output_id": "training_metrics"},
+                    ],
+                })
             return ModelingResult(
                 input_row_count=row_count,
-                processed_row_count=row_count * actual_epochs,
+                processed_row_count=processed_row_count,
                 output_row_count=1,
-                warnings=(
-                    [
+                warnings=[
+                    *warnings,
+                    *(
+                        [
                         f"Early stopping ended after {actual_epochs} epochs "
                         f"and restored validation-best epoch {best_epoch}"
-                    ]
-                    if stopped_early else []
-                ),
+                        ]
+                        if stopped_early
+                        else []
+                    ),
+                ],
                 output_manifest=[
                     {
                         "output_id": "model",
@@ -290,7 +713,7 @@ class SklearnTrainingEngine:
                         "materialization": "temporary" if is_dry_run else "artifact",
                         "location_uri": f"file://{model_path.as_posix()}",
                         "model_name": definition.model_name,
-                        "algorithm": definition.algorithm,
+                        "algorithm": resolved_algorithm,
                         "problem_type": definition.problem_type,
                         "feature_columns": definition.feature_columns,
                         "target_column": definition.target_column,
@@ -312,6 +735,7 @@ class SklearnTrainingEngine:
                         "data_scope": "full",
                         "is_dry_run": is_dry_run,
                     },
+                    *report_outputs,
                 ],
             )
         finally:
@@ -324,8 +748,9 @@ class SklearnTrainingEngine:
         classes: list[Any],
         limit: int = 2_000,
     ) -> dict[str, Any]:
-        """Return a bounded, JSON-safe view of fitted linear-model parameters."""
-        coefficients = np.asarray(getattr(estimator, "coef_", np.empty((0, 0))))
+        """Return a bounded, JSON-safe view of fitted model parameters."""
+        fitted = getattr(estimator, "estimator", estimator)
+        coefficients = np.asarray(getattr(fitted, "coef_", np.empty((0, 0))))
         if coefficients.ndim == 1:
             coefficients = coefficients.reshape(1, -1)
         weights: list[dict[str, Any]] = []
@@ -346,66 +771,293 @@ class SklearnTrainingEngine:
                 })
             if len(weights) >= limit:
                 break
-        intercept = np.asarray(getattr(estimator, "intercept_", np.empty(0))).reshape(-1)
+        intercept = np.asarray(getattr(fitted, "intercept_", np.empty(0))).reshape(-1)
+        raw_importance = np.asarray(
+            getattr(fitted, "feature_importances_", np.empty(0))
+        ).reshape(-1)
+        feature_importance = [
+            {
+                "feature": (
+                    feature_columns[index]
+                    if index < len(feature_columns)
+                    else f"feature_{index}"
+                ),
+                "importance": float(value),
+            }
+            for index, value in enumerate(raw_importance[:limit])
+        ]
         return {
             "weights": weights,
             "intercepts": [float(value) for value in intercept[:100]],
             "total_weight_count": total_weight_count,
             "returned_weight_count": len(weights),
             "truncated": total_weight_count > len(weights),
+            "feature_importance": feature_importance,
+            "total_feature_importance_count": int(raw_importance.size),
+            "fitted_iterations": json_safe(
+                getattr(
+                    fitted,
+                    "n_iter_",
+                    getattr(fitted, "tree_count_", None),
+                )
+            ),
         }
 
-    @staticmethod
-    def _estimator(definition: TrainingDefinition):
-        sgd_common = {
-            "random_state": definition.random_seed,
-            "alpha": float(definition.parameters.get("alpha", 0.0001)),
-            "penalty": str(definition.parameters.get("penalty", "l2")),
-            "learning_rate": str(definition.parameters.get("learning_rate", "optimal")),
-            "fit_intercept": bool(definition.parameters.get("fit_intercept", True)),
-        }
-        if "l1_ratio" in definition.parameters:
-            sgd_common["l1_ratio"] = float(definition.parameters["l1_ratio"])
-        if "eta0" in definition.parameters:
-            sgd_common["eta0"] = float(definition.parameters["eta0"])
-        if definition.algorithm == "sgd_regressor":
-            return SGDRegressor(**sgd_common)
-        if definition.algorithm == "sgd_classifier":
-            return SGDClassifier(loss="log_loss", **sgd_common)
-        if definition.algorithm == "perceptron_classifier":
-            return Perceptron(
-                random_state=definition.random_seed,
-                alpha=float(definition.parameters.get("alpha", 0.0001)),
-                penalty=definition.parameters.get("penalty"),
-                eta0=float(definition.parameters.get("eta0", 1.0)),
-                fit_intercept=bool(definition.parameters.get("fit_intercept", True)),
-            )
-        if definition.algorithm == "passive_aggressive_classifier":
-            return SGDClassifier(
-                random_state=definition.random_seed,
-                loss=str(definition.parameters.get("loss", "hinge")),
-                penalty=None,
-                learning_rate="pa1",
-                eta0=float(definition.parameters.get("C", 1.0)),
-                average=bool(definition.parameters.get("average", False)),
-                fit_intercept=bool(definition.parameters.get("fit_intercept", True)),
-            )
-        return SGDRegressor(
-            random_state=definition.random_seed,
-            penalty=None,
-            learning_rate="pa1",
-            eta0=float(definition.parameters.get("C", 1.0)),
-            epsilon=float(definition.parameters.get("epsilon", 0.1)),
-            loss=str(definition.parameters.get("loss", "epsilon_insensitive")),
-            average=bool(definition.parameters.get("average", False)),
-            fit_intercept=bool(definition.parameters.get("fit_intercept", True)),
+    def _fit_incremental(
+        self,
+        connection: Any,
+        definition: TrainingDefinition,
+        training: SourceRelation,
+        validation: SourceRelation | None,
+        classes: np.ndarray | None,
+        *,
+        parameters: dict[str, Any] | None = None,
+    ) -> tuple[Any, int, bool, int | None, list[dict[str, Any]]]:
+        estimator_parameters = dict(
+            parameters if parameters is not None else definition.parameters
         )
+        resolved_class_weight = (
+            estimator_parameters.pop("class_weight")
+            if isinstance(estimator_parameters.get("class_weight"), dict)
+            else None
+        )
+        estimator = build_estimator(
+            definition.algorithm,
+            definition.problem_type,
+            estimator_parameters,
+            random_seed=definition.random_seed,
+            n_jobs=definition.resource_limits.max_parallel_jobs,
+        )
+        if resolved_class_weight is not None:
+            estimator.set_params(class_weight=resolved_class_weight)
+        selection = [*definition.feature_columns, definition.target_column]
+        query = (
+            f"SELECT {', '.join(identifier(item) for item in selection)} "
+            f"FROM {training.sql}"
+            f"{self._stable_order_clause(training, selection)}"
+        )
+        best_estimator = None
+        best_score: float | None = None
+        best_epoch: int | None = None
+        epochs_without_improvement = 0
+        validation_history: list[dict[str, Any]] = []
+        actual_epochs = 0
+        stopped_early = False
+        for epoch in range(definition.epochs):
+            cursor = connection.execute(query)
+            first_batch = True
+            while frame := cursor.fetchmany(definition.batch_size):
+                values = np.asarray(frame, dtype=object)
+                x = values[:, :-1].astype(np.float64)
+                y = values[:, -1]
+                self._validate_matrix(x, y, definition.problem_type)
+                if definition.problem_type == "regression":
+                    estimator.partial_fit(x, y.astype(np.float64))
+                else:
+                    estimator.partial_fit(
+                        x,
+                        y,
+                        classes=classes if first_batch else None,
+                    )
+                first_batch = False
+            actual_epochs = epoch + 1
+            if definition.early_stopping:
+                if validation is None:
+                    raise ValueError(
+                        "Early stopping requires an explicit validation input"
+                    )
+                epoch_metrics = self._evaluate(
+                    connection, estimator, validation, definition
+                )
+                validation_history.append({"epoch": actual_epochs, **epoch_metrics})
+                score = float(
+                    epoch_metrics["rmse"]
+                    if definition.problem_type == "regression"
+                    else epoch_metrics["accuracy"]
+                )
+                improved = (
+                    best_score is None
+                    or (
+                        score < best_score - definition.early_stopping_min_delta
+                        if definition.problem_type == "regression"
+                        else score > best_score + definition.early_stopping_min_delta
+                    )
+                )
+                if improved:
+                    best_score = score
+                    best_epoch = actual_epochs
+                    best_estimator = deepcopy(estimator)
+                    epochs_without_improvement = 0
+                else:
+                    epochs_without_improvement += 1
+                    if (
+                        epochs_without_improvement
+                        >= definition.early_stopping_patience
+                    ):
+                        stopped_early = True
+                        break
+        return (
+            best_estimator if best_estimator is not None else estimator,
+            actual_epochs,
+            stopped_early,
+            best_epoch,
+            validation_history,
+        )
+
+    @staticmethod
+    def _resolve_incremental_parameters(
+        connection: Any,
+        definition: TrainingDefinition,
+        training: SourceRelation,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Resolve symbolic weights before partial_fit without sampling target rows."""
+
+        parameters = validate_algorithm_parameters(
+            definition.algorithm,
+            definition.problem_type,
+            definition.parameters,
+        )
+        if (
+            definition.problem_type == "regression"
+            or parameters.get("class_weight") != "balanced"
+        ):
+            return parameters, {}
+        rows = connection.execute(
+            f"SELECT {identifier(definition.target_column)}, count(*) "
+            f"FROM {training.sql} "
+            f"WHERE {identifier(definition.target_column)} IS NOT NULL "
+            f"GROUP BY {identifier(definition.target_column)} ORDER BY 1"
+        ).fetchall()
+        if len(rows) < 2:
+            raise ValueError(
+                "Balanced incremental class weights require at least two target classes"
+            )
+        total = sum(int(row[1]) for row in rows)
+        class_count = len(rows)
+        weights = {
+            row[0]: total / (class_count * int(row[1]))
+            for row in rows
+        }
+        resolved = {**parameters, "class_weight": weights}
+        return resolved, {
+            "kind": "balanced_class_weight",
+            "data_scope": "full_training",
+            "row_count": total,
+            "class_counts": {str(row[0]): int(row[1]) for row in rows},
+            "resolved_weights": {str(key): value for key, value in weights.items()},
+            "formula": "n_samples / (n_classes * class_count)",
+        }
+
+    def _load_matrix(
+        self,
+        connection: Any,
+        relation: SourceRelation,
+        definition: TrainingDefinition,
+        *,
+        row_count: int,
+    ) -> tuple[np.ndarray, np.ndarray, int]:
+        self._validate_columns(connection, relation, definition)
+        columns = [*definition.feature_columns, definition.target_column]
+        frame = connection.execute(
+            f"SELECT {', '.join(identifier(item) for item in columns)} "
+            f"FROM {relation.sql}"
+            f"{self._stable_order_clause(relation, columns)}"
+        ).fetch_df()
+        if len(frame) != row_count:
+            raise ValueError(
+                f"Training relation changed while being read: expected "
+                f"{row_count} rows, received {len(frame)}"
+            )
+        x = frame[definition.feature_columns].to_numpy(dtype=np.float64)
+        y = frame[definition.target_column].to_numpy()
+        self._validate_matrix(x, y, definition.problem_type)
+        if definition.problem_type == "regression":
+            y = y.astype(np.float64)
+        estimated_bytes = int(
+            x.nbytes
+            + y.nbytes
+            + frame.memory_usage(index=True, deep=True).sum()
+            + (x.nbytes + y.nbytes) * 2
+        )
+        return x, y, estimated_bytes
+
+    @staticmethod
+    def _validate_matrix(
+        x: np.ndarray,
+        y: np.ndarray,
+        problem_type: ProblemType,
+    ) -> None:
+        if not np.isfinite(x).all():
+            raise ValueError(
+                "Training features contain null, NaN or infinite values"
+            )
+        if any(value is None or bool(pd.isna(value)) for value in y):
+            raise ValueError("Training target contains null values")
+        if problem_type == "regression":
+            numeric = y.astype(np.float64)
+            if not np.isfinite(numeric).all():
+                raise ValueError(
+                    "Regression target contains NaN or infinite values"
+                )
+
+    @staticmethod
+    def _preflight_memory_bytes(row_count: int, feature_count: int) -> int:
+        # Numeric matrix, target, dataframe buffers and estimator/search working copies.
+        return int(row_count * max(1, feature_count + 1) * 8 * 6)
+
+    @staticmethod
+    def _load_cv_fold_assignments(
+        connection: Any,
+        relation: SourceRelation,
+        fold_column: str,
+        row_count: int,
+    ) -> np.ndarray:
+        rows = connection.execute(
+            f"SELECT {identifier(fold_column)} FROM {relation.sql}"
+            f"{SklearnTrainingEngine._stable_order_clause(relation, [fold_column])}"
+        ).fetchnumpy()
+        assignments = np.asarray(rows[fold_column])
+        if len(assignments) != row_count:
+            raise ValueError(
+                "Upstream CV fold plan row count does not match the training input"
+            )
+        if assignments.dtype.kind not in {"i", "u"}:
+            try:
+                assignments = assignments.astype(np.int64)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "Upstream CV fold assignments must be integer-valued"
+                ) from exc
+        if len(np.unique(assignments)) < 2:
+            raise ValueError(
+                "Upstream CV fold plan must contain at least two non-empty folds"
+            )
+        return assignments.astype(np.int64, copy=False)
+
+    @staticmethod
+    def _enforce_memory_budget(
+        estimated_bytes: int,
+        max_memory_mb: int,
+        row_count: int,
+        feature_count: int,
+    ) -> None:
+        limit = max_memory_mb * 1024 * 1024
+        if estimated_bytes > limit:
+            estimated_mb = estimated_bytes / (1024 * 1024)
+            raise ValueError(
+                "The selected estimator requires a full in-memory training matrix. "
+                f"The complete {row_count}-row, {feature_count}-feature scope is "
+                f"estimated at {estimated_mb:.1f} MiB, above the configured "
+                f"{max_memory_mb} MiB limit. Increase the explicit resource budget "
+                "or choose a streaming/large-scale estimator; data was not sampled."
+            )
 
     def _evaluate(self, connection, estimator, relation, definition) -> dict[str, Any]:
         self._validate_columns(connection, relation, definition)
         columns = [*definition.feature_columns, definition.target_column]
         cursor = connection.execute(
             f"SELECT {', '.join(identifier(item) for item in columns)} FROM {relation.sql}"
+            f"{self._stable_order_clause(relation, columns)}"
         )
         count = 0
         absolute_error = squared_error = target_sum = target_square_sum = 0.0
@@ -453,6 +1105,25 @@ class SklearnTrainingEngine:
         return relation.row_count if relation.row_count >= 0 else int(
             connection.execute(f"SELECT count(*) FROM {relation.sql}").fetchone()[0]
         )
+
+    @staticmethod
+    def _stable_order_clause(
+        relation: SourceRelation,
+        fallback_columns: list[str],
+    ) -> str:
+        manifest = relation.metadata.get("feature_manifest")
+        if isinstance(manifest, list):
+            for item in manifest:
+                if (
+                    isinstance(item, dict)
+                    and item.get("role") == "row_id"
+                    and item.get("name")
+                ):
+                    return f" ORDER BY {identifier(str(item['name']))}"
+        columns = list(dict.fromkeys(column for column in fallback_columns if column))
+        if not columns:
+            return ""
+        return " ORDER BY " + ", ".join(identifier(column) for column in columns)
 
     def _run_directory(self, owner_id: str, run_id: str) -> Path:
         directory = (self.repository_root / "users" / owner_id / "pipeline-runs" / run_id).resolve()
@@ -581,6 +1252,7 @@ class SklearnScoringEngine:
                 selected.append(definition.target_column)
             cursor = reader.execute(
                 f"SELECT {', '.join(identifier(item) for item in selected)} FROM {data.sql}"
+                f" ORDER BY {identifier(definition.row_id_column)}"
             )
             total = correct = 0
             absolute_error = squared_error = 0.0
@@ -590,7 +1262,11 @@ class SklearnScoringEngine:
                 x = frame[features].to_numpy(dtype=np.float64)
                 if not np.isfinite(x).all():
                     raise ValueError("Scoring features contain null, NaN or infinite values")
-                predictions = estimator.predict(x)
+                predictions = self._prediction_vector(
+                    estimator.predict(x),
+                    problem_type=problem_type,
+                    class_labels=class_labels,
+                )
                 output = pd.DataFrame({
                     definition.row_id_column: frame[definition.row_id_column],
                     definition.prediction_column: predictions,
@@ -724,3 +1400,35 @@ class SklearnScoringEngine:
         finally:
             reader.close()
             connection.close()
+
+    @staticmethod
+    def _prediction_vector(
+        values: Any,
+        *,
+        problem_type: str,
+        class_labels: list[Any],
+    ) -> np.ndarray:
+        """Normalize estimator output to the one prediction column contract.
+
+        A few third-party multiclass estimators return a score/probability
+        matrix from ``predict``. The scoring artifact stores those values in
+        explicit per-class columns, while its prediction column must contain
+        exactly one chosen class per input row.
+        """
+        predictions = np.asarray(values)
+        if predictions.ndim == 1:
+            return predictions
+        if predictions.ndim == 2 and predictions.shape[1] == 1:
+            return predictions[:, 0]
+        if (
+            problem_type != "regression"
+            and predictions.ndim == 2
+            and class_labels
+            and predictions.shape[1] == len(class_labels)
+        ):
+            labels = np.asarray(class_labels, dtype=object)
+            return labels[np.argmax(predictions, axis=1)]
+        raise ValueError(
+            "Model predict() returned a matrix that cannot be represented as "
+            "one prediction per row"
+        )

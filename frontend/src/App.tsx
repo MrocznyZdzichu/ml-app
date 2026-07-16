@@ -1,5 +1,6 @@
 import {
   Activity,
+  AlertTriangle,
   BarChart3,
   Brain,
   ChevronDown,
@@ -10,6 +11,7 @@ import {
   Drill,
   Filter,
   History,
+  GitBranch,
   ListChecks,
   LogOut,
   Pencil,
@@ -45,6 +47,7 @@ import type {
   UserProfile
 } from "./api/client";
 import { AssetList } from "./components/AssetList";
+import { ArtifactDependenciesDialog } from "./operational/ArtifactDependenciesDialog";
 import {
   ArtifactFilters,
   datasetPipelineId,
@@ -71,6 +74,7 @@ import {
   canonicalizeWorkflowDatasetIds,
   emptyWorkflowDefinition,
   normalizeWorkflowDefinition,
+  validateWorkflowConfiguration,
   workflowTemplateDefinition
 } from "./pipelines/workflowContract";
 import type { PipelineTemplate, WorkflowDefinition } from "./pipelines/workflowContract";
@@ -92,10 +96,12 @@ import {
 } from "./pipelines/dataContractOptions";
 import {
   resolvePipelineRunInputs,
-  type PipelineRunInput
+  resolvePipelineRunModels,
+  type PipelineRunInput,
+  type PipelineRunModel
 } from "./pipelines/pipelineRunInputs";
 
-type TabId = "overview" | "business-cases" | "data" | "analysis" | "pipelines" | "models" | "scoring-reports" | "serving" | "share";
+type TabId = "overview" | "business-cases" | "data" | "analysis" | "pipelines" | "jobs" | "models" | "scoring-reports" | "serving" | "share";
 
 type NavItem = {
   id: TabId;
@@ -109,6 +115,7 @@ const navItems: NavItem[] = [
   { id: "data", label: "Data", icon: Database },
   { id: "analysis", label: "Analysis", icon: BarChart3 },
   { id: "pipelines", label: "Pipelines", icon: Drill },
+  { id: "jobs", label: "Jobs", icon: History },
   { id: "models", label: "Models", icon: Brain },
   { id: "scoring-reports", label: "Scoring Reports", icon: BarChart3 },
   { id: "serving", label: "Serving", icon: Rocket },
@@ -381,6 +388,7 @@ export default function App() {
         )}
         {activeTab === "data" && (
           <DataPanel
+            businessCases={businessCases}
             datasets={datasets}
             pipelines={pipelines}
             onAnalyze={openDatasetAnalysis}
@@ -411,6 +419,13 @@ export default function App() {
             onOpenRequestConsumed={() => setPipelineOpenRequest(null)}
             onRefresh={refreshWorkspace}
             onExamineDataset={openDatasetAnalysis}
+            setNotice={setNotice}
+          />
+        )}
+        {activeTab === "jobs" && (
+          <JobsPanel
+            businessCases={businessCases}
+            pipelines={pipelines}
             setNotice={setNotice}
           />
         )}
@@ -521,13 +536,19 @@ function BusinessCasesPanel({
   const [bcDatasetHistory, setBcDatasetHistory] = useState<DataAsset | null>(null);
   const [bcPipelineHistory, setBcPipelineHistory] = useState<Pipeline | null>(null);
   const [bcRunDialog, setBcRunDialog] = useState<{
+    sessionId: string;
     pipeline: Pipeline;
     version: PipelineVersion;
     inputs: PipelineRunInput[];
+    models: PipelineRunModel[];
   } | null>(null);
   const [bcRunSelections, setBcRunSelections] = useState<Record<string, string>>({});
-  const [bcRunResult, setBcRunResult] = useState<PipelineRun | null>(null);
-  const [bcRunSubmitting, setBcRunSubmitting] = useState(false);
+  const [bcRunModelSelections, setBcRunModelSelections] = useState<Record<string, string>>({});
+  const [bcRunResults, setBcRunResults] = useState<Record<string, PipelineRun>>({});
+  const [bcRunSubmittingSessions, setBcRunSubmittingSessions] = useState<Record<string, boolean>>({});
+  const [bcSelectedRunDetails, setBcSelectedRunDetails] = useState<PipelineRun | null>(null);
+  const [bcRunsPipelineId, setBcRunsPipelineId] = useState<string | null>(null);
+  const [bcRunsRefreshKey, setBcRunsRefreshKey] = useState(0);
   const [bcDataPurposeFilter, setBcDataPurposeFilter] = useState("");
   const [bcDataPipelineFilter, setBcDataPipelineFilter] = useState("");
   const [bcUploadedOnly, setBcUploadedOnly] = useState(false);
@@ -535,6 +556,9 @@ function BusinessCasesPanel({
   const [bcModelPipelineFilter, setBcModelPipelineFilter] = useState("");
   const [bcReportPurposeFilter, setBcReportPurposeFilter] = useState("");
   const [bcReportPipelineFilter, setBcReportPipelineFilter] = useState("");
+  const [bcPipelineTypeFilter, setBcPipelineTypeFilter] = useState("");
+  const [bcPipelineStatusFilter, setBcPipelineStatusFilter] = useState("");
+  const [dependencyTarget, setDependencyTarget] = useState<{ referenceId: string; artifactType: string; title: string } | null>(null);
 
   const selectedBusinessCase = businessCases.find((item) => item.id === selectedBusinessCaseId);
   const datasetById = useMemo(
@@ -583,6 +607,23 @@ function BusinessCasesPanel({
       ? pipelines.filter((pipeline) => pipeline.business_case_id === selectedBusinessCase.id)
       : [],
     [pipelines, selectedBusinessCase]
+  );
+  const businessCasePipelineTypes = useMemo(
+    () => [...new Set(selectedBusinessCasePipelines.map((pipeline) => pipeline.type))]
+      .sort((left, right) => left.localeCompare(right)),
+    [selectedBusinessCasePipelines]
+  );
+  const businessCasePipelineStatuses = useMemo(
+    () => [...new Set(selectedBusinessCasePipelines.map((pipeline) => pipeline.status))]
+      .sort((left, right) => left.localeCompare(right)),
+    [selectedBusinessCasePipelines]
+  );
+  const visibleBusinessCasePipelines = useMemo(
+    () => selectedBusinessCasePipelines.filter((pipeline) =>
+      (!bcPipelineTypeFilter || pipeline.type === bcPipelineTypeFilter)
+      && (!bcPipelineStatusFilter || pipeline.status === bcPipelineStatusFilter)
+    ),
+    [bcPipelineStatusFilter, bcPipelineTypeFilter, selectedBusinessCasePipelines]
   );
   const selectedBusinessCaseModels = useMemo(
     () => latestModelFamilies(
@@ -675,6 +716,8 @@ function BusinessCasesPanel({
     setBcModelPipelineFilter("");
     setBcReportPurposeFilter("");
     setBcReportPipelineFilter("");
+    setBcPipelineTypeFilter("");
+    setBcPipelineStatusFilter("");
     if (!selectedBusinessCase) {
       setAttachments([]);
       return;
@@ -841,9 +884,19 @@ function BusinessCasesPanel({
         datasets
       );
       const inputs = resolvePipelineRunInputs(normalized, datasets);
+      const runModels = resolvePipelineRunModels(normalized, models);
       setBcRunSelections({});
-      setBcRunResult(null);
-      setBcRunDialog({ pipeline, version: published, inputs });
+      setBcRunModelSelections(Object.fromEntries(runModels.map((model) => [model.key, model.versions[0]?.id ?? ""])));
+      setBcRunResults((current) => Object.fromEntries(
+        Object.entries(current).filter(([, run]) => ["queued", "running"].includes(run.status))
+      ));
+      setBcRunDialog({
+        sessionId: crypto.randomUUID(),
+        pipeline,
+        version: published,
+        inputs,
+        models: runModels
+      });
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not prepare pipeline run");
     }
@@ -852,7 +905,9 @@ function BusinessCasesPanel({
   async function submitBcPipelineRun(event: FormEvent) {
     event.preventDefault();
     if (!bcRunDialog) return;
-    const missing = bcRunDialog.inputs.find(
+    const dialog = bcRunDialog;
+    const sessionId = dialog.sessionId;
+    const missing = dialog.inputs.find(
       (input) => requiresRuntimeDatasetSelection(input.policy)
         && !bcRunSelections[input.key]
     );
@@ -860,21 +915,22 @@ function BusinessCasesPanel({
       setNotice(`Select a version for ${missing.name}`);
       return;
     }
-    setBcRunSubmitting(true);
+    setBcRunSubmittingSessions((current) => ({ ...current, [sessionId]: true }));
     try {
-      let run = await api.runPipeline(bcRunDialog.pipeline.id, {
-        pipeline_version_id: bcRunDialog.version.id,
+      let run = await api.runPipeline(dialog.pipeline.id, {
+        pipeline_version_id: dialog.version.id,
         trigger_type: "manual",
         is_dry_run: false,
         runtime_parameters: {},
-        input_versions: bcRunSelections
+        input_versions: bcRunSelections,
+        model_versions: bcRunModelSelections
       });
-      setBcRunResult(run);
+      setBcRunResults((current) => ({ ...current, [sessionId]: run }));
       setNotice(`Pipeline run ${shortId(run.id)} queued`);
       while (["queued", "running"].includes(run.status)) {
         await new Promise((resolve) => window.setTimeout(resolve, 750));
-        run = await api.getPipelineRun(bcRunDialog.pipeline.id, run.id);
-        setBcRunResult(run);
+        run = await api.getPipelineRun(dialog.pipeline.id, run.id);
+        setBcRunResults((current) => ({ ...current, [sessionId]: run }));
       }
       await onRefresh();
       setNotice(
@@ -885,9 +941,14 @@ function BusinessCasesPanel({
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not start pipeline run");
     } finally {
-      setBcRunSubmitting(false);
+      setBcRunSubmittingSessions((current) => ({ ...current, [sessionId]: false }));
     }
   }
+
+  const currentBcRunResult = bcRunDialog ? bcRunResults[bcRunDialog.sessionId] ?? null : null;
+  const currentBcRunSubmitting = bcRunDialog
+    ? Boolean(bcRunSubmittingSessions[bcRunDialog.sessionId])
+    : false;
 
   return (
     <section className="business-case-screen">
@@ -966,6 +1027,12 @@ function BusinessCasesPanel({
                   <Share2 size={14} />
                   Pipelines
                 </button>
+                <button className="secondary-button compact-button" type="button" onClick={() => {
+                  setSelectedBusinessCaseId(item.id);
+                  setBcRunsPipelineId("all");
+                }}>
+                  <History size={14} /> Runs
+                </button>
                 <button
                   className="secondary-button compact-button"
                   type="button"
@@ -1018,6 +1085,9 @@ function BusinessCasesPanel({
               <button className={`secondary-button compact-button${activeWorkspace === "pipelines" ? " active" : ""}`} type="button" onClick={() => setActiveWorkspace("pipelines")}>
                 <Share2 size={14} />
                 Pipelines
+              </button>
+              <button className="secondary-button compact-button" type="button" onClick={() => setBcRunsPipelineId("all")}>
+                <History size={14} /> Runs
               </button>
               <button className={`secondary-button compact-button${activeWorkspace === "models" ? " active" : ""}`} type="button" onClick={() => setActiveWorkspace("models")}>
                 <Brain size={14} />
@@ -1151,6 +1221,12 @@ function BusinessCasesPanel({
                             <History size={14} /> Versions
                           </button>
                         )}
+                        {attachedDataset(item.data_asset_id) && (
+                          <button className="secondary-button compact-button" type="button"
+                            onClick={() => setDependencyTarget({ referenceId: attachedDataset(item.data_asset_id)!.id, artifactType: "dataset", title: assetName })}>
+                            <GitBranch size={14} /> Dependencies
+                          </button>
+                        )}
                         <button
                           className="secondary-button compact-button"
                           type="button"
@@ -1260,7 +1336,46 @@ function BusinessCasesPanel({
         )}
 
         {selectedBusinessCase && activeWorkspace === "pipelines" && (
-          <AssetList title="Mapped pipelines" assets={selectedBusinessCasePipelines.map((item) => ({
+          <div className="panel">
+            <div className="panel-header">
+              <div><h2>Mapped pipelines</h2><p>{visibleBusinessCasePipelines.length} of {selectedBusinessCasePipelines.length} workflows shown.</p></div>
+              <button className="secondary-button compact-button" type="button"
+                onClick={() => setBcRunsPipelineId("all")}>
+                <History size={15} /> Runs
+              </button>
+            </div>
+            <div className="pipeline-catalog-filters" aria-label="Business Case pipeline filters">
+              <label>
+                <span><Filter size={14} /> Pipeline type</span>
+                <select
+                  aria-label="Filter Business Case pipelines by type"
+                  value={bcPipelineTypeFilter}
+                  onChange={(event) => setBcPipelineTypeFilter(event.target.value)}
+                >
+                  <option value="">All pipeline types</option>
+                  {businessCasePipelineTypes.map((type) => (
+                    <option key={type} value={type}>{type.replaceAll("_", " ")}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span><Filter size={14} /> Status</span>
+                <select
+                  aria-label="Filter Business Case pipelines by status"
+                  value={bcPipelineStatusFilter}
+                  onChange={(event) => setBcPipelineStatusFilter(event.target.value)}
+                >
+                  <option value="">All statuses</option>
+                  {businessCasePipelineStatuses.map((status) => (
+                    <option key={status} value={status}>{status.replaceAll("_", " ")}</option>
+                  ))}
+                </select>
+              </label>
+              <span className="pipeline-filter-summary">
+                {visibleBusinessCasePipelines.length} of {selectedBusinessCasePipelines.length} workflows
+              </span>
+            </div>
+          <AssetList title="" assets={visibleBusinessCasePipelines.map((item) => ({
             id: item.id,
             name: item.name,
             meta: `${item.type} / ${businessCaseName(businessCases, item.business_case_id)}`,
@@ -1272,6 +1387,11 @@ function BusinessCasesPanel({
                 onClick: () => setBcPipelineHistory(item)
               },
               {
+                label: "Runs",
+                icon: "versions",
+                onClick: () => setBcRunsPipelineId(item.id)
+              },
+              {
                 label: "Run",
                 icon: "run",
                 disabled: !item.latest_published_version_number,
@@ -1281,9 +1401,15 @@ function BusinessCasesPanel({
                 label: "Edit",
                 icon: "edit",
                 onClick: () => onEditPipeline(item.id)
+              },
+              {
+                label: "Dependencies",
+                icon: "dependencies",
+                onClick: () => setDependencyTarget({ referenceId: item.id, artifactType: "pipeline", title: item.name })
               }
             ]
           }))} />
+          </div>
         )}
         {selectedBusinessCase && activeWorkspace === "models" && (
           <div className="panel">
@@ -1306,7 +1432,8 @@ function BusinessCasesPanel({
               status: item.stage,
               actions: [
                 { label: "Versions", icon: "versions", onClick: () => setBcModelHistory(item) },
-                { label: "View", icon: "view", onClick: () => setSelectedBcModel(item) }
+                { label: "View", icon: "view", onClick: () => setSelectedBcModel(item) },
+                { label: "Dependencies", icon: "dependencies", onClick: () => setDependencyTarget({ referenceId: item.id, artifactType: "model_version", title: item.name }) }
               ]
             }))} />
           </div>
@@ -1332,7 +1459,8 @@ function BusinessCasesPanel({
               status: "ready",
               actions: [
                 { label: "Versions", icon: "versions", onClick: () => setBcReportHistory(item) },
-                { label: "View", icon: "view", onClick: () => setSelectedBcReport(item) }
+                { label: "View", icon: "view", onClick: () => setSelectedBcReport(item) },
+                { label: "Dependencies", icon: "dependencies", onClick: () => setDependencyTarget({ referenceId: item.id, artifactType: "report", title: item.name }) }
               ]
             }))} />
           </div>
@@ -1370,6 +1498,13 @@ function BusinessCasesPanel({
           }}
         />
       )}
+      {dependencyTarget && (
+        <ArtifactDependenciesDialog
+          {...dependencyTarget}
+          onClose={() => setDependencyTarget(null)}
+          onOpenDataset={onOpenDataset}
+        />
+      )}
       {bcModelHistory && (
         <DeferredPanel>
           <ModelVersionHistoryDialog
@@ -1403,14 +1538,28 @@ function BusinessCasesPanel({
           onClose={() => setBcPipelineHistory(null)}
         />
       )}
+      {bcRunsPipelineId && selectedBusinessCase && (
+        <PipelineRunHistoryDialog
+          pipelines={selectedBusinessCasePipelines}
+          businessCases={businessCases}
+          refreshKey={bcRunsRefreshKey}
+          includeDryRuns={false}
+          initialPipelineId={bcRunsPipelineId}
+          title={`${selectedBusinessCase.name} runs`}
+          description="Official pipeline runs in this business case. Dry-runs remain available in Jobs and the pipeline editor."
+          onClose={() => setBcRunsPipelineId(null)}
+          onDetails={setBcSelectedRunDetails}
+          onExamineDataset={onOpenDataset}
+        />
+      )}
       {bcRunDialog && (
         <div className="modal-backdrop" role="presentation"
-          onMouseDown={(event) => event.target === event.currentTarget && !bcRunSubmitting && setBcRunDialog(null)}>
+          onMouseDown={(event) => event.target === event.currentTarget && setBcRunDialog(null)}>
           <form className="modal-dialog form-panel" onSubmit={submitBcPipelineRun}>
             <div className="modal-header">
               <div><span className="builder-kicker">Business Case manual run</span>
                 <h2>{bcRunDialog.pipeline.name}</h2></div>
-              <button className="icon-button" type="button" disabled={bcRunSubmitting}
+              <button className="icon-button" type="button"
                 onClick={() => setBcRunDialog(null)} aria-label="Close run dialog"><X size={17} /></button>
             </div>
             {bcRunDialog.inputs.map((input) => {
@@ -1455,23 +1604,53 @@ function BusinessCasesPanel({
                 </label>
               );
             })}
-            {bcRunResult && (
-              <div className={`catalog-run-monitor ${bcRunResult.status}`}>
-                <div><strong>{bcRunResult.status}</strong>
-                  <span>Run {shortId(bcRunResult.id)} · {bcRunResult.processed_row_count ?? 0} processed rows</span></div>
+            {bcRunDialog.models.map((model) => (
+              <label key={model.key}>Inference bundle — {model.name}
+                <select value={bcRunModelSelections[model.key] ?? ""}
+                  onChange={(event) => setBcRunModelSelections((current) => ({ ...current, [model.key]: event.target.value }))}>
+                  {model.versions.map((version, index) => (
+                    <option key={version.id} value={version.id}>
+                      {index === 0 ? "Latest — " : ""}v{version.version_number} · {version.algorithm}
+                    </option>
+                  ))}
+                </select>
+                <small>{inferenceBundleSummary(
+                  model.versions.find((version) => version.id === bcRunModelSelections[model.key])
+                )}</small>
+              </label>
+            ))}
+            {currentBcRunResult && (
+              <div className={`catalog-run-monitor ${currentBcRunResult.status}`}>
+                <div><strong>{currentBcRunResult.status}</strong>
+                  <span>Run {shortId(currentBcRunResult.id)} · {currentBcRunResult.processed_row_count ?? 0} processed rows</span></div>
               </div>
             )}
+            {currentBcRunResult && (
+              <button className="secondary-button" type="button" onClick={() => setBcSelectedRunDetails(currentBcRunResult)}>
+                <History size={15} /> Logs, details and cancel
+              </button>
+            )}
             <div className="modal-actions">
-              <button className="secondary-button" type="button" disabled={bcRunSubmitting}
-                onClick={() => setBcRunDialog(null)}>Close</button>
-              {!bcRunResult && (
-                <button className="primary-button" type="submit" disabled={bcRunSubmitting}>
-                  <Play size={15} /> {bcRunSubmitting ? "Running…" : "Run published version"}
+              <button className="secondary-button" type="button"
+                onClick={() => setBcRunDialog(null)}>{currentBcRunSubmitting ? "Run in background" : "Close"}</button>
+              {!currentBcRunResult && (
+                <button className="primary-button" type="submit" disabled={currentBcRunSubmitting}>
+                  <Play size={15} /> {currentBcRunSubmitting ? "Starting…" : "Run published version"}
                 </button>
               )}
             </div>
           </form>
         </div>
+      )}
+      {bcSelectedRunDetails && (
+        <PipelineRunDetailsDialog
+          run={bcSelectedRunDetails}
+          onClose={() => setBcSelectedRunDetails(null)}
+          onChanged={async () => {
+            setBcRunsRefreshKey((current) => current + 1);
+            await onRefresh();
+          }}
+        />
       )}
 
       {isCreateOpen && (
@@ -1533,6 +1712,207 @@ function BusinessCasesPanel({
   );
 }
 
+function JobsPanel({
+  businessCases,
+  pipelines,
+  setNotice
+}: {
+  businessCases: BusinessCase[];
+  pipelines: Pipeline[];
+  setNotice: (message: string) => void;
+}) {
+  const [runs, setRuns] = useState<PipelineRun[]>([]);
+  const [statusFilter, setStatusFilter] = useState("active");
+  const [scopeFilter, setScopeFilter] = useState("");
+  const [search, setSearch] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [busyRunId, setBusyRunId] = useState<string | null>(null);
+  const [selectedRunDetails, setSelectedRunDetails] = useState<PipelineRun | null>(null);
+
+  const activeRuns = runs.filter((run) => run.status === "queued" || run.status === "running");
+  const failedRuns = runs.filter((run) => run.status === "failed");
+  const dryRuns = runs.filter((run) => run.is_dry_run);
+
+  async function loadRuns() {
+    setIsLoading(true);
+    try {
+      setRuns(await api.listPipelineRunHistory(300));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not load jobs");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadRuns();
+  }, []);
+
+  useEffect(() => {
+    if (!runs.some((run) => run.status === "queued" || run.status === "running")) return;
+    const interval = window.setInterval(() => void loadRuns(), 2500);
+    return () => window.clearInterval(interval);
+  }, [runs]);
+
+  const filteredRuns = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    return runs.filter((run) => {
+      const pipeline = pipelines.find((item) => item.id === run.pipeline_id);
+      const businessCase = businessCases.find((item) => item.id === run.business_case_id);
+      if (scopeFilter && run.business_case_id !== scopeFilter) return false;
+      if (statusFilter === "active" && run.status !== "queued" && run.status !== "running") return false;
+      if (statusFilter === "dry-run" && !run.is_dry_run) return false;
+      if (statusFilter !== "all" && statusFilter !== "active" && statusFilter !== "dry-run" && run.status !== statusFilter) return false;
+      if (!needle) return true;
+      return [
+        run.id,
+        run.status,
+        pipeline?.name,
+        businessCase?.name,
+        run.requested_step_id
+      ].some((value) => String(value ?? "").toLowerCase().includes(needle));
+    });
+  }, [businessCases, pipelines, runs, scopeFilter, search, statusFilter]);
+
+  async function cancelRun(run: PipelineRun) {
+    setBusyRunId(run.id);
+    try {
+      await api.cancelPipelineRun(run.pipeline_id, run.id);
+      await loadRuns();
+      setNotice(`Cancellation requested for job ${shortId(run.id)}.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not cancel job");
+    } finally {
+      setBusyRunId(null);
+    }
+  }
+
+  async function rerun(run: PipelineRun) {
+    setBusyRunId(run.id);
+    try {
+      const retried = await api.retryPipelineRun(run.pipeline_id, run.id);
+      await loadRuns();
+      setNotice(`Rerun queued as job ${shortId(retried.id)}.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not rerun job");
+    } finally {
+      setBusyRunId(null);
+    }
+  }
+
+  return (
+    <section className="section jobs-panel">
+      <div className="section-header">
+        <div>
+          <span>EXECUTION</span>
+          <h2>Jobs</h2>
+          <p>Pipeline runs across the workspace, including dry-runs and step runs.</p>
+        </div>
+        <button className="secondary-button" type="button" onClick={() => void loadRuns()} disabled={isLoading}>
+          <RotateCcw size={16} />
+          {isLoading ? "Refreshing..." : "Refresh"}
+        </button>
+      </div>
+
+      <div className="job-summary-grid">
+        <Metric icon={History} label="Active" value={activeRuns.length} tone="teal" />
+        <Metric icon={CheckCircle2} label="Dry-runs" value={dryRuns.length} tone="amber" />
+        <Metric icon={X} label="Failed" value={failedRuns.length} tone="rose" />
+      </div>
+
+      <div className="job-filters">
+        <label>
+          Search
+          <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Run, pipeline, Business Case or step" />
+        </label>
+        <label>
+          Status
+          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
+            <option value="active">Active</option>
+            <option value="all">All statuses</option>
+            <option value="queued">Queued</option>
+            <option value="running">Running</option>
+            <option value="succeeded">Succeeded</option>
+            <option value="failed">Failed</option>
+            <option value="cancelled">Cancelled</option>
+            <option value="dry-run">Dry-runs</option>
+          </select>
+        </label>
+        <label>
+          Business Case
+          <select value={scopeFilter} onChange={(event) => setScopeFilter(event.target.value)}>
+            <option value="">All Business Cases</option>
+            {businessCases.map((item) => (
+              <option value={item.id} key={item.id}>{item.name}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+
+      <div className="jobs-table" role="table" aria-label="Jobs">
+        <div className="jobs-row head" role="row">
+          <span>Job</span>
+          <span>Status</span>
+          <span>Pipeline</span>
+          <span>Started</span>
+          <span>Finished</span>
+          <span>Duration</span>
+          <span>Rows</span>
+          <span>Actions</span>
+        </div>
+        {filteredRuns.map((run) => {
+          const canCancel = run.status === "queued" || run.status === "running";
+          const canRerun = run.status === "failed" || run.status === "cancelled";
+          return (
+            <div className="jobs-row" role="row" key={run.id}>
+              <span>
+                <strong>{shortId(run.id)} {run.is_dry_run && <i>dry-run</i>}</strong>
+                <small>{run.requested_step_id ? `step ${run.requested_step_id}` : "full pipeline"} · {run.trigger_type}</small>
+              </span>
+              <span><i className={`pipeline-status ${run.status}`}>{run.status}</i></span>
+              <span>
+                <strong>{pipelineName(pipelines, run.pipeline_id)}</strong>
+                <small>{businessCaseName(businessCases, run.business_case_id)}</small>
+              </span>
+              <span>{run.started_at ? formatDateTime(run.started_at) : "not started"}</span>
+              <span>{run.finished_at ? formatDateTime(run.finished_at) : "in progress"}</span>
+              <span>{durationLabel(run.started_at, run.finished_at)}</span>
+              <span>
+                <strong>{run.processed_row_count ?? 0}</strong>
+                <small>out {run.output_row_count ?? 0} · rejected {run.rejected_row_count ?? 0}</small>
+              </span>
+              <span>
+                <button className="secondary-button" type="button" onClick={() => setSelectedRunDetails(run)}>
+                  <History size={14} /> Logs
+                </button>
+                <button className="secondary-button" type="button" onClick={() => void cancelRun(run)} disabled={!canCancel || busyRunId === run.id}>
+                  <X size={14} /> Cancel
+                </button>
+                <button className="secondary-button" type="button" onClick={() => void rerun(run)} disabled={!canRerun || busyRunId === run.id}>
+                  <RotateCcw size={14} /> Rerun
+                </button>
+              </span>
+            </div>
+          );
+        })}
+        {!filteredRuns.length && (
+          <div className="empty-state">No jobs match the current filters.</div>
+        )}
+      </div>
+
+      {selectedRunDetails && (
+        <PipelineRunDetailsDialog
+          run={selectedRunDetails}
+          onClose={() => setSelectedRunDetails(null)}
+          onChanged={async () => {
+            await loadRuns();
+          }}
+        />
+      )}
+    </section>
+  );
+}
+
 function PipelinesPanel({
   businessCases,
   datasets,
@@ -1559,6 +1939,10 @@ function PipelinesPanel({
   const [description, setDescription] = useState("");
   const [pipelineType, setPipelineType] = useState("custom");
   const [pipelineTemplate, setPipelineTemplate] = useState<PipelineTemplate>("custom");
+  const [createPipelineError, setCreatePipelineError] = useState("");
+  const [isCreatingPipeline, setIsCreatingPipeline] = useState(false);
+  const [catalogBusinessCaseFilter, setCatalogBusinessCaseFilter] = useState("");
+  const [catalogPipelineTypeFilter, setCatalogPipelineTypeFilter] = useState("");
   const [selectedPipelineId, setSelectedPipelineId] = useState("");
   const [isCreatePipelineOpen, setIsCreatePipelineOpen] = useState(false);
   const [copyPipelineTarget, setCopyPipelineTarget] = useState<Pipeline | null>(null);
@@ -1570,8 +1954,10 @@ function PipelinesPanel({
     pipeline: Pipeline;
     version: PipelineVersion;
     inputs: PipelineRunInput[];
+    models: PipelineRunModel[];
   } | null>(null);
   const [catalogRunSelections, setCatalogRunSelections] = useState<Record<string, string>>({});
+  const [catalogRunModelSelections, setCatalogRunModelSelections] = useState<Record<string, string>>({});
   const [isCatalogRunSubmitting, setIsCatalogRunSubmitting] = useState(false);
   const [catalogRunResult, setCatalogRunResult] = useState<PipelineRun | null>(null);
   const [isRenamingPipeline, setIsRenamingPipeline] = useState(false);
@@ -1593,19 +1979,41 @@ function PipelinesPanel({
   const [isDefinitionDirty, setIsDefinitionDirty] = useState(false);
   const [workflowDefinition, setWorkflowDefinition] = useState<WorkflowDefinition>(emptyWorkflowDefinition());
   const [definitionText, setDefinitionText] = useState(JSON.stringify(emptyWorkflowDefinition(), null, 2));
+  const [draftValidationError, setDraftValidationError] = useState("");
   const [versions, setVersions] = useState<PipelineVersion[]>([]);
+  const [hydratedPipelineId, setHydratedPipelineId] = useState("");
   const [runs, setRuns] = useState<PipelineRun[]>([]);
   const [activeStepRuns, setActiveStepRuns] = useState<PipelineStepRun[]>([]);
   const [selectedRunDetails, setSelectedRunDetails] = useState<PipelineRun | null>(null);
+  const [activeRunMonitor, setActiveRunMonitor] = useState<PipelineRun | null>(null);
   const [isRunHistoryOpen, setIsRunHistoryOpen] = useState(false);
+  const [runHistoryPipelineId, setRunHistoryPipelineId] = useState("all");
   const [versionHistoryPipeline, setVersionHistoryPipeline] = useState<Pipeline | null>(null);
   const [runHistoryRefreshKey, setRunHistoryRefreshKey] = useState(0);
   const [pipelineDataAttachments, setPipelineDataAttachments] = useState<BusinessCaseDataAttachment[]>([]);
   const activePipelines = pipelines.filter((item) => item.status !== "deprecated");
   const deprecatedPipelines = pipelines.filter((item) => item.status === "deprecated");
-  const selectedPipeline = activePipelines.find((item) => item.id === selectedPipelineId) ?? activePipelines[0];
+  const catalogPipelineTypes = useMemo(
+    () => [...new Set(pipelines.map((item) => item.type))].sort((left, right) => left.localeCompare(right)),
+    [pipelines]
+  );
+  const pipelineMatchesCatalogFilters = (item: Pipeline) =>
+    (!catalogBusinessCaseFilter || item.business_case_id === catalogBusinessCaseFilter)
+    && (!catalogPipelineTypeFilter || item.type === catalogPipelineTypeFilter);
+  const filteredActivePipelines = activePipelines.filter(pipelineMatchesCatalogFilters);
+  const filteredDeprecatedPipelines = deprecatedPipelines.filter(pipelineMatchesCatalogFilters);
+  const hasCatalogFilters = Boolean(catalogBusinessCaseFilter || catalogPipelineTypeFilter);
+  // Do not fall back to another pipeline while a freshly created/copied item is
+  // being added to the refreshed catalog. Rendering that fallback with the new
+  // selected ID can persist the previous workflow under the new pipeline.
+  const selectedPipeline = activePipelines.find((item) => item.id === selectedPipelineId)
+    ?? (!selectedPipelineId ? activePipelines[0] : undefined);
   const selectedPipelineIdValue = selectedPipeline?.id ?? "";
   const selectedBusinessCaseIdValue = selectedPipeline?.business_case_id ?? "";
+  const workflowValidationIssues = useMemo(
+    () => validateWorkflowConfiguration(workflowDefinition),
+    [workflowDefinition]
+  );
 
   useEffect(() => {
     if (!businessCaseId && businessCases[0]) {
@@ -1641,11 +2049,13 @@ function PipelinesPanel({
   }, [selectedPipeline?.description, selectedPipeline?.id, selectedPipeline?.name, selectedPipeline?.type]);
 
   useEffect(() => {
+    setHydratedPipelineId("");
+    setVersions([]);
+    setRuns([]);
+    setActiveStepRuns([]);
+    setPipelineDataAttachments([]);
     if (!selectedPipelineIdValue) {
-      setVersions([]);
-      setRuns([]);
-      setActiveStepRuns([]);
-      setPipelineDataAttachments([]);
+      setDraftValidationError("");
       return;
     }
     let active = true;
@@ -1666,7 +2076,7 @@ function PipelinesPanel({
           // draft exists. Otherwise stale browser state makes a published
           // version look dirty and points dry-run at a draft that is gone.
           const workingDraft = draftVersion
-            ? readPipelineWorkingDraft(selectedPipelineIdValue)
+            ? readPipelineWorkingDraft(selectedPipelineIdValue, draftVersion.id)
             : null;
           if (!draftVersion) clearPipelineWorkingDraft(selectedPipelineIdValue);
           const normalized = canonicalizeWorkflowDatasetIds(
@@ -1676,7 +2086,15 @@ function PipelinesPanel({
           setWorkflowDefinition(normalized);
           setDefinitionText(JSON.stringify(normalized, null, 2));
           setIsDefinitionDirty(Boolean(workingDraft));
+          setDraftValidationError("");
+          setHydratedPipelineId(selectedPipelineIdValue);
           if (workingDraft) setNotice("Recovered unsaved pipeline changes from this browser tab");
+        } else {
+          const empty = emptyWorkflowDefinition();
+          setWorkflowDefinition(empty);
+          setDefinitionText(JSON.stringify(empty, null, 2));
+          setIsDefinitionDirty(false);
+          setHydratedPipelineId(selectedPipelineIdValue);
         }
       })
       .catch((error) => setNotice(error instanceof Error ? error.message : "Could not load pipeline details"));
@@ -1695,25 +2113,36 @@ function PipelinesPanel({
 
   async function createPipeline(event: FormEvent) {
     event.preventDefault();
+    setCreatePipelineError("");
     if (!businessCaseId) {
-      setNotice("Create or select a business case first");
+      setCreatePipelineError("Create or select a business case first");
       return;
     }
-    const created = await api.createPipeline({
-      business_case_id: businessCaseId,
-      name,
-      description,
-      type: pipelineType,
-      definition: workflowTemplateDefinition(pipelineTemplate)
-    });
-    setNotice(`Pipeline created: ${created.name}`);
-    setSelectedPipelineId(created.id);
-    setIsCreatePipelineOpen(false);
-    setIsPipelineEditorOpen(true);
-    setName("");
-    setDescription("");
-    setPipelineTemplate(suggestedPipelineTemplate(pipelineType));
-    await onRefresh();
+    setIsCreatingPipeline(true);
+    try {
+      const created = await api.createPipeline({
+        business_case_id: businessCaseId,
+        name,
+        description,
+        type: pipelineType,
+        definition: workflowTemplateDefinition(
+          pipelineTemplate,
+          businessCases.find((item) => item.id === businessCaseId)?.target_column ?? ""
+        )
+      });
+      setNotice(`Pipeline created: ${created.name}`);
+      setSelectedPipelineId(created.id);
+      setIsCreatePipelineOpen(false);
+      setIsPipelineEditorOpen(true);
+      setName("");
+      setDescription("");
+      setPipelineTemplate(suggestedPipelineTemplate(pipelineType));
+      await onRefresh();
+    } catch (error) {
+      setCreatePipelineError(error instanceof Error ? error.message : "Could not create pipeline");
+    } finally {
+      setIsCreatingPipeline(false);
+    }
   }
 
   async function renamePipeline(event: FormEvent) {
@@ -1760,6 +2189,13 @@ function PipelinesPanel({
     setIsPipelineMutationSubmitting(true);
     try {
       const copied = await api.copyPipeline(copyPipelineTarget.id, { name: nextName });
+      clearPipelineWorkingDraft(copied.id);
+      const empty = emptyWorkflowDefinition();
+      setHydratedPipelineId("");
+      setVersions([]);
+      setWorkflowDefinition(empty);
+      setDefinitionText(JSON.stringify(empty, null, 2));
+      setIsDefinitionDirty(false);
       setCopyPipelineTarget(null);
       setCopyPipelineName("");
       setSelectedPipelineId(copied.id);
@@ -1804,16 +2240,26 @@ function PipelinesPanel({
     try {
       parsed = JSON.parse(definitionText) as Record<string, unknown>;
     } catch {
-      setNotice("Pipeline definition is not valid JSON");
+      const message = "Pipeline definition is not valid JSON";
+      setDraftValidationError(message);
+      setNotice(message);
       return null;
     }
-    const saved = await api.updateDraftPipelineVersion(selectedPipeline.id, parsed);
-    clearPipelineWorkingDraft(selectedPipeline.id);
-    setIsDefinitionDirty(false);
-    if (showNotice) setNotice("Draft version saved");
-    setVersions(await api.listPipelineVersions(selectedPipeline.id));
-    await onRefresh();
-    return saved;
+    try {
+      const saved = await api.updateDraftPipelineVersion(selectedPipeline.id, parsed);
+      clearPipelineWorkingDraft(selectedPipeline.id);
+      setIsDefinitionDirty(false);
+      setDraftValidationError("");
+      if (showNotice) setNotice("Draft version saved");
+      setVersions(await api.listPipelineVersions(selectedPipeline.id));
+      await onRefresh();
+      return saved;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Draft validation failed";
+      setDraftValidationError(message);
+      if (showNotice) setNotice(message);
+      return null;
+    }
   }
 
   async function saveDraft() {
@@ -1826,10 +2272,17 @@ function PipelinesPanel({
       return;
     }
     if (isDefinitionDirty && !await persistDraft(false)) return;
-    await api.publishDraftPipelineVersion(selectedPipeline.id);
-    setNotice("Draft version published");
-    setVersions(await api.listPipelineVersions(selectedPipeline.id));
-    await onRefresh();
+    try {
+      await api.publishDraftPipelineVersion(selectedPipeline.id);
+      setDraftValidationError("");
+      setNotice("Draft version published");
+      setVersions(await api.listPipelineVersions(selectedPipeline.id));
+      await onRefresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Draft publish validation failed";
+      setDraftValidationError(message);
+      setNotice(message);
+    }
   }
 
   async function createNextDraft() {
@@ -1864,6 +2317,7 @@ function PipelinesPanel({
       setNotice(detail);
       return;
     }
+    setActiveRunMonitor(null);
     setRunFeedback({ status: "queued", title: `${action} queued`, detail: `Preparing ${target} execution…` });
     if (isDryRun) setDryRunResult(null);
     try {
@@ -1888,30 +2342,36 @@ function PipelinesPanel({
         is_dry_run: isDryRun,
         runtime_parameters: {}
       });
+      setActiveRunMonitor(run);
       setRunFeedback({ status: "running", title: `${action} in progress`, detail: `Worker accepted ${target} run ${shortId(run.id)}.` });
       while (run.status === "queued" || run.status === "running") {
         await new Promise((resolve) => window.setTimeout(resolve, 750));
         run = await api.getPipelineRun(selectedPipeline.id, run.id);
+        setActiveRunMonitor(run);
       }
       setRuns(await api.listPipelineRuns(selectedPipeline.id));
       setActiveStepRuns(await api.listPipelineStepRuns(selectedPipeline.id, run.id));
       const scope = run.output_manifest[0]?.data_scope ?? "unknown";
       const counts = `${run.input_row_count ?? 0} input rows → ${run.output_row_count ?? 0} output rows`;
       const failed = run.status === "failed";
-      const title = failed ? `${action} failed` : `${action} completed`;
+      const cancelled = run.status === "cancelled";
+      const title = failed ? `${action} failed` : cancelled ? `${action} cancelled` : `${action} completed`;
       const fittedTransform = run.output_manifest.find((item) => item.artifact_type === "feature_transform");
       const fittedDetail = fittedTransform?.artifact_id
         ? ` · fitted transform ${fittedTransform.artifact_id}`
         : "";
       const detail = failed
         ? run.error_message
+        : cancelled
+          ? "Run cancellation was accepted; inspect the monitor log for the last completed worker event."
         : `${target} finished successfully · ${scope} scope · ${counts}${fittedDetail}`;
-      setRunFeedback({ status: failed ? "failed" : "succeeded", title, detail });
+      setRunFeedback({ status: failed || cancelled ? "failed" : "succeeded", title, detail });
       setNotice(`${title}: ${detail}`);
-      if (!failed && isDryRun) setDryRunResult(run);
-      if (!failed && !isDryRun) {
+      if (!failed && !cancelled && isDryRun) setDryRunResult(run);
+      if (!failed && !cancelled && !isDryRun) {
         await onRefresh();
       }
+      setActiveRunMonitor(run);
     } catch (error) {
       const detail = error instanceof Error ? error.message : "Pipeline execution could not be started";
       setRunFeedback({ status: "failed", title: `${action} failed`, detail });
@@ -1931,9 +2391,11 @@ function PipelinesPanel({
         datasets
       );
       const inputs = resolvePipelineRunInputs(normalized, datasets);
+      const runModels = resolvePipelineRunModels(normalized, models);
       setCatalogRunSelections({});
+      setCatalogRunModelSelections(Object.fromEntries(runModels.map((model) => [model.key, model.versions[0]?.id ?? ""])));
       setCatalogRunResult(null);
-      setCatalogRunDialog({ pipeline, version: published, inputs });
+      setCatalogRunDialog({ pipeline, version: published, inputs, models: runModels });
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not prepare pipeline run");
     }
@@ -1957,7 +2419,8 @@ function PipelinesPanel({
         trigger_type: "manual",
         is_dry_run: false,
         runtime_parameters: {},
-        input_versions: catalogRunSelections
+        input_versions: catalogRunSelections,
+        model_versions: catalogRunModelSelections
       });
       setNotice(`Pipeline run ${shortId(run.id)} queued`);
       setCatalogRunResult(run);
@@ -1982,13 +2445,18 @@ function PipelinesPanel({
   }
 
   function updateWorkflowDefinition(definition: WorkflowDefinition) {
+    const draftVersion = versions.find((item) => item.status === "draft");
+    if (!selectedPipeline || hydratedPipelineId !== selectedPipeline.id || !draftVersion) return;
     setWorkflowDefinition(definition);
     setDefinitionText(JSON.stringify(definition, null, 2));
     setIsDefinitionDirty(true);
-    if (selectedPipeline) writePipelineWorkingDraft(selectedPipeline.id, definition);
+    setDraftValidationError("");
+    writePipelineWorkingDraft(selectedPipeline.id, draftVersion.id, definition);
   }
 
   function updateDefinitionText(value: string) {
+    const draftVersion = versions.find((item) => item.status === "draft");
+    if (!selectedPipeline || hydratedPipelineId !== selectedPipeline.id || !draftVersion) return;
     setDefinitionText(value);
     setIsDefinitionDirty(true);
     try {
@@ -1997,7 +2465,7 @@ function PipelinesPanel({
         normalizeWorkflowDefinition(parsed),
         datasets
       ));
-      if (selectedPipeline) writePipelineWorkingDraft(selectedPipeline.id, parsed);
+      writePipelineWorkingDraft(selectedPipeline.id, draftVersion.id, parsed);
     } catch {
       // Keep the last valid visual definition while the advanced JSON is incomplete.
     }
@@ -2031,6 +2499,12 @@ function PipelinesPanel({
             onClick={() => setVersionHistoryPipeline(item)}
           >
             <History size={14} /> Versions
+          </button>
+          <button className="secondary-button compact-button" type="button" onClick={() => {
+            setRunHistoryPipelineId(item.id);
+            setIsRunHistoryOpen(true);
+          }}>
+            <History size={14} /> Runs
           </button>
           {!isDeprecated && (
             <button
@@ -2090,20 +2564,61 @@ function PipelinesPanel({
               <p>Create, inspect and open versioned workflows assigned to your Business Cases.</p>
             </div>
             <div className="catalog-toolbar-actions">
-              <button className="secondary-button" type="button" onClick={() => setIsRunHistoryOpen(true)}>
+              <button className="secondary-button" type="button" onClick={() => {
+                setRunHistoryPipelineId("all");
+                setIsRunHistoryOpen(true);
+              }}>
                 <History size={16} /> Runs history
               </button>
-              <button className="primary-button" type="button" onClick={() => setIsCreatePipelineOpen(true)}>
+              <button className="primary-button" type="button" onClick={() => {
+                setCreatePipelineError("");
+                setIsCreatePipelineOpen(true);
+              }}>
                 <Plus size={16} /> New pipeline
               </button>
             </div>
+          </div>
+          <div className="pipeline-catalog-filters" aria-label="Pipeline filters">
+            <label>
+              <span><Filter size={14} /> Business case</span>
+              <select
+                aria-label="Filter pipelines by Business Case"
+                value={catalogBusinessCaseFilter}
+                onChange={(event) => setCatalogBusinessCaseFilter(event.target.value)}
+              >
+                <option value="">All business cases</option>
+                {businessCases.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+              </select>
+            </label>
+            <label>
+              <span><Filter size={14} /> Pipeline type</span>
+              <select
+                aria-label="Filter pipelines by type"
+                value={catalogPipelineTypeFilter}
+                onChange={(event) => setCatalogPipelineTypeFilter(event.target.value)}
+              >
+                <option value="">All pipeline types</option>
+                {catalogPipelineTypes.map((type) => (
+                  <option key={type} value={type}>{type.replaceAll("_", " ")}</option>
+                ))}
+              </select>
+            </label>
+            <span className="pipeline-filter-summary">
+              {filteredActivePipelines.length} of {activePipelines.length} active workflows
+            </span>
           </div>
           <div className="pipeline-table" role="table" aria-label="Pipelines">
             <div className="pipeline-table-row head" role="row">
               <span>Name</span><span>Business case</span><span>Purpose</span><span>Version</span><span>Status</span><span>Updated</span><span />
             </div>
-            {activePipelines.map((item) => renderPipelineRow(item))}
-            {!activePipelines.length && <div className="catalog-empty">No active pipelines. Create a workflow or copy one from the deprecated section.</div>}
+            {filteredActivePipelines.map((item) => renderPipelineRow(item))}
+            {!filteredActivePipelines.length && (
+              <div className="catalog-empty">
+                {hasCatalogFilters
+                  ? "No active pipelines match the selected filters."
+                  : "No active pipelines. Create a workflow or copy one from the deprecated section."}
+              </div>
+            )}
           </div>
         </section>
         {deprecatedPipelines.length > 0 && (
@@ -2113,13 +2628,16 @@ function PipelinesPanel({
                 <strong>Deprecated pipelines</strong>
                 <small>Preserved for audit and lineage. They cannot be edited or run.</small>
               </span>
-              <i>{deprecatedPipelines.length}</i>
+              <i>{filteredDeprecatedPipelines.length}</i>
             </summary>
             <div className="pipeline-table" role="table" aria-label="Deprecated pipelines">
               <div className="pipeline-table-row head" role="row">
                 <span>Name</span><span>Business case</span><span>Purpose</span><span>Version</span><span>Status</span><span>Updated</span><span />
               </div>
-              {deprecatedPipelines.map((item) => renderPipelineRow(item, true))}
+              {filteredDeprecatedPipelines.map((item) => renderPipelineRow(item, true))}
+              {!filteredDeprecatedPipelines.length && (
+                <div className="catalog-empty">No deprecated pipelines match the selected filters.</div>
+              )}
             </div>
           </details>
         )}
@@ -2145,6 +2663,7 @@ function PipelinesPanel({
                 }}>
                   <option value="custom">Custom workflow</option>
                   <option value="training">Training workflow</option>
+                  <option value="automl">AutoML workflow</option>
                   <option value="batch_scoring">Batch scoring</option>
                   <option value="monitoring">Monitoring workflow</option>
                 </select>
@@ -2154,6 +2673,7 @@ function PipelinesPanel({
                   onChange={(event) => setPipelineTemplate(event.target.value as PipelineTemplate)}>
                   <option value="custom">Empty custom workflow</option>
                   <option value="training">Training · DE, FE, Training, Test Scoring</option>
+                  <option value="automl">AutoML · DE, model-aware search and champion</option>
                   <option value="batch_scoring">Batch scoring · DE, FE Transform, Batch Scoring</option>
                   <option value="monitoring">Monitoring · Target Join, Performance Report</option>
                 </select>
@@ -2167,10 +2687,11 @@ function PipelinesPanel({
                 </div>
               )}
               <label>Description<textarea className="compact-textarea" value={description} onChange={(event) => setDescription(event.target.value)} /></label>
+              {createPipelineError && <div className="form-warning" role="alert">{createPipelineError}</div>}
               <div className="modal-actions">
-                <button className="secondary-button" type="button" onClick={() => setIsCreatePipelineOpen(false)}>Cancel</button>
-                <button className="primary-button" type="submit">
-                  <Plus size={16} /> Create pipeline
+                <button className="secondary-button" type="button" disabled={isCreatingPipeline} onClick={() => setIsCreatePipelineOpen(false)}>Cancel</button>
+                <button className="primary-button" type="submit" disabled={isCreatingPipeline}>
+                  <Plus size={16} /> {isCreatingPipeline ? "Creating…" : "Create pipeline"}
                 </button>
               </div>
             </form>
@@ -2231,6 +2752,7 @@ function PipelinesPanel({
             pipelines={pipelines}
             businessCases={businessCases}
             refreshKey={runHistoryRefreshKey}
+            initialPipelineId={runHistoryPipelineId}
             onClose={() => setIsRunHistoryOpen(false)}
             onDetails={setSelectedRunDetails}
             onExamineDataset={onExamineDataset}
@@ -2334,6 +2856,21 @@ function PipelinesPanel({
                   </label>
                 );
               })}
+              {!catalogRunResult && catalogRunDialog.models.map((model) => (
+                <label key={model.key}>Inference bundle — {model.name}
+                  <select value={catalogRunModelSelections[model.key] ?? ""}
+                    onChange={(event) => setCatalogRunModelSelections((current) => ({ ...current, [model.key]: event.target.value }))}>
+                    {model.versions.map((version, index) => (
+                      <option key={version.id} value={version.id}>
+                        {index === 0 ? "Latest — " : ""}v{version.version_number} · {version.algorithm}
+                      </option>
+                    ))}
+                  </select>
+                  <small>{inferenceBundleSummary(
+                    model.versions.find((version) => version.id === catalogRunModelSelections[model.key])
+                  )}</small>
+                </label>
+              ))}
               {!catalogRunResult && !catalogRunDialog.inputs.length && <p>This pipeline has no external dataset inputs.</p>}
               {catalogRunResult && !["queued", "running"].includes(catalogRunResult.status) && (
                 <div className="catalog-run-outputs">
@@ -2424,6 +2961,7 @@ function PipelinesPanel({
               <option value="data_preparation">Data preparation</option>
               <option value="feature_engineering">Feature engineering</option>
               <option value="training">Training</option>
+              <option value="automl">AutoML</option>
               <option value="batch_scoring">Batch scoring</option>
               <option value="monitoring">Monitoring</option>
               <option value="custom">Custom</option>
@@ -2446,7 +2984,36 @@ function PipelinesPanel({
             {runFeedback.status === "succeeded" ? "✓" : runFeedback.status === "failed" ? "!" : ""}
           </span>
           <div><strong>{runFeedback.title}</strong><span>{runFeedback.detail}</span></div>
+          {activeRunMonitor && (
+            <button
+              className="secondary-button compact-button"
+              type="button"
+              onClick={() => setSelectedRunDetails(activeRunMonitor)}
+            >
+              <Activity size={14} /> Monitor
+            </button>
+          )}
           {!isRunActive && <button className="icon-button" type="button" onClick={() => setRunFeedback(null)} aria-label="Dismiss"><X size={15} /></button>}
+        </div>
+      )}
+      {(draftValidationError || workflowValidationIssues.length > 0) && (
+        <div className="inline-run-feedback failed validation-feedback" role="alert" aria-live="polite">
+          <span className="run-result-icon"><AlertTriangle size={16} /></span>
+          <div>
+            <strong>{draftValidationError ? "Pipeline validation failed" : "Pipeline settings need attention"}</strong>
+            {draftValidationError && <span>{draftValidationError}</span>}
+            {!draftValidationError && workflowValidationIssues.slice(0, 5).map((issue) => (
+              <span key={issue}>{issue}</span>
+            ))}
+            {!draftValidationError && workflowValidationIssues.length > 5 && (
+              <span>And {workflowValidationIssues.length - 5} more validation issue(s).</span>
+            )}
+          </div>
+          {draftValidationError && (
+            <button className="icon-button" type="button" onClick={() => setDraftValidationError("")} aria-label="Dismiss validation message">
+              <X size={15} />
+            </button>
+          )}
         </div>
       )}
       {activeStepRuns.length > 0 && (
@@ -2501,8 +3068,11 @@ function PipelinesPanel({
       )}
 
       <div className="panel pipeline-canvas-panel">
-        <DeferredPanel>
+        {hydratedPipelineId !== selectedPipeline?.id ? (
+          <p>Loading pipeline definitionâ€¦</p>
+        ) : <DeferredPanel>
           <WorkflowEditor
+            key={`${selectedPipeline.id}:${versions.find((item) => item.status === "draft")?.id ?? versions.at(-1)?.id ?? "empty"}`}
             definition={workflowDefinition}
             businessCase={businessCases.find((item) => item.id === selectedBusinessCaseIdValue)}
             datasets={latestLogicalDatasetAliases(datasets)}
@@ -2512,12 +3082,13 @@ function PipelinesPanel({
               const dataset = datasets.find((item) => item.id === attachment.data_asset_id);
               return dataset ? { ...attachment, data_asset_id: dataset.logical_id } : attachment;
             })}
+            pipelineId={selectedPipeline?.id}
             outputNameSuggestion={selectedPipeline?.name ?? "result"}
             pipelineType={selectedPipeline?.type ?? pipelineTypeDraft}
             onChange={updateWorkflowDefinition}
             disabled={!hasDraft}
           />
-        </DeferredPanel>
+        </DeferredPanel>}
       </div>
 
       <div className="editor-lower-grid">
@@ -2641,6 +3212,21 @@ function PipelinesPanel({
                 </label>
               );
             })}
+            {!catalogRunResult && catalogRunDialog.models.map((model) => (
+              <label key={model.key}>Inference bundle — {model.name}
+                <select value={catalogRunModelSelections[model.key] ?? ""}
+                  onChange={(event) => setCatalogRunModelSelections((current) => ({ ...current, [model.key]: event.target.value }))}>
+                  {model.versions.map((version, index) => (
+                    <option key={version.id} value={version.id}>
+                      {index === 0 ? "Latest — " : ""}v{version.version_number} · {version.algorithm}
+                    </option>
+                  ))}
+                </select>
+                <small>{inferenceBundleSummary(
+                  model.versions.find((version) => version.id === catalogRunModelSelections[model.key])
+                )}</small>
+              </label>
+            ))}
             {catalogRunResult && !["queued", "running"].includes(catalogRunResult.status) && (
               <div className="catalog-run-outputs">
                 <strong>Created datasets</strong>
@@ -2776,6 +3362,7 @@ function pipelineName(pipelines: Pipeline[], pipelineId: string) {
 
 function suggestedPipelineTemplate(purpose: string): PipelineTemplate {
   if (purpose === "training") return "training";
+  if (purpose === "automl") return "automl";
   if (purpose === "batch_scoring") return "batch_scoring";
   if (purpose === "monitoring") return "monitoring";
   return "custom";
@@ -2847,12 +3434,14 @@ function DatasetVersionHistoryDialog({
 }
 
 function DataPanel({
+  businessCases,
   datasets,
   pipelines,
   onAnalyze,
   onRefresh,
   setNotice
 }: {
+  businessCases: BusinessCase[];
   datasets: DataAsset[];
   pipelines: Pipeline[];
   onAnalyze: (datasetId: string) => void;
@@ -2867,15 +3456,56 @@ function DataPanel({
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [isUploadingFile, setIsUploadingFile] = useState(false);
   const [uploadLogicalId, setUploadLogicalId] = useState("");
+  const [businessCaseFilter, setBusinessCaseFilter] = useState("");
+  const [businessCaseAttachments, setBusinessCaseAttachments] = useState<BusinessCaseDataAttachment[]>([]);
+  const [isBusinessCaseFilterLoading, setIsBusinessCaseFilterLoading] = useState(false);
   const [purposeFilter, setPurposeFilter] = useState("");
   const [pipelineFilter, setPipelineFilter] = useState("");
   const [uploadedOnly, setUploadedOnly] = useState(false);
+  useEffect(() => {
+    setBusinessCaseAttachments([]);
+    if (!businessCaseFilter) {
+      setIsBusinessCaseFilterLoading(false);
+      return;
+    }
+    let active = true;
+    setIsBusinessCaseFilterLoading(true);
+    api.listBusinessCaseDataAttachments(businessCaseFilter)
+      .then((items) => {
+        if (active) setBusinessCaseAttachments(items);
+      })
+      .catch((error) => {
+        if (active) {
+          setNotice(error instanceof Error ? error.message : "Could not load Business Case datasets");
+        }
+      })
+      .finally(() => {
+        if (active) setIsBusinessCaseFilterLoading(false);
+      });
+    return () => { active = false; };
+  }, [businessCaseFilter, setNotice]);
+  const attachedLogicalIds = useMemo(() => {
+    const datasetById = new Map(datasets.map((dataset) => [dataset.id, dataset]));
+    return new Set(
+      businessCaseAttachments
+        .map((attachment) => datasetById.get(attachment.data_asset_id)?.logical_id)
+        .filter((value): value is string => Boolean(value))
+    );
+  }, [businessCaseAttachments, datasets]);
+  const filterPipelines = businessCaseFilter
+    ? pipelines.filter((pipeline) => pipeline.business_case_id === businessCaseFilter)
+    : pipelines;
   const activeDatasets = datasets.filter((dataset) => {
     if (dataset.status === "deleted" || isDataView(dataset)) return false;
+    if (businessCaseFilter && !attachedLogicalIds.has(dataset.logical_id)) return false;
     if (uploadedOnly) return isUploadedDataset(dataset);
     return pipelineMatches(datasetPipelineId(dataset), pipelines, purposeFilter, pipelineFilter);
   });
-  const dataViews = datasets.filter((dataset) => dataset.status !== "deleted" && isDataView(dataset));
+  const dataViews = datasets.filter((dataset) =>
+    dataset.status !== "deleted"
+    && isDataView(dataset)
+    && (!businessCaseFilter || attachedLogicalIds.has(dataset.logical_id))
+  );
   const deletedDatasets = datasets.filter((dataset) => dataset.status === "deleted");
 
   function selectDatasetFile(nextFile: File | null) {
@@ -3053,23 +3683,44 @@ function DataPanel({
         <div className="panel dataset-catalog-filters">
           <div>
             <h2>Dataset filters</h2>
-            <p>{datasetVersionGroups(activeDatasets).length} dataset families shown</p>
+            <p>
+              {isBusinessCaseFilterLoading
+                ? "Loading Business Case datasets…"
+                : `${datasetVersionGroups(activeDatasets).length} dataset families shown`}
+            </p>
           </div>
-          <ArtifactFilters
-            pipelines={pipelines}
-            purpose={purposeFilter}
-            pipelineId={pipelineFilter}
-            onPurposeChange={setPurposeFilter}
-            onPipelineChange={setPipelineFilter}
-            uploadedOnly={uploadedOnly}
-            onUploadedOnlyChange={(value) => {
-              setUploadedOnly(value);
-              if (value) {
-                setPurposeFilter("");
-                setPipelineFilter("");
-              }
-            }}
-          />
+          <div className="dataset-filter-controls">
+            <label className="dataset-business-case-filter">
+              <span><Filter size={14} /> Business case</span>
+              <select
+                aria-label="Filter datasets by Business Case"
+                value={businessCaseFilter}
+                onChange={(event) => {
+                  setBusinessCaseFilter(event.target.value);
+                  setPurposeFilter("");
+                  setPipelineFilter("");
+                }}
+              >
+                <option value="">All business cases</option>
+                {businessCases.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+              </select>
+            </label>
+            <ArtifactFilters
+              pipelines={filterPipelines}
+              purpose={purposeFilter}
+              pipelineId={pipelineFilter}
+              onPurposeChange={setPurposeFilter}
+              onPipelineChange={setPipelineFilter}
+              uploadedOnly={uploadedOnly}
+              onUploadedOnlyChange={(value) => {
+                setUploadedOnly(value);
+                if (value) {
+                  setPurposeFilter("");
+                  setPipelineFilter("");
+                }
+              }}
+            />
+          </div>
         </div>
         <VersionedDatasetList
           datasets={activeDatasets}
@@ -3286,6 +3937,15 @@ function durationLabel(startedAt: string | null | undefined, finishedAt: string 
 
 function shortId(value: string) {
   return value.slice(0, 8);
+}
+
+function inferenceBundleSummary(model: ModelArtifact | undefined) {
+  if (!model) return "Select a model version to resolve its inference bundle.";
+  if (!model.fitted_transform_artifact_id) {
+    return "No matching fitted transform is registered; the backend will block this run.";
+  }
+  return `Model + fitted transform ${shortId(model.fitted_transform_artifact_id)} `
+    + `from training run ${shortId(model.pipeline_run_id)} are pinned atomically.`;
 }
 
 function AnalysisPanel({

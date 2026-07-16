@@ -340,6 +340,9 @@ class PipelineService:
             )
         version.definition = validate_definition(version.definition, executable=True)
         workflow = WorkflowDefinition.model_validate(version.definition)
+        resolved_models = self._resolve_model_versions(
+            workflow, payload.model_versions, principal, pipeline.business_case_id
+        )
         self._validate_external_artifacts(
             workflow,
             principal,
@@ -359,6 +362,7 @@ class PipelineService:
         )
         runtime_parameters = dict(payload.runtime_parameters)
         runtime_parameters["resolved_input_versions"] = resolved_inputs
+        runtime_parameters["resolved_model_versions"] = resolved_models
         run = PipelineRun(
             id=str(uuid4()),
             owner_id=principal.user_id,
@@ -521,6 +525,199 @@ class PipelineService:
                 }
         return resolved
 
+    def _resolve_model_versions(
+        self,
+        workflow: WorkflowDefinition,
+        requested_versions: dict[str, str],
+        principal: Principal,
+        business_case_id: str,
+    ) -> dict[str, dict[str, Any]]:
+        """Resolve an immutable model and its matching inference FE bundle."""
+        model_artifacts = [
+            artifact
+            for artifact in self.artifacts.list_artifacts(principal.user_id, ArtifactType.MODEL_VERSION)
+            if artifact.business_case_id == business_case_id
+        ]
+        by_id = {artifact.id: artifact for artifact in model_artifacts}
+        fitted_artifacts = [
+            artifact
+            for artifact in self.artifacts.list_artifacts(
+                principal.user_id, ArtifactType.FEATURE_TRANSFORM
+            )
+            if artifact.business_case_id == business_case_id
+        ]
+        resolved: dict[str, dict[str, Any]] = {}
+        for step in workflow.steps:
+            if step.type != "scoring":
+                continue
+            definition = step.config.get("definition")
+            if not isinstance(definition, dict) or definition.get("purpose") != "batch":
+                continue
+            configured = by_id.get(str(definition.get("model_artifact_id") or ""))
+            if configured is None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail={"message": f"Step '{step.step_id}' references an unavailable model artifact"},
+                )
+            logical_id = str(configured.metadata.get("logical_model_id") or configured.id)
+            family = [
+                artifact for artifact in model_artifacts
+                if str(artifact.metadata.get("logical_model_id") or artifact.id) == logical_id
+            ]
+            selected_id = requested_versions.get(step.step_id)
+            selected = by_id.get(selected_id) if selected_id else max(
+                family, key=lambda artifact: (artifact.created_at, artifact.id)
+            )
+            if selected not in family:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail={"message": f"Selected model version is not available for step '{step.step_id}'"},
+                )
+            version_number = sorted(family, key=lambda artifact: (artifact.created_at, artifact.id)).index(selected) + 1
+            bundle = self._resolve_model_inference_bundle(
+                workflow,
+                step.step_id,
+                selected,
+                fitted_artifacts,
+            )
+            resolved[step.step_id] = {
+                "model_artifact_id": selected.id,
+                "logical_model_id": logical_id,
+                "version_number": version_number,
+                "model_name": str(selected.metadata.get("model_name") or "Model"),
+                "selection_policy": "selected" if selected_id else "latest",
+                **bundle,
+            }
+        return resolved
+
+    def _resolve_model_inference_bundle(
+        self,
+        workflow: WorkflowDefinition,
+        scoring_step_id: str,
+        model_artifact: Any,
+        fitted_artifacts: list[Any],
+    ) -> dict[str, Any]:
+        """Pin the recipe and fitted state produced by the selected model run."""
+        scoring_step = next(step for step in workflow.steps if step.step_id == scoring_step_id)
+        data_input = next(
+            (item for item in scoring_step.inputs if item.port_id == "data"),
+            None,
+        )
+        feature_step_id = data_input.source.step_id if data_input is not None else ""
+        feature_step = next(
+            (step for step in workflow.steps if step.step_id == feature_step_id),
+            None,
+        )
+        if feature_step is None or feature_step.type != "feature_engineering":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "message": (
+                        f"Batch scoring step '{scoring_step_id}' must consume a Feature "
+                        "Engineering step so the model and fitted transform can be pinned together"
+                    )
+                },
+            )
+
+        metadata = dict(model_artifact.metadata or {})
+        lineage = dict(metadata.get("lineage") or {})
+        training_run_id = str(lineage.get("pipeline_run_id") or "")
+        training_version_id = str(lineage.get("pipeline_version_id") or "")
+        model_step_id = str(lineage.get("pipeline_step_id") or "")
+        training_config = dict(metadata.get("training_config") or {})
+        auto_fe = dict(training_config.get("auto_feature_engineering") or {})
+        resolved_recipe = auto_fe.get("resolved_recipe")
+
+        if isinstance(resolved_recipe, dict) and resolved_recipe:
+            fitted_step_id = model_step_id
+            feature_definition = dict(resolved_recipe)
+        else:
+            version = self.repository.get_version(training_version_id)
+            if version is None or version.owner_id != model_artifact.owner_id:
+                raise self._incomplete_inference_bundle(scoring_step_id, model_artifact.id)
+            fitted_step_id = self._upstream_feature_step_id(version.definition, model_step_id)
+            feature_definition = self._feature_definition(version.definition, fitted_step_id)
+
+        matches = [
+            artifact for artifact in fitted_artifacts
+            if str(dict(artifact.metadata.get("lineage") or {}).get("pipeline_run_id") or "")
+            == training_run_id
+            and str(dict(artifact.metadata.get("lineage") or {}).get("pipeline_step_id") or "")
+            == fitted_step_id
+        ]
+        if len(matches) != 1 or not feature_definition:
+            raise self._incomplete_inference_bundle(scoring_step_id, model_artifact.id)
+        fitted = matches[0]
+
+        model_features = [str(value) for value in metadata.get("feature_columns") or []]
+        manifest_features = [
+            str(item.get("name"))
+            for item in fitted.metadata.get("feature_manifest") or []
+            if isinstance(item, dict) and item.get("role") == "feature" and item.get("name")
+        ]
+        if model_features and manifest_features and model_features != manifest_features:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail={
+                    "message": (
+                        f"Model and fitted transform feature contracts do not match for step "
+                        f"'{scoring_step_id}'"
+                    )
+                },
+            )
+
+        return {
+            "feature_step_id": feature_step_id,
+            "feature_engineering_definition": feature_definition,
+            "fitted_transform_artifact_id": fitted.id,
+            "fitted_transform_state_hash": str(fitted.metadata.get("state_hash") or ""),
+            "fitted_transform_definition_hash": str(
+                fitted.metadata.get("definition_hash") or ""
+            ),
+            "training_pipeline_run_id": training_run_id,
+            "training_pipeline_version_id": training_version_id,
+            "training_pipeline_step_id": model_step_id,
+            "feature_columns": model_features,
+        }
+
+    @staticmethod
+    def _upstream_feature_step_id(definition: dict[str, Any], model_step_id: str) -> str:
+        model_step = next(
+            (
+                step for step in definition.get("steps", [])
+                if isinstance(step, dict) and step.get("step_id") == model_step_id
+            ),
+            {},
+        )
+        for item in model_step.get("inputs", []):
+            if isinstance(item, dict) and item.get("port_id") == "training":
+                source = item.get("source") or {}
+                if isinstance(source, dict):
+                    return str(source.get("step_id") or "")
+        return ""
+
+    @staticmethod
+    def _feature_definition(definition: dict[str, Any], step_id: str) -> dict[str, Any]:
+        for step in definition.get("steps", []):
+            if not isinstance(step, dict) or step.get("step_id") != step_id:
+                continue
+            config = step.get("config") or {}
+            nested = config.get("definition") if isinstance(config, dict) else None
+            return dict(nested) if isinstance(nested, dict) else {}
+        return {}
+
+    @staticmethod
+    def _incomplete_inference_bundle(scoring_step_id: str, model_artifact_id: str) -> HTTPException:
+        return HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "message": (
+                    f"Model '{model_artifact_id}' has no complete fitted Feature Engineering "
+                    f"bundle for scoring step '{scoring_step_id}'"
+                )
+            },
+        )
+
     def _validate_external_artifacts(
         self,
         workflow: WorkflowDefinition,
@@ -567,7 +764,7 @@ class PipelineService:
         run = self.repository.get_run(run_id)
         if not run or run.pipeline_id != pipeline.id or run.owner_id != principal.user_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pipeline run not found")
-        return run
+        return self._repair_finished_active_run(run)
 
     def get_run_details(self, pipeline_id: str, run_id: str, principal: Principal) -> dict[str, Any]:
         run = self.get_run(pipeline_id, run_id, principal)
@@ -614,6 +811,17 @@ class PipelineService:
         run.status = PipelineRunStatus.CANCELLED
         run.finished_at = datetime.now(timezone.utc)
         run.warnings = [*run.warnings, "Cancellation requested; an active DuckDB step stops at the next step boundary"]
+        run.events = [
+            *run.events,
+            {
+                "timestamp": run.finished_at.isoformat(),
+                "level": "warning",
+                "type": "run.cancel_requested",
+                "step_id": "",
+                "message": "Cancellation requested by user",
+                "details": {},
+            },
+        ][-1000:]
         return self.repository.update_run(run)
 
     def retry_run(self, pipeline_id: str, run_id: str, principal: Principal) -> PipelineRun:
@@ -629,6 +837,12 @@ class PipelineService:
             for key, value in resolved.items()
             if isinstance(value, dict) and value.get("dataset_id")
         } if isinstance(resolved, dict) else {}
+        resolved_models = previous.runtime_parameters.get("resolved_model_versions", {})
+        model_versions = {
+            str(key): str(value.get("model_artifact_id"))
+            for key, value in resolved_models.items()
+            if isinstance(value, dict) and value.get("model_artifact_id")
+        } if isinstance(resolved_models, dict) else {}
         runtime_parameters = {
             key: value
             for key, value in previous.runtime_parameters.items()
@@ -642,6 +856,7 @@ class PipelineService:
                 trigger_type=PipelineRunTrigger.MANUAL,
                 runtime_parameters=runtime_parameters,
                 input_versions=input_versions,
+                model_versions=model_versions,
                 is_dry_run=previous.is_dry_run,
                 step_id=previous.requested_step_id or None,
             ),
@@ -659,12 +874,39 @@ class PipelineService:
         if pipeline_id:
             pipeline = self._get_owned_pipeline(pipeline_id, principal)
             pipeline_id = pipeline.id
-        return self.repository.list_runs(
+        runs = self.repository.list_runs(
             pipeline_id,
             principal.user_id,
             limit=limit,
             offset=offset,
         )
+        return [self._repair_finished_active_run(run) for run in runs]
+
+    def list_run_summaries(
+        self,
+        principal: Principal,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[PipelineRun]:
+        # The history grid needs metadata only. Trial events and output manifests
+        # can be several megabytes and are fetched lazily with run details.
+        summaries = self.repository.list_run_summaries(
+            principal.user_id,
+            limit=limit,
+            offset=offset,
+        )
+        reconciled: list[PipelineRun] = []
+        for summary in summaries:
+            if (
+                summary.status in {PipelineRunStatus.QUEUED, PipelineRunStatus.RUNNING}
+                and summary.finished_at is not None
+            ):
+                full_run = self.repository.get_run(summary.id)
+                if full_run is not None:
+                    summary = self._repair_finished_active_run(full_run)
+            reconciled.append(summary)
+        return reconciled
 
     def list_step_runs(
         self,
@@ -750,6 +992,50 @@ class PipelineService:
         if draft:
             return draft
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Pipeline has no runnable version")
+
+    def _repair_finished_active_run(self, run: PipelineRun) -> PipelineRun:
+        if run.status not in {PipelineRunStatus.QUEUED, PipelineRunStatus.RUNNING}:
+            return run
+        if run.finished_at is None:
+            return run
+        message = (
+            "Pipeline worker stopped after setting a finish timestamp without a terminal status; "
+            "the run was marked failed during status reconciliation."
+        )
+        run.status = PipelineRunStatus.FAILED
+        run.error_message = run.error_message or message
+        run.warnings = list(dict.fromkeys([*run.warnings, message]))
+        run.events = [
+            *run.events,
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "level": "error",
+                "type": "run.reconciled_failed",
+                "step_id": "",
+                "message": "Pipeline run status reconciled to failed",
+                "details": {"reason": message},
+            },
+        ][-1000:]
+        for step_run in self.repository.list_step_runs(run.id, run.owner_id):
+            if step_run.status not in {PipelineRunStatus.QUEUED, PipelineRunStatus.RUNNING}:
+                continue
+            step_run.status = PipelineRunStatus.FAILED
+            step_run.finished_at = step_run.finished_at or run.finished_at
+            step_run.error_message = step_run.error_message or message
+            step_run.warnings = list(dict.fromkeys([*step_run.warnings, message]))
+            step_run.events = [
+                *step_run.events,
+                {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "level": "error",
+                    "type": "step.reconciled_failed",
+                    "step_id": step_run.pipeline_step_id,
+                    "message": "Pipeline step status reconciled to failed",
+                    "details": {"reason": message},
+                },
+            ][-1000:]
+            self.repository.update_step_run(step_run)
+        return self.repository.update_run(run)
 
 
 def normalize_definition(definition: dict) -> dict:

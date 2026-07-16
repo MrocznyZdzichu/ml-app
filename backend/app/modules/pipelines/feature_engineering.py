@@ -14,6 +14,15 @@ from uuid import uuid4
 import duckdb
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor
+from sklearn.feature_selection import (
+    chi2,
+    f_classif,
+    f_regression,
+    mutual_info_classif,
+    mutual_info_regression,
+)
+from sklearn.linear_model import Lasso, LogisticRegression
 
 from app.modules.business_cases.domain import ArtifactType
 from app.modules.business_cases.repository import (
@@ -60,6 +69,9 @@ class FeatureTransformation(BaseModel):
         "datetime_features",
         "numeric_interaction",
         "math_transform",
+        "winsorize_numeric",
+        "variance_filter",
+        "supervised_feature_selector",
         "sql_expression",
         "pca",
     ]
@@ -68,18 +80,27 @@ class FeatureTransformation(BaseModel):
 
     @model_validator(mode="after")
     def validate_config(self) -> FeatureTransformation:
-        if not self.columns and self.type not in {"numeric_interaction", "sql_expression"}:
+        if not self.columns and self.type not in {
+            "numeric_interaction", "sql_expression", "supervised_feature_selector",
+        }:
             raise ValueError(f"Feature transform '{self.transform_id}' requires columns")
         allowed: dict[str, set[str]] = {
             "impute": {"method", "value", "add_indicator"},
-            "scale_numeric": {"method", "output_suffix"},
+            "scale_numeric": {"method", "output_suffix", "drop_original"},
             "encode_categorical": {
                 "method", "min_frequency", "max_categories", "handle_unknown",
-                "drop_original", "output_suffix",
+                "drop_original", "output_suffix", "hash_bins", "target_column",
+                "row_id_column", "problem_type", "cross_fit_folds", "smoothing",
             },
             "datetime_features": {"features", "cyclical", "drop_original"},
             "numeric_interaction": {"left", "right", "operator", "output_column", "zero_division"},
-            "math_transform": {"operation", "output_suffix"},
+            "math_transform": {"operation", "output_suffix", "drop_original"},
+            "winsorize_numeric": {"lower_quantile", "upper_quantile"},
+            "variance_filter": {"threshold"},
+            "supervised_feature_selector": {
+                "method", "target_column", "problem_type", "max_features",
+                "correlation_threshold", "random_seed", "max_memory_mb", "profile",
+            },
             "sql_expression": {"expression", "output_column", "output_type"},
             "pca": {"n_components", "output_prefix", "whiten", "drop_original"},
         }
@@ -100,8 +121,13 @@ class FeatureTransformation(BaseModel):
         }:
             raise ValueError("Numeric scaling method must be standard, minmax or robust")
         if self.type == "encode_categorical":
-            if self.config.get("method", "ordinal") not in {"ordinal", "one_hot", "frequency"}:
-                raise ValueError("Categorical encoding method must be ordinal, one_hot or frequency")
+            if self.config.get("method", "ordinal") not in {
+                "ordinal", "one_hot", "frequency", "hashing", "target_mean", "ordered_target",
+            }:
+                raise ValueError(
+                    "Categorical encoding method must be ordinal, one_hot, frequency, hashing, "
+                    "target_mean or ordered_target"
+                )
             if self.config.get("handle_unknown", "other") not in {"other", "error"}:
                 raise ValueError("Unknown category policy must be other or error")
             maximum = int(self.config.get("max_categories", 50))
@@ -109,6 +135,20 @@ class FeatureTransformation(BaseModel):
                 raise ValueError("max_categories must be between 2 and 500")
             if int(self.config.get("min_frequency", 1)) < 1:
                 raise ValueError("min_frequency must be positive")
+            if self.config.get("method") in {"hashing"}:
+                bins = int(self.config.get("hash_bins", 32))
+                if bins < 2 or bins > 256:
+                    raise ValueError("Categorical hashing requires 2 to 256 hash bins")
+            if self.config.get("method") in {"target_mean", "ordered_target"}:
+                if not self.config.get("target_column") or not self.config.get("row_id_column"):
+                    raise ValueError(
+                        "Leakage-safe target encoding requires target_column and row_id_column"
+                    )
+                folds = int(self.config.get("cross_fit_folds", 5))
+                if folds < 2 or folds > 20:
+                    raise ValueError("Target encoding cross_fit_folds must be between 2 and 20")
+                if float(self.config.get("smoothing", 10.0)) < 0:
+                    raise ValueError("Target encoding smoothing cannot be negative")
         if self.type == "datetime_features":
             features = self.config.get("features", ["year", "month", "day_of_week"])
             allowed_parts = {"year", "quarter", "month", "day", "day_of_week", "hour", "is_weekend"}
@@ -120,14 +160,37 @@ class FeatureTransformation(BaseModel):
                 raise ValueError("numeric_interaction requires left, right, operator and output_column")
             if self.config["operator"] not in {"add", "subtract", "multiply", "divide"}:
                 raise ValueError("Unsupported numeric interaction operator")
+            if self.config.get("zero_division", "null") not in {"null", "zero"}:
+                raise ValueError("Numeric interaction zero_division must be null or zero")
         if self.type == "math_transform":
             if self.config.get("operation", "square") not in {
-                "square", "sqrt", "exp", "log", "log1p", "abs",
+                "square", "sqrt", "exp", "log", "log1p", "signed_log1p", "abs",
             }:
                 raise ValueError("Unsupported mathematical feature transformation")
             suffix = self.config.get("output_suffix")
             if not isinstance(suffix, str) or not suffix:
                 raise ValueError("math_transform requires a non-empty output_suffix")
+        if self.type == "winsorize_numeric":
+            lower = float(self.config.get("lower_quantile", 0.01))
+            upper = float(self.config.get("upper_quantile", 0.99))
+            if not 0 <= lower < upper <= 1:
+                raise ValueError("Winsorization quantiles must satisfy 0 <= lower < upper <= 1")
+        if self.type == "variance_filter":
+            threshold = float(self.config.get("threshold", 0.0))
+            if threshold < 0:
+                raise ValueError("Variance threshold cannot be negative")
+        if self.type == "supervised_feature_selector":
+            if self.config.get("method", "mutual_information") not in {
+                "mutual_information", "f_test", "chi_square", "l1", "importance",
+            }:
+                raise ValueError("Unsupported supervised feature-selection method")
+            if not self.config.get("target_column"):
+                raise ValueError("Supervised feature selection requires target_column")
+            if int(self.config.get("max_features", 50)) < 1:
+                raise ValueError("Supervised feature selection max_features must be positive")
+            threshold = float(self.config.get("correlation_threshold", 0.98))
+            if not 0 < threshold <= 1:
+                raise ValueError("Feature redundancy threshold must be in (0, 1]")
         if self.type == "sql_expression":
             output = self.config.get("output_column")
             if not isinstance(output, str) or not output:
@@ -178,7 +241,7 @@ class EvaluationConfig(BaseModel):
 
     split_strategy: Literal["predefined", "random", "stratified", "group", "time"] = "predefined"
     validation_size: float = Field(default=0.1, ge=0, lt=1)
-    test_size: float = Field(default=0.2, gt=0, lt=1)
+    test_size: float = Field(default=0.2, ge=0, lt=1)
     seed: int = 42
     stratify_column: str = ""
     group_column: str = ""
@@ -189,6 +252,12 @@ class EvaluationConfig(BaseModel):
     def validate_evaluation(self) -> EvaluationConfig:
         if self.split_strategy != "predefined" and self.validation_size + self.test_size >= 1:
             raise ValueError("Validation and test shares must leave a non-empty training share")
+        if (
+            self.split_strategy != "predefined"
+            and self.validation_size == 0
+            and self.test_size == 0
+        ):
+            raise ValueError("Generated split requires a validation or test share")
         if self.split_strategy == "stratified" and not self.stratify_column:
             raise ValueError("Stratified split requires stratify_column")
         if self.split_strategy == "group" and not self.group_column:
@@ -256,14 +325,6 @@ class FeatureEngineeringDefinition(BaseModel):
         ) if value]
         if set(protected) & set(self.feature_columns):
             raise ValueError("Target, row ID, group and event time columns cannot be selected as features")
-        if self.evaluation.split_strategy in {"random", "stratified"} and not self.row_id_column:
-            raise ValueError("Random and stratified splits require row_id_column for reproducibility")
-        if (
-            self.evaluation.cross_validation.enabled
-            and self.evaluation.cross_validation.strategy in {"kfold", "stratified"}
-            and not self.row_id_column
-        ):
-            raise ValueError("K-fold and stratified cross-validation require row_id_column")
         return self
 
     def validate_executable(self) -> None:
@@ -275,15 +336,27 @@ class FeatureEngineeringDefinition(BaseModel):
             raise ValueError("fit_transform requires exactly one training input")
         if self.mode == "transform" and not self.fitted_state_artifact_id:
             raise ValueError("Transform mode requires fitted_state_artifact_id")
+        if self.evaluation.split_strategy in {"random", "stratified"} and not self.row_id_column:
+            raise ValueError("Random and stratified splits require row_id_column for reproducibility")
+        if (
+            self.evaluation.cross_validation.enabled
+            and self.evaluation.cross_validation.strategy in {"kfold", "stratified"}
+            and not self.row_id_column
+        ):
+            raise ValueError("K-fold and stratified cross-validation require row_id_column")
         if self.evaluation.split_strategy != "predefined":
             if len(self.inputs) != 1 or self.inputs[0].role != "training":
                 raise ValueError("Generated splits require one source input with the training role")
             output_inputs = {item.input_id for item in self.outputs}
-            required = {"training", "test"}
+            required = {"training"}
             if self.evaluation.validation_size > 0:
                 required.add("validation")
+            if self.evaluation.test_size > 0:
+                required.add("test")
             if not required.issubset(output_inputs):
-                raise ValueError("Generated split outputs must include training, test and optional validation")
+                raise ValueError(
+                    "Generated split outputs must include training and every configured holdout"
+                )
 
 
 @dataclass(frozen=True)
@@ -356,7 +429,7 @@ class DuckDbFeatureEngineeringEngine:
                 state["feature_roles"] = _feature_roles(definition)
             else:
                 state = self._load_state(definition.fitted_state_artifact_id, owner_id)
-                if state.get("recipe_hash") != _recipe_hash(definition):
+                if state.get("recipe_hash") not in _compatible_recipe_hashes(definition):
                     raise ValueError(
                         "Feature Engineering recipe does not match the pinned fitted transform"
                     )
@@ -455,6 +528,8 @@ class DuckDbFeatureEngineeringEngine:
             for role, predicate in predicates.items():
                 if role == "validation" and evaluation.validation_size == 0:
                     continue
+                if role == "test" and evaluation.test_size == 0:
+                    continue
                 view = f"__mlapp_fe_split_{role}_{uuid4().hex[:8]}"
                 connection.execute(
                     f"CREATE TEMP VIEW {identifier(view)} AS "
@@ -484,10 +559,17 @@ class DuckDbFeatureEngineeringEngine:
             ).fetchone()[0])
             for role, view in prepared.items()
         }
-        if evaluation.split_strategy != "predefined" and (
-            split_counts.get("training", 0) == 0 or split_counts.get("test", 0) == 0
-        ):
-            raise ValueError("Generated split produced an empty training or test partition")
+        if evaluation.split_strategy != "predefined":
+            required_roles = ["training"]
+            if evaluation.validation_size > 0:
+                required_roles.append("validation")
+            if evaluation.test_size > 0:
+                required_roles.append("test")
+            empty_roles = [role for role in required_roles if split_counts.get(role, 0) == 0]
+            if empty_roles:
+                raise ValueError(
+                    "Generated split produced empty partitions: " + ", ".join(empty_roles)
+                )
         fold_counts: list[dict[str, int]] = []
         if evaluation.cross_validation.enabled:
             fold_counts = [
@@ -630,8 +712,20 @@ class DuckDbFeatureEngineeringEngine:
             )
         schema_rows = connection.execute(f"DESCRIBE SELECT * FROM {identifier(current)}").fetchall()
         final_names = {str(row[0]) for row in schema_rows}
+        selector_dropped = {
+            str(column)
+            for state in transform_states.values()
+            if state.get("type") in {"variance_filter", "supervised_feature_selector"}
+            for column in state.get("dropped_columns") or []
+        }
+        has_dynamic_selector = any(
+            state.get("type") in {"variance_filter", "supervised_feature_selector"}
+            for state in transform_states.values()
+        )
         missing_features = sorted(
             feature for feature in definition.feature_columns
+            if not has_dynamic_selector
+            if feature not in selector_dropped
             if feature not in final_names
             and not any(name.startswith(f"{feature}__") for name in final_names)
         )
@@ -648,7 +742,13 @@ class DuckDbFeatureEngineeringEngine:
                 definition.event_time_column,
             ) if value
         }
-        selected_features = set(definition.feature_columns)
+        # Learned selectors resolve the final model feature set dynamically.
+        # Once one is present, every remaining non-protected output column is a
+        # selected feature; requiring the pre-encoding source names here falsely
+        # rejects valid one-hot/target-encoded selector recipes.
+        selected_features = (
+            set() if has_dynamic_selector else set(definition.feature_columns)
+        )
         feature_manifest = [
             {
                 "feature_id": hashlib.sha256(str(row[0]).encode("utf-8")).hexdigest()[:16],
@@ -750,6 +850,59 @@ class DuckDbFeatureEngineeringEngine:
                     "scale": json_safe(scale or 1),
                 }
             return {"type": transform.type, "method": method, "columns": columns}
+        if transform.type == "winsorize_numeric":
+            lower = float(transform.config.get("lower_quantile", 0.01))
+            upper = float(transform.config.get("upper_quantile", 0.99))
+            expressions = []
+            for column in transform.columns:
+                name = identifier(column)
+                expressions.extend([
+                    f"quantile_cont({name}, {lower})",
+                    f"quantile_cont({name}, {upper})",
+                ])
+            row = connection.execute(
+                f"SELECT {', '.join(expressions)} FROM {identifier(source)}"
+            ).fetchone()
+            bounds = {
+                column: {
+                    "lower": json_safe(row[index * 2]),
+                    "upper": json_safe(row[index * 2 + 1]),
+                }
+                for index, column in enumerate(transform.columns)
+            }
+            return {
+                "type": transform.type,
+                "lower_quantile": lower,
+                "upper_quantile": upper,
+                "columns": bounds,
+            }
+        if transform.type == "variance_filter":
+            threshold = float(transform.config.get("threshold", 0.0))
+            row = connection.execute(
+                "SELECT " + ", ".join(
+                    f"var_pop(CAST({identifier(column)} AS DOUBLE))"
+                    for column in transform.columns
+                ) + f" FROM {identifier(source)}"
+            ).fetchone()
+            variances = {
+                column: float(row[index] or 0.0)
+                for index, column in enumerate(transform.columns)
+            }
+            selected = [
+                column for column in transform.columns
+                if variances[column] > threshold
+            ]
+            return {
+                "type": transform.type,
+                "threshold": threshold,
+                "variances": variances,
+                "selected_columns": selected,
+                "dropped_columns": [
+                    column for column in transform.columns if column not in selected
+                ],
+            }
+        if transform.type == "supervised_feature_selector":
+            return self._fit_supervised_selector(connection, source, transform)
         if transform.type == "encode_categorical":
             method = str(transform.config.get("method", "ordinal"))
             minimum = int(transform.config.get("min_frequency", 1))
@@ -758,6 +911,21 @@ class DuckDbFeatureEngineeringEngine:
                 connection.execute(f"SELECT count(*) FROM {identifier(source)}").fetchone()[0]
             )
             columns: dict[str, Any] = {}
+            target_column = str(transform.config.get("target_column") or "")
+            problem_type = str(transform.config.get("problem_type") or "regression")
+            row_id_column = str(transform.config.get("row_id_column") or "")
+            cross_fit_folds = int(transform.config.get("cross_fit_folds", 5))
+            smoothing = float(transform.config.get("smoothing", 10.0))
+            labels = (
+                [json_safe(row[0]) for row in connection.execute(
+                    f"SELECT DISTINCT {identifier(target_column)} FROM {identifier(source)} "
+                    f"WHERE {identifier(target_column)} IS NOT NULL ORDER BY 1"
+                ).fetchall()]
+                if method in {"target_mean", "ordered_target"} and problem_type != "regression"
+                else []
+            )
+            if problem_type == "binary_classification" and len(labels) == 2:
+                labels = [labels[-1]]
             for column in transform.columns:
                 rows = connection.execute(
                     f"SELECT {identifier(column)}, count(*) AS frequency FROM {identifier(source)} "
@@ -766,15 +934,60 @@ class DuckDbFeatureEngineeringEngine:
                     f"LIMIT ?",
                     [minimum, maximum],
                 ).fetchall()
-                columns[column] = {
+                info: dict[str, Any] = {
                     "categories": [json_safe(row[0]) for row in rows],
                     "frequencies": {str(row[0]): int(row[1]) for row in rows},
                     "training_row_count": training_row_count,
                 }
+                if method in {"target_mean", "ordered_target"}:
+                    targets = labels if labels else [None]
+                    encodings: list[dict[str, Any]] = []
+                    fold_expression = (
+                        f"hash(CAST({identifier(row_id_column)} AS VARCHAR)) % {cross_fit_folds}"
+                    )
+                    for label in targets:
+                        value = (
+                            f"CAST({identifier(target_column)} AS DOUBLE)"
+                            if label is None else
+                            f"CAST({identifier(target_column)} = {sql_literal(label)} AS DOUBLE)"
+                        )
+                        prior = float(connection.execute(
+                            f"SELECT avg({value}) FROM {identifier(source)} "
+                            f"WHERE {identifier(target_column)} IS NOT NULL"
+                        ).fetchone()[0] or 0.0)
+                        aggregate_rows = connection.execute(
+                            f"SELECT {identifier(column)}, {fold_expression} AS fold, "
+                            f"sum({value}), count({value}) FROM {identifier(source)} "
+                            f"WHERE {identifier(column)} IS NOT NULL "
+                            f"AND {identifier(target_column)} IS NOT NULL "
+                            f"GROUP BY {identifier(column)}, fold"
+                        ).fetchall()
+                        by_category: dict[str, dict[str, Any]] = {}
+                        for category, fold, total, count in aggregate_rows:
+                            entry = by_category.setdefault(str(category), {
+                                "sum": 0.0, "count": 0, "folds": {},
+                            })
+                            entry["sum"] += float(total or 0.0)
+                            entry["count"] += int(count)
+                            entry["folds"][str(int(fold))] = {
+                                "sum": float(total or 0.0), "count": int(count),
+                            }
+                        encodings.append({
+                            "label": label,
+                            "prior": prior,
+                            "categories": by_category,
+                        })
+                    info["encodings"] = encodings
+                columns[column] = info
             return {
                 "type": transform.type,
                 "method": method,
                 "handle_unknown": transform.config.get("handle_unknown", "other"),
+                "problem_type": problem_type,
+                "row_id_column": row_id_column,
+                "target_column": target_column,
+                "cross_fit_folds": cross_fit_folds,
+                "smoothing": smoothing,
                 "columns": columns,
             }
         if transform.type == "pca":
@@ -838,6 +1051,137 @@ class DuckDbFeatureEngineeringEngine:
             }
         return {"type": transform.type}
 
+    def _fit_supervised_selector(
+        self,
+        connection: duckdb.DuckDBPyConnection,
+        source: str,
+        transform: FeatureTransformation,
+    ) -> dict[str, Any]:
+        target = str(transform.config["target_column"])
+        problem_type = str(transform.config.get("problem_type") or "regression")
+        described = connection.execute(
+            f"DESCRIBE SELECT * FROM {identifier(source)}"
+        ).fetchall()
+        numeric_tokens = ("INT", "DECIMAL", "DOUBLE", "FLOAT", "REAL", "HUGEINT")
+        protected = {
+            target,
+            str(transform.config.get("row_id_column") or ""),
+            "__mlapp_cv_fold",
+        }
+        candidates = list(transform.columns) or [
+            str(row[0]) for row in described
+            if str(row[0]) not in protected
+            and any(token in str(row[1]).upper() for token in numeric_tokens)
+        ]
+        if not candidates:
+            raise ValueError("Supervised feature selection found no numeric candidates")
+        row_count = int(connection.execute(
+            f"SELECT count(*) FROM {identifier(source)} WHERE {identifier(target)} IS NOT NULL"
+        ).fetchone()[0])
+        max_memory_mb = int(transform.config.get("max_memory_mb", 2048))
+        # Account for the DuckDB result, temporary object array, float matrix and
+        # estimator working space. The selector never silently samples to fit.
+        estimated_bytes = row_count * (len(candidates) + 1) * 8 * 4
+        if estimated_bytes > max_memory_mb * 1024 * 1024:
+            raise ValueError(
+                "Full-scope supervised feature selection exceeds its explicit memory budget: "
+                f"{row_count} rows x {len(candidates)} features require approximately "
+                f"{estimated_bytes / (1024 * 1024):.1f} MiB, limit {max_memory_mb} MiB. "
+                "Data was not sampled."
+            )
+        rows = connection.execute(
+            f"SELECT {', '.join(identifier(item) for item in [*candidates, target])} "
+            f"FROM {identifier(source)} WHERE {identifier(target)} IS NOT NULL"
+        ).fetchall()
+        values = np.asarray(rows, dtype=object)
+        if len(values) < 2:
+            raise ValueError("Supervised feature selection requires at least two target rows")
+        x = values[:, :-1].astype(np.float64)
+        if not np.isfinite(x).all():
+            raise ValueError(
+                "Supervised feature selection received null or infinite features; "
+                "apply imputation before the selector"
+            )
+        y_raw = values[:, -1]
+        classification = problem_type != "regression"
+        y = np.unique(y_raw, return_inverse=True)[1] if classification else y_raw.astype(float)
+        method = str(transform.config.get("method", "mutual_information"))
+        seed = int(transform.config.get("random_seed", 42))
+        if method == "mutual_information":
+            scores = (
+                mutual_info_classif(x, y, random_state=seed)
+                if classification else mutual_info_regression(x, y, random_state=seed)
+            )
+        elif method == "f_test":
+            scores = (f_classif(x, y) if classification else f_regression(x, y))[0]
+        elif method == "chi_square":
+            if not classification:
+                raise ValueError("Chi-square feature selection supports classification only")
+            shifted = x - np.nanmin(x, axis=0, keepdims=True)
+            scores = chi2(shifted, y)[0]
+        elif method == "l1":
+            fitted = (
+                LogisticRegression(
+                    penalty="l1", solver="liblinear", random_state=seed, max_iter=500,
+                ).fit(x, y)
+                if classification else Lasso(alpha=0.001, random_state=seed, max_iter=5_000).fit(x, y)
+            )
+            coefficients = np.asarray(getattr(fitted, "coef_", np.zeros(len(candidates))))
+            scores = np.max(np.abs(coefficients), axis=0) if coefficients.ndim > 1 else np.abs(coefficients)
+        else:
+            fitted = (
+                ExtraTreesClassifier(n_estimators=64, random_state=seed, n_jobs=1).fit(x, y)
+                if classification else
+                ExtraTreesRegressor(n_estimators=64, random_state=seed, n_jobs=1).fit(x, y)
+            )
+            scores = np.asarray(fitted.feature_importances_)
+        scores = np.nan_to_num(np.asarray(scores, dtype=float), nan=0.0, posinf=0.0, neginf=0.0)
+        ranked = sorted(
+            range(len(candidates)),
+            key=lambda index: (-abs(float(scores[index])), candidates[index]),
+        )
+        maximum = min(int(transform.config.get("max_features", 50)), len(candidates))
+        correlation_threshold = float(transform.config.get("correlation_threshold", 0.98))
+        correlations = np.nan_to_num(np.corrcoef(x, rowvar=False), nan=0.0)
+        if correlations.ndim == 0:
+            correlations = np.ones((1, 1))
+        selected_indices: list[int] = []
+        correlation_dropped: list[dict[str, Any]] = []
+        for index in ranked:
+            redundant_with = next((
+                kept for kept in selected_indices
+                if abs(float(correlations[index, kept])) >= correlation_threshold
+            ), None)
+            if redundant_with is not None:
+                correlation_dropped.append({
+                    "feature": candidates[index],
+                    "redundant_with": candidates[redundant_with],
+                    "absolute_correlation": abs(float(correlations[index, redundant_with])),
+                })
+                continue
+            selected_indices.append(index)
+            if len(selected_indices) >= maximum:
+                break
+        selected = [candidates[index] for index in selected_indices]
+        if not selected:
+            selected = [candidates[ranked[0]]]
+        return {
+            "type": transform.type,
+            "method": method,
+            "profile": str(transform.config.get("profile") or "balanced"),
+            "data_scope": "full",
+            "fitted_row_count": row_count,
+            "estimated_matrix_bytes": estimated_bytes,
+            "correlation_threshold": correlation_threshold,
+            "candidate_columns": candidates,
+            "selected_columns": selected,
+            "dropped_columns": [column for column in candidates if column not in selected],
+            "scores": {
+                candidates[index]: float(scores[index]) for index in range(len(candidates))
+            },
+            "correlation_dropped": correlation_dropped,
+        }
+
     def _apply_transform(
         self,
         connection: duckdb.DuckDBPyConnection,
@@ -864,12 +1208,35 @@ class DuckDbFeatureEngineeringEngine:
                     )
         elif transform.type == "scale_numeric":
             suffix = str(transform.config.get("output_suffix", "__scaled"))
+            if bool(transform.config.get("drop_original", False)):
+                selection = [
+                    identifier(column) for column in columns if column not in transform.columns
+                ]
             for column in transform.columns:
                 params = fitted["columns"][column]
                 selection.append(
                     f"(CAST({identifier(column)} AS DOUBLE) - {sql_literal(params['center'])}) "
                     f"/ {sql_literal(params['scale'])} AS {identifier(column + suffix)}"
                 )
+        elif transform.type == "winsorize_numeric":
+            selection = []
+            for column in columns:
+                if column not in transform.columns:
+                    selection.append(identifier(column))
+                    continue
+                bounds = fitted["columns"][column]
+                lower = bounds.get("lower")
+                upper = bounds.get("upper")
+                if lower is None or upper is None:
+                    selection.append(identifier(column))
+                    continue
+                selection.append(
+                    f"greatest({sql_literal(lower)}, least({sql_literal(upper)}, "
+                    f"CAST({identifier(column)} AS DOUBLE))) AS {identifier(column)}"
+                )
+        elif transform.type in {"variance_filter", "supervised_feature_selector"}:
+            dropped = set(fitted.get("dropped_columns") or [])
+            selection = [identifier(column) for column in columns if column not in dropped]
         elif transform.type == "encode_categorical":
             method = fitted["method"]
             suffix = str(transform.config.get("output_suffix", ""))
@@ -905,19 +1272,97 @@ class DuckDbFeatureEngineeringEngine:
                         f"WHEN {identifier(column)} = {sql_literal(category)} THEN {index}"
                         for index, category in enumerate(categories)
                     )
-                    selection.append(
-                        f"CASE {cases} ELSE -1 END AS {identifier(column + suffix + '__ordinal')}"
-                    )
-                else:
+                    expression = f"CASE {cases} ELSE -1 END" if cases else "-1"
+                    selection.append(f"{expression} AS {identifier(column + suffix + '__ordinal')}")
+                elif method == "frequency":
                     total = max(int(info["training_row_count"]), 1)
                     cases = " ".join(
                         f"WHEN {identifier(column)} = {sql_literal(category)} "
                         f"THEN {sql_literal(info['frequencies'][str(category)] / total)}"
                         for category in categories
                     )
-                    selection.append(
-                        f"CASE {cases} ELSE 0.0 END AS {identifier(column + suffix + '__frequency')}"
-                    )
+                    expression = f"CASE {cases} ELSE 0.0 END" if cases else "0.0"
+                    selection.append(f"{expression} AS {identifier(column + suffix + '__frequency')}")
+                elif method == "hashing":
+                    bins = int(transform.config.get("hash_bins", 32))
+                    for bucket in range(bins):
+                        selection.append(
+                            f"CAST(hash(CAST({identifier(column)} AS VARCHAR)) % {bins} = {bucket} "
+                            f"AS TINYINT) AS {identifier(f'{column}__hash_{bucket}') }"
+                        )
+                else:
+                    smoothing = float(fitted.get("smoothing") or 0.0)
+                    folds = int(fitted.get("cross_fit_folds") or 5)
+                    row_id = identifier(str(fitted["row_id_column"]))
+                    fold_expression = f"hash(CAST({row_id} AS VARCHAR)) % {folds}"
+                    for encoding_index, encoding in enumerate(info.get("encodings") or []):
+                        prior = float(encoding["prior"])
+                        if method == "ordered_target" and scope_id in {"training", "fit_training"}:
+                            label = encoding.get("label")
+                            target_value = (
+                                f"CAST({identifier(str(fitted['target_column']))} AS DOUBLE)"
+                                if label is None else
+                                f"CAST({identifier(str(fitted['target_column']))} = "
+                                f"{sql_literal(label)} AS DOUBLE)"
+                            )
+                            ordering = f"hash(CAST({row_id} AS VARCHAR))"
+                            preceding = (
+                                f"PARTITION BY {identifier(column)} ORDER BY {ordering} "
+                                "ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING"
+                            )
+                            label_suffix = (
+                                "" if len(info.get("encodings") or []) == 1
+                                else f"__class_{encoding_index}"
+                            )
+                            selection.append(
+                                f"coalesce((coalesce(sum({target_value}) OVER ({preceding}), 0.0) + "
+                                f"{sql_literal(smoothing * prior)}) / nullif("
+                                f"count({target_value}) OVER ({preceding}) + {sql_literal(smoothing)}, 0), "
+                                f"{sql_literal(prior)}) "
+                                f"AS {identifier(column + '__ordered_target' + label_suffix)}"
+                            )
+                            continue
+                        category_cases: list[str] = []
+                        for category in categories:
+                            stats = (encoding.get("categories") or {}).get(str(category))
+                            if not stats:
+                                continue
+                            if scope_id in {"training", "fit_training"}:
+                                fold_cases = []
+                                for fold in range(folds):
+                                    held = (stats.get("folds") or {}).get(str(fold), {})
+                                    numerator = float(stats["sum"]) - float(held.get("sum") or 0.0)
+                                    denominator = int(stats["count"]) - int(held.get("count") or 0)
+                                    encoded = (numerator + smoothing * prior) / max(
+                                        denominator + smoothing, 1e-12,
+                                    )
+                                    fold_cases.append(
+                                        f"WHEN {fold} THEN {sql_literal(encoded)}"
+                                    )
+                                value_expression = (
+                                    f"CASE {fold_expression} {' '.join(fold_cases)} "
+                                    f"ELSE {sql_literal(prior)} END"
+                                )
+                            else:
+                                encoded = (
+                                    float(stats["sum"]) + smoothing * prior
+                                ) / max(int(stats["count"]) + smoothing, 1e-12)
+                                value_expression = sql_literal(encoded)
+                            category_cases.append(
+                                f"WHEN {identifier(column)} = {sql_literal(category)} "
+                                f"THEN {value_expression}"
+                            )
+                        label_suffix = (
+                            "" if len(info.get("encodings") or []) == 1
+                            else f"__class_{encoding_index}"
+                        )
+                        output_suffix = (
+                            "__ordered_target" if method == "ordered_target" else "__target_mean"
+                        )
+                        selection.append(
+                            f"CASE {' '.join(category_cases)} ELSE {sql_literal(prior)} END "
+                            f"AS {identifier(column + output_suffix + label_suffix)}"
+                        )
         elif transform.type == "datetime_features":
             parts = transform.config.get("features", ["year", "month", "day_of_week"])
             drop_original = bool(transform.config.get("drop_original", False))
@@ -966,8 +1411,14 @@ class DuckDbFeatureEngineeringEngine:
                     "exp": f"exp({value})",
                     "log": f"CASE WHEN {value} > 0 THEN ln({value}) ELSE NULL END",
                     "log1p": f"CASE WHEN {value} > -1 THEN ln(1 + {value}) ELSE NULL END",
+                    "signed_log1p": f"sign({value}) * ln(1 + abs({value}))",
                     "abs": f"abs({value})",
                 }[operation]
+                if bool(transform.config.get("drop_original", False)):
+                    selection = [
+                        selected for selected in selection
+                        if selected != identifier(column)
+                    ]
                 selection.append(
                     f"{expression} AS {identifier(column + suffix)}"
                 )
@@ -1003,9 +1454,15 @@ class DuckDbFeatureEngineeringEngine:
             symbol = {"add": "+", "subtract": "-", "multiply": "*", "divide": "/"}[operator]
             if operator == "divide":
                 zero_policy = transform.config.get("zero_division", "null")
-                right = f"nullif({right}, 0)" if zero_policy == "null" else right
+                expression = (
+                    f"({left} / nullif({right}, 0))"
+                    if zero_policy == "null"
+                    else f"CASE WHEN {right} = 0 THEN 0.0 ELSE {left} / {right} END"
+                )
+            else:
+                expression = f"({left} {symbol} {right})"
             selection.append(
-                f"({left} {symbol} {right}) AS {identifier(str(transform.config['output_column']))}"
+                f"{expression} AS {identifier(str(transform.config['output_column']))}"
             )
         else:
             raise ValueError(f"Unsupported Feature Engineering transform '{transform.type}'")
@@ -1061,6 +1518,8 @@ class DuckDbFeatureEngineeringEngine:
             ).hexdigest(),
             "feature_manifest": state.get("feature_manifest", []),
             "split_evaluation": evaluation_manifest,
+            "fitted_transform_count": len(state.get("transforms", {})),
+            "feature_recipe_hash": _recipe_hash(definition),
             "data_scope": "full",
             "is_dry_run": is_dry_run,
             "dataset_name": output.dataset_name,
@@ -1122,7 +1581,10 @@ class DuckDbFeatureEngineeringEngine:
                 f"Feature transform '{transform.transform_id}' would overwrite columns: "
                 + ", ".join(collisions)
             )
-        numeric_transforms = {"scale_numeric", "numeric_interaction", "math_transform", "pca"}
+        numeric_transforms = {
+            "scale_numeric", "numeric_interaction", "math_transform", "pca",
+            "winsorize_numeric", "variance_filter", "supervised_feature_selector",
+        }
         if transform.type in numeric_transforms:
             described = connection.execute(
                 f"DESCRIBE SELECT * FROM {identifier(source)}"
@@ -1227,13 +1689,47 @@ def _state_hash(state: dict[str, Any]) -> str:
 
 
 def _recipe_hash(definition: FeatureEngineeringDefinition) -> str:
+    return _recipe_payload_hash(
+        [item.model_dump(mode="json") for item in definition.transformations],
+        definition,
+    )
+
+
+def _compatible_recipe_hashes(definition: FeatureEngineeringDefinition) -> set[str]:
+    """Accept JSON-equivalent numeric config emitted by JavaScript clients.
+
+    JavaScript serializes integral floats such as ``0.0`` as ``0``. Existing
+    fitted artifacts retain the original byte-sensitive recipe hash, so transform
+    mode checks both the received representation and a typed-float representation
+    for FE config fields whose contract is continuous.
+    """
+    transformations = [item.model_dump(mode="json") for item in definition.transformations]
+    normalized = json.loads(json.dumps(transformations))
+    float_fields = {
+        "winsorize_numeric": ("lower_quantile", "upper_quantile"),
+        "variance_filter": ("threshold",),
+    }
+    for transform in normalized:
+        config = transform.get("config") or {}
+        for field in float_fields.get(str(transform.get("type")), ()):
+            value = config.get(field)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                config[field] = float(value)
+    return {
+        _recipe_payload_hash(transformations, definition),
+        _recipe_payload_hash(normalized, definition),
+    }
+
+
+def _recipe_payload_hash(
+    transformations: list[dict[str, Any]],
+    definition: FeatureEngineeringDefinition,
+) -> str:
     feature_roles = _feature_roles(definition)
     feature_roles.pop("cv_fold_column", None)
     payload = json.dumps(
         {
-            "transformations": [
-                item.model_dump(mode="json") for item in definition.transformations
-            ],
+            "transformations": transformations,
             "feature_roles": feature_roles,
         },
         sort_keys=True,

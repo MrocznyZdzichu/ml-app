@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from app.core.security import Principal, require_user
 from app.modules.business_cases.schemas import (
@@ -10,9 +10,24 @@ from app.modules.business_cases.schemas import (
     BusinessCaseRead,
 )
 from app.modules.business_cases.service import BusinessCaseService
+from app.modules.business_cases.lineage import ArtifactDependencyResolver
 
 router = APIRouter(prefix="/business-cases", tags=["business-cases"])
 service = BusinessCaseService()
+dependency_resolver = ArtifactDependencyResolver()
+
+
+@router.get("/dependencies/{reference_id}")
+def get_artifact_dependencies(
+    reference_id: str,
+    artifact_type: str | None = Query(default=None, max_length=64),
+    principal: Principal = Depends(require_user),
+) -> list[dict[str, object]]:
+    return dependency_resolver.resolve(
+        owner_id=principal.user_id,
+        reference_id=reference_id,
+        artifact_type=artifact_type,
+    )
 
 
 @router.post("", response_model=BusinessCaseRead, status_code=201)

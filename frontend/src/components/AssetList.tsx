@@ -1,4 +1,4 @@
-import { Eye, History, Pencil, Play, Trash2 } from "lucide-react";
+import { Eye, GitBranch, History, Pencil, Play, Trash2 } from "lucide-react";
 
 export type AssetListItem = {
   id: string;
@@ -12,7 +12,7 @@ export type AssetListItem = {
   actions?: Array<{
     label: string;
     onClick: () => void;
-    icon?: "view" | "versions" | "run" | "edit";
+    icon?: "view" | "versions" | "run" | "edit" | "dependencies";
     disabled?: boolean;
   }>;
 };
@@ -40,6 +40,7 @@ export function AssetList({
               <em>{asset.status}</em>
               {asset.actions?.map((action) => {
                 const Icon = action.icon === "versions" ? History
+                  : action.icon === "dependencies" ? GitBranch
                   : action.icon === "run" ? Play
                     : action.icon === "view" ? Eye : Pencil;
                 return (

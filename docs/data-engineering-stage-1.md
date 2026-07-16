@@ -1,17 +1,17 @@
-# Data Engineering — Stage 1 contract
+# Data Engineering contract
 
-The first functional increment executes a full-data, manual Data Engineering
-step inside a high-level pipeline. It deliberately does not implement
-schedules, database connectors, arbitrary Python, data contracts, rejected
-records, or other lifecycle step types. Normal runs create persistent Parquet
-datasets with minimal artifact lineage; dry-runs remain temporary.
+Data Engineering is a nested DAG inside a high-level lifecycle pipeline. It
+executes full-data DuckDB transformations, supports multiple inputs and joins,
+and materializes persistent Parquet datasets with lineage. Dry-runs remain
+temporary. Schedules, database connectors, arbitrary Python, and incremental or
+merge writes are not implemented.
 
 ## High-level pipeline workflow
 
-The user-facing pipeline is a lifecycle DAG (`contract_version: "2.0"`). The
-first functional prototype exposes exactly one high-level step type:
-`data_engineering`. Standard transformations and User Written SQL are nested
-inside that step; they are not lifecycle steps.
+The user-facing pipeline is a lifecycle DAG (`contract_version: "2.0"`).
+`data_engineering` is one of several executable high-level step types. Standard
+transformations and User Written SQL are nested inside it; they are not separate
+lifecycle steps.
 
 ```json
 {
@@ -87,7 +87,7 @@ An empty draft is allowed. Publishing or running requires an executable
 IDs are stable and unique across input, step, and output nodes. Edges reference
 an explicit upstream node and port. Validation rejects missing references,
 cycles, duplicate IDs and ports, incorrect operation arity, unsupported config,
-and non-temporary Stage 1 outputs.
+and unsupported output modes.
 
 Supported operations are `select_columns`, `add_identifier`, `rename_columns`, `cast_columns`,
 `filter_rows`, `sort_rows`, `deduplicate`, `impute_missing`, `derive_column`,
@@ -108,6 +108,16 @@ input port IDs become the only relation names available to one read-only
 `SELECT`/`WITH` query. The validator rejects multiple statements, DDL/DML,
 `COPY`, `ATTACH`, extension loading, direct file/URL readers, system catalogs,
 and relations not declared as step inputs. It does not execute Python.
+
+## Data contracts and rejected records
+
+Each output may declare expected columns, types, nullability, uniqueness,
+ranges, allowed values, and a schema-drift policy. A failed rule can stop the
+run (`fail`), complete it with a visible warning (`warn`), or remove invalid
+rows from the main output (`reject`). Rejected rows are written to a separate
+dataset with the source row number and rejection reason. The run manifest
+records the quality report and rejected-row count; no rule silently changes
+the declared data scope.
 
 ## Block editor
 
@@ -133,10 +143,9 @@ only a predicate; subqueries and additional clauses are rejected.
 ## Execution and audit
 
 `POST /api/v1/pipelines/{pipeline_id}/runs` records a `queued` manual run for a
-specific version and dispatches it to Celery. Passing `step_id` audits the run
-as a manually requested single-step execution. In the one-step prototype its
-execution plan is intentionally identical to the whole pipeline. Draft
-versions require `is_dry_run: true`; official runs require a published
+specific version and dispatches it to Celery. Passing `step_id` runs that step
+with its required ancestors and records every executed `PipelineStepRun`.
+Draft versions require `is_dry_run: true`; official runs require a published
 version. Status can be read at
 `GET /api/v1/pipelines/{pipeline_id}/runs/{run_id}`.
 

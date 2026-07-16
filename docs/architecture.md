@@ -16,7 +16,10 @@ The application is organized around a common analytics lifecycle:
 - API: owns HTTP contracts, authorization checks, orchestration, and metadata.
 - Worker: owns long-running jobs such as ingestion, profiling, training, export, and batch scoring.
 - PostgreSQL: stores users, permissions, metadata, experiment runs, and audit events.
-- MinIO/S3: stores raw datasets, generated reports, plots, trained models, and exports.
+- Local repository (`data/repository`): currently stores uploaded datasets,
+  generated Parquet, fitted transforms, reports, and trained model files.
+- MinIO/S3: started in local Compose as future object-storage infrastructure;
+  it is not yet the active artifact store.
 - Redis: broker/cache for background work.
 - Model runtime: a small container image used to expose online scoring for a model artifact.
 
@@ -204,6 +207,18 @@ visualization, and descriptive profiling without loading full tables into Python
 or React.
 
 ## Model Operationalization
+
+Pipeline Training and AutoML runs materialize immutable model, metrics, fitted
+feature-transform, Feature Manifest, and training-report artifacts. A shared
+report envelope distinguishes `training_evaluation_report` from the reserved
+`monitoring_performance_report`; the report types have separate builders and UI
+templates rather than one overloaded schema. Training metrics refer to the full
+evaluation scope, while SHAP/permutation explainability carries its own bounded
+sample scope. AutoML creates explainability only for the final selected winner.
+
+Batch/Test Scoring and Monitoring retain separate contracts. A prediction
+dataset is row-level and lineage-backed; a report contains bounded aggregates,
+diagnostics and provenance rather than copied prediction rows.
 
 The first version uses a reusable model runtime image. The registry stores model
 artifact metadata, and a deployment spec points to the artifact and runtime image.

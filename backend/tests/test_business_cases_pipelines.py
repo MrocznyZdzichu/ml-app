@@ -37,6 +37,41 @@ def _create_business_case(client: TestClient, token: str) -> dict:
     return response.json()
 
 
+def test_model_training_catalog_is_available_to_authenticated_pipeline_editors() -> None:
+    client = TestClient(create_app())
+    token = _register(client, "alice")
+
+    response = client.get(
+        "/api/v1/pipelines/model-training/catalog",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["algorithm_count"] >= 50
+    assert len(body["algorithms"]) == body["algorithm_count"]
+    assert all(item["parameters"] is not None for item in body["algorithms"])
+
+
+def test_automl_pipeline_purpose_is_accepted_by_create_api() -> None:
+    client = TestClient(create_app())
+    token = _register(client, "automl-create")
+    business_case = _create_business_case(client, token)
+
+    response = client.post(
+        "/api/v1/pipelines",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "business_case_id": business_case["id"],
+            "name": "Iris AutoML",
+            "type": "automl",
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["type"] == "automl"
+
+
 def test_business_case_can_exist_without_data_and_owns_data_mappings() -> None:
     client = TestClient(create_app())
     token = _register(client, "alice")
@@ -356,6 +391,9 @@ def test_pipeline_version_and_run_contracts_are_auditable(monkeypatch) -> None:
     )
     assert history.status_code == 200
     assert [item["id"] for item in history.json()] == [retried.json()["id"]]
+    assert "events" not in history.json()[0]
+    assert "output_manifest" not in history.json()[0]
+    assert "runtime_parameters" not in history.json()[0]
 
 
 def test_select_at_run_requires_and_audits_a_concrete_dataset_version(monkeypatch) -> None:

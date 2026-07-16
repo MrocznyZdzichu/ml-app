@@ -235,8 +235,38 @@ class PipelineOutputMaterializer:
         ]))
         artifact_ids: list[str] = []
         materialized_manifest: list[dict[str, Any]] = []
+        artifact_ids_by_output: dict[str, str] = {}
         for raw_item in output_manifest:
             item = dict(raw_item)
+            internal_inputs = list(item.get("internal_input_outputs") or [])
+            missing_internal = [
+                str(binding.get("output_id") or "")
+                for binding in internal_inputs
+                if str(binding.get("output_id") or "") not in artifact_ids_by_output
+            ]
+            if missing_internal:
+                raise ValueError(
+                    "Output declares internal artifacts that were not materialized earlier: "
+                    + ", ".join(missing_internal)
+                )
+            internal_artifact_ids = [
+                artifact_ids_by_output[str(binding["output_id"])]
+                for binding in internal_inputs
+            ]
+            item_input_artifact_ids = list(dict.fromkeys([
+                *input_artifact_ids,
+                *internal_artifact_ids,
+            ]))
+            item_input_lineage = [
+                *(input_lineage or []),
+                *[
+                    {
+                        "input_port_id": str(binding.get("input_port_id") or "internal"),
+                        "artifact_ids": [artifact_ids_by_output[str(binding["output_id"])]],
+                    }
+                    for binding in internal_inputs
+                ],
+            ]
             if item.get("artifact_type") == ArtifactType.FEATURE_TRANSFORM.value:
                 if item.get("materialization") != "artifact":
                     materialized_manifest.append(item)
@@ -246,19 +276,21 @@ class PipelineOutputMaterializer:
                     version=version,
                     step_id=step_id,
                     item=item,
-                    input_artifact_ids=input_artifact_ids,
-                    input_lineage=input_lineage or [],
+                    input_artifact_ids=item_input_artifact_ids,
+                    input_lineage=item_input_lineage,
                 )
                 item.update({
                     "artifact_id": artifact.id,
                     "location_uri": artifact.metadata["location_uri"],
                 })
                 artifact_ids.append(artifact.id)
+                artifact_ids_by_output[str(item.get("output_id") or "")] = artifact.id
                 materialized_manifest.append(item)
                 continue
             if item.get("artifact_type") in {
                 ArtifactType.MODEL_VERSION.value,
                 ArtifactType.METRICS.value,
+                ArtifactType.REPORT.value,
             }:
                 if item.get("materialization") != "artifact":
                     materialized_manifest.append(item)
@@ -268,8 +300,8 @@ class PipelineOutputMaterializer:
                     version=version,
                     step_id=step_id,
                     item=item,
-                    input_artifact_ids=input_artifact_ids,
-                    input_lineage=input_lineage or [],
+                    input_artifact_ids=item_input_artifact_ids,
+                    input_lineage=item_input_lineage,
                 )
                 item.update({
                     "artifact_id": artifact.id,
@@ -277,6 +309,7 @@ class PipelineOutputMaterializer:
                     "location_uri": artifact.metadata["location_uri"],
                 })
                 artifact_ids.append(artifact.id)
+                artifact_ids_by_output[str(item.get("output_id") or "")] = artifact.id
                 materialized_manifest.append(item)
                 continue
             if item.get("materialization") != "dataset":
@@ -287,8 +320,8 @@ class PipelineOutputMaterializer:
                 version=version,
                 step_id=step_id,
                 item=item,
-                input_artifact_ids=input_artifact_ids,
-                input_lineage=input_lineage or [],
+                input_artifact_ids=item_input_artifact_ids,
+                input_lineage=item_input_lineage,
                 step_type=step_type,
                 output_stage=output_stage,
             )
@@ -304,6 +337,7 @@ class PipelineOutputMaterializer:
                 }
             )
             artifact_ids.append(artifact.id)
+            artifact_ids_by_output[str(item.get("output_id") or "")] = artifact.id
             materialized_manifest.append(item)
         return materialized_manifest, artifact_ids
 
@@ -374,6 +408,8 @@ class PipelineOutputMaterializer:
                     "lineage": lineage,
                     "schema_hash": item.get("schema_hash", ""),
                     "feature_manifest": list(item.get("feature_manifest") or []),
+                    "fitted_transform_count": int(item.get("fitted_transform_count") or 0),
+                    "feature_recipe_hash": str(item.get("feature_recipe_hash") or ""),
                     "evaluation": dict(item.get("evaluation") or {}),
                     "split_evaluation": dict(item.get("split_evaluation") or {}),
                     "metrics": dict(item.get("metrics") or {}),
@@ -505,6 +541,14 @@ class PipelineOutputMaterializer:
             if artifact_type == ArtifactType.MODEL_VERSION
             else ""
         )
+        logical_report_id = (
+            str(uuid5(
+                NAMESPACE_URL,
+                f"mlapp:report-family:{run.owner_id}:{run.pipeline_id}:{step_id}:{item['output_id']}",
+            ))
+            if artifact_type == ArtifactType.REPORT
+            else ""
+        )
         artifact = Artifact(
             id=str(uuid4()),
             owner_id=run.owner_id,
@@ -521,6 +565,10 @@ class PipelineOutputMaterializer:
                 "target_column": item.get("target_column", ""),
                 "model_hash": item.get("model_hash", ""),
                 "logical_model_id": logical_model_id,
+                "logical_report_id": logical_report_id,
+                "report_name": item.get("report_name", ""),
+                "report_type": item.get("report_type", ""),
+                "report": dict(item.get("report") or {}),
                 "metrics": dict(item.get("metrics") or {}),
                 "training_config": dict(item.get("training_config") or {}),
                 "model_parameters": dict(item.get("model_parameters") or {}),
@@ -544,7 +592,7 @@ class PipelineOutputMaterializer:
     ) -> Artifact:
         reference_id = str(uuid5(
             NAMESPACE_URL,
-            f"mlapp:feature-transform:{run.id}:{item['output_id']}",
+            f"mlapp:feature-transform:{run.id}:{step_id}:{item['output_id']}",
         ))
         existing = self.business_cases.find_artifact(
             run.owner_id,

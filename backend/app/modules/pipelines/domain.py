@@ -8,6 +8,7 @@ class PipelineType(str, Enum):
     DATA_PREPARATION = "data_preparation"
     FEATURE_ENGINEERING = "feature_engineering"
     TRAINING = "training"
+    AUTOML = "automl"
     BATCH_SCORING = "batch_scoring"
     MONITORING = "monitoring"
     CUSTOM = "custom"
@@ -40,6 +41,10 @@ class PipelineRunTrigger(str, Enum):
     MANUAL = "manual"
     API = "api"
     SCHEDULE = "schedule"
+
+
+class PipelineExecutionCancelled(Exception):
+    pass
 
 
 class DatasetVersionPolicy(str, Enum):
@@ -125,6 +130,7 @@ class PipelineRun:
     output_row_count: int | None = None
     rejected_row_count: int | None = None
     warnings: list[str] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
     output_artifact_ids: list[str] = field(default_factory=list)
     output_manifest: list[dict[str, Any]] = field(default_factory=list)
     error_message: str = ""
@@ -146,6 +152,7 @@ class PipelineStepRun:
     processed_row_count: int | None = None
     output_row_count: int | None = None
     warnings: list[str] = field(default_factory=list)
+    events: list[dict[str, Any]] = field(default_factory=list)
     output_manifest: list[dict[str, Any]] = field(default_factory=list)
     error_message: str = ""
     started_at: datetime | None = None

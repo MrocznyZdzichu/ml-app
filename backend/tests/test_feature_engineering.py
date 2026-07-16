@@ -35,6 +35,22 @@ def _asset(asset_id: str, owner_id: str, path: Path, rows: int) -> DataAsset:
     )
 
 
+def test_stratified_draft_can_be_saved_before_a_stable_row_id_is_configured() -> None:
+    definition = FeatureEngineeringDefinition.model_validate({
+        "inputs": [{"input_id": "training", "role": "training"}],
+        "target_column": "species",
+        "evaluation": {"split_strategy": "stratified", "stratify_column": "species"},
+        "outputs": [
+            {"output_id": "train", "input_id": "training", "dataset_name": "Train", "business_case_role": "training"},
+            {"output_id": "validation", "input_id": "validation", "dataset_name": "Validation", "business_case_role": "validation"},
+            {"output_id": "test", "input_id": "test", "dataset_name": "Test", "business_case_role": "test"},
+        ],
+    })
+
+    with pytest.raises(ValueError, match="row_id_column"):
+        definition.validate_executable()
+
+
 def _definition(handle_unknown: str = "other") -> FeatureEngineeringDefinition:
     return FeatureEngineeringDefinition.model_validate({
         "contract_version": "1.0",
@@ -175,6 +191,54 @@ def test_feature_engineering_unknown_error_reports_input_and_count(tmp_path: Pat
         )
 
 
+def test_frequency_encoding_with_no_retained_categories_outputs_zero(tmp_path: Path) -> None:
+    repository_root = tmp_path / "repository"
+    source = repository_root / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    train_path = source / "train.csv"
+    validation_path = source / "validation.csv"
+    train_path.write_text(
+        "id,age,city,target\n1,10,A,0\n2,20,B,1\n3,30,C,0\n",
+        encoding="utf-8",
+    )
+    validation_path.write_text("id,age,city,target\n4,40,D,1\n", encoding="utf-8")
+    repository = InMemoryDatasetRepository()
+    repository.add(_asset("train", "owner-1", train_path, 3))
+    repository.add(_asset("validation", "owner-1", validation_path, 1))
+    payload = _definition().model_dump(mode="json")
+    payload["transformations"] = [{
+        "transform_id": "encode_city_frequency",
+        "type": "encode_categorical",
+        "columns": ["city"],
+        "config": {
+            "method": "frequency",
+            "min_frequency": 2,
+            "max_categories": 10,
+            "handle_unknown": "other",
+            "drop_original": True,
+        },
+    }]
+    definition = FeatureEngineeringDefinition.model_validate(payload)
+    engine = DuckDbFeatureEngineeringEngine(
+        input_adapter=CsvDatasetInputAdapter(repository, repository_root),
+        repository_root=repository_root,
+    )
+
+    result = engine.execute(
+        definition=definition,
+        run_id="run-frequency-without-categories",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+
+    validation = next(item for item in result.output_manifest if item["output_id"] == "validation_features")
+    values = duckdb.connect().execute(
+        "SELECT city__frequency FROM read_parquet(?)",
+        [validation["location_uri"].removeprefix("file://")],
+    ).fetchall()
+    assert values == [(0.0,)]
+
+
 def test_transform_mode_reuses_pinned_state_without_refitting(tmp_path: Path) -> None:
     repository_root = tmp_path / "repository"
     source = repository_root / "users" / "owner-1" / "source"
@@ -195,8 +259,16 @@ def test_transform_mode_reuses_pinned_state_without_refitting(tmp_path: Path) ->
         business_cases=business_cases,
         repository_root=repository_root,
     )
+    fitted_definition_payload = _definition().model_dump(mode="json")
+    fitted_definition_payload["transformations"].append({
+        "transform_id": "drop_constant_scaled_age",
+        "type": "variance_filter",
+        "columns": ["age__scaled"],
+        "config": {"threshold": 0.0},
+    })
+    fitted_definition = FeatureEngineeringDefinition.model_validate(fitted_definition_payload)
     fitted = engine.execute(
-        definition=_definition(),
+        definition=fitted_definition,
         run_id="fit-run",
         owner_id="owner-1",
         is_dry_run=True,
@@ -210,7 +282,10 @@ def test_transform_mode_reuses_pinned_state_without_refitting(tmp_path: Path) ->
         origin=ArtifactOrigin.PLATFORM_GENERATED,
         metadata={"location_uri": state_item["location_uri"]},
     ))
-    payload = _definition().model_dump(mode="json")
+    payload = fitted_definition.model_dump(mode="json")
+    # JSON.stringify in the browser serializes the fitted recipe's 0.0 as 0.
+    # Both representations must pin the same semantic FE recipe.
+    payload["transformations"][-1]["config"]["threshold"] = 0
     payload.update({
         "mode": "transform",
         "inputs": [{"input_id": "scoring", "role": "scoring_input", "dataset_id": "scoring"}],
@@ -376,6 +451,151 @@ def test_feature_sql_expression_rejects_queries_and_external_reads() -> None:
                     "business_case_role": "training",
                 }],
             })
+
+
+def test_numeric_generation_and_variance_selection_fit_only_training_scope(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    source = repository_root / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    train_path = source / "numeric-train.csv"
+    validation_path = source / "numeric-validation.csv"
+    train_path.write_text(
+        "id,signal,constant,target\n1,0,5,0\n2,1,5,0\n3,2,5,1\n4,100,5,1\n",
+        encoding="utf-8",
+    )
+    validation_path.write_text(
+        "id,signal,constant,target\n5,1000,5,1\n",
+        encoding="utf-8",
+    )
+    repository = InMemoryDatasetRepository()
+    repository.add(_asset("numeric-train", "owner-1", train_path, 4))
+    repository.add(_asset("numeric-validation", "owner-1", validation_path, 1))
+    engine = DuckDbFeatureEngineeringEngine(
+        input_adapter=CsvDatasetInputAdapter(repository, repository_root),
+        repository_root=repository_root,
+    )
+    definition = FeatureEngineeringDefinition.model_validate({
+        "contract_version": "1.0",
+        "mode": "fit_transform",
+        "inputs": [
+            {"input_id": "training", "role": "training", "dataset_id": "numeric-train"},
+            {"input_id": "validation", "role": "validation", "dataset_id": "numeric-validation"},
+        ],
+        "feature_columns": ["signal", "constant"],
+        "target_column": "target",
+        "row_id_column": "id",
+        "transformations": [
+            {
+                "transform_id": "winsor",
+                "type": "winsorize_numeric",
+                "columns": ["signal", "constant"],
+                "config": {"lower_quantile": 0.25, "upper_quantile": 0.75},
+            },
+            {
+                "transform_id": "signed_log",
+                "type": "math_transform",
+                "columns": ["signal"],
+                "config": {"operation": "signed_log1p", "output_suffix": "__signed_log1p"},
+            },
+            {
+                "transform_id": "selector",
+                "type": "variance_filter",
+                "columns": ["signal", "constant", "signal__signed_log1p"],
+                "config": {"threshold": 0.0},
+            },
+        ],
+        "outputs": [
+            {"output_id": "training_features", "input_id": "training", "dataset_name": "Train", "business_case_role": "training"},
+            {"output_id": "validation_features", "input_id": "validation", "dataset_name": "Validation", "business_case_role": "validation"},
+        ],
+    })
+
+    result = engine.execute(
+        definition=definition,
+        run_id="numeric-generation",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+    state_item = next(item for item in result.output_manifest if item["output_id"] == "fitted_transform")
+    state = json.loads(Path(state_item["location_uri"].removeprefix("file://")).read_text(encoding="utf-8"))
+    assert state["transforms"]["winsor"]["columns"]["signal"] == {
+        "lower": 0.75,
+        "upper": 26.5,
+    }
+    assert state["transforms"]["selector"]["dropped_columns"] == ["constant"]
+    validation = next(item for item in result.output_manifest if item["output_id"] == "validation_features")
+    row = duckdb.connect().execute(
+        'SELECT signal, "signal__signed_log1p" FROM read_parquet(?)',
+        [validation["location_uri"].removeprefix("file://")],
+    ).fetchone()
+    assert row == (26.5, pytest.approx(3.3141860046725258))
+    assert "constant" not in {item["name"] for item in validation["schema"]}
+
+
+def test_numeric_interaction_zero_policy_produces_finite_features(tmp_path: Path) -> None:
+    repository_root = tmp_path / "repository"
+    source = repository_root / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    train_path = source / "interaction-train.csv"
+    validation_path = source / "interaction-validation.csv"
+    train_path.write_text(
+        "id,left_value,right_value,target\n1,10,2,0\n2,5,0,1\n3,9,3,0\n",
+        encoding="utf-8",
+    )
+    validation_path.write_text(
+        "id,left_value,right_value,target\n4,7,0,1\n",
+        encoding="utf-8",
+    )
+    datasets = InMemoryDatasetRepository()
+    datasets.add(_asset("interaction-train", "owner-1", train_path, 3))
+    datasets.add(_asset("interaction-validation", "owner-1", validation_path, 1))
+    definition = FeatureEngineeringDefinition.model_validate({
+        "contract_version": "1.0",
+        "mode": "fit_transform",
+        "inputs": [
+            {"input_id": "training", "role": "training", "dataset_id": "interaction-train"},
+            {"input_id": "validation", "role": "validation", "dataset_id": "interaction-validation"},
+        ],
+        "feature_columns": ["safe_ratio"],
+        "target_column": "target",
+        "row_id_column": "id",
+        "transformations": [{
+            "transform_id": "safe_ratio",
+            "type": "numeric_interaction",
+            "config": {
+                "left": "left_value",
+                "right": "right_value",
+                "operator": "divide",
+                "output_column": "safe_ratio",
+                "zero_division": "zero",
+            },
+        }],
+        "outputs": [
+            {"output_id": "training_features", "input_id": "training", "dataset_name": "Train"},
+            {"output_id": "validation_features", "input_id": "validation", "dataset_name": "Validation", "business_case_role": "validation"},
+        ],
+    })
+    result = DuckDbFeatureEngineeringEngine(
+        input_adapter=CsvDatasetInputAdapter(datasets, repository_root),
+        repository_root=repository_root,
+    ).execute(
+        definition=definition,
+        run_id="safe-interaction",
+        owner_id="owner-1",
+        is_dry_run=True,
+    )
+    training = next(item for item in result.output_manifest if item["output_id"] == "training_features")
+    validation = next(item for item in result.output_manifest if item["output_id"] == "validation_features")
+    assert duckdb.connect().execute(
+        "SELECT safe_ratio FROM read_parquet(?) ORDER BY id",
+        [training["location_uri"].removeprefix("file://")],
+    ).fetchall() == [(5.0,), (0.0,), (3.0,)]
+    assert duckdb.connect().execute(
+        "SELECT safe_ratio FROM read_parquet(?)",
+        [validation["location_uri"].removeprefix("file://")],
+    ).fetchone() == (0.0,)
 
 
 def test_workflow_accepts_de_followed_by_feature_engineering() -> None:
@@ -874,3 +1094,130 @@ def test_de_to_fe_pipeline_run_creates_step_runs_dataset_and_fitted_artifact(
         item["role"] for item in attachments.json()
         if item["data_asset_id"] in generated_dataset_ids
     } == {"training", "validation", "test"}
+
+
+def test_supervised_selector_is_full_scope_redundancy_aware_and_persisted(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    source = repository_root / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    train_path = source / "selector.csv"
+    train_path.write_text(
+        "id,signal,signal_copy,noise,target\n"
+        + "\n".join(
+            f"{index},{index},{index},{(index * 7) % 5},{int(index >= 10)}"
+            for index in range(20)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    repository = InMemoryDatasetRepository()
+    repository.add(_asset("selector", "owner-1", train_path, 20))
+    engine = DuckDbFeatureEngineeringEngine(
+        input_adapter=CsvDatasetInputAdapter(repository, repository_root),
+        repository_root=repository_root,
+    )
+    definition = FeatureEngineeringDefinition.model_validate({
+        "mode": "fit_transform",
+        "inputs": [{"input_id": "training", "role": "training", "dataset_id": "selector"}],
+        "feature_columns": ["signal", "signal_copy", "noise"],
+        "target_column": "target",
+        "row_id_column": "id",
+        "transformations": [{
+            "transform_id": "supervised",
+            "type": "supervised_feature_selector",
+            "columns": [],
+            "config": {
+                "method": "mutual_information",
+                "target_column": "target",
+                "problem_type": "binary_classification",
+                "max_features": 2,
+                "correlation_threshold": 0.95,
+                "random_seed": 42,
+                "max_memory_mb": 128,
+                "profile": "compact",
+            },
+        }],
+        "outputs": [{
+            "output_id": "training_features", "input_id": "training",
+            "dataset_name": "Selected", "business_case_role": "training",
+        }],
+    })
+
+    result = engine.execute(
+        definition=definition, run_id="selector", owner_id="owner-1", is_dry_run=True,
+    )
+    state_item = next(item for item in result.output_manifest if item["output_id"] == "fitted_transform")
+    state = json.loads(Path(state_item["location_uri"].removeprefix("file://")).read_text())
+    selector = state["transforms"]["supervised"]
+    assert selector["data_scope"] == "full"
+    assert selector["fitted_row_count"] == 20
+    assert len(selector["selected_columns"]) == 2
+    assert {"signal", "signal_copy"} & set(selector["selected_columns"])
+    assert selector["correlation_dropped"]
+
+
+def test_target_encoding_is_cross_fitted_and_reuses_global_state_for_validation(
+    tmp_path: Path,
+) -> None:
+    repository_root = tmp_path / "repository"
+    source = repository_root / "users" / "owner-1" / "source"
+    source.mkdir(parents=True)
+    train_path = source / "target-train.csv"
+    validation_path = source / "target-validation.csv"
+    train_path.write_text(
+        "id,city,target\n1,A,0\n2,A,1\n3,B,0\n4,B,1\n5,A,1\n6,B,0\n",
+        encoding="utf-8",
+    )
+    validation_path.write_text("id,city,target\n7,A,1\n8,C,0\n", encoding="utf-8")
+    repository = InMemoryDatasetRepository()
+    repository.add(_asset("target-train", "owner-1", train_path, 6))
+    repository.add(_asset("target-validation", "owner-1", validation_path, 2))
+    engine = DuckDbFeatureEngineeringEngine(
+        input_adapter=CsvDatasetInputAdapter(repository, repository_root),
+        repository_root=repository_root,
+    )
+    definition = FeatureEngineeringDefinition.model_validate({
+        "mode": "fit_transform",
+        "inputs": [
+            {"input_id": "training", "role": "training", "dataset_id": "target-train"},
+            {"input_id": "validation", "role": "validation", "dataset_id": "target-validation"},
+        ],
+        "feature_columns": ["city"],
+        "target_column": "target",
+        "row_id_column": "id",
+        "transformations": [{
+            "transform_id": "target_encoding",
+            "type": "encode_categorical",
+            "columns": ["city"],
+            "config": {
+                "method": "target_mean", "min_frequency": 1, "max_categories": 10,
+                "handle_unknown": "other", "drop_original": True,
+                "target_column": "target", "row_id_column": "id",
+                "problem_type": "binary_classification", "cross_fit_folds": 3,
+                "smoothing": 2,
+            },
+        }],
+        "outputs": [
+            {"output_id": "training_features", "input_id": "training", "dataset_name": "Train", "business_case_role": "training"},
+            {"output_id": "validation_features", "input_id": "validation", "dataset_name": "Validation", "business_case_role": "validation"},
+        ],
+    })
+
+    result = engine.execute(
+        definition=definition, run_id="target-encoding", owner_id="owner-1", is_dry_run=True,
+    )
+    training = next(item for item in result.output_manifest if item["output_id"] == "training_features")
+    validation = next(item for item in result.output_manifest if item["output_id"] == "validation_features")
+    training_values = duckdb.connect().execute(
+        'SELECT "city__target_mean" FROM read_parquet(?) ORDER BY id',
+        [training["location_uri"].removeprefix("file://")],
+    ).fetchall()
+    validation_values = duckdb.connect().execute(
+        'SELECT "city__target_mean" FROM read_parquet(?) ORDER BY id',
+        [validation["location_uri"].removeprefix("file://")],
+    ).fetchall()
+    assert len({round(float(row[0]), 6) for row in training_values}) > 1
+    assert float(validation_values[0][0]) == pytest.approx(0.6)
+    assert float(validation_values[1][0]) == pytest.approx(0.5)

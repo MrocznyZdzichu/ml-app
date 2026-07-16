@@ -27,7 +27,7 @@ class WorkflowStep(BaseModel):
 
     step_id: str = Field(min_length=1, max_length=128)
     name: str = Field(min_length=1, max_length=200)
-    type: Literal["data_engineering", "feature_engineering", "training", "scoring", "monitoring"]
+    type: Literal["data_engineering", "feature_engineering", "training", "automl", "scoring", "monitoring"]
     inputs: list[WorkflowStepInput] = Field(default_factory=list)
     output_port_id: str = Field(default="dataset", min_length=1, max_length=128)
     additional_output_port_ids: list[str] = Field(default_factory=list)
@@ -114,6 +114,33 @@ def normalize_workflow_definition(definition: dict[str, Any]) -> dict[str, Any]:
             legacy_primary_ports[str(step.get("step_id") or "")] = previous_primary
         normalized["steps"] = steps
 
+        # AutoML with integrated AutoFE must transform the holdout test data with
+        # the winning fitted recipe before Test Scoring consumes it. Recover
+        # existing template drafts that previously wired raw FE test output.
+        automl_steps = [
+            step for step in steps
+            if step.get("type") == "automl"
+            and bool(((step.get("config") or {}).get("definition") or {})
+                     .get("auto_feature_engineering", {}).get("enabled"))
+        ]
+        scoring_steps = [step for step in steps if step.get("type") == "scoring"]
+        if len(automl_steps) == 1 and len(scoring_steps) == 1:
+            automl = automl_steps[0]
+            scoring = scoring_steps[0]
+            scoring_inputs = [dict(item) for item in scoring.get("inputs") or []]
+            data_input = next((item for item in scoring_inputs if item.get("port_id") == "data"), None)
+            if data_input and str((data_input.get("source") or {}).get("port_id")) == "test":
+                automl_inputs = [dict(item) for item in automl.get("inputs") or []]
+                if not any(item.get("port_id") == "test" for item in automl_inputs):
+                    automl_inputs.append({"port_id": "test", "source": dict(data_input["source"])})
+                automl["inputs"] = automl_inputs
+                additional = list(automl.get("additional_output_port_ids") or [])
+                if "test" not in additional:
+                    additional.append("test")
+                automl["additional_output_port_ids"] = additional
+                data_input["source"] = {"step_id": automl.get("step_id"), "port_id": "test"}
+                scoring["inputs"] = scoring_inputs
+
         outputs = [dict(output) for output in normalized["outputs"]]
         for output in outputs:
             source = dict(output.get("source") or {})
@@ -165,14 +192,15 @@ def validate_workflow_definition(definition: dict[str, Any], executable: bool) -
     workflow = WorkflowDefinition.model_validate(normalized)
     if executable and not workflow.steps:
         raise ValueError("An executable pipeline requires at least one workflow step")
-    if len(workflow.steps) > 4:
-        raise ValueError("The current workflow supports at most four lifecycle steps")
+    if len(workflow.steps) > 5:
+        raise ValueError("The current workflow supports at most five lifecycle steps")
     if workflow.steps:
         actual_sequence = [step.type for step in workflow.steps]
         order = {
             "data_engineering": 0,
             "feature_engineering": 1,
             "training": 2,
+            "automl": 2,
             "scoring": 3,
             "monitoring": 4,
         }
@@ -182,11 +210,18 @@ def validate_workflow_definition(definition: dict[str, Any], executable: bool) -
             )
         if len(actual_sequence) != len(set(actual_sequence)):
             raise ValueError("The current workflow supports one step of each lifecycle type")
+        if "training" in actual_sequence and "automl" in actual_sequence:
+            raise ValueError("A workflow must choose either Training or AutoML, not both")
         if "monitoring" in actual_sequence:
-            allowed = ["data_engineering", "monitoring"]
-            if actual_sequence != allowed:
+            standalone_monitoring = actual_sequence == ["data_engineering", "monitoring"]
+            lifecycle_monitoring = (
+                actual_sequence[-1] == "monitoring"
+                and "scoring" in actual_sequence
+                and actual_sequence.index("scoring") == len(actual_sequence) - 2
+            )
+            if not standalone_monitoring and not lifecycle_monitoring:
                 raise ValueError(
-                    "Monitoring workflow must contain Process & Join followed by Performance Report"
+                    "Monitoring must either follow Process & Join or directly follow Test Scoring"
                 )
     for index, step in enumerate(workflow.steps):
         nested_definition = dict(step.config["definition"])
@@ -218,25 +253,41 @@ def validate_workflow_definition(definition: dict[str, Any], executable: bool) -
                 )
             if index > 0 and not step.inputs:
                 raise ValueError("Feature Engineering after Data Engineering requires an upstream input")
-        elif step.type == "training":
+        elif step.type in {"training", "automl"}:
             from app.modules.pipelines.modeling import TrainingDefinition
 
+            # Older AutoML drafts could inherit step-level early stopping from
+            # the editor after a validation port was added. That control is
+            # invalid for any hyperparameter search; normalize the legacy
+            # value rather than making a saved draft impossible to recover.
+            if (
+                step.type == "automl"
+                and dict(nested_definition.get("optimization") or {}).get("mode") == "automl"
+            ):
+                nested_definition["early_stopping"] = False
             validated = TrainingDefinition.model_validate(nested_definition)
+            if step.type == "automl" and validated.optimization.mode != "automl":
+                raise ValueError("AutoML step requires optimization mode 'automl'")
             if executable:
                 validated.validate_executable()
             step.config["definition"] = validated.model_dump(mode="json")
             ports = {item.port_id for item in step.inputs}
             if "training" not in ports:
-                raise ValueError("Training requires an explicit 'training' input port")
-            if ports - {"training", "validation", "fitted_transform"}:
+                raise ValueError(f"{step.type.title()} requires an explicit 'training' input port")
+            allowed_ports = {"training", "validation", "fitted_transform"}
+            if step.type == "automl":
+                allowed_ports.add("test")
+            if ports - allowed_ports:
                 raise ValueError(
-                    "Training accepts 'training' and optional 'validation' "
+                    f"{step.type.title()} accepts 'training' and optional 'validation' "
                     "and 'fitted_transform' input ports"
                 )
             if validated.early_stopping and "validation" not in ports:
                 raise ValueError("Training early stopping requires an explicit 'validation' input port")
             if step.output_port_id != "model":
-                raise ValueError("Training primary output port must be 'model'")
+                raise ValueError(f"{step.type.title()} primary output port must be 'model'")
+            if step.type == "automl" and "test" in ports and "test" not in step.additional_output_port_ids:
+                raise ValueError("AutoML with a test input must expose a transformed 'test' output port")
         elif step.type == "scoring":
             from app.modules.pipelines.modeling import ScoringDefinition
 
@@ -287,7 +338,7 @@ def _validate_batch_scoring_preparation(workflow: WorkflowDefinition) -> None:
     ]
     if not batch_steps:
         return
-    if any(step.type == "training" for step in workflow.steps):
+    if any(step.type in {"training", "automl"} for step in workflow.steps):
         raise ValueError("A batch-scoring workflow cannot contain a Training step")
     feature = next(
         (step for step in workflow.steps if step.type == "feature_engineering"),
@@ -336,6 +387,27 @@ def _validate_monitoring_preparation(workflow: WorkflowDefinition) -> None:
     )
     if report is None:
         return
+    data_input = next(
+        (item for item in report.inputs if item.port_id == "data"),
+        None,
+    )
+    scoring = next(
+        (step for step in workflow.steps if step.type == "scoring"),
+        None,
+    )
+    if scoring is not None:
+        if scoring.config["definition"].get("purpose") != "test":
+            raise ValueError("Lifecycle Monitoring can directly consume only Test Scoring output")
+        if not scoring.config["definition"].get("target_column"):
+            raise ValueError("Lifecycle Monitoring requires Test Scoring with a target column")
+        if (
+            data_input is None
+            or data_input.source.step_id != scoring.step_id
+            or data_input.source.port_id != scoring.output_port_id
+        ):
+            raise ValueError("Lifecycle Monitoring must consume the Test Scoring predictions port")
+        return
+
     process = next(
         (step for step in workflow.steps if step.type == "data_engineering"),
         None,
@@ -348,10 +420,6 @@ def _validate_monitoring_preparation(workflow: WorkflowDefinition) -> None:
         for operation in operations
     ):
         raise ValueError("Monitoring Process & Join requires an explicit join operation")
-    data_input = next(
-        (item for item in report.inputs if item.port_id == "data"),
-        None,
-    )
     if (
         data_input is None
         or data_input.source.step_id != process.step_id

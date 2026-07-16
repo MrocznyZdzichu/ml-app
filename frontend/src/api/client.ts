@@ -107,6 +107,19 @@ export type DataAsset = {
   updated_at: string;
 };
 
+export type ArtifactDependency = {
+  direction: "upstream" | "downstream";
+  role: string;
+  artifact_id: string;
+  artifact_type: string;
+  reference_id: string;
+  business_case_id: string;
+  pipeline_id: string;
+  pipeline_version_id: string;
+  pipeline_run_id: string;
+  pipeline_step_id: string;
+};
+
 export function temporaryPipelineOutputId(runId: string, outputId: string, pipelineStepId = "") {
   const parts = [encodeURIComponent(runId)];
   if (pipelineStepId) parts.push(encodeURIComponent(pipelineStepId));
@@ -390,7 +403,7 @@ export type ModelArtifact = {
   algorithm: string;
   stage: string;
   artifact_uri: string;
-  metrics: Record<string, number>;
+  metrics: Record<string, unknown>;
   business_case_id: string;
   pipeline_id: string;
   pipeline_version_id: string;
@@ -621,6 +634,7 @@ export type PipelineRun = {
   output_row_count: number | null;
   rejected_row_count: number | null;
   warnings: string[];
+  events: PipelineRunEvent[];
   output_artifact_ids: string[];
   output_manifest: Array<{
     output_id: string;
@@ -645,6 +659,9 @@ export type PipelineRun = {
     quality_output_kind?: "rejected_records";
     source_output_id?: string;
     evaluation?: ModelEvaluationSnapshot | Record<string, unknown>;
+    report_type?: "training_evaluation_report" | "monitoring_performance_report";
+    report_name?: string;
+    report?: TrainingEvaluationReport | Record<string, unknown>;
     score_contract?: Record<string, unknown>;
     row_id_column?: string;
     prediction_column?: string;
@@ -687,6 +704,44 @@ export type PipelineRun = {
   finished_at: string | null;
 };
 
+export type TrainingEvaluationReport = {
+  contract_version: "1.0";
+  report_type: "training_evaluation_report";
+  name: string;
+  created_at: string;
+  data_scope: {
+    mode: "full" | "sample";
+    row_count: number;
+    sampled: boolean;
+    sample_size: number;
+    sampling_method: string;
+    seed: number | null;
+  };
+  sections: {
+    summary?: Record<string, unknown>;
+    metrics?: Record<string, unknown>;
+    validation?: Record<string, unknown>;
+    search?: Record<string, unknown>;
+    feature_engineering?: Record<string, unknown>;
+    model_parameters?: Record<string, unknown>;
+    explainability?: {
+      status?: string;
+      reason?: string;
+      scope?: Record<string, unknown>;
+      permutation_importance?: Array<{ feature: string; mean_importance: number; std?: number }>;
+      shap?: {
+        status?: string;
+        explainer?: string;
+        reason?: string;
+        values?: Array<{ feature: string; mean_absolute_shap: number }>;
+      };
+      notes?: string[];
+    };
+  };
+  diagnostics: Array<Record<string, unknown>>;
+  warnings: string[];
+};
+
 export type PipelineStepRun = {
   id: string;
   owner_id: string;
@@ -698,10 +753,20 @@ export type PipelineStepRun = {
   processed_row_count: number | null;
   output_row_count: number | null;
   warnings: string[];
+  events: PipelineRunEvent[];
   output_manifest: PipelineRun["output_manifest"];
   error_message: string;
   started_at: string | null;
   finished_at: string | null;
+};
+
+export type PipelineRunEvent = {
+  timestamp: string;
+  level: "info" | "warning" | "error" | string;
+  type: string;
+  step_id: string;
+  message: string;
+  details: Record<string, unknown>;
 };
 
 export type PipelineRunDetails = {
@@ -805,6 +870,8 @@ export const api = {
     }),
   listPipelines: (businessCaseId?: string) =>
     request<Pipeline[]>(businessCaseId ? `/pipelines?business_case_id=${encodeURIComponent(businessCaseId)}` : "/pipelines"),
+  getModelTrainingCatalog: <T = unknown>() =>
+    request<T>("/pipelines/model-training/catalog"),
   createPipeline: (payload: Record<string, unknown>) =>
     request<Pipeline>("/pipelines", {
       method: "POST",
@@ -941,6 +1008,10 @@ export const api = {
     request<ScoringReport[]>(`/scoring-reports/${encodeURIComponent(logicalId)}/versions`),
   getScoringReportDataLineage: (reportId: string) =>
     request<DatasetLineageReference[]>(`/scoring-reports/${encodeURIComponent(reportId)}/data-lineage`),
+  getArtifactDependencies: (referenceId: string, artifactType: string) =>
+    request<ArtifactDependency[]>(
+      `/business-cases/dependencies/${encodeURIComponent(referenceId)}?artifact_type=${encodeURIComponent(artifactType)}`
+    ),
   createDeployment: (payload: Record<string, unknown>) =>
     request<Deployment>("/serving/deployments", {
       method: "POST",
