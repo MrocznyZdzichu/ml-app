@@ -6,6 +6,7 @@ import random
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import wraps
 from typing import Any, Callable, Literal
 
 import numpy as np
@@ -17,6 +18,7 @@ from sklearn.model_selection import (
     StratifiedKFold,
     cross_val_score,
 )
+from threadpoolctl import threadpool_limits
 
 from app.modules.pipelines.modeling_catalog import (
     ProblemType,
@@ -38,7 +40,29 @@ OptimizationMode = Literal[
     "automl",
 ]
 ValidationStrategy = Literal["auto", "holdout", "cross_validation"]
-OptimizationScoreCallback = Callable[[Any, str], tuple[float, list[float]]]
+OptimizationProgressCallback = Callable[[int, float, list[float]], None]
+OptimizationScoreCallback = Callable[
+    [Any, str, OptimizationProgressCallback | None],
+    tuple[float, list[float]],
+]
+
+
+def _limit_native_threads(function: Callable[..., TrainingFitResult]) -> Callable[..., TrainingFitResult]:
+    """Apply the declared CPU limit to BLAS/OpenMP as well as estimators.
+
+    Estimator ``n_jobs`` does not constrain NumPy/OpenBLAS.  In a multi-process
+    worker that otherwise lets every trial use every CPU core, causing severe
+    oversubscription and making stochastic optimizers sensitive to native
+    reduction order even when their Python-level random seed is fixed.
+    """
+
+    @wraps(function)
+    def wrapped(*args: Any, **kwargs: Any) -> TrainingFitResult:
+        limit = max(1, int(kwargs.get("max_parallel_jobs", 1)))
+        with threadpool_limits(limits=limit):
+            return function(*args, **kwargs)
+
+    return wrapped
 
 
 @dataclass(frozen=True)
@@ -61,6 +85,7 @@ def default_metric(problem_type: ProblemType) -> str:
 class ModelOptimizationEngine:
     """Resource-bounded model selection over an explicitly materialized full relation."""
 
+    @_limit_native_threads
     def fit(
         self,
         *,
@@ -87,6 +112,7 @@ class ModelOptimizationEngine:
         emit_event: Callable[[str, dict[str, Any]], None] | None = None,
         is_cancel_requested: Callable[[], bool] | None = None,
         score_callback: OptimizationScoreCallback | None = None,
+        refit_best_model: bool = True,
     ) -> TrainingFitResult:
         metric = (
             default_metric(problem_type)
@@ -165,6 +191,7 @@ class ModelOptimizationEngine:
                 emit_event=emit_event,
                 is_cancel_requested=is_cancel_requested,
                 score_callback=score_callback,
+                refit_best_model=refit_best_model,
             )
         return self._fit_optuna(
             algorithm=algorithm,
@@ -190,6 +217,7 @@ class ModelOptimizationEngine:
             emit_event=emit_event,
             is_cancel_requested=is_cancel_requested,
             score_callback=score_callback,
+            refit_best_model=refit_best_model,
         )
 
     def _fit_enumerated(
@@ -217,6 +245,7 @@ class ModelOptimizationEngine:
         emit_event: Callable[[str, dict[str, Any]], None] | None,
         is_cancel_requested: Callable[[], bool] | None,
         score_callback: OptimizationScoreCallback | None,
+        refit_best_model: bool,
     ) -> TrainingFitResult:
         raw_space = self._resolved_search_space(algorithm, search_space)
         space = {
@@ -404,8 +433,9 @@ class ModelOptimizationEngine:
             max_parallel_jobs,
             epochs,
         )
-        estimator.fit(x_train, y_train)
-        if emit_event:
+        if refit_best_model:
+            estimator.fit(x_train, y_train)
+        if emit_event and refit_best_model:
             emit_event(
                 "optimization.refit_completed",
                 {
@@ -477,6 +507,7 @@ class ModelOptimizationEngine:
         emit_event: Callable[[str, dict[str, Any]], None] | None,
         is_cancel_requested: Callable[[], bool] | None,
         score_callback: OptimizationScoreCallback | None,
+        refit_best_model: bool,
     ) -> TrainingFitResult:
         import optuna
 
@@ -500,9 +531,19 @@ class ModelOptimizationEngine:
         else:
             candidates = [algorithm]
         sampler = optuna.samplers.TPESampler(seed=random_seed)
-        study = optuna.create_study(direction="maximize", sampler=sampler)
+        pruner = optuna.pruners.MedianPruner(
+            n_startup_trials=5,
+            n_warmup_steps=1,
+            interval_steps=1,
+        )
+        study = optuna.create_study(
+            direction="maximize",
+            sampler=sampler,
+            pruner=pruner,
+        )
 
         def objective(trial: Any) -> float:
+            trial_started = time.monotonic()
             selected = (
                 trial.suggest_categorical("algorithm", candidates)
                 if mode == "automl"
@@ -520,31 +561,52 @@ class ModelOptimizationEngine:
             merged = {**base, **suggested}
             trial.set_user_attr("algorithm", selected)
             trial.set_user_attr("parameters", merged)
-            estimator = self._build(
-                selected,
-                problem_type,
-                merged,
-                random_seed + trial.number,
-                max_parallel_jobs,
-                epochs,
-            )
-            score, fold_scores = self._score(
-                estimator,
-                problem_type=problem_type,
-                metric=metric,
-                validation_strategy=validation_strategy,
-                cv_folds=cv_folds,
-                random_seed=random_seed,
-                x_train=x_train,
-                y_train=y_train,
-                x_validation=x_validation,
-                y_validation=y_validation,
-                cv_fold_assignments=cv_fold_assignments,
+            try:
+                estimator = self._build(
+                    selected,
+                    problem_type,
+                    merged,
+                    random_seed + trial.number,
+                    max_parallel_jobs,
+                    epochs,
+                )
+                def report_progress(
+                    step: int,
+                    score: float,
+                    fold_scores: list[float],
+                ) -> None:
+                    trial.set_user_attr("fold_scores", list(fold_scores))
+                    trial.report(score, step)
+                    if trial.should_prune():
+                        raise optuna.TrialPruned(
+                            f"Median pruner stopped trial after {step + 1} fold(s)"
+                        )
+
+                score, fold_scores = self._score(
+                    estimator,
+                    problem_type=problem_type,
+                    metric=metric,
+                    validation_strategy=validation_strategy,
+                    cv_folds=cv_folds,
+                    random_seed=random_seed,
+                    x_train=x_train,
+                    y_train=y_train,
+                    x_validation=x_validation,
+                    y_validation=y_validation,
+                    cv_fold_assignments=cv_fold_assignments,
                     cv_strategy=cv_strategy,
                     score_callback=score_callback,
-            )
-            trial.set_user_attr("fold_scores", fold_scores)
-            return score
+                    progress_callback=(
+                        report_progress if score_callback is not None else None
+                    ),
+                )
+                trial.set_user_attr("fold_scores", fold_scores)
+                return score
+            finally:
+                trial.set_user_attr(
+                    "elapsed_seconds",
+                    round(time.monotonic() - trial_started, 6),
+                )
 
         started = time.monotonic()
         if emit_event:
@@ -568,11 +630,10 @@ class ModelOptimizationEngine:
             selected = str(trial.user_attrs.get("algorithm") or algorithm)
             raw_parameters = trial.user_attrs.get("parameters") or {}
             state = str(trial.state.name).lower()
-            event_type = (
-                "optimization.trial_succeeded"
-                if state == "complete"
-                else "optimization.trial_failed"
-            )
+            event_type = {
+                "complete": "optimization.trial_succeeded",
+                "pruned": "optimization.trial_pruned",
+            }.get(state, "optimization.trial_failed")
             if emit_event:
                 emit_event(
                     event_type,
@@ -589,6 +650,7 @@ class ModelOptimizationEngine:
                         "score": float(trial.value) if trial.value is not None else None,
                         "fold_scores": trial.user_attrs.get("fold_scores") or [],
                         "parameters": json_safe(raw_parameters),
+                        "elapsed_seconds": trial.user_attrs.get("elapsed_seconds"),
                         "state": state,
                     },
                 )
@@ -616,6 +678,7 @@ class ModelOptimizationEngine:
                 "score": float(item.value) if item.value is not None else None,
                 "fold_scores": item.user_attrs.get("fold_scores") or [],
                 "parameters": raw_parameters,
+                "elapsed_seconds": item.user_attrs.get("elapsed_seconds"),
                 **(
                     {"error": "Trial failed; inspect worker logs for estimator details"}
                     if state == "fail"
@@ -642,8 +705,9 @@ class ModelOptimizationEngine:
             max_parallel_jobs,
             epochs,
         )
-        estimator.fit(x_train, y_train)
-        if emit_event:
+        if refit_best_model:
+            estimator.fit(x_train, y_train)
+        if emit_event and refit_best_model:
             emit_event(
                 "optimization.refit_completed",
                 {
@@ -723,6 +787,16 @@ class ModelOptimizationEngine:
             random_seed=random_seed,
             n_jobs=max_parallel_jobs,
         )
+        if (
+            algorithm in {"mlp_classifier", "mlp_regressor"}
+            and "max_iter" not in parameters
+        ):
+            # TrainingDefinition.epochs is the platform-level iteration budget.
+            # MLP is not incremental in this engine, so without this explicit
+            # mapping it silently used sklearn's 300-iteration default.  In
+            # fold-local CV that can turn one late trial into 5 x 300 epochs and
+            # overshoot the complete AutoML wall-clock budget by many minutes.
+            estimator.set_params(max_iter=epochs)
         if algorithm_spec(algorithm).execution_mode == "incremental":
             available = estimator.get_params(deep=False)
             patch: dict[str, Any] = {}
@@ -750,9 +824,10 @@ class ModelOptimizationEngine:
         cv_fold_assignments: np.ndarray | None,
         cv_strategy: str,
         score_callback: OptimizationScoreCallback | None = None,
+        progress_callback: OptimizationProgressCallback | None = None,
     ) -> tuple[float, list[float]]:
         if score_callback is not None:
-            return score_callback(estimator, metric)
+            return score_callback(estimator, metric, progress_callback)
         scorer = get_scorer(metric)
         if validation_strategy == "holdout":
             if x_validation is None or y_validation is None:
@@ -1183,6 +1258,8 @@ class ModelOptimizationEngine:
         cv_fold_source: str,
     ) -> dict[str, Any]:
         succeeded = sum(item["status"] == "succeeded" for item in trials)
+        pruned = sum(item["status"] == "pruned" for item in trials)
+        elapsed = time.monotonic() - started
         return {
             "mode": mode,
             "random_seed": random_seed,
@@ -1193,15 +1270,18 @@ class ModelOptimizationEngine:
             "total_candidate_count": total_candidate_count,
             "max_trials": max_trials,
             "successful_trial_count": succeeded,
-            "failed_trial_count": len(trials) - succeeded,
+            "pruned_trial_count": pruned,
+            "failed_trial_count": len(trials) - succeeded - pruned,
             "best_score": best_score,
             "best_algorithm": best_algorithm,
             "best_parameters": best_parameters,
             "search_space": search_space,
-            "elapsed_seconds": round(time.monotonic() - started, 6),
+            "elapsed_seconds": round(elapsed, 6),
             "timeout_seconds": timeout_seconds,
+            "budget_overrun_seconds": round(max(0.0, elapsed - timeout_seconds), 6),
+            "trials_per_minute": round((len(trials) * 60.0 / elapsed), 6) if elapsed else None,
             "timed_out": (
-                time.monotonic() - started >= timeout_seconds
+                elapsed >= timeout_seconds
                 and len(trials) > 0
             ),
             "stopped_by_max_trials": (

@@ -734,7 +734,10 @@ function TrainingParameters({ definition, defaults, catalog, algorithm, disabled
           onChange={(event) => updateLimits({ max_memory_mb: Number(event.target.value) })} /></label>
         <label>Parallel estimator jobs<input type="number" min={1} max={64}
           value={definition.resource_limits.max_parallel_jobs} disabled={disabled}
-          onChange={(event) => updateLimits({ max_parallel_jobs: Number(event.target.value) })} /></label>
+          onChange={(event) => updateLimits({ max_parallel_jobs: Number(event.target.value) })} />
+          <small>Total CPU concurrency budget. AutoML shares it between CV folds; a single
+            estimator may use it when folds are not parallel. Memory limits can lower the
+            effective job count.</small></label>
       </div>
       {algorithm?.execution_mode === "incremental" && optimization.mode === "single" &&
         <label className="fe-toggle">

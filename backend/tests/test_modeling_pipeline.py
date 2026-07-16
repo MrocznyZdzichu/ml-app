@@ -58,6 +58,71 @@ def test_catalog_exposes_conditional_tuning_for_perceptron_and_sgd() -> None:
     assert sgd["power_t"]["active_when"] == {"learning_rate": ["invscaling"]}
 
 
+def test_mlp_uses_declared_epoch_budget_unless_max_iter_is_explicit() -> None:
+    bounded = ModelOptimizationEngine._build(
+        "mlp_regressor",
+        "regression",
+        {"hidden_layer_sizes": [8]},
+        random_seed=42,
+        max_parallel_jobs=1,
+        epochs=17,
+    )
+    explicit = ModelOptimizationEngine._build(
+        "mlp_regressor",
+        "regression",
+        {"hidden_layer_sizes": [8], "max_iter": 31},
+        random_seed=42,
+        max_parallel_jobs=1,
+        epochs=17,
+    )
+
+    assert bounded.max_iter == 17
+    assert explicit.max_iter == 31
+
+
+def test_optuna_prunes_weak_trial_after_deterministic_fold_warmup() -> None:
+    callback_calls = 0
+
+    def score_callback(estimator, metric, progress_callback):
+        nonlocal callback_calls
+        callback_calls += 1
+        score = 1.0 if callback_calls <= 5 else -100.0
+        fold_scores = [score]
+        progress_callback(0, score, list(fold_scores))
+        fold_scores.append(score)
+        progress_callback(1, score, list(fold_scores))
+        return score, fold_scores
+
+    result = ModelOptimizationEngine().fit(
+        algorithm="ridge_regression",
+        problem_type="regression",
+        parameters={},
+        random_seed=42,
+        epochs=10,
+        x_train=np.empty((0, 1)),
+        y_train=np.empty((0,)),
+        x_validation=None,
+        y_validation=None,
+        mode="optuna",
+        validation_strategy="cross_validation",
+        primary_metric="neg_mean_absolute_error",
+        cv_folds=2,
+        max_trials=6,
+        timeout_seconds=60,
+        max_parallel_jobs=1,
+        candidate_algorithms=[],
+        score_callback=score_callback,
+        refit_best_model=False,
+    )
+
+    summary = result.optimization_summary
+    assert summary["successful_trial_count"] == 5
+    assert summary["pruned_trial_count"] == 1
+    assert summary["failed_trial_count"] == 0
+    assert summary["trials"][-1]["status"] == "pruned"
+    assert summary["trials"][-1]["fold_scores"] == [-100.0, -100.0]
+
+
 def test_hist_gradient_boosting_automl_does_not_sample_incomplete_quantile_loss() -> None:
     catalog = training_catalog()
     algorithm = next(

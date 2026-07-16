@@ -433,13 +433,21 @@ def test_autofe_planner_profiles_full_scope_and_builds_bounded_recipe(tmp_path) 
         "v4_categorical",
         "v3_v4_combined",
     ]
-    assert fair[0].provenance["candidate_scheduler"]["scheduled_family_counts"] == {
-        "base_numeric": 3,
-        "v3_supervised_selection": 3,
-        "v4_categorical": 3,
-        "v3_v4_combined": 3,
-    }
-    assert any("__categorical_hashing" in item.provenance["recipe_id"] for item in fair)
+    scheduled_counts = fair[0].provenance["candidate_scheduler"][
+        "scheduled_family_counts"
+    ]
+    assert sum(scheduled_counts.values()) == 12
+    assert all("categorical_hashing" not in item.provenance["recipe_id"] for item in fair)
+    assert fair[0].provenance["planner_candidate_skips"] == [{
+        "variant": "hashing",
+        "reason": (
+            "full-scope cardinality profile shows every categorical column "
+            "is narrower with bounded one-hot encoding"
+        ),
+        "categorical_column_count": 1,
+        "hash_bins": 32,
+        "maximum_profiled_cardinality": 2,
+    }]
     assert any("__select_" in item.provenance["recipe_id"] for item in fair)
 
 
@@ -529,6 +537,45 @@ def test_profile_aware_planner_builds_bounded_auditable_numeric_features(tmp_pat
         if item.provenance["recipe_id"] == "scaled_dense__profile_aware_interactions"
     )
     assert repeated_candidate.provenance["recipe_hash"] == candidate.provenance["recipe_hash"]
+
+
+def test_categorical_hashing_is_retained_for_high_cardinality_profile(tmp_path) -> None:
+    payload = automl_definition(autofe=True)
+    payload["feature_columns"] = []
+    payload["feature_selection"] = "upstream_contract"
+    definition = TrainingDefinition.model_validate(payload)
+    plan = DuckDbAutoFEPlanner(tmp_path).plan(
+        training=SourceRelation(
+            sql=(
+                "(SELECT i AS row_id, CAST(i % 2 AS INTEGER) AS target, "
+                "'category_' || CAST(i % 80 AS VARCHAR) AS segment "
+                "FROM range(160) t(i))"
+            ),
+            row_count=160,
+        ),
+        validation=None,
+        test=None,
+        training_definition=definition,
+        run_id="hashing-high-cardinality",
+        owner_id="owner",
+    )
+
+    candidates = model_aware_autofe_plans(
+        plan,
+        ["logistic_regression"],
+        max_candidates=8,
+        categorical_recipe_search=True,
+        categorical_encoding_candidates=["one_hot_frequency", "hashing"],
+        target_column="target",
+        row_id_column="row_id",
+        problem_type="binary_classification",
+    )
+
+    assert any(
+        item.provenance["recipe_id"].endswith("__categorical_hashing")
+        for item in candidates
+    )
+    assert candidates[0].provenance["planner_candidate_skips"] == []
 
 
 def test_profile_aware_planner_reduces_width_to_full_scope_memory_budget(tmp_path) -> None:
@@ -848,6 +895,8 @@ def test_integrated_autofe_and_automl_train_a_real_classification_model(tmp_path
             next(item["recipe_id"] for item in executed if item["status"] == "promoted")
         ],
         "allocated_exploration_trials": 3,
+        "consumed_exploration_trials": 3,
+        "reclaimed_exploration_trials": 0,
         "allocated_exploration_timeout_seconds": 30,
         "allocated_deepening_trials": 2,
         "allocated_deepening_timeout_seconds": 30,
@@ -1200,12 +1249,22 @@ def test_integrated_autofe_runs_fold_local_cross_validation_and_refits_winner(tm
         **definition["optimization"],
         "validation_strategy": "cross_validation",
         "cv_folds": 3,
-        "max_trials": 2,
+        "max_trials": 3,
         "candidate_algorithms": ["logistic_regression"],
     }
     definition["auto_feature_engineering"] = {
         **definition["auto_feature_engineering"],
-        "max_recipe_candidates": 1,
+        "max_recipe_candidates": 2,
+        "two_phase_search_enabled": True,
+        "exploration_trials_per_recipe": 1,
+        "exploration_time_fraction": 0.5,
+        "promotion_top_k": 1,
+        "numeric_feature_search": True,
+        "numeric_recipe_search_v2": True,
+    }
+    definition["resource_limits"] = {
+        "max_memory_mb": 512,
+        "max_parallel_jobs": 3,
     }
     step_payload["steps"][1]["config"]["definition"] = definition
     step = WorkflowStep.model_validate(step_payload["steps"][1])
@@ -1240,22 +1299,52 @@ def test_integrated_autofe_runs_fold_local_cross_validation_and_refits_winner(tm
     assert study["mode"] == "joint_model_aware_fold_local_cv"
     assert study["cross_validation"]["fold_count"] == 3
     assert study["cross_validation"]["planned_row_count"] == 150
-    assert study["candidates"][0]["optimization"]["validation_strategy"] == "cross_validation"
-    assert len(study["candidates"][0]["optimization"]["trials"][0]["fold_scores"]) == 3
-    assert len(study["candidates"][0]["fold_local_feature_counts"]) == 3
-    assert study["candidates"][0]["fold_cache"] == {
-        "scope": "run_recipe",
-        "recipe_hash": study["candidates"][0]["fold_cache"]["recipe_hash"],
-        "fold_count": 3,
-        "miss_count": 3,
-        "hit_count": 3,
+    candidate = next(
+        item for item in study["candidates"] if item["status"] == "promoted"
+    )
+    assert candidate["status"] == "promoted"
+    assert [phase["phase"] for phase in candidate["phases"]] == [
+        "exploration", "deepening",
+    ]
+    assert all(
+        phase["optimization"]["validation_strategy"] == "cross_validation"
+        for phase in candidate["phases"]
+    )
+    assert all(
+        len(phase["optimization"]["trials"][0]["fold_scores"]) == 3
+        for phase in candidate["phases"]
+    )
+    exploration_cache = candidate["phases"][0]["fold_cache"]
+    deepening_cache = candidate["phases"][1]["fold_cache"]
+    assert exploration_cache["scope"] == "run_recipe_across_phases"
+    assert exploration_cache["fold_count"] == 3
+    assert exploration_cache["miss_count"] == 3
+    assert exploration_cache["hit_count"] == 0
+    assert exploration_cache["matrix_miss_count"] == 3
+    assert exploration_cache["matrix_hit_count"] == 0
+    assert deepening_cache["scope"] == "run_recipe_across_phases"
+    assert deepening_cache["miss_count"] == 0
+    assert deepening_cache["hit_count"] == 3
+    assert deepening_cache["matrix_miss_count"] == 0
+    assert deepening_cache["matrix_hit_count"] == 3
+    assert deepening_cache["parallel_fold_jobs"] == 3
+    assert 0 < deepening_cache["matrix_cache_bytes"] <= deepening_cache["matrix_cache_limit_bytes"]
+    assert deepening_cache["estimator_fit_seconds"] > 0
+    assert study["parallel_execution"] == {
+        "configured_job_budget": 3,
+        "parallel_fold_jobs": 3,
+        "estimator_threads_per_fold": 1,
+        "nested_parallelism": False,
+        "candidate_refits_skipped": True,
+        "matrix_cache_memory_fraction": 0.25,
     }
-    assert len(study["candidates"][0]["oof_summaries"]) == 2
-    for trial in study["candidates"][0]["optimization"]["trials"]:
-        assert trial["oof_summary"]["prediction_count"] == 150
-        assert trial["oof_summary"]["coverage"] == 1.0
-        assert trial["oof_summary"]["predictions_persisted"] is False
-    assert study["candidates"][0]["selected_oof_summary"]["coverage"] == 1.0
+    for phase in candidate["phases"]:
+        assert len(phase["oof_summaries"]) == 1
+        for trial in phase["optimization"]["trials"]:
+            assert trial["oof_summary"]["prediction_count"] == 150
+            assert trial["oof_summary"]["coverage"] == 1.0
+            assert trial["oof_summary"]["predictions_persisted"] is False
+        assert phase["selected_oof_summary"]["coverage"] == 1.0
     assert model["training_config"]["auto_feature_engineering"]["joint_study"]["best_score"] is not None
 
 

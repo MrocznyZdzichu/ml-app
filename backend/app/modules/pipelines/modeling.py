@@ -300,6 +300,7 @@ class SklearnTrainingEngine:
         is_cancel_requested: Callable[[], bool] | None = None,
         optimization_score_callback: OptimizationScoreCallback | None = None,
         create_training_report: bool = True,
+        study_only: bool = False,
     ) -> ModelingResult:
         directory = self._run_directory(owner_id, run_id)
         connection = configured_duckdb_connection(directory / ".training-duckdb")
@@ -475,21 +476,30 @@ class SklearnTrainingEngine:
                     preflight_rows,
                     len(definition.feature_columns),
                 )
-                x_train, y_train, estimated_bytes = self._load_matrix(
-                    connection,
-                    training,
-                    definition,
-                    row_count=row_count,
+                callback_only_study = (
+                    study_only and optimization_score_callback is not None
                 )
+                if callback_only_study:
+                    x_train = np.empty((0, len(definition.feature_columns)))
+                    y_train = np.empty((0,))
+                    estimated_bytes = 0
+                else:
+                    x_train, y_train, estimated_bytes = self._load_matrix(
+                        connection,
+                        training,
+                        definition,
+                        row_count=row_count,
+                    )
                 if emit_event:
                     emit_event(
                         "training.matrix_loaded",
                         {
                             "message": "Training matrix loaded into worker memory",
-                            "row_count": row_count,
+                            "row_count": 0 if callback_only_study else row_count,
                             "feature_count": len(definition.feature_columns),
                             "estimated_bytes": estimated_bytes,
                             "memory_budget_mb": definition.resource_limits.max_memory_mb,
+                            "study_only": callback_only_study,
                         },
                     )
                 x_validation: np.ndarray | None = None
@@ -542,12 +552,40 @@ class SklearnTrainingEngine:
                     emit_event=emit_event,
                     is_cancel_requested=is_cancel_requested,
                     score_callback=optimization_score_callback,
+                    refit_best_model=not study_only,
                 )
                 estimator = fit_result.estimator
                 processed_row_count = fit_result.processed_row_count
                 resolved_algorithm = fit_result.algorithm
                 resolved_parameters = fit_result.parameters
                 optimization_summary = fit_result.optimization_summary
+                if study_only:
+                    metrics = {"optimization": optimization_summary}
+                    return ModelingResult(
+                        input_row_count=row_count,
+                        processed_row_count=processed_row_count,
+                        output_row_count=1,
+                        warnings=warnings,
+                        output_manifest=[{
+                            "output_id": "model",
+                            "artifact_type": "model_version",
+                            "materialization": "temporary",
+                            "algorithm": resolved_algorithm,
+                            "problem_type": definition.problem_type,
+                            "feature_columns": definition.feature_columns,
+                            "target_column": definition.target_column,
+                            "metrics": metrics,
+                            "training_config": {
+                                **definition.model_dump(mode="json"),
+                                "resolved_algorithm": resolved_algorithm,
+                                "resolved_parameters": json_safe(resolved_parameters),
+                            },
+                            "row_count": 1,
+                            "data_scope": "full",
+                            "is_dry_run": True,
+                            "study_only": True,
+                        }],
+                    )
                 warnings.append(
                     "Full training matrix was materialized in worker memory "
                     f"within the configured "

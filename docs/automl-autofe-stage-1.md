@@ -112,6 +112,22 @@ best successful trial. With cross-validation, the approximate model-fit cost is
 `completed trials × fold count`, plus fold-local FE preparation and the final
 winner refit.
 
+The timeout is checked between atomic estimator trials; libraries cannot safely
+interrupt an in-process fit. Provenance therefore reports both elapsed time and
+`budget_overrun_seconds`. Trial events include per-trial elapsed time and study
+summaries expose `trials_per_minute`. MLP trials map the platform `epochs`
+setting to sklearn `max_iter` unless `max_iter` is explicitly configured, which
+bounds the most important source of timeout overrun in fold-local CV.
+
+The configured parallel-job limit is applied to estimator-level workers and to
+native BLAS/OpenMP thread pools. This prevents worker-process oversubscription
+and stabilizes stochastic estimators whose seeded update path can otherwise
+diverge after floating-point reductions execute in a different native thread
+order. LightGBM additionally uses its deterministic CPU mode. Exact
+bit-for-bit equality across different library versions, CPU architectures or
+accelerator backends is not claimed; reproducibility assumes the same runtime
+environment and immutable inputs.
+
 The editor reports the global cap, approximate per-recipe allocation, fold count
 and estimated maximum fits. Result views report the configured joint budget and
 completed trials across recipes, and distinguish timeout from reaching the
@@ -197,9 +213,11 @@ recipe hashes, fold scores, and resolved feature counts.
 Fold-local feature matrices are cached inside the candidate run. The cache key
 binds the recipe hash, raw train/validation fold relations, fold number and
 seed. The first trial materializes each fold once; subsequent model and
-hyperparameter trials reuse those Parquet outputs. Cache hits/misses and keys
-are recorded, and the complete candidate directory is removed when its recipe
-study ends.
+hyperparameter trials reuse those Parquet outputs. Exploration and deepening
+also share the same recipe cache. Numeric matrices use a bounded in-memory cache
+(up to 25% of the configured memory budget) and otherwise reload from the fold
+Parquet output. Cache hits/misses, timings and keys are recorded, and the
+complete candidate directory is removed when its recipe study ends.
 
 Every successful trial records a bounded full-training-scope OOF summary:
 prediction coverage/count, fold count, mean, row-weighted mean, standard
@@ -215,9 +233,14 @@ partition, they cannot be reused for CV. Fold-local AutoFE therefore requires a
 pre-FE input (normally the Data Engineering output). This guard prevents a
 globally fitted human recipe from being misreported as leakage-safe CV.
 
-Fold-local trials currently run serially for deterministic run-directory and
-memory isolation. Group/time folds, a retained winning OOF dataset, and
-fold-local execution of arbitrary human-authored FE recipes remain future work.
+`Parallel estimator jobs` is a total CPU concurrency budget, not a multiplier.
+Fold-local CV evaluates folds in deterministic batches and assigns one native
+estimator thread to each active fold, preventing nested oversubscription. The
+effective fold worker count is additionally capped from the configured memory
+budget before each trial. Without fold-local CV, the estimator may consume the
+configured job budget directly. Group/time folds, a retained winning OOF
+dataset, and fold-local execution of arbitrary human-authored FE recipes remain
+future work.
 
 ## Reusing Data Engineering in AutoML drafts
 

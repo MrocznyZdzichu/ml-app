@@ -718,8 +718,13 @@ class DuckDbFeatureEngineeringEngine:
             if state.get("type") in {"variance_filter", "supervised_feature_selector"}
             for column in state.get("dropped_columns") or []
         }
+        has_dynamic_selector = any(
+            state.get("type") in {"variance_filter", "supervised_feature_selector"}
+            for state in transform_states.values()
+        )
         missing_features = sorted(
             feature for feature in definition.feature_columns
+            if not has_dynamic_selector
             if feature not in selector_dropped
             if feature not in final_names
             and not any(name.startswith(f"{feature}__") for name in final_names)
@@ -737,7 +742,13 @@ class DuckDbFeatureEngineeringEngine:
                 definition.event_time_column,
             ) if value
         }
-        selected_features = set(definition.feature_columns)
+        # Learned selectors resolve the final model feature set dynamically.
+        # Once one is present, every remaining non-protected output column is a
+        # selected feature; requiring the pre-encoding source names here falsely
+        # rejects valid one-hot/target-encoded selector recipes.
+        selected_features = (
+            set() if has_dynamic_selector else set(definition.feature_columns)
+        )
         feature_manifest = [
             {
                 "feature_id": hashlib.sha256(str(row[0]).encode("utf-8")).hexdigest()[:16],

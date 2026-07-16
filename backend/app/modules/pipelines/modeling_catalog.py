@@ -2156,6 +2156,8 @@ def build_estimator(
             "random_state": random_seed,
             "n_jobs": n_jobs,
             "verbosity": -1,
+            "deterministic": True,
+            "force_col_wise": True,
         }
         estimator = (
             LGBMClassifier(**common)

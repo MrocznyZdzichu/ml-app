@@ -261,6 +261,7 @@ def model_aware_autofe_plans(
         for profile, variant, scaling in candidate_specs
     ]
     base_specs = list(expanded_specs)
+    planner_candidate_skips: list[dict[str, Any]] = []
     if supervised_feature_selection:
         methods = feature_selection_methods or ["mutual_information", "l1", "importance"]
         if problem_type == "regression":
@@ -281,6 +282,32 @@ def model_aware_autofe_plans(
         categorical_candidates = categorical_encoding_candidates or [
             "one_hot_frequency", "hashing", "target_mean", "ordered_target", "native",
         ]
+        categorical_decisions = [
+            item for item in base_plan.provenance.get("column_decisions", [])
+            if item.get("role") == "categorical"
+        ]
+        hashing_is_dominated = bool(categorical_decisions) and all(
+            item.get("action") == "one_hot"
+            and int(item.get("approx_distinct_count") or 0) + 1 < categorical_hash_bins
+            for item in categorical_decisions
+        )
+        if hashing_is_dominated and "hashing" in categorical_candidates:
+            categorical_candidates = [
+                item for item in categorical_candidates if item != "hashing"
+            ]
+            planner_candidate_skips.append({
+                "variant": "hashing",
+                "reason": (
+                    "full-scope cardinality profile shows every categorical column "
+                    "is narrower with bounded one-hot encoding"
+                ),
+                "categorical_column_count": len(categorical_decisions),
+                "hash_bins": categorical_hash_bins,
+                "maximum_profiled_cardinality": max(
+                    int(item.get("approx_distinct_count") or 0)
+                    for item in categorical_decisions
+                ),
+            })
         for categorical in categorical_candidates:
             if categorical == "one_hot_frequency":
                 continue
@@ -303,6 +330,7 @@ def model_aware_autofe_plans(
         supervised_feature_selection=supervised_feature_selection,
         categorical_recipe_search=categorical_recipe_search,
     )
+    scheduler_provenance["profile_based_skips"] = planner_candidate_skips
     for profile, variant, scaling, selection_spec, categorical_variant in scheduled_specs:
         definition = base_plan.definition.model_copy(deep=True)
         transformations = [
@@ -593,6 +621,7 @@ def model_aware_autofe_plans(
                 (profile, variant, scaling, selection_spec, categorical_variant)
             ),
             "candidate_scheduler": scheduler_provenance,
+            "planner_candidate_skips": planner_candidate_skips,
             "recipe_id": recipe_id,
             "feature_capability_profile": profile,
             "compatible_algorithms": list(grouped[profile]),

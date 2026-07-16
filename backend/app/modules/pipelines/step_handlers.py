@@ -4,6 +4,9 @@ import math
 import hashlib
 import json
 import shutil
+import time
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -460,8 +463,9 @@ class AutoMLStepHandler(TrainingStepHandler):
             )
         if cv_plan is not None and definition.resource_limits.max_parallel_jobs > 1:
             candidate_warnings.append(
-                "Fold-local AutoFE currently evaluates trials serially so run-scoped fitted "
-                "state and memory accounting remain isolated and deterministic"
+                "Fold-local AutoFE uses the configured parallel-job budget across CV folds; "
+                "each estimator is restricted to one native thread to prevent nested "
+                "oversubscription"
             )
         if context.emit_event:
             context.emit_event("autofe.plan_created", {
@@ -474,6 +478,17 @@ class AutoMLStepHandler(TrainingStepHandler):
                 "validation_source": plan.provenance["validation_source"],
                 "evaluated_algorithms": evaluated_algorithms,
                 "skipped_algorithms": skipped_algorithms,
+                "parallel_execution": {
+                    "configured_job_budget": definition.resource_limits.max_parallel_jobs,
+                    "parallel_fold_jobs": min(
+                        definition.resource_limits.max_parallel_jobs,
+                        len(cv_plan.folds) if cv_plan is not None else 1,
+                    ),
+                    "estimator_threads_per_fold": 1 if cv_plan is not None else (
+                        definition.resource_limits.max_parallel_jobs
+                    ),
+                    "nested_parallelism": False,
+                },
                 **({"cross_validation": cv_plan.provenance} if cv_plan else {}),
             })
 
@@ -511,6 +526,16 @@ class AutoMLStepHandler(TrainingStepHandler):
             )
 
         processed_row_count = 0
+        recipe_execution_caches: dict[str, dict[str, Any]] = {}
+
+        def cleanup_recipe(recipe_id: str) -> None:
+            cache = recipe_execution_caches.pop(recipe_id, None)
+            if cache is not None:
+                self._cleanup_candidate_run(
+                    context.owner_id,
+                    str(cache["candidate_root_id"]),
+                )
+
         def evaluate_phase(
             recipe: AutoFEPlan,
             index: int,
@@ -522,6 +547,7 @@ class AutoMLStepHandler(TrainingStepHandler):
         ) -> dict[str, Any]:
             nonlocal processed_row_count
             recipe_id = str(recipe.provenance.get("recipe_id") or f"recipe_{index + 1}")
+            phase_started = time.monotonic()
             if context.is_cancel_requested and context.is_cancel_requested():
                 raise PipelineExecutionCancelled("Pipeline run was cancelled")
             if context.emit_event:
@@ -533,7 +559,11 @@ class AutoMLStepHandler(TrainingStepHandler):
                     "trial_budget": trial_budget,
                     "timeout_budget_seconds": timeout_budget,
                 })
-            candidate_run_id = f"{context.run_id}/autofe-candidates/{recipe_id}/{phase}"
+            candidate_root_id = f"{context.run_id}/autofe-candidates/{recipe_id}"
+            candidate_run_id = f"{candidate_root_id}/{phase}"
+            shared_cache = recipe_execution_caches.setdefault(recipe_id, {
+                "candidate_root_id": candidate_root_id,
+            })
             try:
                 candidate, warnings, phase_processed = self._evaluate_autofe_recipe_candidate(
                     recipe=recipe,
@@ -548,6 +578,11 @@ class AutoMLStepHandler(TrainingStepHandler):
                     trial_budget=trial_budget,
                     timeout_budget=timeout_budget,
                     seed_offset=seed_offset,
+                    shared_cache=shared_cache,
+                )
+                candidate["wall_clock_seconds"] = round(
+                    time.monotonic() - phase_started,
+                    6,
                 )
                 processed_row_count += phase_processed
                 candidate_warnings.extend(warnings)
@@ -578,6 +613,10 @@ class AutoMLStepHandler(TrainingStepHandler):
                     "allocated_timeout_seconds": timeout_budget,
                     "resolved_feature_count": 0,
                     "resolved_features": [],
+                    "wall_clock_seconds": round(
+                        time.monotonic() - phase_started,
+                        6,
+                    ),
                 }
                 if context.emit_event:
                     context.emit_event("autofe.recipe_trial_failed", {
@@ -586,8 +625,6 @@ class AutoMLStepHandler(TrainingStepHandler):
                         "phase": phase,
                     })
                 return failed
-            finally:
-                self._cleanup_candidate_run(context.owner_id, candidate_run_id)
 
         exploration_results = [
             evaluate_phase(
@@ -601,11 +638,29 @@ class AutoMLStepHandler(TrainingStepHandler):
             for index, recipe in enumerate(plans)
         ]
 
+        if not uses_two_phase_scheduler:
+            for recipe in plans:
+                cleanup_recipe(str(recipe.provenance.get("recipe_id") or "recipe"))
+
         deepening_results: dict[str, dict[str, Any]] = {}
         promoted_recipe_ids: list[str] = []
         if uses_two_phase_scheduler:
-            remaining_trials = definition.optimization.max_trials - sum(trial_allocations)
-            remaining_timeout = definition.optimization.timeout_seconds - sum(timeout_allocations)
+            completed_exploration_trials = sum(
+                int(item.get("trial_count") or 0) for item in exploration_results
+            )
+            remaining_trials = max(
+                0,
+                definition.optimization.max_trials - completed_exploration_trials,
+            )
+            consumed_exploration_timeout = sum(
+                timeout_allocations[index]
+                for index, item in enumerate(exploration_results)
+                if item.get("status") == "succeeded"
+            )
+            remaining_timeout = max(
+                0,
+                definition.optimization.timeout_seconds - consumed_exploration_timeout,
+            )
             ranked_exploration = sorted(
                 (
                     item for item in exploration_results
@@ -622,6 +677,10 @@ class AutoMLStepHandler(TrainingStepHandler):
             )
             promoted = ranked_exploration[:promotion_count]
             promoted_recipe_ids = [str(item["recipe_id"]) for item in promoted]
+            for item in exploration_results:
+                recipe_id = str(item["recipe_id"])
+                if recipe_id not in promoted_recipe_ids:
+                    cleanup_recipe(recipe_id)
             if promoted:
                 plan_indexes = {
                     str(recipe.provenance.get("recipe_id") or f"recipe_{index + 1}"): index
@@ -647,14 +706,18 @@ class AutoMLStepHandler(TrainingStepHandler):
                     })
                 for rank, explored in enumerate(promoted):
                     recipe_index = plan_indexes[str(explored["recipe_id"])]
-                    deepening_results[str(explored["recipe_id"])] = evaluate_phase(
-                        plans[recipe_index],
-                        recipe_index,
-                        phase="deepening",
-                        trial_budget=deep_trial_allocations[rank],
-                        timeout_budget=deep_timeout_allocations[rank],
-                        seed_offset=10_000 + rank,
-                    )
+                    recipe_id = str(explored["recipe_id"])
+                    try:
+                        deepening_results[recipe_id] = evaluate_phase(
+                            plans[recipe_index],
+                            recipe_index,
+                            phase="deepening",
+                            trial_budget=deep_trial_allocations[rank],
+                            timeout_budget=deep_timeout_allocations[rank],
+                            seed_offset=10_000 + rank,
+                        )
+                    finally:
+                        cleanup_recipe(recipe_id)
             elif remaining_trials or remaining_timeout >= 10:
                 candidate_warnings.append(
                     "AutoFE two-phase scheduler could not deepen a recipe because no successful "
@@ -798,6 +861,22 @@ class AutoMLStepHandler(TrainingStepHandler):
             "requested_algorithms": candidate_algorithms,
             "evaluated_algorithms": evaluated_algorithms,
             "skipped_algorithms": skipped_algorithms,
+            "planner_candidate_skips": list(
+                generated_plans[0].provenance.get("planner_candidate_skips") or []
+            ),
+            "parallel_execution": {
+                "configured_job_budget": definition.resource_limits.max_parallel_jobs,
+                "parallel_fold_jobs": min(
+                    definition.resource_limits.max_parallel_jobs,
+                    len(cv_plan.folds) if cv_plan is not None else 1,
+                ),
+                "estimator_threads_per_fold": 1 if cv_plan is not None else (
+                    definition.resource_limits.max_parallel_jobs
+                ),
+                "nested_parallelism": False,
+                "candidate_refits_skipped": True,
+                "matrix_cache_memory_fraction": 0.25 if cv_plan is not None else 0.0,
+            },
             **({"cross_validation": cv_plan.provenance} if cv_plan else {}),
             "selected_recipe_id": winner["recipe_id"],
             "selected_algorithm": winner["best_algorithm"],
@@ -818,6 +897,17 @@ class AutoMLStepHandler(TrainingStepHandler):
                 ),
                 "promoted_recipe_ids": promoted_recipe_ids,
                 "allocated_exploration_trials": sum(trial_allocations),
+                "consumed_exploration_trials": sum(
+                    int(item.get("trial_count") or 0)
+                    for item in exploration_results
+                ),
+                "reclaimed_exploration_trials": max(
+                    0,
+                    sum(trial_allocations) - sum(
+                        int(item.get("trial_count") or 0)
+                        for item in exploration_results
+                    ),
+                ),
                 "allocated_exploration_timeout_seconds": sum(timeout_allocations),
                 "allocated_deepening_trials": sum(
                     int(item.get("allocated_trial_budget") or 0)
@@ -929,10 +1019,13 @@ class AutoMLStepHandler(TrainingStepHandler):
         trial_budget: int,
         timeout_budget: int,
         seed_offset: int,
+        shared_cache: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], list[str], int]:
         recipe_id = str(recipe.provenance.get("recipe_id") or "recipe")
-        feature_result, prepared_training, prepared_validation, _, resolved_features = (
-            self._prepare_features(
+        cache = shared_cache if shared_cache is not None else {}
+        prepared = cache.get("prepared")
+        if prepared is None:
+            prepared = self._prepare_features(
                 recipe,
                 raw_training,
                 raw_validation,
@@ -941,7 +1034,8 @@ class AutoMLStepHandler(TrainingStepHandler):
                 owner_id=context.owner_id,
                 is_dry_run=True,
             )
-        )
+            cache["prepared"] = prepared
+        feature_result, prepared_training, prepared_validation, _, resolved_features = prepared
         candidate_optimization = definition.optimization.model_copy(update={
             "candidate_algorithms": list(
                 recipe.provenance.get("compatible_algorithms") or candidate_algorithms
@@ -980,10 +1074,13 @@ class AutoMLStepHandler(TrainingStepHandler):
                     emit_event=context.emit_event,
                     is_cancel_requested=context.is_cancel_requested,
                     stats=fold_local_stats,
+                    shared_cache=cache,
+                    parallel_jobs=definition.resource_limits.max_parallel_jobs,
                 )
                 if cv_plan is not None else None
             ),
             create_training_report=False,
+            study_only=True,
         )
         model_manifest = next(
             item for item in candidate_result.output_manifest
@@ -1038,12 +1135,37 @@ class AutoMLStepHandler(TrainingStepHandler):
                 "feature_stability": dict(fold_local_stats.get("feature_stability") or {}),
                 "fold_cache": {
                     "scope": (
-                        "run_recipe" if phase == "flat_search" else "run_recipe_phase"
+                        "run_recipe" if phase == "flat_search"
+                        else "run_recipe_across_phases"
                     ),
                     "recipe_hash": recipe.provenance.get("recipe_hash"),
                     "fold_count": len(cv_plan.folds),
                     "miss_count": int(fold_local_stats.get("cache_misses", 0)),
                     "hit_count": int(fold_local_stats.get("cache_hits", 0)),
+                    "matrix_hit_count": int(
+                        fold_local_stats.get("matrix_cache_hits", 0)
+                    ),
+                    "matrix_miss_count": int(
+                        fold_local_stats.get("matrix_cache_misses", 0)
+                    ),
+                    "matrix_cache_bytes": int(
+                        fold_local_stats.get("matrix_cache_bytes", 0)
+                    ),
+                    "matrix_cache_limit_bytes": int(
+                        fold_local_stats.get("matrix_cache_limit_bytes", 0)
+                    ),
+                    "parallel_fold_jobs": int(
+                        fold_local_stats.get("parallel_fold_jobs", 1)
+                    ),
+                    "fold_preparation_seconds": round(float(
+                        fold_local_stats.get("fold_preparation_seconds", 0.0)
+                    ), 6),
+                    "matrix_load_seconds": round(float(
+                        fold_local_stats.get("matrix_load_seconds", 0.0)
+                    ), 6),
+                    "estimator_fit_seconds": round(float(
+                        fold_local_stats.get("estimator_fit_seconds", 0.0)
+                    ), 6),
                     **({"phase": phase} if phase != "flat_search" else {}),
                 },
                 "oof_summaries": [
@@ -1066,156 +1188,274 @@ class AutoMLStepHandler(TrainingStepHandler):
         emit_event: Callable[[str, dict[str, Any]], None] | None,
         is_cancel_requested: Callable[[], bool] | None,
         stats: dict[str, Any],
-    ) -> Callable[[Any, str], tuple[float, list[float]]]:
+        shared_cache: dict[str, Any] | None = None,
+        parallel_jobs: int = 1,
+    ) -> Callable[[Any, str, Callable[[int, float, list[float]], None] | None], tuple[float, list[float]]]:
         """Evaluate one estimator with FE fitted independently inside every fold."""
 
-        fold_cache: dict[int, dict[str, Any]] = {}
+        cache = shared_cache if shared_cache is not None else {}
+        fold_cache: dict[int, dict[str, Any]] = cache.setdefault("folds", {})
+        matrix_cache_limit = max(
+            0,
+            int(definition.resource_limits.max_memory_mb * 1024 * 1024 * 0.25),
+        )
+        cache.setdefault("matrix_cache_bytes", 0)
+        matrix_cache_lock: Lock = cache.setdefault("matrix_cache_lock", Lock())
+        worker_count = max(1, min(int(parallel_jobs), len(cv_plan.folds)))
+        stats["parallel_fold_jobs"] = worker_count
+        stats["matrix_cache_limit_bytes"] = matrix_cache_limit
 
-        def score(estimator: Any, metric: str) -> tuple[float, list[float]]:
+        def prepare_fold(fold: Any) -> dict[str, Any]:
+            cached = fold_cache.get(fold.fold)
+            if cached is not None:
+                cached["last_prepare_cache_hit"] = True
+                stats["cache_hits"] = int(stats.get("cache_hits", 0)) + 1
+                if emit_event:
+                    emit_event("autofe.fold_cache_hit", {
+                        "message": f"Reusing fold-local FE cache for fold {fold.fold + 1}",
+                        "fold": fold.fold,
+                        "recipe_hash": recipe.provenance.get("recipe_hash"),
+                        "cache_key": cached["cache_key"],
+                    })
+                return cached
+            started = time.monotonic()
+            if emit_event:
+                emit_event("autofe.fold_cache_miss", {
+                    "message": f"Preparing fold-local FE cache for fold {fold.fold + 1}",
+                    "fold": fold.fold,
+                    "fold_count": len(cv_plan.folds),
+                    "recipe_hash": recipe.provenance.get("recipe_hash"),
+                    "training_row_count": fold.training.row_count,
+                    "validation_row_count": fold.validation.row_count,
+                })
+            fold_run_id = f"{run_id}/fold-local/cache/fold-{fold.fold}"
+            fold_definition = recipe.definition.model_copy(update={
+                "inputs": [
+                    FeatureInput(input_id="training", role="training"),
+                    FeatureInput(input_id="validation", role="validation"),
+                ],
+                "outputs": [
+                    FeatureOutput(
+                        output_id="autofe_training",
+                        input_id="training",
+                        dataset_name=f"{definition.model_name} fold {fold.fold} training",
+                        business_case_role="training",
+                    ),
+                    FeatureOutput(
+                        output_id="autofe_validation",
+                        input_id="validation",
+                        dataset_name=f"{definition.model_name} fold {fold.fold} validation",
+                        business_case_role="validation",
+                    ),
+                ],
+                "evaluation": EvaluationConfig(split_strategy="predefined"),
+            })
+            fold_recipe = AutoFEPlan(
+                definition=fold_definition,
+                provenance=recipe.provenance,
+                warnings=recipe.warnings,
+            )
+            feature_result, prepared_training, prepared_validation, _, features = (
+                self._prepare_features(
+                    fold_recipe,
+                    fold.training,
+                    fold.validation,
+                    None,
+                    run_id=fold_run_id,
+                    owner_id=owner_id,
+                    is_dry_run=True,
+                )
+            )
+            if prepared_validation is None:
+                raise ValueError("Fold-local AutoFE produced no validation matrix")
+            fitted_state = next(
+                (
+                    item for item in feature_result.output_manifest
+                    if item.get("artifact_type") == "feature_transform"
+                ),
+                {},
+            )
+            cached = {
+                "training": prepared_training,
+                "validation": prepared_validation,
+                "features": features,
+                "fold_run_id": fold_run_id,
+                "fitted_state_hash": str(fitted_state.get("state_hash") or ""),
+                "fitted_state_signature": self._stable_state_signature(
+                    str(fitted_state.get("location_uri") or "")
+                ),
+                "feature_selection": self._selection_state_from_manifest(fitted_state),
+                "last_prepare_cache_hit": False,
+                "cache_key": hashlib.sha256(
+                    (
+                        f"{recipe.provenance.get('recipe_hash', '')}|"
+                        f"{fold.fold}|{cv_plan.provenance.get('seed')}|"
+                        f"{fold.training.sql}|{fold.validation.sql}"
+                    ).encode("utf-8")
+                ).hexdigest(),
+            }
+            fold_cache[fold.fold] = cached
+            stats["cache_misses"] = int(stats.get("cache_misses", 0)) + 1
+            stats["processed_row_count"] = (
+                int(stats.get("processed_row_count", 0))
+                + int(feature_result.processed_row_count)
+            )
+            stats["fold_preparation_seconds"] = float(
+                stats.get("fold_preparation_seconds", 0.0)
+            ) + (time.monotonic() - started)
+            return cached
+
+        def load_matrices(fold: Any, cached: dict[str, Any]) -> tuple[Any, Any, Any, Any, bool, float]:
+            matrices = cached.get("matrices")
+            if matrices is not None:
+                return (*matrices, True, 0.0)
+            started = time.monotonic()
+            features = list(cached["features"])
+            fold_training_definition = definition.model_copy(update={
+                "feature_columns": features,
+                "feature_selection": "explicit",
+            })
+            connection = configured_duckdb_connection(
+                self.feature_engine.repository_root
+                / "users" / owner_id / "pipeline-runs"
+                / cached["fold_run_id"] / ".matrix"
+            )
+            try:
+                x_train, y_train, train_bytes = self.engine._load_matrix(
+                    connection,
+                    cached["training"],
+                    fold_training_definition,
+                    row_count=cached["training"].row_count,
+                )
+                x_validation, y_validation, validation_bytes = self.engine._load_matrix(
+                    connection,
+                    cached["validation"],
+                    fold_training_definition,
+                    row_count=cached["validation"].row_count,
+                )
+                total_bytes = train_bytes + validation_bytes
+                self.engine._enforce_memory_budget(
+                    total_bytes,
+                    definition.resource_limits.max_memory_mb,
+                    cached["training"].row_count + cached["validation"].row_count,
+                    len(features),
+                )
+            finally:
+                connection.close()
+            load_seconds = time.monotonic() - started
+            with matrix_cache_lock:
+                current_bytes = int(cache.get("matrix_cache_bytes", 0))
+                if current_bytes + total_bytes <= matrix_cache_limit:
+                    cached["matrices"] = (
+                        x_train, y_train, x_validation, y_validation,
+                    )
+                    cached["matrix_bytes"] = total_bytes
+                    cache["matrix_cache_bytes"] = current_bytes + total_bytes
+            return x_train, y_train, x_validation, y_validation, False, load_seconds
+
+        def score(
+            estimator: Any,
+            metric: str,
+            progress_callback: Callable[[int, float, list[float]], None] | None = None,
+        ) -> tuple[float, list[float]]:
             scorer = get_scorer(metric)
             fold_scores: list[float] = []
             trial_number = int(stats.get("trial_count", 0))
             stats["trial_count"] = trial_number + 1
-            trial_feature_counts: list[dict[str, int]] = []
-            for fold in cv_plan.folds:
+            prepared_by_fold = {
+                fold.fold: prepare_fold(fold) for fold in cv_plan.folds
+            }
+            stats["matrix_cache_bytes"] = int(cache.get("matrix_cache_bytes", 0))
+            max_fold_working_bytes = max(
+                self.engine._preflight_memory_bytes(
+                    int(cached["training"].row_count + cached["validation"].row_count),
+                    len(cached["features"]),
+                )
+                for cached in prepared_by_fold.values()
+            )
+            available_working_bytes = max(
+                1,
+                int(definition.resource_limits.max_memory_mb * 1024 * 1024 * 0.75),
+            )
+            memory_worker_capacity = max(
+                1,
+                available_working_bytes // max(1, max_fold_working_bytes),
+            )
+            effective_worker_count = max(
+                1,
+                min(worker_count, memory_worker_capacity, len(cv_plan.folds)),
+            )
+            stats["parallel_fold_jobs"] = effective_worker_count
+            stats["memory_parallel_capacity"] = memory_worker_capacity
+
+            def evaluate_fold(fold: Any) -> dict[str, Any]:
                 if is_cancel_requested and is_cancel_requested():
                     raise PipelineExecutionCancelled("Pipeline run was cancelled")
-                fold_run_id = f"{run_id}/fold-local/cache/fold-{fold.fold}"
-                fold_definition = recipe.definition.model_copy(update={
-                    "inputs": [
-                        FeatureInput(input_id="training", role="training"),
-                        FeatureInput(input_id="validation", role="validation"),
-                    ],
-                    "outputs": [
-                        FeatureOutput(
-                            output_id="autofe_training",
-                            input_id="training",
-                            dataset_name=f"{definition.model_name} fold {fold.fold} training",
-                            business_case_role="training",
-                        ),
-                        FeatureOutput(
-                            output_id="autofe_validation",
-                            input_id="validation",
-                            dataset_name=f"{definition.model_name} fold {fold.fold} validation",
-                            business_case_role="validation",
-                        ),
-                    ],
-                    "evaluation": EvaluationConfig(split_strategy="predefined"),
-                })
-                fold_recipe = AutoFEPlan(
-                    definition=fold_definition,
-                    provenance=recipe.provenance,
-                    warnings=recipe.warnings,
-                )
-                cached = fold_cache.get(fold.fold)
-                cache_hit = cached is not None
-                if cached is None:
-                    if emit_event:
-                        emit_event("autofe.fold_cache_miss", {
-                            "message": f"Preparing fold-local FE cache for fold {fold.fold + 1}",
-                            "fold": fold.fold,
-                            "fold_count": len(cv_plan.folds),
-                            "recipe_hash": recipe.provenance.get("recipe_hash"),
-                            "training_row_count": fold.training.row_count,
-                            "validation_row_count": fold.validation.row_count,
-                        })
-                    feature_result, prepared_training, prepared_validation, _, features = (
-                        self._prepare_features(
-                            fold_recipe,
-                            fold.training,
-                            fold.validation,
-                            None,
-                            run_id=fold_run_id,
-                            owner_id=owner_id,
-                            is_dry_run=True,
-                        )
+                cached = prepared_by_fold[fold.fold]
+                (
+                    x_train, y_train, x_validation, y_validation,
+                    matrix_hit, load_seconds,
+                ) = load_matrices(fold, cached)
+                fit_started = time.monotonic()
+                fitted = clone(estimator).fit(x_train, y_train)
+                fold_score = float(scorer(fitted, x_validation, y_validation))
+                return {
+                    "fold": fold,
+                    "cached": cached,
+                    "score": fold_score,
+                    "matrix_hit": matrix_hit,
+                    "load_seconds": load_seconds,
+                    "fit_seconds": time.monotonic() - fit_started,
+                }
+
+            def evaluate_batch(batch: list[Any]) -> list[dict[str, Any]]:
+                if len(batch) == 1 or effective_worker_count == 1:
+                    return [evaluate_fold(fold) for fold in batch]
+                with ThreadPoolExecutor(
+                    max_workers=min(effective_worker_count, len(batch)),
+                    thread_name_prefix="autofe-fold",
+                ) as executor:
+                    return list(executor.map(evaluate_fold, batch))
+
+            trial_feature_counts: list[dict[str, Any]] = []
+            warmup_count = min(2, len(cv_plan.folds))
+            batches = [
+                cv_plan.folds[:warmup_count],
+                cv_plan.folds[warmup_count:],
+            ]
+            for batch in batches:
+                if not batch:
+                    continue
+                for result in evaluate_batch(batch):
+                    fold = result["fold"]
+                    cached = result["cached"]
+                    fold_scores.append(float(result["score"]))
+                    stats["matrix_cache_hits"] = int(
+                        stats.get("matrix_cache_hits", 0)
+                    ) + int(result["matrix_hit"])
+                    stats["matrix_cache_misses"] = int(
+                        stats.get("matrix_cache_misses", 0)
+                    ) + int(not result["matrix_hit"])
+                    stats["matrix_load_seconds"] = float(
+                        stats.get("matrix_load_seconds", 0.0)
+                    ) + float(result["load_seconds"])
+                    stats["estimator_fit_seconds"] = float(
+                        stats.get("estimator_fit_seconds", 0.0)
+                    ) + float(result["fit_seconds"])
+                    processed = int(
+                        cached["training"].row_count + cached["validation"].row_count
                     )
-                    if prepared_validation is None:
-                        raise ValueError("Fold-local AutoFE produced no validation matrix")
-                    fitted_state = next(
-                        (
-                            item for item in feature_result.output_manifest
-                            if item.get("artifact_type") == "feature_transform"
-                        ),
-                        {},
-                    )
-                    cached = {
-                        "training": prepared_training,
-                        "validation": prepared_validation,
-                        "features": features,
-                        "fitted_state_hash": str(fitted_state.get("state_hash") or ""),
-                        "fitted_state_signature": self._stable_state_signature(
-                            str(fitted_state.get("location_uri") or "")
-                        ),
-                        "feature_selection": self._selection_state_from_manifest(fitted_state),
-                        "cache_key": hashlib.sha256(
-                            (
-                                f"{recipe.provenance.get('recipe_hash', '')}|"
-                                f"{fold.fold}|{cv_plan.provenance.get('seed')}|"
-                                f"{fold.training.sql}|{fold.validation.sql}"
-                            ).encode("utf-8")
-                        ).hexdigest(),
-                    }
-                    fold_cache[fold.fold] = cached
-                    stats["cache_misses"] = int(stats.get("cache_misses", 0)) + 1
-                    stats["processed_row_count"] = (
-                        int(stats.get("processed_row_count", 0))
-                        + int(feature_result.processed_row_count)
-                    )
-                else:
-                    stats["cache_hits"] = int(stats.get("cache_hits", 0)) + 1
-                    if emit_event:
-                        emit_event("autofe.fold_cache_hit", {
-                            "message": f"Reusing fold-local FE cache for fold {fold.fold + 1}",
-                            "fold": fold.fold,
-                            "recipe_hash": recipe.provenance.get("recipe_hash"),
-                            "cache_key": cached["cache_key"],
-                        })
-                prepared_training = cached["training"]
-                prepared_validation = cached["validation"]
-                features = list(cached["features"])
-                try:
-                    fold_training_definition = definition.model_copy(update={
-                        "feature_columns": features,
-                        "feature_selection": "explicit",
-                    })
-                    connection = configured_duckdb_connection(
-                        self.feature_engine.repository_root
-                        / "users" / owner_id / "pipeline-runs" / fold_run_id / ".matrix"
-                    )
-                    try:
-                        x_train, y_train, train_bytes = self.engine._load_matrix(
-                            connection,
-                            prepared_training,
-                            fold_training_definition,
-                            row_count=prepared_training.row_count,
-                        )
-                        x_validation, y_validation, validation_bytes = self.engine._load_matrix(
-                            connection,
-                            prepared_validation,
-                            fold_training_definition,
-                            row_count=prepared_validation.row_count,
-                        )
-                        self.engine._enforce_memory_budget(
-                            train_bytes + validation_bytes,
-                            definition.resource_limits.max_memory_mb,
-                            prepared_training.row_count + prepared_validation.row_count,
-                            len(features),
-                        )
-                    finally:
-                        connection.close()
-                    fitted = clone(estimator).fit(x_train, y_train)
-                    fold_score = float(scorer(fitted, x_validation, y_validation))
-                    fold_scores.append(fold_score)
-                    processed = int(prepared_training.row_count + prepared_validation.row_count)
-                    stats["processed_row_count"] = int(stats.get("processed_row_count", 0)) + processed
+                    stats["processed_row_count"] = int(
+                        stats.get("processed_row_count", 0)
+                    ) + processed
                     trial_feature_counts.append({
                         "fold": fold.fold,
-                        "feature_count": len(features),
+                        "feature_count": len(cached["features"]),
                         "fitted_state_hash": cached["fitted_state_hash"],
                         "fitted_state_signature": cached["fitted_state_signature"],
                         "cache_key": cached["cache_key"],
-                        "cache_hit": cache_hit,
+                        "cache_hit": bool(cached.get("last_prepare_cache_hit")),
+                        "matrix_cache_hit": bool(result["matrix_hit"]),
                         "selected_features": list(
                             (cached.get("feature_selection") or {}).get("selected_columns") or []
                         ),
@@ -1224,15 +1464,24 @@ class AutoMLStepHandler(TrainingStepHandler):
                         emit_event("autofe.fold_completed", {
                             "message": f"Fold-local FE completed for fold {fold.fold + 1}",
                             "fold": fold.fold,
-                            "score": fold_score,
+                            "score": result["score"],
                             "metric": metric,
-                            "resolved_feature_count": len(features),
+                            "resolved_feature_count": len(cached["features"]),
+                            "matrix_cache_hit": bool(result["matrix_hit"]),
+                            "fit_seconds": round(float(result["fit_seconds"]), 6),
+                            "parallel_fold_jobs": effective_worker_count,
                         })
-                finally:
-                    # Fold Parquet/state stays run-scoped until the recipe study ends.
-                    # The outer candidate cleanup removes the entire cache directory.
-                    pass
-            stats.setdefault("trial_feature_counts", []).append(trial_feature_counts)
+                    stats["feature_counts"] = list(trial_feature_counts)
+                    if progress_callback is not None:
+                        progress_callback(
+                            len(fold_scores) - 1,
+                            sum(fold_scores) / len(fold_scores),
+                            list(fold_scores),
+                        )
+            stats.setdefault("trial_feature_counts", []).append(
+                list(trial_feature_counts)
+            )
+            stats["matrix_cache_bytes"] = int(cache.get("matrix_cache_bytes", 0))
             stats["feature_counts"] = trial_feature_counts
             selected_by_fold = [
                 set(item.get("selected_features") or []) for item in trial_feature_counts
