@@ -67,6 +67,20 @@ def test_csv_upload_stores_metadata_and_is_private_by_default() -> None:
     )
     assert other_user_get.status_code == 404
 
+    download = client.get(
+        f"/api/v1/datasets/{dataset['id']}/download",
+        headers={"Authorization": f"Bearer {token_a}"},
+    )
+    assert download.status_code == 200
+    assert download.content == csv_body
+    assert "iris.csv" in download.headers["content-disposition"]
+
+    other_user_download = client.get(
+        f"/api/v1/datasets/{dataset['id']}/download",
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    assert other_user_download.status_code == 404
+
     persisted = PostgresDatasetRepository().get(dataset["id"])
     assert persisted is not None
     assert persisted.name == "iris-sample"

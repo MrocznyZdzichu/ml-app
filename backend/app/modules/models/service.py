@@ -11,6 +11,11 @@ from app.modules.business_cases.domain import Artifact, ArtifactType
 from app.modules.business_cases.repository import PostgresBusinessCaseRepository
 from app.modules.pipelines.domain import PipelineRun, PipelineVersion
 from app.modules.pipelines.repository import PostgresPipelineRepository
+from app.modules.business_cases.service import BusinessCaseService
+from app.modules.sharing.domain import BC_ROLE_RANK, BusinessCaseAccessRole
+from app.modules.sharing.policy import access_policy
+from app.modules.datasets.repository import PostgresDatasetRepository
+from app.modules.sharing.domain import ResourceAccessRole, ResourceKind
 
 
 class ModelService:
@@ -23,8 +28,20 @@ class ModelService:
         self.repository = repository or InMemoryModelRepository()
         self.artifacts = artifacts or PostgresBusinessCaseRepository()
         self.pipelines = pipelines or PostgresPipelineRepository()
+        self.business_cases = BusinessCaseService()
+        self.datasets = PostgresDatasetRepository()
 
     def start_training(self, payload: TrainingRequest, principal: Principal) -> TrainingJob:
+        asset = self.datasets.get(payload.dataset_id)
+        if asset is None:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        access_policy.require_resource(
+            principal,
+            ResourceKind.DATA_VIEW if asset.source_type.value == "view" else ResourceKind.DATASET,
+            asset.id,
+            asset.owner_id,
+            ResourceAccessRole.EDITOR,
+        )
         job = TrainingJob(
             id=str(uuid4()),
             owner_id=principal.user_id,
@@ -49,16 +66,24 @@ class ModelService:
         return job
 
     def list_training_jobs(self, principal: Principal) -> list[TrainingJob]:
-        return self.repository.list_training_jobs(principal.user_id)
+        return self.repository.list_all_training_jobs() if principal.is_administrator else self.repository.list_training_jobs(principal.user_id)
 
     def list_models(self, principal: Principal) -> list[ModelArtifact]:
-        pipeline_models = [
-            self._artifact_model(artifact)
-            for artifact in self.artifacts.list_artifacts(
-                principal.user_id,
-                ArtifactType.MODEL_VERSION,
-            )
-        ]
+        if isinstance(self.artifacts, PostgresBusinessCaseRepository):
+            cases = [
+                case for case in self.business_cases.list_business_cases(principal)
+                if case.access_role and BC_ROLE_RANK[BusinessCaseAccessRole(case.access_role)] >= BC_ROLE_RANK[BusinessCaseAccessRole.READER]
+            ]
+            case_ids = {case.id for case in cases}
+            case_owners = {case.owner_id for case in cases}
+        else:
+            case_ids = None
+            case_owners = {principal.user_id}
+        pipeline_models = [self._artifact_model(artifact) for artifact in (
+            self.artifacts.list_artifacts_for_business_cases(case_ids, ArtifactType.MODEL_VERSION)
+            if case_ids is not None
+            else [item for owner_id in case_owners for item in self.artifacts.list_artifacts(owner_id, ArtifactType.MODEL_VERSION)]
+        )]
         run_cache: dict[str, PipelineRun | None] = {}
         for model in pipeline_models:
             if model.pipeline_id or not model.pipeline_run_id:
@@ -68,16 +93,18 @@ class ModelService:
                     model.pipeline_run_id
                 )
             run = run_cache[model.pipeline_run_id]
-            if run is not None and run.owner_id == principal.user_id:
+            if run is not None and run.owner_id == model.owner_id:
                 model.pipeline_id = run.pipeline_id
                 model.lineage = {**model.lineage, "pipeline_id": run.pipeline_id}
 
         fitted_by_run_step: dict[tuple[str, str], Artifact] = {}
         if any(model.pipeline_run_id for model in pipeline_models):
-            for artifact in self.artifacts.list_artifacts(
-                principal.user_id,
-                ArtifactType.FEATURE_TRANSFORM,
-            ):
+            fitted_artifacts = (
+                self.artifacts.list_artifacts_for_business_cases(case_ids, ArtifactType.FEATURE_TRANSFORM)
+                if case_ids is not None
+                else [item for owner_id in case_owners for item in self.artifacts.list_artifacts(owner_id, ArtifactType.FEATURE_TRANSFORM)]
+            )
+            for artifact in fitted_artifacts:
                 lineage = dict(artifact.metadata.get("lineage") or {})
                 run_id = str(lineage.get("pipeline_run_id") or "")
                 step_id = str(lineage.get("pipeline_step_id") or "")
@@ -87,20 +114,18 @@ class ModelService:
         pipeline_ids = sorted({
             model.pipeline_id for model in pipeline_models if model.pipeline_id
         })
-        versions_by_id = {
-            version.id: version
-            for version in self.pipelines.list_versions_for_pipelines(
-                principal.user_id,
-                pipeline_ids,
-            )
-        }
+        pipeline_owners = {model.owner_id for model in pipeline_models}
+        versions_by_id = {version.id: version for owner_id in pipeline_owners
+                          for version in self.pipelines.list_versions_for_pipelines(owner_id, pipeline_ids)}
         for model in pipeline_models:
             self._enrich_batch_scoring_contract(model, fitted_by_run_step, versions_by_id)
             model.logical_id = model.logical_id or self._logical_model_id(model)
         known = {item.id for item in pipeline_models}
         models = [
             *pipeline_models,
-            *(item for item in self.repository.list_models(principal.user_id) if item.id not in known),
+            *(item for item in (
+                self.repository.list_all_models() if principal.is_administrator else self.repository.list_models(principal.user_id)
+            ) if item.id not in known),
         ]
         self._assign_version_numbers(models)
         return sorted(models, key=lambda item: (item.created_at, item.id), reverse=True)
@@ -127,6 +152,8 @@ class ModelService:
         principal: Principal,
     ) -> ModelArtifact:
         model = self.get_model(model_id, principal)
+        if model.business_case_id:
+            access_policy.require_business_case(principal, model.business_case_id, BusinessCaseAccessRole.CONTRIBUTOR)
         model.stage = payload.stage
         return self.repository.update_model(model)
 

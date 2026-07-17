@@ -40,7 +40,10 @@ export function ArtifactFilters({
   onPurposeChange,
   onPipelineChange,
   uploadedOnly,
-  onUploadedOnlyChange
+  onUploadedOnlyChange,
+  role,
+  roleOptions,
+  onRoleChange
 }: {
   pipelines: Pipeline[];
   purpose: string;
@@ -49,12 +52,15 @@ export function ArtifactFilters({
   onPipelineChange: (value: string) => void;
   uploadedOnly?: boolean;
   onUploadedOnlyChange?: (value: boolean) => void;
+  role?: string;
+  roleOptions?: Array<{ value: string; label: string }>;
+  onRoleChange?: (value: string) => void;
 }) {
   const purposes = [...new Set(pipelines.map((pipeline) => pipeline.template).filter(Boolean))].sort();
   const visiblePipelines = pipelines.filter((pipeline) => !purpose || pipeline.template === purpose);
 
   return (
-    <div className="artifact-filters" aria-label="Artifact filters">
+    <div className={`artifact-filters${onRoleChange ? " artifact-filters-with-role" : ""}`} aria-label="Artifact filters">
       {onUploadedOnlyChange && (
         <label className="artifact-filter-toggle">
           <input
@@ -96,6 +102,21 @@ export function ArtifactFilters({
           ))}
         </select>
       </label>
+      {onRoleChange && (
+        <label>
+          <span>Data role</span>
+          <select
+            aria-label="Filter by data role"
+            value={role ?? ""}
+            onChange={(event) => onRoleChange(event.target.value)}
+          >
+            <option value="">All roles</option>
+            {(roleOptions ?? []).map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
+        </label>
+      )}
     </div>
   );
 }

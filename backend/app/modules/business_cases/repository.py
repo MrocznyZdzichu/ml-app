@@ -78,6 +78,9 @@ class BusinessCaseRepository(Protocol):
     def list_business_cases(self, owner_id: str) -> list[BusinessCase]:
         ...
 
+    def list_all_business_cases(self) -> list[BusinessCase]:
+        ...
+
     def get_business_case(self, business_case_id: str) -> BusinessCase | None:
         ...
 
@@ -91,6 +94,11 @@ class BusinessCaseRepository(Protocol):
         ...
 
     def list_artifacts(self, owner_id: str, artifact_type: ArtifactType | None = None) -> list[Artifact]:
+        ...
+
+    def list_artifacts_for_business_cases(
+        self, business_case_ids: set[str], artifact_type: ArtifactType | None = None
+    ) -> list[Artifact]:
         ...
 
     def find_artifact(self, owner_id: str, reference_id: str, business_case_id: str | None) -> Artifact | None:
@@ -125,6 +133,9 @@ class InMemoryBusinessCaseRepository:
     def list_business_cases(self, owner_id: str) -> list[BusinessCase]:
         return [item for item in self._business_cases.values() if item.owner_id == owner_id]
 
+    def list_all_business_cases(self) -> list[BusinessCase]:
+        return list(self._business_cases.values())
+
     def get_business_case(self, business_case_id: str) -> BusinessCase | None:
         return self._business_cases.get(business_case_id)
 
@@ -144,6 +155,12 @@ class InMemoryBusinessCaseRepository:
             item for item in self._artifacts.values()
             if item.owner_id == owner_id and (artifact_type is None or item.type == artifact_type)
         ]
+
+    def list_artifacts_for_business_cases(
+        self, business_case_ids: set[str], artifact_type: ArtifactType | None = None
+    ) -> list[Artifact]:
+        return [item for item in self._artifacts.values()
+                if item.business_case_id in business_case_ids and (artifact_type is None or item.type == artifact_type)]
 
     def find_artifact(self, owner_id: str, reference_id: str, business_case_id: str | None) -> Artifact | None:
         for artifact in self._artifacts.values():
@@ -198,6 +215,12 @@ class PostgresBusinessCaseRepository:
         with self.engine.begin() as connection:
             return [self._business_case_from_record(row._mapping) for row in connection.execute(statement)]
 
+    def list_all_business_cases(self) -> list[BusinessCase]:
+        self._ensure_initialized()
+        statement = select(business_cases_table).order_by(business_cases_table.c.updated_at.desc())
+        with self.engine.begin() as connection:
+            return [self._business_case_from_record(row._mapping) for row in connection.execute(statement)]
+
     def get_business_case(self, business_case_id: str) -> BusinessCase | None:
         self._ensure_initialized()
         statement = select(business_cases_table).where(business_cases_table.c.id == business_case_id)
@@ -232,6 +255,19 @@ class PostgresBusinessCaseRepository:
     def list_artifacts(self, owner_id: str, artifact_type: ArtifactType | None = None) -> list[Artifact]:
         self._ensure_initialized()
         statement = select(artifacts_table).where(artifacts_table.c.owner_id == owner_id)
+        if artifact_type is not None:
+            statement = statement.where(artifacts_table.c.type == artifact_type.value)
+        statement = statement.order_by(artifacts_table.c.created_at.desc())
+        with self.engine.begin() as connection:
+            return [self._artifact_from_record(row._mapping) for row in connection.execute(statement)]
+
+    def list_artifacts_for_business_cases(
+        self, business_case_ids: set[str], artifact_type: ArtifactType | None = None
+    ) -> list[Artifact]:
+        self._ensure_initialized()
+        if not business_case_ids:
+            return []
+        statement = select(artifacts_table).where(artifacts_table.c.business_case_id.in_(business_case_ids))
         if artifact_type is not None:
             statement = statement.where(artifacts_table.c.type == artifact_type.value)
         statement = statement.order_by(artifacts_table.c.created_at.desc())

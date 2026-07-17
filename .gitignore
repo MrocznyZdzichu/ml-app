@@ -3,6 +3,8 @@
 .env.*
 !.env.example
 
+*.egg-info/
+
 # Local agent instructions
 /AGENTS.md
 
@@ -33,6 +35,8 @@ pnpm-debug.log*
 /data/
 /artifacts/
 /models/
+/examples/API-usage/scoring-results/
+/examples/API-usage/monitoring-results/
 sandbox.ipynb
 *.sqlite
 *.sqlite3

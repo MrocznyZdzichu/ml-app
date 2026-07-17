@@ -30,7 +30,7 @@ class DescriptiveProfileJobs:
         self.redis = redis_client or Redis.from_url(settings.redis_url)
         self.expires_seconds = settings.descriptive_profile_result_expires_seconds
 
-    def start(self, dataset_id: str, owner_id: str, options: dict[str, Any]) -> dict[str, Any]:
+    def start(self, dataset_id: str, owner_id: str, options: dict[str, Any], asset_owner_id: str | None = None) -> dict[str, Any]:
         job_id = str(uuid4())
         ownership_key = self._key(job_id)
         self.redis.setex(
@@ -39,8 +39,11 @@ class DescriptiveProfileJobs:
             json.dumps({"dataset_id": dataset_id, "owner_id": owner_id}),
         )
         try:
+            task_args = [dataset_id, owner_id, options]
+            if asset_owner_id and asset_owner_id != owner_id:
+                task_args = [dataset_id, asset_owner_id, options, owner_id]
             descriptive_profile_dataset.apply_async(
-                args=[dataset_id, owner_id, options],
+                args=task_args,
                 task_id=job_id,
             )
         except Exception:

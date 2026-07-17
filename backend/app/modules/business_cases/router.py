@@ -8,9 +8,11 @@ from app.modules.business_cases.schemas import (
     BusinessCaseDataAttachmentRead,
     BusinessCaseDataAttachmentUpdate,
     BusinessCaseRead,
+    BusinessCaseOwnershipTransfer,
 )
 from app.modules.business_cases.service import BusinessCaseService
 from app.modules.business_cases.lineage import ArtifactDependencyResolver
+from app.modules.sharing.domain import BC_ROLE_RANK, BusinessCaseAccessRole
 
 router = APIRouter(prefix="/business-cases", tags=["business-cases"])
 service = BusinessCaseService()
@@ -23,11 +25,27 @@ def get_artifact_dependencies(
     artifact_type: str | None = Query(default=None, max_length=64),
     principal: Principal = Depends(require_user),
 ) -> list[dict[str, object]]:
-    return dependency_resolver.resolve(
-        owner_id=principal.user_id,
-        reference_id=reference_id,
-        artifact_type=artifact_type,
-    )
+    edges: list[dict[str, object]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for business_case in service.list_business_cases(principal):
+        role = BusinessCaseAccessRole(business_case.access_role)
+        if BC_ROLE_RANK[role] < BC_ROLE_RANK[BusinessCaseAccessRole.READER]:
+            continue
+        for edge in dependency_resolver.resolve(
+            owner_id=business_case.owner_id,
+            reference_id=reference_id,
+            artifact_type=artifact_type,
+        ):
+            if edge.get("business_case_id") and edge["business_case_id"] != business_case.id:
+                continue
+            key = (
+                str(edge.get("direction", "")), str(edge.get("role", "")),
+                str(edge.get("artifact_type", "")), str(edge.get("reference_id", "")),
+            )
+            if key not in seen:
+                seen.add(key)
+                edges.append(edge)
+    return edges
 
 
 @router.post("", response_model=BusinessCaseRead, status_code=201)
@@ -58,6 +76,15 @@ def update_business_case(
     principal: Principal = Depends(require_user),
 ) -> BusinessCaseRead:
     return BusinessCaseRead.model_validate(service.update_business_case(business_case_id, payload, principal))
+
+
+@router.post("/{business_case_id}/transfer-ownership", response_model=BusinessCaseRead)
+def transfer_business_case_ownership(
+    business_case_id: str,
+    payload: BusinessCaseOwnershipTransfer,
+    principal: Principal = Depends(require_user),
+) -> BusinessCaseRead:
+    return BusinessCaseRead.model_validate(service.transfer_ownership(business_case_id, payload, principal))
 
 
 @router.post("/{business_case_id}/data-attachments", response_model=BusinessCaseDataAttachmentRead, status_code=201)

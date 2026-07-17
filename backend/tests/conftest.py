@@ -15,6 +15,13 @@ from app.modules.business_cases.repository import (
     metadata as business_case_metadata,
 )
 from app.modules.auth.repository import user_accounts_table
+from app.modules.sharing.repository import (
+    access_groups_table,
+    audit_events_table,
+    business_case_grants_table,
+    group_memberships_table,
+    resource_grants_table,
+)
 from app.modules.datasets.repository import data_assets_table
 from app.modules.pipelines.repository import (
     metadata as pipeline_metadata,
@@ -66,6 +73,27 @@ def _delete_test_accounts(user_ids: set[str]) -> None:
     with get_engine().begin() as connection:
         business_case_metadata.create_all(connection)
         pipeline_metadata.create_all(connection)
+        connection.execute(delete(group_memberships_table).where(group_memberships_table.c.user_id.in_(user_ids)))
+        connection.execute(delete(business_case_grants_table).where(
+            business_case_grants_table.c.subject_type == "user",
+            business_case_grants_table.c.subject_id.in_(user_ids),
+        ))
+        connection.execute(delete(resource_grants_table).where(
+            resource_grants_table.c.subject_type == "user",
+            resource_grants_table.c.subject_id.in_(user_ids),
+        ))
+        owned_group_ids = select(access_groups_table.c.id).where(access_groups_table.c.owner_id.in_(user_ids))
+        connection.execute(delete(group_memberships_table).where(group_memberships_table.c.group_id.in_(owned_group_ids)))
+        connection.execute(delete(business_case_grants_table).where(
+            business_case_grants_table.c.subject_type == "group",
+            business_case_grants_table.c.subject_id.in_(owned_group_ids),
+        ))
+        connection.execute(delete(resource_grants_table).where(
+            resource_grants_table.c.subject_type == "group",
+            resource_grants_table.c.subject_id.in_(owned_group_ids),
+        ))
+        connection.execute(delete(access_groups_table).where(access_groups_table.c.owner_id.in_(user_ids)))
+        connection.execute(delete(audit_events_table).where(audit_events_table.c.actor_id.in_(user_ids)))
         connection.execute(
             delete(pipeline_step_runs_table).where(pipeline_step_runs_table.c.owner_id.in_(user_ids))
         )

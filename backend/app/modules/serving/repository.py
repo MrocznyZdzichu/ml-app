@@ -10,6 +10,9 @@ class ServingRepository(Protocol):
     def list_deployments(self, owner_id: str) -> list[Deployment]:
         ...
 
+    def list_all_deployments(self) -> list[Deployment]:
+        ...
+
     def get_deployment(self, deployment_id: str) -> Deployment | None:
         ...
 
@@ -31,6 +34,9 @@ class InMemoryServingRepository:
 
     def list_deployments(self, owner_id: str) -> list[Deployment]:
         return [deployment for deployment in self._deployments.values() if deployment.owner_id == owner_id]
+
+    def list_all_deployments(self) -> list[Deployment]:
+        return list(self._deployments.values())
 
     def get_deployment(self, deployment_id: str) -> Deployment | None:
         return self._deployments.get(deployment_id)

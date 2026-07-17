@@ -14,7 +14,7 @@ export function AuthScreen({
   onAuthenticated: (token: string) => Promise<void>;
 }) {
   const [mode, setMode] = useState<"login" | "register">("login");
-  const [email, setEmail] = useState("demo@example.com");
+  const [login, setLogin] = useState("demo@example.com");
   const [displayName, setDisplayName] = useState("Demo Analyst");
   const [password, setPassword] = useState("password123");
   const [message, setMessage] = useState(isChecking ? "Checking session" : "Sign in to continue");
@@ -32,8 +32,8 @@ export function AuthScreen({
     setMessage(mode === "login" ? "Signing in" : "Creating account");
     try {
       const response = mode === "login"
-        ? await api.login({ email, password })
-        : await api.register({ email, password, display_name: displayName });
+        ? await api.login({ login, password })
+        : await api.register({ email: login, password, display_name: displayName });
       await onAuthenticated(response.access_token);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Authentication failed");
@@ -74,12 +74,12 @@ export function AuthScreen({
 
         <form className="auth-form" onSubmit={submit}>
           <label>
-            Email
+            {mode === "login" ? "Login or email" : "Email"}
             <input
-              autoComplete="email"
-              type="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
+              autoComplete={mode === "login" ? "username" : "email"}
+              type={mode === "login" ? "text" : "email"}
+              value={login}
+              onChange={(event) => setLogin(event.target.value)}
               required
             />
           </label>
@@ -97,7 +97,7 @@ export function AuthScreen({
             Password
             <input
               autoComplete={mode === "login" ? "current-password" : "new-password"}
-              minLength={6}
+              minLength={mode === "login" ? 1 : 6}
               type="password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}

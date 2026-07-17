@@ -1302,6 +1302,12 @@ export function ModelPerformanceReport({ report }: { report: ModelEvaluationSnap
             <header><div><h4>Actual vs predicted</h4><p>{report.residuals.actual_vs_predicted.rendering}</p></div></header>
             <ActualPredictedScatter points={report.residuals.actual_vs_predicted.points} />
           </section>
+          {report.residuals.qq_plot && (
+            <section className="evaluation-section">
+              <header><div><h4>Residual QQ-plot</h4><p>{report.residuals.qq_plot.rendering}</p></div></header>
+              <ResidualQqPlot plot={report.residuals.qq_plot} summary={report.residuals.summary} />
+            </section>
+          )}
         </>
       )}
       {report.warnings.length > 0 && (
@@ -1502,10 +1508,40 @@ function ResidualHistogram({
 }: {
   bins: NonNullable<ModelEvaluationSnapshot["residuals"]>["histogram"];
 }) {
+  if (!bins.length) return <div className="catalog-empty">No residual distribution is available.</div>;
   const maximum = Math.max(1, ...bins.map((bin) => bin.count));
-  return <div className="evaluation-histogram residual" aria-label="Residual distribution">
-    {bins.map((bin, index) => <i key={index} style={{ height: `${bin.count / maximum * 100}%` }}
-      title={`${bin.lower.toPrecision(3)}–${bin.upper.toPrecision(3)}: ${bin.count}`} />)}
+  const plot = { left: 68, right: 690, top: 24, bottom: 345 };
+  const yTicks = [0, 0.25, 0.5, 0.75, 1];
+  const xTickIndexes = [0, Math.floor((bins.length - 1) / 2), bins.length - 1];
+  const width = (plot.right - plot.left) / bins.length;
+  return <div className="evaluation-histogram-chart regression-chart" aria-label="Residual distribution">
+    <svg viewBox="0 0 720 400" role="img" aria-label="Residual distribution histogram">
+      {yTicks.map((tick) => {
+        const y = plot.bottom - tick * (plot.bottom - plot.top);
+        return <g key={tick}>
+          <line x1={plot.left} y1={y} x2={plot.right} y2={y} className="grid" />
+          <text x={plot.left - 10} y={y + 4} className="tick" textAnchor="end">
+            {Math.round(maximum * tick).toLocaleString()}
+          </text>
+        </g>;
+      })}
+      {bins.map((bin, index) => {
+        const height = bin.count / maximum * (plot.bottom - plot.top);
+        return <rect key={index} className="residual-bar" x={plot.left + index * width + 1}
+          y={plot.bottom - height} width={Math.max(1, width - 2)} height={height}>
+          <title>{`${formatChartTick(bin.lower)}–${formatChartTick(bin.upper)}: ${bin.count.toLocaleString()} rows`}</title>
+        </rect>;
+      })}
+      <line x1={plot.left} y1={plot.bottom} x2={plot.right} y2={plot.bottom} className="axis" />
+      <line x1={plot.left} y1={plot.top} x2={plot.left} y2={plot.bottom} className="axis" />
+      {xTickIndexes.map((index) => <text key={index} x={plot.left + (index + 0.5) * width}
+        y={plot.bottom + 18} className="tick" textAnchor="middle">
+        {formatChartTick((bins[index].lower + bins[index].upper) / 2)}
+      </text>)}
+      <text x={(plot.left + plot.right) / 2} y="392" className="axis-title" textAnchor="middle">Residual (predicted − actual)</text>
+      <text x="16" y={(plot.top + plot.bottom) / 2} className="axis-title" textAnchor="middle"
+        transform={`rotate(-90 16 ${(plot.top + plot.bottom) / 2})`}>Row count</text>
+    </svg>
   </div>;
 }
 
@@ -1519,16 +1555,79 @@ function ActualPredictedScatter({
   const minimum = Math.min(...values);
   const maximum = Math.max(...values);
   const span = maximum - minimum || 1;
-  return <div className="evaluation-line-chart">
-    <svg viewBox="0 0 300 190" role="img" aria-label="Actual versus predicted values">
-      <line x1="20" y1="170" x2="280" y2="25" className="baseline" />
+  const plot = { left: 72, right: 535, top: 22, bottom: 345 };
+  const ticks = [0, 0.25, 0.5, 0.75, 1];
+  return <div className="evaluation-line-chart regression-chart">
+    <svg viewBox="0 0 560 400" role="img" aria-label="Actual versus predicted values">
+      {ticks.map((tick) => {
+        const x = plot.left + tick * (plot.right - plot.left);
+        const y = plot.bottom - tick * (plot.bottom - plot.top);
+        return <g key={tick}>
+          <line x1={x} y1={plot.top} x2={x} y2={plot.bottom} className="grid" />
+          <line x1={plot.left} y1={y} x2={plot.right} y2={y} className="grid" />
+          <text x={x} y={plot.bottom + 18} className="tick" textAnchor="middle">{formatChartTick(minimum + tick * span)}</text>
+          <text x={plot.left - 10} y={y + 4} className="tick" textAnchor="end">{formatChartTick(minimum + tick * span)}</text>
+        </g>;
+      })}
+      <line x1={plot.left} y1={plot.bottom} x2={plot.right} y2={plot.bottom} className="axis" />
+      <line x1={plot.left} y1={plot.top} x2={plot.left} y2={plot.bottom} className="axis" />
+      <line x1={plot.left} y1={plot.bottom} x2={plot.right} y2={plot.top} className="baseline" />
       {points.map((point, index) => (
-        <circle key={index} cx={20 + (point.actual - minimum) / span * 260}
-          cy={170 - (point.predicted - minimum) / span * 145} r="2.2" className="scatter-point" />
+        <circle key={index} cx={plot.left + (point.actual - minimum) / span * (plot.right - plot.left)}
+          cy={plot.bottom - (point.predicted - minimum) / span * (plot.bottom - plot.top)} r="2.2" className="scatter-point" />
       ))}
+      <text x={(plot.left + plot.right) / 2} y="392" className="axis-title" textAnchor="middle">Actual value</text>
+      <text x="16" y={(plot.top + plot.bottom) / 2} className="axis-title" textAnchor="middle"
+        transform={`rotate(-90 16 ${(plot.top + plot.bottom) / 2})`}>Predicted value</text>
     </svg>
-    <span className="x-label">Actual</span><span className="y-label">Predicted</span>
   </div>;
+}
+
+function ResidualQqPlot({ plot: qqPlot, summary }: {
+  plot: NonNullable<NonNullable<ModelEvaluationSnapshot["residuals"]>["qq_plot"]>;
+  summary: NonNullable<ModelEvaluationSnapshot["residuals"]>["summary"];
+}) {
+  if (!qqPlot.points.length) return <div className="catalog-empty">No residual quantiles are available.</div>;
+  const frame = { left: 72, right: 535, top: 22, bottom: 345 };
+  const xMin = qqPlot.points[0].theoretical;
+  const xMax = qqPlot.points.at(-1)!.theoretical;
+  const observed = qqPlot.points.map((point) => point.observed);
+  const reference = [xMin, xMax].map((x) => summary.mean + summary.standard_deviation * x);
+  const yMin = Math.min(...observed, ...reference);
+  const yMax = Math.max(...observed, ...reference);
+  const xSpan = xMax - xMin || 1;
+  const ySpan = yMax - yMin || 1;
+  const ticks = [0, 0.25, 0.5, 0.75, 1];
+  return <div className="evaluation-line-chart regression-chart">
+    <svg viewBox="0 0 560 400" role="img" aria-label="Residual normal quantile plot">
+      {ticks.map((tick) => {
+        const x = frame.left + tick * (frame.right - frame.left);
+        const y = frame.bottom - tick * (frame.bottom - frame.top);
+        return <g key={tick}>
+          <line x1={x} y1={frame.top} x2={x} y2={frame.bottom} className="grid" />
+          <line x1={frame.left} y1={y} x2={frame.right} y2={y} className="grid" />
+          <text x={x} y={frame.bottom + 18} className="tick" textAnchor="middle">{(xMin + tick * xSpan).toFixed(2)}</text>
+          <text x={frame.left - 10} y={y + 4} className="tick" textAnchor="end">{formatChartTick(yMin + tick * ySpan)}</text>
+        </g>;
+      })}
+      <line x1={frame.left} y1={frame.bottom} x2={frame.right} y2={frame.bottom} className="axis" />
+      <line x1={frame.left} y1={frame.top} x2={frame.left} y2={frame.bottom} className="axis" />
+      <line x1={frame.left} y1={frame.bottom - (reference[0] - yMin) / ySpan * (frame.bottom - frame.top)}
+        x2={frame.right} y2={frame.bottom - (reference[1] - yMin) / ySpan * (frame.bottom - frame.top)} className="baseline" />
+      {qqPlot.points.map((point, index) => <circle key={index}
+        cx={frame.left + (point.theoretical - xMin) / xSpan * (frame.right - frame.left)}
+        cy={frame.bottom - (point.observed - yMin) / ySpan * (frame.bottom - frame.top)} r="2.5" className="scatter-point" />)}
+      <text x={(frame.left + frame.right) / 2} y="392" className="axis-title" textAnchor="middle">{qqPlot.x_label}</text>
+      <text x="16" y={(frame.top + frame.bottom) / 2} className="axis-title" textAnchor="middle"
+        transform={`rotate(-90 16 ${(frame.top + frame.bottom) / 2})`}>{qqPlot.y_label}</text>
+    </svg>
+  </div>;
+}
+
+function formatChartTick(value: number) {
+  const magnitude = Math.abs(value);
+  if (magnitude >= 1_000_000 || (magnitude > 0 && magnitude < 0.01)) return value.toExponential(1);
+  return value.toLocaleString(undefined, { maximumFractionDigits: magnitude >= 100 ? 0 : 2 });
 }
 
 function formatEvaluationMetric(value: number, unit: string) {

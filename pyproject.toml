@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ml-app-client"
+version = "0.1.0"
+description = "Supported Python integration client for ML App"
+requires-python = ">=3.10"
+dependencies = ["requests>=2.32,<3.0"]
+
+[tool.setuptools]
+packages = ["ml_app_client"]

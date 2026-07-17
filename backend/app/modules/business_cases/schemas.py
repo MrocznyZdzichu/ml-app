@@ -37,6 +37,11 @@ class BusinessCaseUpdate(BaseModel):
     success_criteria: str = ""
 
 
+class BusinessCaseOwnershipTransfer(BaseModel):
+    new_owner_id: str = Field(min_length=1)
+    reason: str = ""
+
+
 class BusinessCaseRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -55,6 +60,7 @@ class BusinessCaseRead(BaseModel):
     updated_by: str
     created_at: datetime
     updated_at: datetime
+    access_role: str = "owner"
 
 
 class ArtifactRead(BaseModel):

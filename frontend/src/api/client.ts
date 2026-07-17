@@ -36,6 +36,10 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     throw new Error(readErrorMessage(body) || response.statusText);
   }
 
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
   return response.json() as Promise<T>;
 }
 
@@ -72,6 +76,7 @@ export type AuthResponse = {
   token_type: string;
   user_id: string;
   email: string;
+  login_name: string;
 };
 
 export type UserProfile = {
@@ -79,6 +84,9 @@ export type UserProfile = {
   email: string;
   display_name: string;
   roles: string[];
+  login_name: string;
+  is_active: boolean;
+  uses_initial_password: boolean;
 };
 
 export type DataAsset = {
@@ -494,6 +502,66 @@ export type BusinessCase = {
   updated_by: string;
   created_at: string;
   updated_at: string;
+  access_role: "report_viewer" | "reader" | "contributor" | "manager" | "owner";
+};
+
+export type DirectoryUser = {
+  id: string;
+  user_id?: string;
+  login_name: string;
+  email: string;
+  display_name: string;
+  roles?: string[];
+  is_active: boolean;
+  is_technical?: boolean;
+  session_version?: number;
+  created_at?: string;
+};
+
+export type AccessGroup = {
+  id: string;
+  name: string;
+  description: string;
+  is_active: boolean;
+  owner_id: string;
+  created_by: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type GroupMembership = {
+  id: string;
+  group_id: string;
+  user_id: string;
+  membership_role: "member" | "manager" | "owner";
+  added_by: string;
+  created_at: string;
+};
+
+export type BusinessCaseGrant = {
+  id: string;
+  business_case_id: string;
+  subject_type: "user" | "group";
+  subject_id: string;
+  access_role: BusinessCase["access_role"];
+  granted_by: string;
+  created_at: string;
+  updated_at: string;
+  expires_at: string | null;
+};
+
+export type ResourceGrant = {
+  id: string;
+  resource_kind: "dataset" | "data_view" | "analysis" | "report";
+  resource_id: string;
+  subject_type: "user" | "group";
+  subject_id: string;
+  access_role: "reader" | "editor" | "owner";
+  granted_by: string;
+  created_at: string;
+  updated_at: string;
+  expires_at: string | null;
 };
 
 export type BusinessCaseDataAttachment = {
@@ -605,6 +673,12 @@ export type ModelEvaluationSnapshot = {
       p95: number;
     };
     histogram: Array<{ lower: number; upper: number; count: number }>;
+    qq_plot?: {
+      points: Array<{ theoretical: number; observed: number }>;
+      x_label: string;
+      y_label: string;
+      rendering: string;
+    };
     actual_vs_predicted: {
       points: Array<{ actual: number; predicted: number }>;
       rendering: string;
@@ -832,12 +906,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload)
     }),
-  login: (payload: { email: string; password: string }) =>
+  login: (payload: { login?: string; email?: string; password: string }) =>
     request<AuthResponse>("/auth/login", {
       method: "POST",
-      body: JSON.stringify(payload)
+      body: JSON.stringify({ login: payload.login ?? payload.email, password: payload.password })
     }),
   me: () => request<UserProfile>("/auth/me"),
+  changePassword: (payload: { current_password: string; new_password: string }) =>
+    request<void>("/auth/change-password", { method: "POST", body: JSON.stringify(payload) }),
   listDatasets: () => request<DataAsset[]>("/datasets"),
   listDatasetVersions: (logicalId: string) =>
     request<DataAsset[]>(`/datasets/${datasetRouteId(logicalId)}/versions`),
@@ -851,6 +927,10 @@ export const api = {
     request<BusinessCase>(`/business-cases/${businessCaseId}`, {
       method: "PATCH",
       body: JSON.stringify(payload)
+    }),
+  transferBusinessCaseOwnership: (businessCaseId: string, payload: { new_owner_id: string; reason?: string }) =>
+    request<BusinessCase>(`/business-cases/${businessCaseId}/transfer-ownership`, {
+      method: "POST", body: JSON.stringify(payload)
     }),
   attachBusinessCaseData: (businessCaseId: string, payload: Record<string, unknown>) =>
     request<BusinessCaseDataAttachment>(`/business-cases/${businessCaseId}/data-attachments`, {
@@ -1023,11 +1103,37 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ records })
     }),
-  share: (payload: Record<string, unknown>) =>
-    request<Record<string, unknown>>("/sharing/grants", {
-      method: "POST",
-      body: JSON.stringify(payload)
-    }),
+  listDirectoryUsers: () => request<DirectoryUser[]>("/sharing/directory/users"),
+  listAdminUsers: () => request<DirectoryUser[]>("/users"),
+  updateAdminUser: (userId: string, payload: { roles: string[]; is_active: boolean }) =>
+    request<DirectoryUser>(`/users/${encodeURIComponent(userId)}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  resetUserPassword: (userId: string, newPassword: string) =>
+    request<void>(`/users/${encodeURIComponent(userId)}/reset-password`, { method: "POST", body: JSON.stringify({ new_password: newPassword }) }),
+  listGroups: () => request<AccessGroup[]>("/sharing/groups"),
+  createGroup: (payload: { name: string; description: string }) =>
+    request<AccessGroup>("/sharing/groups", { method: "POST", body: JSON.stringify(payload) }),
+  updateGroup: (groupId: string, payload: { name: string; description: string; is_active: boolean }) =>
+    request<AccessGroup>(`/sharing/groups/${encodeURIComponent(groupId)}`, { method: "PUT", body: JSON.stringify(payload) }),
+  deleteGroup: (groupId: string) =>
+    request<void>(`/sharing/groups/${encodeURIComponent(groupId)}`, { method: "DELETE" }),
+  listGroupMembers: (groupId: string) =>
+    request<GroupMembership[]>(`/sharing/groups/${encodeURIComponent(groupId)}/members`),
+  upsertGroupMember: (groupId: string, payload: { user_id: string; membership_role: "member" | "manager" }) =>
+    request<GroupMembership>(`/sharing/groups/${encodeURIComponent(groupId)}/members`, { method: "PUT", body: JSON.stringify(payload) }),
+  removeGroupMember: (groupId: string, userId: string) =>
+    request<void>(`/sharing/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(userId)}`, { method: "DELETE" }),
+  listBusinessCaseGrants: (businessCaseId: string) =>
+    request<BusinessCaseGrant[]>(`/sharing/business-cases/${encodeURIComponent(businessCaseId)}/grants`),
+  grantBusinessCase: (businessCaseId: string, payload: Record<string, unknown>) =>
+    request<BusinessCaseGrant>(`/sharing/business-cases/${encodeURIComponent(businessCaseId)}/grants`, { method: "PUT", body: JSON.stringify(payload) }),
+  revokeBusinessCaseGrant: (businessCaseId: string, grantId: string) =>
+    request<void>(`/sharing/business-cases/${encodeURIComponent(businessCaseId)}/grants/${encodeURIComponent(grantId)}`, { method: "DELETE" }),
+  listResourceGrants: (kind: string, resourceId: string) =>
+    request<ResourceGrant[]>(`/sharing/resources/${encodeURIComponent(kind)}/${encodeURIComponent(resourceId)}/grants`),
+  grantResource: (payload: Record<string, unknown>) =>
+    request<ResourceGrant>("/sharing/resources/grants", { method: "PUT", body: JSON.stringify(payload) }),
+  revokeResourceGrant: (grantId: string) =>
+    request<void>(`/sharing/resources/grants/${encodeURIComponent(grantId)}`, { method: "DELETE" }),
   exportResource: (payload: Record<string, unknown>) =>
     request<Record<string, unknown>>("/exports", {
       method: "POST",

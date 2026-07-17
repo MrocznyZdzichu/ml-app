@@ -4,6 +4,8 @@ from app.core.security import Principal, require_user
 from app.modules.scoring_reports.schemas import DatasetLineageRead, ScoringReportRead
 from app.modules.scoring_reports.service import ScoringReportService
 from app.modules.business_cases.lineage import DatasetLineageResolver
+from app.modules.sharing.domain import BusinessCaseAccessRole
+from app.modules.sharing.policy import access_policy
 
 
 router = APIRouter(prefix="/scoring-reports", tags=["scoring-reports"])
@@ -47,6 +49,7 @@ def get_scoring_report_data_lineage(
     principal: Principal = Depends(require_user),
 ) -> list[DatasetLineageRead]:
     report = service.get_report(report_id, principal)
+    access_policy.require_business_case(principal, report.business_case_id, BusinessCaseAccessRole.READER)
     artifact = service.artifacts.get_artifact(report.id)
     if artifact is None:
         return []

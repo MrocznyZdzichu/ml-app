@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from math import sqrt
+from statistics import NormalDist
 from typing import Any
 
 import duckdb
@@ -472,6 +473,7 @@ class ModelEvaluationSnapshotBuilder:
                     f"MAPE excludes {int(count) - int(mape_count)} rows with zero actual value."
                 )
         histogram = self._residual_histogram(connection, relation_sql, target, prediction)
+        qq_plot = self._residual_qq_plot(connection, relation_sql, target, prediction)
         scatter = connection.execute(
             f"""
             SELECT cast({target} AS DOUBLE), cast({prediction} AS DOUBLE)
@@ -491,6 +493,12 @@ class ModelEvaluationSnapshotBuilder:
                     "p95": float(p95),
                 },
                 "histogram": histogram,
+                "qq_plot": {
+                    "points": qq_plot,
+                    "x_label": "Theoretical normal quantile",
+                    "y_label": "Observed residual quantile",
+                    "rendering": "99 exact full-data residual quantiles",
+                },
                 "actual_vs_predicted": {
                     "points": [{"actual": float(a), "predicted": float(p)} for a, p in scatter],
                     "rendering": f"reservoir sample, maximum {self.scatter_limit} rows",
@@ -507,6 +515,30 @@ class ModelEvaluationSnapshotBuilder:
                 ],
             },
         }
+
+    def _residual_qq_plot(
+        self,
+        connection: duckdb.DuckDBPyConnection,
+        relation_sql: str,
+        target: str,
+        prediction: str,
+    ) -> list[dict[str, float]]:
+        """Return bounded QQ coordinates while computing each quantile over all rows."""
+        probabilities = [index / 100 for index in range(1, 100)]
+        probability_sql = ", ".join(str(value) for value in probabilities)
+        residual = f"cast({prediction} AS DOUBLE) - cast({target} AS DOUBLE)"
+        observed = connection.execute(
+            f"SELECT quantile_cont({residual}, [{probability_sql}]) FROM {relation_sql} "
+            f"WHERE {target} IS NOT NULL AND {prediction} IS NOT NULL"
+        ).fetchone()[0]
+        normal = NormalDist()
+        return [
+            {
+                "theoretical": normal.inv_cdf(probability),
+                "observed": float(value),
+            }
+            for probability, value in zip(probabilities, observed, strict=True)
+        ]
 
     def _confusion_matrix(
         self,

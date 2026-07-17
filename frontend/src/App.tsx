@@ -144,7 +144,7 @@ const ServingPanel = lazy(() =>
   import("./operational/LifecyclePanels").then((module) => ({ default: module.ServingPanel }))
 );
 const SharePanel = lazy(() =>
-  import("./operational/LifecyclePanels").then((module) => ({ default: module.SharePanel }))
+  import("./operational/CollaborationPanel").then((module) => ({ default: module.CollaborationPanel }))
 );
 const VisualizationDashboard = lazy(() =>
   import("./analysis/VisualizationDashboard").then((module) => ({
@@ -464,9 +464,10 @@ export default function App() {
         {activeTab === "share" && (
           <DeferredPanel>
             <SharePanel
+              businessCases={businessCases}
               datasets={datasets}
-              models={models}
-              deployments={deployments}
+              currentUser={currentUser}
+              onRefresh={refreshWorkspace}
               setNotice={setNotice}
             />
           </DeferredPanel>
@@ -551,6 +552,7 @@ function BusinessCasesPanel({
   const [bcRunsRefreshKey, setBcRunsRefreshKey] = useState(0);
   const [bcDataPurposeFilter, setBcDataPurposeFilter] = useState("");
   const [bcDataPipelineFilter, setBcDataPipelineFilter] = useState("");
+  const [bcDataRoleFilter, setBcDataRoleFilter] = useState("");
   const [bcUploadedOnly, setBcUploadedOnly] = useState(false);
   const [bcModelPurposeFilter, setBcModelPurposeFilter] = useState("");
   const [bcModelPipelineFilter, setBcModelPipelineFilter] = useState("");
@@ -639,6 +641,7 @@ function BusinessCasesPanel({
   );
   const visibleAttachments = useMemo(
     () => activeAttachments.filter((attachment) => {
+      if (bcDataRoleFilter && attachment.role !== bcDataRoleFilter) return false;
       const attached = datasetById.get(attachment.data_asset_id);
       const dataset = attached
         ? latestDatasetByLogicalId.get(attached.logical_id) ?? attached
@@ -655,6 +658,7 @@ function BusinessCasesPanel({
       activeAttachments,
       bcDataPipelineFilter,
       bcDataPurposeFilter,
+      bcDataRoleFilter,
       bcUploadedOnly,
       datasetById,
       latestDatasetByLogicalId,
@@ -1195,6 +1199,9 @@ function BusinessCasesPanel({
                 pipelineId={bcDataPipelineFilter}
                 onPurposeChange={setBcDataPurposeFilter}
                 onPipelineChange={setBcDataPipelineFilter}
+                role={bcDataRoleFilter}
+                roleOptions={businessCaseDataRoleOptions}
+                onRoleChange={setBcDataRoleFilter}
                 uploadedOnly={bcUploadedOnly}
                 onUploadedOnlyChange={(value) => {
                   setBcUploadedOnly(value);

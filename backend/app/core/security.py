@@ -20,7 +20,13 @@ class Principal:
     user_id: str
     email: str
     display_name: str
-    roles: tuple[str, ...] = ("owner",)
+    login_name: str = ""
+    roles: tuple[str, ...] = ("user",)
+    session_version: int = 1
+
+    @property
+    def is_administrator(self) -> bool:
+        return "administrator" in self.roles
 
 
 def hash_password(password: str) -> str:
@@ -67,7 +73,9 @@ def create_access_token(principal: Principal) -> str:
         "sub": principal.user_id,
         "email": principal.email,
         "display_name": principal.display_name,
+        "login_name": principal.login_name,
         "roles": list(principal.roles),
+        "session_version": principal.session_version,
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(minutes=settings.access_token_expire_minutes)).timestamp()),
     }
@@ -98,7 +106,9 @@ def decode_access_token(token: str) -> Principal:
         user_id=str(payload.get("sub", "")),
         email=str(payload.get("email", "")),
         display_name=str(payload.get("display_name", "")),
-        roles=tuple(str(role) for role in payload.get("roles", ["owner"])),
+        login_name=str(payload.get("login_name", payload.get("email", ""))),
+        roles=tuple(str(role) for role in payload.get("roles", ["user"])),
+        session_version=int(payload.get("session_version", 1)),
     )
 
 
@@ -112,10 +122,28 @@ def require_user(
     if scheme.lower() != "bearer" or not token:
         raise _credentials_error()
 
-    principal = decode_access_token(token)
-    if not principal.user_id or not principal.email:
+    token_principal = decode_access_token(token)
+    if not token_principal.user_id:
         raise _credentials_error()
-    return principal
+    # Roles, account state and session invalidation are authoritative in the DB,
+    # not in a potentially stale bearer token.
+    from app.modules.auth.repository import PostgresUserRepository
+
+    account = PostgresUserRepository().get(token_principal.user_id)
+    if (
+        account is None
+        or not account.is_active
+        or account.session_version != token_principal.session_version
+    ):
+        raise _credentials_error()
+    return Principal(
+        user_id=account.id,
+        email=account.email,
+        display_name=account.display_name,
+        login_name=account.login_name,
+        roles=account.roles,
+        session_version=account.session_version,
+    )
 
 
 def _sign(encoded_payload: str) -> str:

@@ -122,6 +122,9 @@ class PipelineRepository(Protocol):
     def list_pipelines(self, owner_id: str, business_case_id: str | None = None) -> list[Pipeline]:
         ...
 
+    def list_pipelines_for_business_cases(self, business_case_ids: set[str]) -> list[Pipeline]:
+        ...
+
     def get_pipeline(self, pipeline_id: str) -> Pipeline | None:
         ...
 
@@ -208,6 +211,9 @@ class InMemoryPipelineRepository:
             for item in self._pipelines.values()
             if item.owner_id == owner_id and (business_case_id is None or item.business_case_id == business_case_id)
         ]
+
+    def list_pipelines_for_business_cases(self, business_case_ids: set[str]) -> list[Pipeline]:
+        return [item for item in self._pipelines.values() if item.business_case_id in business_case_ids]
 
     def get_pipeline(self, pipeline_id: str) -> Pipeline | None:
         return self._pipelines.get(pipeline_id)
@@ -329,6 +335,18 @@ class PostgresPipelineRepository:
         if business_case_id is not None:
             statement = statement.where(pipelines_table.c.business_case_id == business_case_id)
         statement = statement.order_by(pipelines_table.c.updated_at.desc())
+        with self.engine.begin() as connection:
+            return [self._pipeline_from_record(row._mapping) for row in connection.execute(statement)]
+
+    def list_pipelines_for_business_cases(self, business_case_ids: set[str]) -> list[Pipeline]:
+        self._ensure_initialized()
+        if not business_case_ids:
+            return []
+        statement = (
+            select(pipelines_table)
+            .where(pipelines_table.c.business_case_id.in_(business_case_ids))
+            .order_by(pipelines_table.c.updated_at.desc())
+        )
         with self.engine.begin() as connection:
             return [self._pipeline_from_record(row._mapping) for row in connection.execute(statement)]
 

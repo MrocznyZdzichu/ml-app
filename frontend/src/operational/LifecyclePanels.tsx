@@ -1,4 +1,4 @@
-import { Brain, Download, Eye, GitBranch, History, Play, Plus, Rocket, Search, Share2, SlidersHorizontal, X } from "lucide-react";
+import { Brain, Eye, GitBranch, History, Play, Plus, Rocket, Search, SlidersHorizontal, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../api/client";
@@ -1177,77 +1177,6 @@ export function ServingPanel({
           <h2>Scoring output</h2>
         </div>
         <pre className="json-output">{JSON.stringify(scoreResult ?? { status: "waiting" }, null, 2)}</pre>
-      </div>
-    </section>
-  );
-}
-
-export function SharePanel({
-  datasets,
-  models,
-  deployments,
-  setNotice
-}: {
-  datasets: DataAsset[];
-  models: ModelArtifact[];
-  deployments: Deployment[];
-  setNotice: NoticeSetter;
-}) {
-  const [targetUser, setTargetUser] = useState("analyst@example.com");
-
-  async function shareResource() {
-    const dataset = datasets[0];
-    await api.share({
-      target_user_id: targetUser,
-      resource_kind: "dataset",
-      resource_id: dataset?.id ?? "demo-dataset",
-      permission: "read"
-    });
-    setNotice("Share grant created");
-  }
-
-  async function exportResource() {
-    const model = models[0];
-    await api.exportResource({
-      resource_kind: model ? "model" : "dataset",
-      resource_id: model?.id ?? datasets[0]?.id ?? "demo-resource",
-      format: model ? "pickle" : "csv"
-    });
-    setNotice("Export job queued");
-  }
-
-  return (
-    <section className="two-column">
-      <div className="panel form-panel">
-        <div className="panel-header">
-          <h2>Collaboration</h2>
-          <Share2 size={18} />
-        </div>
-        <label>
-          User
-          <input value={targetUser} onChange={(event) => setTargetUser(event.target.value)} />
-        </label>
-        <div className="button-row">
-          <button className="secondary-button" onClick={shareResource} type="button">
-            <Share2 size={16} />
-            Share
-          </button>
-          <button className="primary-button" onClick={exportResource} type="button">
-            <Download size={16} />
-            Export
-          </button>
-        </div>
-      </div>
-
-      <div className="panel">
-        <div className="panel-header">
-          <h2>Available resources</h2>
-        </div>
-        <div className="resource-strip">
-          <span>{datasets.length} datasets</span>
-          <span>{models.length} models</span>
-          <span>{deployments.length} deployments</span>
-        </div>
       </div>
     </section>
   );

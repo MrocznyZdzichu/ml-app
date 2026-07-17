@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi.responses import FileResponse
 
 from app.core.security import Principal, require_user
 from app.modules.datasets.schemas import (
@@ -89,6 +90,20 @@ def preview_dataset(
     principal: Principal = Depends(require_user),
 ) -> DataAssetPreviewRead:
     return service.preview(dataset_id, principal, max(1, min(limit, 50_000)))
+
+
+@router.get("/{dataset_id}/download", response_class=FileResponse)
+def download_dataset(
+    dataset_id: str,
+    principal: Principal = Depends(require_user),
+) -> FileResponse:
+    path, filename = service.download_file(dataset_id, principal)
+    media_type = (
+        "application/vnd.apache.parquet"
+        if path.suffix.lower() == ".parquet"
+        else "text/csv"
+    )
+    return FileResponse(path, media_type=media_type, filename=filename)
 
 
 @router.post("/{dataset_id}/query", response_model=DataAssetPreviewRead)

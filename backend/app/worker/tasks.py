@@ -23,6 +23,10 @@ from app.modules.pipelines.step_handlers import (
     StepExecutionContext,
 )
 from app.modules.pipelines.workflow import WorkflowDefinition, normalize_workflow_definition
+from app.core.security import Principal
+from app.modules.auth.repository import PostgresUserRepository
+from app.modules.sharing.domain import BusinessCaseAccessRole, ResourceAccessRole, ResourceKind
+from app.modules.sharing.policy import access_policy
 from uuid import uuid4
 
 
@@ -42,6 +46,30 @@ def execute_pipeline_run(run_id: str) -> dict:
         raise ValueError("Pipeline version not found")
     if run.status in {PipelineRunStatus.CANCELLED, PipelineRunStatus.SUCCEEDED}:
         return {"run_id": run.id, "status": run.status.value}
+
+    if hasattr(run, "created_by") and hasattr(run, "business_case_id"):
+        try:
+            actor = PostgresUserRepository().get(run.created_by)
+            if actor is None or not actor.is_active:
+                raise ValueError("Pipeline run actor is no longer active")
+            access_policy.require_business_case(
+                Principal(
+                    user_id=actor.id,
+                    email=actor.email,
+                    display_name=actor.display_name,
+                    login_name=actor.login_name,
+                    roles=actor.roles,
+                    session_version=actor.session_version,
+                ),
+                run.business_case_id,
+                BusinessCaseAccessRole.CONTRIBUTOR,
+            )
+        except Exception as exc:
+            run.status = PipelineRunStatus.FAILED
+            run.error_message = f"Execution access check failed: {exc}"[:4000]
+            run.finished_at = datetime.now(timezone.utc)
+            repository.update_run(run)
+            return {"run_id": run.id, "status": run.status.value, "error": run.error_message}
 
     run.status = PipelineRunStatus.RUNNING
     run.started_at = datetime.now(timezone.utc)
@@ -402,9 +430,10 @@ def execute_pipeline_run(run_id: str) -> dict:
 
 
 @celery_app.task(name="app.worker.tasks.descriptive_profile_dataset", track_started=True)
-def descriptive_profile_dataset(dataset_id: str, owner_id: str, settings: dict) -> dict:
+def descriptive_profile_dataset(dataset_id: str, owner_id: str, settings: dict, actor_id: str | None = None) -> dict:
     repository = PostgresDatasetRepository()
     asset = _load_analysis_asset(dataset_id, owner_id, repository)
+    _require_worker_dataset_access(asset, actor_id or owner_id, ResourceAccessRole.EDITOR)
 
     def load_asset(asset_id: str):
         loaded = repository.get(asset_id)
@@ -416,9 +445,10 @@ def descriptive_profile_dataset(dataset_id: str, owner_id: str, settings: dict) 
 
 
 @celery_app.task(name="app.worker.tasks.time_series_analysis_dataset", track_started=True)
-def time_series_analysis_dataset(dataset_id: str, owner_id: str, options: dict) -> dict:
+def time_series_analysis_dataset(dataset_id: str, owner_id: str, options: dict, actor_id: str | None = None) -> dict:
     repository = PostgresDatasetRepository()
     asset = _load_analysis_asset(dataset_id, owner_id, repository)
+    _require_worker_dataset_access(asset, actor_id or owner_id, ResourceAccessRole.EDITOR)
 
     def load_asset(asset_id: str):
         loaded = repository.get(asset_id)
@@ -446,6 +476,23 @@ def _load_analysis_asset(dataset_id: str, owner_id: str, repository: PostgresDat
     if asset is None or asset.owner_id != owner_id:
         raise ValueError("Dataset not found")
     return asset
+
+
+def _require_worker_dataset_access(asset, actor_id: str, minimum: ResourceAccessRole) -> None:
+    actor = PostgresUserRepository().get(actor_id)
+    if actor is None or not actor.is_active:
+        raise ValueError("Dataset analysis actor is no longer active")
+    principal = Principal(
+        user_id=actor.id, email=actor.email, display_name=actor.display_name,
+        login_name=actor.login_name, roles=actor.roles, session_version=actor.session_version,
+    )
+    access_policy.require_resource(
+        principal,
+        ResourceKind.DATA_VIEW if asset.source_type.value == "view" else ResourceKind.DATASET,
+        asset.id,
+        asset.owner_id,
+        minimum,
+    )
 
 
 def _definition_with_resolved_inputs(
