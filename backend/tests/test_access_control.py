@@ -104,6 +104,23 @@ def test_business_case_access_levels_and_shared_execution() -> None:
         json={"subject_type": "user", "subject_id": bob["user_id"], "access_role": "contributor"},
     )
     assert contributor_grant.status_code == 200
+    new_version = client.post(
+        "/api/v1/datasets/upload", headers=bob_headers,
+        data={"logical_id": dataset["logical_id"]},
+        files={"file": ("customers-v2.csv", b"id,churn\n1,0\n2,1\n3,0\n", "text/csv")},
+    )
+    assert new_version.status_code == 201, new_version.text
+    assert new_version.json()["owner_id"] == alice["user_id"]
+    assert new_version.json()["uploaded_by"] == bob["user_id"]
+    assert new_version.json()["version_number"] == 2
+    visible_versions = client.get(
+        f"/api/v1/datasets/{dataset['logical_id']}/versions", headers=bob_headers
+    )
+    assert visible_versions.status_code == 200, visible_versions.text
+    assert [item["version_number"] for item in visible_versions.json()] == [1, 2]
+    assert new_version.json()["id"] in {
+        item["id"] for item in client.get("/api/v1/datasets", headers=bob_headers).json()
+    }
     created = client.post("/api/v1/pipelines", headers=bob_headers, json={
         "business_case_id": business_case["id"], "name": "Shared pipeline", "type": "custom",
     })

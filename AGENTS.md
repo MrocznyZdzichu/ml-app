@@ -166,6 +166,10 @@ zmianą funkcji zawsze je zweryfikuj.
     i nie usuwa całego BC;
   - `owner`: pełna kontrola, w tym nadawanie ownera, transfer własności oraz
     archiwizacja lub usunięcie BC.
+- Nazwa Business Case jest globalnie unikalna bez rozróżniania wielkości liter.
+  Konflikt przy tworzeniu lub zmianie nazwy zwraca `409 Conflict`, także gdy
+  istniejący BC nie jest widoczny dla użytkownika; jest to świadoma decyzja
+  produktowa nadrzędna wobec non-disclosure dla tej konkretnej operacji.
 - Grant do BC obejmuje jego metadane i powiązane datasety/Data Views, pipeline'y,
   wersje, runy, wyniki, eksperymenty, modele, raporty, prediction datasets,
   scoring, deploymenty, monitoring i widoczne lineage. Nie duplikuj grantów na

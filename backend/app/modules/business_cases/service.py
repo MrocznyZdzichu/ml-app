@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 
 from app.core.security import Principal
 from app.modules.business_cases.domain import (
@@ -35,11 +36,13 @@ class BusinessCaseService:
         self.repository = repository or business_case_repository
 
     def create_business_case(self, payload: BusinessCaseCreate, principal: Principal) -> BusinessCase:
+        name = payload.name.strip()
+        self._require_unique_name(name)
         now = datetime.now(timezone.utc)
         business_case = BusinessCase(
             id=str(uuid4()),
             owner_id=principal.user_id,
-            name=payload.name.strip(),
+            name=name,
             description=payload.description,
             problem_type=payload.problem_type,
             status=payload.status,
@@ -53,7 +56,10 @@ class BusinessCaseService:
             created_at=now,
             updated_at=now,
         )
-        return self.repository.add_business_case(business_case)
+        try:
+            return self.repository.add_business_case(business_case)
+        except IntegrityError as exc:
+            raise self._name_conflict(name) from exc
 
     def list_business_cases(self, principal: Principal) -> list[BusinessCase]:
         allowed = access_policy.accessible_business_case_ids(principal)
@@ -85,7 +91,9 @@ class BusinessCaseService:
             payload.status.value == "archived" or business_case.status.value == "archived"
         ) and role != BusinessCaseAccessRole.OWNER:
             raise HTTPException(status_code=403, detail="Only an owner can archive or modify an archived Business Case")
-        business_case.name = payload.name.strip()
+        name = payload.name.strip()
+        self._require_unique_name(name, exclude_id=business_case.id)
+        business_case.name = name
         business_case.description = payload.description
         business_case.problem_type = payload.problem_type
         business_case.status = payload.status
@@ -96,7 +104,25 @@ class BusinessCaseService:
         business_case.success_criteria = payload.success_criteria
         business_case.updated_by = principal.user_id
         business_case.updated_at = datetime.now(timezone.utc)
-        return self.repository.update_business_case(business_case)
+        try:
+            return self.repository.update_business_case(business_case)
+        except IntegrityError as exc:
+            raise self._name_conflict(name) from exc
+
+    def _require_unique_name(self, name: str, *, exclude_id: str = "") -> None:
+        normalized = name.casefold()
+        if any(
+            item.id != exclude_id and item.name.strip().casefold() == normalized
+            for item in self.repository.list_all_business_cases()
+        ):
+            raise self._name_conflict(name)
+
+    @staticmethod
+    def _name_conflict(name: str) -> HTTPException:
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Business Case name {name!r} is already in use",
+        )
 
     def transfer_ownership(
         self,

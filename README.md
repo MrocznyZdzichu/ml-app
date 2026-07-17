@@ -45,6 +45,8 @@ The Python integration client can be installed from this repository with
 `pip install -e .`. See
 [`examples/API-usage/estates_retraining_via_client.ipynb`](examples/API-usage/estates_retraining_via_client.ipynb)
 for an end-to-end retraining example using names instead of internal IDs.
+On a new installation, run `python examples/bootstrap_estates_sell_prices.py`
+to idempotently create or verify the portable Estates demo prerequisites.
 
 ## Quick Start
 

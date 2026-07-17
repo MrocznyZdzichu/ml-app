@@ -106,6 +106,24 @@ def _materialize_group_owners(connection: Connection) -> None:
     ))
 
 
+def _enforce_unique_business_case_names(connection: Connection) -> None:
+    """Deduplicate legacy names and enforce global case-insensitive uniqueness."""
+    connection.execute(text(
+        "WITH ranked AS ("
+        "SELECT id, name, row_number() OVER ("
+        "PARTITION BY lower(btrim(name)) ORDER BY created_at, id"
+        ") AS duplicate_number FROM mlapp.business_cases"
+        ") "
+        "UPDATE mlapp.business_cases AS bc "
+        "SET name = left(btrim(bc.name), 178) || ' (duplicate ' || bc.id || ')' "
+        "FROM ranked WHERE ranked.id = bc.id AND ranked.duplicate_number > 1"
+    ))
+    connection.execute(text(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_business_cases_name "
+        "ON mlapp.business_cases (lower(name))"
+    ))
+
+
 def _legacy_schema_hardening(connection: Connection) -> None:
     inspector = inspect(connection)
     if inspector.has_table("data_assets", schema="mlapp"):
@@ -271,5 +289,10 @@ MIGRATIONS = [
         version="20260717_0003",
         description="Materialize every group owner as an immutable owner membership",
         apply=_materialize_group_owners,
+    ),
+    Migration(
+        version="20260717_0004",
+        description="Enforce globally unique case-insensitive Business Case names",
+        apply=_enforce_unique_business_case_names,
     ),
 ]

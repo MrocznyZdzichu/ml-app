@@ -3,6 +3,8 @@
 from .client import (
     ApiError,
     AuthenticationError,
+    AuthorizationError,
+    ConflictError,
     Dataset,
     MLAppClient,
     PipelineRun,
@@ -13,6 +15,8 @@ from .client import (
 __all__ = [
     "ApiError",
     "AuthenticationError",
+    "AuthorizationError",
+    "ConflictError",
     "Dataset",
     "MLAppClient",
     "PipelineRun",

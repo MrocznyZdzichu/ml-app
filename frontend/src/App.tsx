@@ -552,6 +552,7 @@ function BusinessCasesPanel({
   const [bcRunsRefreshKey, setBcRunsRefreshKey] = useState(0);
   const [bcDataPurposeFilter, setBcDataPurposeFilter] = useState("");
   const [bcDataPipelineFilter, setBcDataPipelineFilter] = useState("");
+  const [bcDataRoleFilter, setBcDataRoleFilter] = useState("");
   const [bcUploadedOnly, setBcUploadedOnly] = useState(false);
   const [bcModelPurposeFilter, setBcModelPurposeFilter] = useState("");
   const [bcModelPipelineFilter, setBcModelPipelineFilter] = useState("");
@@ -640,6 +641,7 @@ function BusinessCasesPanel({
   );
   const visibleAttachments = useMemo(
     () => activeAttachments.filter((attachment) => {
+      if (bcDataRoleFilter && attachment.role !== bcDataRoleFilter) return false;
       const attached = datasetById.get(attachment.data_asset_id);
       const dataset = attached
         ? latestDatasetByLogicalId.get(attached.logical_id) ?? attached
@@ -656,6 +658,7 @@ function BusinessCasesPanel({
       activeAttachments,
       bcDataPipelineFilter,
       bcDataPurposeFilter,
+      bcDataRoleFilter,
       bcUploadedOnly,
       datasetById,
       latestDatasetByLogicalId,
@@ -1196,6 +1199,9 @@ function BusinessCasesPanel({
                 pipelineId={bcDataPipelineFilter}
                 onPurposeChange={setBcDataPurposeFilter}
                 onPipelineChange={setBcDataPipelineFilter}
+                role={bcDataRoleFilter}
+                roleOptions={businessCaseDataRoleOptions}
+                onRoleChange={setBcDataRoleFilter}
                 uploadedOnly={bcUploadedOnly}
                 onUploadedOnlyChange={(value) => {
                   setBcUploadedOnly(value);

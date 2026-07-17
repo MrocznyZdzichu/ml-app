@@ -187,12 +187,20 @@ class DatasetService:
     ) -> DataAsset:
         logical_asset = None
         if logical_id:
-            logical_asset = self.repository.get_latest_version(principal.user_id, logical_id)
+            logical_asset = max(
+                (
+                    asset for asset in self.repository.list_all()
+                    if asset.logical_id == logical_id and asset.status != DataAssetStatus.DELETED
+                ),
+                key=lambda asset: asset.version_number,
+                default=None,
+            )
             if logical_asset is None:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Logical dataset was not found",
                 )
+            self._require_asset_access(logical_asset, principal, ResourceAccessRole.EDITOR)
             if logical_asset.source_type == SourceType.VIEW:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
@@ -249,6 +257,7 @@ class DatasetService:
             metadata={"source_schema": source_schema},
         )
         if logical_asset is not None:
+            asset.owner_id = logical_asset.owner_id
             asset.name = logical_asset.name
             asset.description = description or logical_asset.description
             asset.tags = list(tags if tags is not None else logical_asset.tags)
@@ -277,6 +286,28 @@ class DatasetService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found")
         self._require_asset_access(asset, principal)
         return asset
+
+    def download_file(self, dataset_id: str, principal: Principal) -> tuple[Path, str]:
+        """Resolve an authorized persistent file dataset for streaming download."""
+        asset = self.get_asset(dataset_id, principal)
+        if asset.status == DataAssetStatus.DELETED:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Deleted dataset cannot be downloaded",
+            )
+        if asset.source_type != SourceType.FILE or not asset.location_uri.startswith("file://"):
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail="Only persistent file datasets can be downloaded",
+            )
+        path = Path(asset.location_uri.removeprefix("file://")).resolve()
+        repository_root = self.repository_root.resolve()
+        if not self._is_relative_to(path, repository_root) or not path.is_file():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Dataset file was not found",
+            )
+        return path, asset.original_filename or path.name
 
     def list_versions(self, logical_id: str, principal: Principal) -> list[DataAsset]:
         if not isinstance(self.repository, PostgresDatasetRepository):

@@ -6,6 +6,8 @@ content describes the current contract unless marked otherwise.
 
 ## Product and architecture
 
+- [Estates demo bootstrap](estates-demo-bootstrap.md) — idempotent installation prerequisites and lifecycle boundary.
+
 - [Architecture](architecture.md) — service boundaries, storage, analytics, and ML artifacts.
 - [Development](development.md) — local workflow, checks, runtime tuning, and repository hygiene.
 - [Synthetic ML scenarios](synthetic-ml-scenarios.md) — business meaning and generation contracts for demo data.

@@ -24,7 +24,7 @@ def _create_business_case(client: TestClient, token: str) -> dict:
         "/api/v1/business-cases",
         headers={"Authorization": f"Bearer {token}"},
         json={
-            "name": "Iris classification",
+            "name": f"Iris classification {uuid4()}",
             "description": "Recognize Iris species",
             "problem_type": "multiclass_classification",
             "target_column": "species",
@@ -35,6 +35,44 @@ def _create_business_case(client: TestClient, token: str) -> dict:
     )
     assert response.status_code == 201
     return response.json()
+
+
+def test_business_case_names_are_globally_case_insensitive_unique() -> None:
+    client = TestClient(create_app())
+    token_a = _register(client, "alice")
+    token_b = _register(client, "bob")
+    name = f"Global unique BC {uuid4()}"
+    payload = {"name": name, "problem_type": "custom"}
+
+    first = client.post(
+        "/api/v1/business-cases",
+        headers={"Authorization": f"Bearer {token_a}"},
+        json=payload,
+    )
+    assert first.status_code == 201
+
+    duplicate = client.post(
+        "/api/v1/business-cases",
+        headers={"Authorization": f"Bearer {token_b}"},
+        json={**payload, "name": f"  {name.upper()}  "},
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["detail"] == (
+        f"Business Case name {name.upper()!r} is already in use"
+    )
+
+    second = client.post(
+        "/api/v1/business-cases",
+        headers={"Authorization": f"Bearer {token_b}"},
+        json={"name": f"Another BC {uuid4()}", "problem_type": "custom"},
+    )
+    assert second.status_code == 201
+    rename = client.patch(
+        f"/api/v1/business-cases/{second.json()['id']}",
+        headers={"Authorization": f"Bearer {token_b}"},
+        json={"name": name.swapcase(), "problem_type": "custom"},
+    )
+    assert rename.status_code == 409
 
 
 def test_model_training_catalog_is_available_to_authenticated_pipeline_editors() -> None:

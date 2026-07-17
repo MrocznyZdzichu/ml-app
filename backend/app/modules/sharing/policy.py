@@ -10,7 +10,7 @@ from app.modules.business_cases.repository import (
     PostgresBusinessCaseRepository,
     business_case_data_attachments_table,
 )
-from app.modules.datasets.repository import PostgresDatasetRepository
+from app.modules.datasets.repository import PostgresDatasetRepository, data_assets_table
 from app.modules.sharing.domain import (
     AuditEvent,
     BC_ROLE_RANK,
@@ -103,12 +103,22 @@ class AccessPolicy:
         )
         roles = [grant.access_role for grant in direct]
         if kind in {ResourceKind.DATASET, ResourceKind.DATA_VIEW}:
+            attached_assets = data_assets_table.alias("attached_assets")
+            requested_asset = data_assets_table.alias("requested_asset")
             with self.engine.begin() as connection:
                 bc_ids = [
                     str(row[0]) for row in connection.execute(
-                        select(business_case_data_attachments_table.c.business_case_id).where(
-                            business_case_data_attachments_table.c.data_asset_id == resource_id
+                        select(business_case_data_attachments_table.c.business_case_id)
+                        .join(
+                            attached_assets,
+                            attached_assets.c.id == business_case_data_attachments_table.c.data_asset_id,
                         )
+                        .join(
+                            requested_asset,
+                            requested_asset.c.logical_id == attached_assets.c.logical_id,
+                        )
+                        .where(requested_asset.c.id == resource_id)
+                        .distinct()
                     )
                 ]
             for business_case_id in bc_ids:
@@ -169,10 +179,22 @@ class AccessPolicy:
                 ids.update(str(row[0]) for row in rows)
         bc_ids = self.accessible_business_case_ids(principal, BusinessCaseAccessRole.READER) or set()
         if bc_ids:
+            attached_assets = data_assets_table.alias("attached_assets")
+            family_versions = data_assets_table.alias("family_versions")
             with self.engine.begin() as connection:
-                rows = connection.execute(select(business_case_data_attachments_table.c.data_asset_id).where(
-                    business_case_data_attachments_table.c.business_case_id.in_(bc_ids)
-                ))
+                rows = connection.execute(
+                    select(family_versions.c.id)
+                    .join(
+                        attached_assets,
+                        attached_assets.c.logical_id == family_versions.c.logical_id,
+                    )
+                    .join(
+                        business_case_data_attachments_table,
+                        business_case_data_attachments_table.c.data_asset_id == attached_assets.c.id,
+                    )
+                    .where(business_case_data_attachments_table.c.business_case_id.in_(bc_ids))
+                    .distinct()
+                )
                 ids.update(str(row[0]) for row in rows)
         return ids
 

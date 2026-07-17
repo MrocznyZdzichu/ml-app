@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS mlapp.business_cases (
 );
 
 CREATE INDEX IF NOT EXISTS idx_business_cases_owner_id ON mlapp.business_cases(owner_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_business_cases_name ON mlapp.business_cases(LOWER(name));
 
 CREATE TABLE IF NOT EXISTS mlapp.artifacts (
     id VARCHAR(64) PRIMARY KEY,

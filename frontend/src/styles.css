@@ -4736,6 +4736,10 @@ textarea {
   grid-template-columns: minmax(150px, auto) repeat(2, minmax(190px, 1fr));
 }
 
+.artifact-filters.artifact-filters-with-role:has(.artifact-filter-toggle) {
+  grid-template-columns: minmax(150px, auto) repeat(3, minmax(170px, 1fr));
+}
+
 .artifact-filters > label:not(.artifact-filter-toggle) {
   display: grid;
   gap: 5px;
