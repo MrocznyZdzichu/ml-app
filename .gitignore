@@ -3,6 +3,8 @@
 .env.*
 !.env.example
 
+*.egg-info/
+
 # Local agent instructions
 /AGENTS.md
 

@@ -38,7 +38,13 @@ see [Current Implementation Boundaries](#current-implementation-boundaries).
 - `services/model-runtime` - template runtime for future model serving.
 - `infra` - local infrastructure bootstrap assets.
 - `examples/data` - sample CSV datasets for manual testing.
+- `ml_app_client` - supported Python client for dataset upload and pipeline execution.
 - `docs` - architecture, development, and feature reference notes.
+
+The Python integration client can be installed from this repository with
+`pip install -e .`. See
+[`examples/API-usage/estates_retraining_via_client.ipynb`](examples/API-usage/estates_retraining_via_client.ipynb)
+for an end-to-end retraining example using names instead of internal IDs.
 
 ## Quick Start
 
