@@ -71,6 +71,12 @@ def test_regression_evaluation_snapshot_reports_residual_diagnostics() -> None:
     assert metrics["rmse"] == pytest.approx(1)
     assert metrics["r2"] > 0.99
     assert len(report["residuals"]["histogram"]) == 20
+    assert len(report["residuals"]["qq_plot"]["points"]) == 99
+    assert report["residuals"]["qq_plot"]["points"][49] == pytest.approx({
+        "theoretical": 0,
+        "observed": 0,
+    })
+    assert "full-data" in report["residuals"]["qq_plot"]["rendering"]
     assert len(report["residuals"]["actual_vs_predicted"]["points"]) == 500
     assert report["monitoring"]["comparison_dimensions"] == [
         "metrics",

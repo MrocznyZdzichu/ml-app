@@ -673,6 +673,12 @@ export type ModelEvaluationSnapshot = {
       p95: number;
     };
     histogram: Array<{ lower: number; upper: number; count: number }>;
+    qq_plot?: {
+      points: Array<{ theoretical: number; observed: number }>;
+      x_label: string;
+      y_label: string;
+      rendering: string;
+    };
     actual_vs_predicted: {
       points: Array<{ actual: number; predicted: number }>;
       rendering: string;

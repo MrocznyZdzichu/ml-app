@@ -1014,6 +1014,13 @@ textarea {
   width: 100%;
 }
 
+.evaluation-line-chart.regression-chart,
+.evaluation-histogram-chart.regression-chart,
+.evaluation-line-chart.regression-chart svg,
+.evaluation-histogram-chart.regression-chart svg {
+  min-height: 0;
+}
+
 .evaluation-histogram-chart .axis {
   stroke: #71818d;
   stroke-width: 1.2;
@@ -1025,6 +1032,10 @@ textarea {
 
 .evaluation-histogram-chart rect.negative {
   fill: #d5904b;
+}
+
+.evaluation-histogram-chart rect.residual-bar {
+  fill: #4c8c9b;
 }
 
 .histogram-summary {
