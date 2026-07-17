@@ -3,8 +3,9 @@
 ML App is a containerized data-science and machine-learning workbench. It covers
 file ingestion, metadata, full-dataset analysis, reusable Data Views, versioned
 Data/Feature Engineering pipelines, Training, AutoML, scoring, model registry,
-and monitoring. Serving, sharing, export, and some external-source integrations
-remain provisional.
+and monitoring. Serving, export, and some external-source integrations remain
+provisional; identity, Business Case sharing, groups and administration are
+durable platform capabilities.
 
 > **AI-developed project:** This application has been designed and implemented
 > with substantial AI assistance. Treat the codebase as an actively evolving
@@ -23,7 +24,8 @@ The current product slice focuses on a practical analyst workflow:
 - continue from saved views into browsing, visualization, and descriptive analysis,
 - compose reusable interactive dashboards over full datasets and Data Views,
 - register immutable models and reports, run Test/Batch Scoring and Monitoring,
-- exercise provisional deployment, sharing, and export contracts.
+- manage Business Case access, groups and exceptional loose-data grants,
+- exercise provisional deployment and export contracts.
 
 The analytics paths described as full-dataset below execute against all rows.
 The explicitly identified preview and prototype paths have important limitations;
@@ -86,8 +88,15 @@ For a clean no-cache rebuild:
 ### Authentication
 
 - Local user registration and login.
-- Bearer token authentication in the frontend.
-- User-owned datasets; other users cannot access private assets.
+- Reserved `root` administrator bootstrap login with a changeable initial
+  password and no restart-time password reset.
+- Bearer token authentication with account/session invalidation after password,
+  role or status changes.
+- Platform roles (`user`, reserved `governance_steward`, `administrator`) and
+  Business Case roles (`report_viewer`, `reader`, `contributor`, `manager`,
+  `owner`).
+- Durable user/group grants in PostgreSQL. Private assets remain isolated unless
+  shared through a Business Case or an explicit loose-object exception.
 
 ### Data Assets
 
@@ -255,20 +264,20 @@ and [`docs/automl-autofe-stage-1.md`](docs/automl-autofe-stage-1.md).
 Deleted datasets and views remain visible in the Data workspace deletion history
 but are excluded from Overview metrics, Recent assets, and Analysis selectors.
 
-### Model Registry, prototype Serving, Sharing, and Export
+### Model Registry, Sharing, and prototype Serving/Export
 
 The Models workspace consumes real immutable artifacts produced by Training and
 AutoML pipeline runs, including versions, metrics and lineage. The legacy
-standalone training form and the Serving, Share, and Export paths remain
-provisional:
+standalone training form and the Serving and Export paths remain provisional:
 
 - the legacy standalone training form creates prototype metadata; real fitting,
   report generation and artifact registration run through Training/AutoML and
   Scoring pipeline steps,
 - deployment requests create in-memory metadata but do not start a runtime,
 - online scoring returns placeholder `0.0` predictions,
-- sharing grants, batch-score jobs, and export jobs are metadata-only and are
-  lost when the API process restarts.
+- Business Case/group/direct-object grants and audit events are durable;
+  deployment, batch-score and export job metadata remains in-memory and is lost
+  when the API process restarts.
 
 The optional `model-runtime` Compose service can load a joblib artifact and
 expose `/health` and `/score`, but it is not wired automatically to deployment

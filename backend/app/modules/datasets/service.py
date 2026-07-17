@@ -31,6 +31,8 @@ from app.modules.datasets.sources import DatasetSourceRegistry
 from app.modules.datasets.visualizations import FullDatasetVisualization
 from app.modules.datasets.time_series import FullDatasetTimeSeriesAnalyzer
 from app.modules.datasets.temporary import TemporaryPipelineOutputResolver
+from app.modules.sharing.domain import ResourceAccessRole, ResourceKind
+from app.modules.sharing.policy import access_policy
 
 
 class DatasetService:
@@ -69,6 +71,7 @@ class DatasetService:
 
     def create_view(self, payload: DataViewCreate, principal: Principal) -> DataAsset:
         source = self.get_asset(payload.source_dataset_id, principal)
+        self._require_asset_access(source, principal, ResourceAccessRole.EDITOR)
         self._require_persistent_asset(
             source,
             "Temporary dry-run output must be materialized before it can back a Data View",
@@ -258,7 +261,11 @@ class DatasetService:
         return self.repository.add(asset)
 
     def list_assets(self, principal: Principal) -> list[DataAsset]:
-        return self.repository.list_for_owner(principal.user_id)
+        if not isinstance(self.repository, PostgresDatasetRepository):
+            return self.repository.list_for_owner(principal.user_id)
+        allowed = access_policy.accessible_dataset_ids(principal)
+        items = self.repository.list_all()
+        return items if allowed is None else [item for item in items if item.id in allowed]
 
     def get_asset(self, dataset_id: str, principal: Principal) -> DataAsset:
         if self.temporary_outputs.recognizes(dataset_id):
@@ -266,18 +273,30 @@ class DatasetService:
         asset = self.repository.get(dataset_id)
         if asset is None:
             asset = self.repository.get_latest_version(principal.user_id, dataset_id)
-        if not asset or asset.owner_id != principal.user_id:
+        if not asset:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found")
+        self._require_asset_access(asset, principal)
         return asset
 
     def list_versions(self, logical_id: str, principal: Principal) -> list[DataAsset]:
-        versions = self.repository.list_versions(principal.user_id, logical_id)
+        if not isinstance(self.repository, PostgresDatasetRepository):
+            versions = self.repository.list_versions(principal.user_id, logical_id)
+        else:
+            versions = [item for item in self.repository.list_all() if item.logical_id == logical_id]
+            versions = [item for item in versions if access_policy.resource_role(
+                principal,
+                ResourceKind.DATA_VIEW if item.source_type == SourceType.VIEW else ResourceKind.DATASET,
+                item.id,
+                item.owner_id,
+            ) is not None]
+            versions.sort(key=lambda item: item.version_number)
         if not versions:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Logical dataset not found")
         return versions
 
     def profile(self, dataset_id: str, payload: DataAssetProfileRequest, principal: Principal) -> DataAssetProfileRead:
         asset = self.get_asset(dataset_id, principal)
+        self._require_asset_access(asset, principal, ResourceAccessRole.EDITOR)
         self._require_persistent_asset(
             asset,
             "Temporary dry-run output cannot have mutable profiling status",
@@ -304,6 +323,7 @@ class DatasetService:
         principal: Principal,
     ) -> DataAsset:
         asset = self.get_asset(dataset_id, principal)
+        self._require_asset_access(asset, principal, ResourceAccessRole.EDITOR)
         self._require_persistent_asset(asset, "Temporary dry-run output metadata cannot be changed")
         if asset.status == DataAssetStatus.DELETED:
             raise HTTPException(
@@ -341,12 +361,13 @@ class DatasetService:
         principal: Principal,
     ) -> dict[str, Any]:
         asset = self.get_asset(dataset_id, principal)
+        self._require_asset_access(asset, principal, ResourceAccessRole.EDITOR)
         if asset.status == DataAssetStatus.DELETED:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Deleted dataset cannot be profiled",
             )
-        return self.profile_jobs.start(dataset_id, principal.user_id, payload.model_dump())
+        return self.profile_jobs.start(dataset_id, principal.user_id, payload.model_dump(), asset.owner_id)
 
     def descriptive_profile_status(
         self,
@@ -425,6 +446,7 @@ class DatasetService:
         principal: Principal,
     ) -> dict[str, Any]:
         asset = self.get_asset(dataset_id, principal)
+        self._require_asset_access(asset, principal, ResourceAccessRole.EDITOR)
         connection = self.full_visualization.store.connect(asset)
         relation = self.full_visualization.store.relation_sql(asset, lambda asset_id: self.get_asset(asset_id, principal))
         try:
@@ -440,8 +462,9 @@ class DatasetService:
             connection.close()
 
     def start_time_series_analysis(self, dataset_id: str, payload: TimeSeriesAnalysisRequest, principal: Principal) -> dict[str, Any]:
-        self.get_asset(dataset_id, principal)
-        return self.time_series_jobs.start(dataset_id, principal.user_id, payload.model_dump())
+        asset = self.get_asset(dataset_id, principal)
+        self._require_asset_access(asset, principal, ResourceAccessRole.EDITOR)
+        return self.time_series_jobs.start(dataset_id, principal.user_id, payload.model_dump(), asset.owner_id)
 
     def time_series_analysis_status(self, dataset_id: str, job_id: str, principal: Principal) -> dict[str, Any]:
         self.get_asset(dataset_id, principal)
@@ -449,6 +472,7 @@ class DatasetService:
 
     def delete_asset(self, dataset_id: str, principal: Principal) -> DataAsset:
         asset = self.get_asset(dataset_id, principal)
+        self._require_asset_access(asset, principal, ResourceAccessRole.OWNER)
         self._require_persistent_asset(asset, "Temporary dry-run output is managed by its pipeline run")
         if asset.status == DataAssetStatus.DELETED:
             return asset
@@ -463,6 +487,24 @@ class DatasetService:
     def _require_persistent_asset(self, asset: DataAsset, detail: str) -> None:
         if self.temporary_outputs.recognizes(asset.id):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
+
+    def _require_asset_access(
+        self,
+        asset: DataAsset,
+        principal: Principal,
+        minimum: ResourceAccessRole = ResourceAccessRole.READER,
+    ) -> ResourceAccessRole:
+        if not isinstance(self.repository, PostgresDatasetRepository):
+            if asset.owner_id != principal.user_id and not principal.is_administrator:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Dataset not found")
+            return ResourceAccessRole.OWNER
+        return access_policy.require_resource(
+            principal,
+            ResourceKind.DATA_VIEW if asset.source_type == SourceType.VIEW else ResourceKind.DATASET,
+            asset.id,
+            asset.owner_id,
+            minimum,
+        )
 
     def _safe_filename(self, filename: str) -> str:
         return Path(filename.replace("\\", "_").replace("/", "_")).name

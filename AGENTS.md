@@ -9,9 +9,14 @@ zmianą funkcji zawsze je zweryfikuj.
 
 - Domyślną, trwałą gałęzią roboczą jest `dev`. Nie twórz feature branchy bez
   wyraźnej prośby. `master` służy do okresowego utrwalania stabilnego stanu.
-- Po zmianie uruchom `rebuild-run.bat` i sprawdź aplikację. Dobierz testy,
-  kompilację i kontrolę typów proporcjonalnie do ryzyka. Jawna dyspozycja
-  użytkownika dotycząca sposobu weryfikacji ma pierwszeństwo dla danego zadania.
+- Po zmianach wpływających na działanie aplikacji, jej konfigurację uruchomieniową,
+  zależności, obrazy lub schemat danych uruchom `rebuild-run.bat` i sprawdź
+  aplikację. Nie uruchamiaj przebudowy po zmianach wyłącznie dokumentacyjnych,
+  komentarzach, formatowaniu lub innych modyfikacjach, które nie mogą wpłynąć na
+  wykonanie aplikacji; zweryfikuj wtedy diff i spójność zmienionych materiałów.
+  Dobierz testy, kompilację i kontrolę typów proporcjonalnie do rzeczywistego
+  ryzyka. Jawna dyspozycja użytkownika dotycząca sposobu weryfikacji ma
+  pierwszeństwo dla danego zadania.
 - Nie uznawaj zmiany funkcjonalnej za gotową bez sprawdzenia istotnej ścieżki.
 - Nie automatyzuj lokalnego UI przez integrację `browser`, dopóki użytkownik
   jawnie o to nie poprosi lub nie potwierdzi naprawy integracji. Frontend
@@ -114,7 +119,89 @@ zmianą funkcji zawsze je zweryfikuj.
 - Artefakty i modele są niemutowalne. Zewnętrznie rejestrowany obiekt musi mieć
   jawne źródło i opis.
 - Zachowuj pola audytowe `owner`, `created_by` i `updated_by`. Pełny RBAC jest
-  przyszłym zakresem, ale brak RBAC nie zwalnia z kontroli dostępu do assetów.
+  wdrażany zgodnie z zasadami poniżej; brak kompletnego RBAC w przejściowym
+  stanie implementacji nie zwalnia z kontroli dostępu do assetów.
+
+## Użytkownicy, administracja i współdzielenie
+
+- Instalacja jest jednofirmowa. Nie wprowadzaj tenantów, organizacji ani
+  administratorów tenantów. Samodzielna rejestracja pozostaje otwarta, a każde
+  nowo zarejestrowane konto otrzymuje wyłącznie bazową rolę platformową `user`.
+- Rozdzielaj role platformowe od dostępu do zasobów. Role platformowe to `user`,
+  `governance_steward` i `administrator`; nie używaj roli zasobowej `owner` jako
+  roli platformowej. Administratorzy mogą podnosić role innych kont.
+  `governance_steward` jest na razie wyłącznie przewidzianą rolą bez dodatkowych
+  uprawnień; nie implementuj dla niej niejawnego globalnego odczytu ani bypassu.
+- Platforma zawsze bootstrapuje zarezerwowane konto techniczne o loginie `root`,
+  inicjalnym haśle `toor` i roli `administrator`. Konto root musi być tworzone
+  idempotentnie, nie może zostać usunięte, dezaktywowane ani pozbawione roli
+  administratora. Umożliwiaj zmianę jego hasła, ale na obecnym etapie jej nie
+  wymuszaj. Restart, migracja ani ponowny bootstrap nigdy nie mogą przywrócić
+  `toor`, jeżeli hasło zostało zmienione. Dopuszczalne jest nieblokujące
+  ostrzeżenie, że aktywne pozostaje hasło inicjalne.
+- Logowanie musi obsługiwać zarezerwowany login `root` mimo że zwykłe konta są
+  rejestrowane adresem e-mail. Walidacja logowania nie może odrzucić istniejącego
+  `toor` tylko dlatego, że polityka nowych haseł wymaga większej długości;
+  politykę siły stosuj przy rejestracji i zmianie hasła, nie do wstępnego
+  odrzucania poświadczeń podczas logowania.
+- Administrator ma globalny, audytowany bypass kontroli dostępu i domyślnie może
+  przeglądać wszystkich użytkowników, wszystkie Business Cases i wszystkie
+  obiekty. Może zarządzać rolami platformowymi, stanem kont, grupami,
+  członkostwem, dowolnymi grantami i transferem własności. Nie twórz dla niego
+  osobnych grantów do każdego zasobu ani nie zmieniaj `owner_id` tylko po to,
+  aby umożliwić administracyjny dostęp. Administrator nigdy nie poznaje
+  istniejących haseł; może je wyłącznie resetować lub inicjować ich zmianę.
+- Business Case jest podstawową granicą współdzielenia. Standardowe,
+  hierarchiczne role dostępu do BC to:
+  - `report_viewer`: widzi metadane BC i opublikowane raporty, w tym scoringowe
+    i monitoringowe, ale nie widzi datasetów, Data Views, danych rekordowych,
+    konfiguracji pipeline'ów, plików modeli ani drill-down do danych źródłowych;
+  - `reader`: pełny odczyt BC i jego widocznych artefaktów, danych, lineage,
+    wersji i runów, bez zmian i uruchamiania obliczeń;
+  - `contributor`: uprawnienia readera oraz tworzenie, edycja draftów i
+    uruchamianie analiz i pipeline'ów, bez zarządzania dostępem, transferu
+    własności i usunięcia całego BC;
+  - `manager`: uprawnienia contributora oraz zarządzanie dostępem do BC; może
+    nadawać role najwyżej do `manager`, ale nie `owner`, nie przenosi własności
+    i nie usuwa całego BC;
+  - `owner`: pełna kontrola, w tym nadawanie ownera, transfer własności oraz
+    archiwizacja lub usunięcie BC.
+- Grant do BC obejmuje jego metadane i powiązane datasety/Data Views, pipeline'y,
+  wersje, runy, wyniki, eksperymenty, modele, raporty, prediction datasets,
+  scoring, deploymenty, monitoring i widoczne lineage. Nie duplikuj grantów na
+  każdym potomnym artefakcie; rozstrzygaj dostęp przez centralną politykę
+  zasób-akcja i filtruj dostępne listy już w zapytaniach do PostgreSQL.
+- Efektywny dostęp jest sumą ścieżek wynikających z administracji, własności,
+  bezpośredniego grantu użytkownika, grantu grupowego i grantu przez BC. Na
+  pierwszym etapie nie wprowadzaj jawnych grantów `deny`. Odebranie jednej
+  ścieżki nie odbiera dostępu, jeżeli nadal istnieje inna aktywna ścieżka.
+- Dataset lub DataView może należeć do wielu BC. Dostęp przez jeden BC nie
+  ujawnia innych BC, ich metadanych, powiązań ani niedostępnych fragmentów
+  lineage. Odpięcie od jednego BC nie odbiera dostępu zapewnianego przez inny BC
+  lub grant bezpośredni.
+- Bezpośrednie udostępnianie obiektu jest wyjątkową, jawnie oznaczoną ścieżką
+  przeznaczoną przede wszystkim dla luźnych datasetów i Data Views, opcjonalnie
+  samodzielnych analiz lub raportów, jeżeli istnieją poza BC. Używa ról
+  `reader`, `editor` i `owner`. Modele, pipeline'y ML, scoring, monitoring i
+  deploymenty współdziel przez obowiązkowy Business Case. Przypięcie luźnego
+  obiektu do BC nie może po cichu usunąć jego wcześniejszych grantów
+  bezpośrednich; pokaż je jako niezależne ścieżki i pozwól jawnie je wycofać.
+- Grant może wskazywać użytkownika albo grupę. Grupy są rekomendowaną ścieżką i
+  mają nazwę, opis, status, członków, managera/właściciela oraz pola audytowe.
+  Zarządzanie grupą jest niezależne od zarządzania BC: manager BC może nadać
+  grupie dostęp, lecz zmienia członkostwo tylko wtedy, gdy osobno zarządza grupą
+  albo jest administratorem.
+- Kontrole dostępu obowiązują wszystkie endpointy, pobieranie plików, resolver
+  lineage, zadania asynchroniczne i wyniki workerów, a nie wyłącznie listy i UI.
+  Dla zadań co najmniej ponownie sprawdzaj dostęp przed rozpoczęciem wykonania;
+  wyniki pozostają chronione aktualną polityką BC. Zmiana roli platformowej,
+  blokada konta, zmiana hasła i istotne odebranie dostępu muszą unieważniać lub
+  wersjonować sesje tak, aby nie ufać bezterminowo rolom zapisanym w JWT.
+- Audytuj logowania root, zmiany haseł i ról platformowych, blokady kont,
+  resetowanie sesji, zmiany grup i członkostwa, wszystkie granty, nadawanie
+  `manager`/`owner`, transfer własności oraz administracyjny dostęp do cudzych
+  zasobów. Zdarzenie zawiera aktora, operację, podmiot docelowy, zasób, poprzedni
+  i nowy stan, czas oraz identyfikator żądania; opcjonalnie powód i wygaśnięcie.
 
 ## ML, AutoML i raporty
 

@@ -10,10 +10,16 @@ class ModelRepository(Protocol):
     def list_training_jobs(self, owner_id: str) -> list[TrainingJob]:
         ...
 
+    def list_all_training_jobs(self) -> list[TrainingJob]:
+        ...
+
     def add_model(self, model: ModelArtifact) -> ModelArtifact:
         ...
 
     def list_models(self, owner_id: str) -> list[ModelArtifact]:
+        ...
+
+    def list_all_models(self) -> list[ModelArtifact]:
         ...
 
     def get_model(self, model_id: str) -> ModelArtifact | None:
@@ -35,12 +41,18 @@ class InMemoryModelRepository:
     def list_training_jobs(self, owner_id: str) -> list[TrainingJob]:
         return [job for job in self._jobs.values() if job.owner_id == owner_id]
 
+    def list_all_training_jobs(self) -> list[TrainingJob]:
+        return list(self._jobs.values())
+
     def add_model(self, model: ModelArtifact) -> ModelArtifact:
         self._models[model.id] = model
         return model
 
     def list_models(self, owner_id: str) -> list[ModelArtifact]:
         return [model for model in self._models.values() if model.owner_id == owner_id]
+
+    def list_all_models(self) -> list[ModelArtifact]:
+        return list(self._models.values())
 
     def get_model(self, model_id: str) -> ModelArtifact | None:
         return self._models.get(model_id)

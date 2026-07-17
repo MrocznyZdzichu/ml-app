@@ -34,8 +34,34 @@ Each module follows the same direction:
 - `router.py` exposes FastAPI endpoints.
 
 Dataset, auth, model, serving, sharing, analysis, and export modules follow this
-layout. Dataset and auth metadata are currently backed by PostgreSQL
+layout. Dataset, auth, sharing and audit metadata are backed by PostgreSQL
 repositories.
+
+## Identity and Access Control
+
+The installation is single-company and keeps open self-registration. New users
+receive only the `user` platform role. A reserved technical `root` account is
+repaired idempotently at startup with the `administrator` role; bootstrap never
+overwrites a password that has already been changed. Account state and session
+version are checked against PostgreSQL on every authenticated request, so stale
+JWT role claims do not preserve revoked access.
+
+Business Case grants are the primary authorization boundary. Effective access
+is the union of implicit BC ownership, user grants, active-group grants and the
+administrator bypass. The hierarchy is `report_viewer`, `reader`,
+`contributor`, `manager`, `owner`. Report viewers cannot resolve datasets,
+pipeline configuration, models or data lineage. Loose datasets and Data Views
+may exceptionally use direct `reader`, `editor` or `owner` grants. Explicit
+denies are not part of the current contract.
+
+Groups, memberships, BC grants, direct resource grants and audit events are
+stored in PostgreSQL. Authorization is resolved centrally for API reads,
+mutations, downloads, lineage and worker entrypoints. A worker rechecks the
+submitting actor immediately before starting a pipeline or full-dataset
+analysis. Business Case ownership can be transferred without rewriting
+historical artifacts or physical dataset paths; artifact lookup therefore uses
+the BC relationship rather than assuming the current BC owner created every
+artifact.
 
 ## Dataset Architecture
 

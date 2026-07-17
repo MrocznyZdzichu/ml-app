@@ -72,6 +72,9 @@ class DatasetRepository(Protocol):
     def list_for_owner(self, owner_id: str) -> list[DataAsset]:
         ...
 
+    def list_all(self) -> list[DataAsset]:
+        ...
+
     def get(self, asset_id: str) -> DataAsset | None:
         ...
 
@@ -101,6 +104,9 @@ class InMemoryDatasetRepository:
 
     def list_for_owner(self, owner_id: str) -> list[DataAsset]:
         return [asset for asset in self._items.values() if asset.owner_id == owner_id]
+
+    def list_all(self) -> list[DataAsset]:
+        return list(self._items.values())
 
     def get(self, asset_id: str) -> DataAsset | None:
         return self._items.get(asset_id)
@@ -163,6 +169,12 @@ class PostgresDatasetRepository:
             .where(data_assets_table.c.owner_id == owner_id)
             .order_by(data_assets_table.c.created_at.desc())
         )
+        with self.engine.begin() as connection:
+            return [self._from_record(row._mapping) for row in connection.execute(statement)]
+
+    def list_all(self) -> list[DataAsset]:
+        self._ensure_initialized()
+        statement = select(data_assets_table).order_by(data_assets_table.c.created_at.desc())
         with self.engine.begin() as connection:
             return [self._from_record(row._mapping) for row in connection.execute(statement)]
 

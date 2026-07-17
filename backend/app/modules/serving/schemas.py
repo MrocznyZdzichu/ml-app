@@ -21,6 +21,7 @@ class DeploymentRead(BaseModel):
     model_id: str
     name: str
     image: str
+    business_case_id: str = ""
     endpoint_url: str | None
     status: DeploymentStatus
     environment: dict[str, str]
@@ -38,6 +39,7 @@ class ScoreResponse(BaseModel):
 
 class BatchScoreRequest(BaseModel):
     input_uri: str
+    business_case_id: str = ""
     output_uri: str | None = None
     options: dict[str, Any] = Field(default_factory=dict)
 

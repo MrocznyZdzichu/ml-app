@@ -26,6 +26,7 @@ class Deployment:
     model_id: str
     name: str
     image: str
+    business_case_id: str = ""
     endpoint_url: str | None = None
     status: DeploymentStatus = DeploymentStatus.REQUESTED
     environment: dict[str, str] = field(default_factory=dict)
@@ -38,6 +39,7 @@ class BatchScoreJob:
     owner_id: str
     deployment_id: str
     input_uri: str
+    business_case_id: str = ""
     output_uri: str | None = None
     status: BatchJobStatus = BatchJobStatus.QUEUED
     options: dict[str, Any] = field(default_factory=dict)

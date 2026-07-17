@@ -9,25 +9,34 @@ from app.modules.business_cases.repository import (
     PostgresBusinessCaseRepository,
 )
 from app.modules.scoring_reports.domain import ScoringReport
+from app.modules.business_cases.service import BusinessCaseService
 
 
 class ScoringReportService:
     def __init__(self, artifacts: BusinessCaseRepository | None = None) -> None:
         self.artifacts = artifacts or PostgresBusinessCaseRepository()
+        self.business_cases = BusinessCaseService()
 
     def list_reports(
         self,
         principal: Principal,
         business_case_id: str | None = None,
     ) -> list[ScoringReport]:
-        reports = [
-            self._from_artifact(artifact)
-            for artifact in self.artifacts.list_artifacts(
-                principal.user_id,
-                ArtifactType.REPORT,
-            )
-            if business_case_id is None or artifact.business_case_id == business_case_id
-        ]
+        if isinstance(self.artifacts, PostgresBusinessCaseRepository):
+            cases = self.business_cases.list_business_cases(principal)
+            if business_case_id is not None:
+                cases = [case for case in cases if case.id == business_case_id]
+            case_ids = {case.id for case in cases}
+            owners = {case.owner_id for case in cases}
+        else:
+            case_ids = None
+            owners = {principal.user_id}
+        artifacts = (
+            self.artifacts.list_artifacts_for_business_cases(case_ids, ArtifactType.REPORT)
+            if case_ids is not None
+            else [item for owner_id in owners for item in self.artifacts.list_artifacts(owner_id, ArtifactType.REPORT)]
+        )
+        reports = [self._from_artifact(artifact) for artifact in artifacts]
         self._assign_version_numbers(reports)
         return sorted(reports, key=lambda item: (item.created_at, item.id), reverse=True)
 

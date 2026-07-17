@@ -10,6 +10,9 @@ class AnalysisRepository(Protocol):
     def list_for_owner(self, owner_id: str) -> list[AnalysisJob]:
         ...
 
+    def list_all(self) -> list[AnalysisJob]:
+        ...
+
     def get(self, job_id: str) -> AnalysisJob | None:
         ...
 
@@ -24,6 +27,9 @@ class InMemoryAnalysisRepository:
 
     def list_for_owner(self, owner_id: str) -> list[AnalysisJob]:
         return [job for job in self._items.values() if job.owner_id == owner_id]
+
+    def list_all(self) -> list[AnalysisJob]:
+        return list(self._items.values())
 
     def get(self, job_id: str) -> AnalysisJob | None:
         return self._items.get(job_id)

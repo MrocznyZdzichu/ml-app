@@ -144,7 +144,7 @@ const ServingPanel = lazy(() =>
   import("./operational/LifecyclePanels").then((module) => ({ default: module.ServingPanel }))
 );
 const SharePanel = lazy(() =>
-  import("./operational/LifecyclePanels").then((module) => ({ default: module.SharePanel }))
+  import("./operational/CollaborationPanel").then((module) => ({ default: module.CollaborationPanel }))
 );
 const VisualizationDashboard = lazy(() =>
   import("./analysis/VisualizationDashboard").then((module) => ({
@@ -464,9 +464,10 @@ export default function App() {
         {activeTab === "share" && (
           <DeferredPanel>
             <SharePanel
+              businessCases={businessCases}
               datasets={datasets}
-              models={models}
-              deployments={deployments}
+              currentUser={currentUser}
+              onRefresh={refreshWorkspace}
               setNotice={setNotice}
             />
           </DeferredPanel>
