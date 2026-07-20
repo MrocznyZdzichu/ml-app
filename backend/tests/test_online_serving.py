@@ -4,7 +4,8 @@ import pytest
 
 from app.core.security import Principal
 from app.modules.models.domain import ModelArtifact, ModelStage
-from app.modules.serving.domain import DeploymentRole, InferenceStatus
+from app.modules.models.schemas import PromoteModelRequest
+from app.modules.serving.domain import DeploymentRole, DeploymentStatus, InferenceStatus
 from app.modules.serving.runtime import RuntimeUnavailableError
 from app.modules.serving.schemas import DeploymentCreate, DeploymentRevisionCreate, ScoreRecord
 from app.modules.serving.service import ServingService
@@ -70,6 +71,36 @@ class MemoryServingRepository:
     def prune_expired(self, deployment_id, cutoff):
         return 0
 
+    def active_assignments_for_model(self, model_id):
+        result = []
+        for deployment in self.deployments.values():
+            if deployment.status == DeploymentStatus.STOPPED:
+                continue
+            revision = self.revisions.get(deployment.active_revision_id)
+            for assignment in revision.assignments if revision else []:
+                if assignment.model_id == model_id:
+                    result.append({
+                        "deployment_id": deployment.id,
+                        "deployment_name": deployment.name,
+                        "deployment_slug": deployment.slug,
+                        "deployment_status": deployment.status,
+                        "endpoint_url": deployment.endpoint_url,
+                        "revision_id": revision.id,
+                        "revision_version": revision.version_number,
+                        "role": assignment.role,
+                    })
+        return result
+
+    def clear_active_assignments(self, deployment_id):
+        return None
+
+    def restore_active_assignments(self, deployment, revision):
+        return None
+
+    def set_deployment_status(self, deployment, revision):
+        self.deployments[deployment.id] = deployment
+        return deployment
+
 
 class Models:
     def __init__(self, models):
@@ -77,6 +108,9 @@ class Models:
 
     def get_model(self, model_id, principal):
         return self.models[model_id]
+
+    def list_versions(self, logical_id, principal):
+        return [item for item in self.models.values() if item.logical_id == logical_id]
 
 
 class Runtime:
@@ -98,6 +132,34 @@ def model(model_id: str, stage: ModelStage = ModelStage.PRODUCTION) -> ModelArti
         stage=stage, business_case_id="bc-1", problem_type="regression",
         feature_columns=["value"], model_hash=f"hash-{model_id}",
     )
+
+
+def test_candidate_input_is_canonicalized_to_developed() -> None:
+    assert PromoteModelRequest(stage="candidate").stage == ModelStage.DEVELOPED
+
+
+def test_model_family_usage_exposes_active_service_role(principal) -> None:
+    repository = MemoryServingRepository()
+    champion = model("model-v11")
+    champion.logical_id = "model-family"
+    service = ServingService(repository=repository, runtime=Runtime(), models=Models([champion]))
+    deployment = service.create_deployment(
+        DeploymentCreate(name="Estates Service", model_id=champion.id), principal
+    )
+
+    usage = service.list_model_family_usage("model-family", principal)
+
+    assert usage == [{
+        "model_id": champion.id,
+        "deployment_id": deployment.id,
+        "deployment_name": deployment.name,
+        "deployment_slug": deployment.slug,
+        "deployment_status": DeploymentStatus.RUNNING,
+        "endpoint_url": deployment.endpoint_url,
+        "revision_id": deployment.active_revision_id,
+        "revision_version": 1,
+        "role": DeploymentRole.CHAMPION,
+    }]
 
 
 @pytest.fixture
@@ -142,19 +204,84 @@ def test_versioned_roles_fallback_and_inference_history(principal) -> None:
     assert result.model_id == fallback.id
     assert result.served_role == DeploymentRole.FALLBACK
     assert result.fallback_used is True
+    assert repository.deployments[deployment.id].status == DeploymentStatus.DEGRADED
     assert result.predictions[0].prediction == 42.0
     assert "no stable record_id" in result.warnings[0]
     assert repository.inferences[result.request_id].status == InferenceStatus.SUCCEEDED
-    assert {item["role"] for item in repository.items} == {"fallback", "shadow"}
-    assert service.score(deployment.id, [ScoreRecord(features={"value": 999})], principal, idempotency_key="one").request_id == result.request_id
+    assert {item["role"] for item in repository.items} == {"champion", "fallback", "shadow"}
+    assert next(item for item in repository.items if item["role"] == "champion")["status"] == "failed"
+    assert service.score(deployment.id, [ScoreRecord(features={"value": 42})], principal, idempotency_key="one").request_id == result.request_id
+    with pytest.raises(Exception) as idempotency_error:
+        service.score(deployment.id, [ScoreRecord(features={"value": 999})], principal, idempotency_key="one")
+    assert getattr(idempotency_error.value, "status_code", None) == 409
+    runtime.failures.clear()
+    service.score(
+        deployment.id,
+        [ScoreRecord(record_id="recovered", features={"value": 7})],
+        principal,
+        idempotency_key="two",
+    )
+    assert repository.deployments[deployment.id].status == DeploymentStatus.RUNNING
 
 
-def test_candidate_cannot_become_champion(principal) -> None:
-    candidate = model("candidate", ModelStage.CANDIDATE)
-    service = ServingService(repository=MemoryServingRepository(), runtime=Runtime(), models=Models([candidate]))
+def test_developed_model_cannot_become_champion(principal) -> None:
+    developed = model("developed", ModelStage.DEVELOPED)
+    service = ServingService(repository=MemoryServingRepository(), runtime=Runtime(), models=Models([developed]))
     with pytest.raises(Exception) as error:
-        service.create_deployment(DeploymentCreate(name="Unsafe", model_id=candidate.id), principal)
+        service.create_deployment(DeploymentCreate(name="Unsafe", model_id=developed.id), principal)
     assert getattr(error.value, "status_code", None) == 409
+
+
+def test_invalid_active_model_stage_degrades_and_blocks_scoring(principal) -> None:
+    champion = model("champion")
+    repository = MemoryServingRepository()
+    service = ServingService(repository=repository, runtime=Runtime(), models=Models([champion]))
+    deployment = service.create_deployment(
+        DeploymentCreate(name="Lifecycle guarded", model_id=champion.id), principal
+    )
+    champion.stage = ModelStage.DEVELOPED
+
+    with pytest.raises(Exception) as error:
+        service.score(deployment.id, [ScoreRecord(features={"value": 1})], principal)
+
+    assert getattr(error.value, "status_code", None) == 503
+    assert repository.deployments[deployment.id].status.value == "degraded"
+
+
+def test_service_stop_start_and_rollback_create_a_new_revision(principal) -> None:
+    first, second = model("first"), model("second")
+    repository = MemoryServingRepository()
+    service = ServingService(
+        repository=repository, runtime=Runtime(), models=Models([first, second])
+    )
+    deployment = service.create_deployment(
+        DeploymentCreate(name="Operable service", model_id=first.id), principal
+    )
+    original_revision_id = deployment.active_revision_id
+    service.create_revision(deployment.id, DeploymentRevisionCreate(
+        assignments=[{"model_id": second.id, "role": "champion"}],
+        reason="Move to second",
+    ), principal)
+
+    rollback = service.rollback_deployment(
+        deployment.id, original_revision_id, "Second model regressed", principal
+    )
+    assert rollback.version_number == 3
+    assert rollback.assignments[0].model_id == first.id
+    assert repository.deployments[deployment.id].active_revision_id == rollback.id
+
+    stopped = service.set_deployment_status(
+        deployment.id, DeploymentStatus.STOPPED, "Maintenance", principal
+    )
+    assert stopped.status == DeploymentStatus.STOPPED
+    with pytest.raises(Exception) as stopped_error:
+        service.score(deployment.id, [ScoreRecord(features={"value": 1})], principal)
+    assert getattr(stopped_error.value, "status_code", None) == 503
+
+    started = service.set_deployment_status(
+        deployment.id, DeploymentStatus.RUNNING, "Maintenance complete", principal
+    )
+    assert started.status == DeploymentStatus.RUNNING
 
 
 def test_success_is_not_returned_when_audit_completion_fails(principal) -> None:

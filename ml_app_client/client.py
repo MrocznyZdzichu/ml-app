@@ -10,9 +10,12 @@ from __future__ import annotations
 import mimetypes
 import os
 import time
+import warnings
 from dataclasses import dataclass
+from getpass import getpass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
+from urllib.parse import quote
 
 import requests
 
@@ -137,6 +140,31 @@ class Deployment:
 
 
 @dataclass(frozen=True)
+class ModelServingUsage:
+    model_id: str
+    deployment_id: str
+    deployment_name: str
+    deployment_status: str
+    revision_version: int
+    role: str
+    endpoint_url: str
+    raw: Mapping[str, Any]
+
+    @classmethod
+    def from_api(cls, value: Mapping[str, Any]) -> "ModelServingUsage":
+        return cls(
+            model_id=str(value["model_id"]),
+            deployment_id=str(value["deployment_id"]),
+            deployment_name=str(value["deployment_name"]),
+            deployment_status=str(value["deployment_status"]),
+            revision_version=int(value["revision_version"]),
+            role=str(value["role"]),
+            endpoint_url=str(value.get("endpoint_url") or ""),
+            raw=value,
+        )
+
+
+@dataclass(frozen=True)
 class PredictionResult:
     request_id: str
     deployment_id: str
@@ -202,6 +230,31 @@ class MLAppClient:
             access_token=os.getenv("ML_APP_ACCESS_TOKEN") or None,
             **kwargs,
         )
+
+    @classmethod
+    def connect(
+        cls,
+        *,
+        login: str | None = None,
+        prompt: Callable[[str], str] = input,
+        password_prompt: Callable[[str], str] = getpass,
+        **kwargs: Any,
+    ) -> "MLAppClient":
+        """Create an authenticated client, prompting only when no token is configured.
+
+        ``ML_APP_ACCESS_TOKEN`` remains the preferred non-interactive mechanism.
+        Interactive notebooks can use this method without placing a password in a cell.
+        ``ML_APP_LOGIN`` may provide the default account name while the password is
+        still collected through a hidden prompt.
+        """
+        client = cls.from_env(**kwargs)
+        if os.getenv("ML_APP_ACCESS_TOKEN"):
+            return client
+        login_name = (login or os.getenv("ML_APP_LOGIN") or prompt("ML App login or email: ")).strip()
+        if not login_name:
+            raise AuthenticationError("A login or email is required")
+        client.login(login_name, password_prompt("ML App password: "))
+        return client
 
     def login(self, login: str, password: str) -> None:
         """Authenticate this client without persisting the password."""
@@ -610,10 +663,17 @@ class MLAppClient:
         When ``model`` is a name, the newest version is selected by default.
         Pass ``version="v5"`` or ``version=5`` to choose an explicit version.
         """
-        allowed_stages = {"candidate", "staging", "production", "archived"}
+        if stage == "candidate":
+            warnings.warn(
+                "Model stage 'candidate' is deprecated; use 'developed' instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            stage = "developed"
+        allowed_stages = {"developed", "staging", "production", "archived"}
         if stage not in allowed_stages:
             raise ValueError(
-                "stage must be one of: candidate, staging, production, archived"
+                "stage must be one of: developed, staging, production, archived"
             )
         models = self.list_models()
         normalized = model.strip().casefold()
@@ -636,14 +696,19 @@ class MLAppClient:
             raise ResourceNotFoundError(f"Model {model!r}{suffix} was not found")
         selected = max(matches, key=lambda item: int(item.get("version_number") or 0))
         return self._request(
-            "POST",
-            f"/models/{selected['id']}/promote",
+            "PATCH",
+            f"/models/{selected['id']}/stage",
             json={"stage": stage},
         )
 
     def list_deployments(self) -> list[Deployment]:
         """List model services visible through the current Business Case grants."""
         return [Deployment.from_api(item) for item in self._request("GET", "/serving/deployments")]
+
+    def list_model_serving_usage(self, logical_model_id: str) -> list[ModelServingUsage]:
+        """List active service assignments for every version in a model family."""
+        path = f"/serving/model-families/{quote(logical_model_id, safe='')}/usage"
+        return [ModelServingUsage.from_api(item) for item in self._request("GET", path)]
 
     def create_deployment(
         self,
@@ -670,7 +735,7 @@ class MLAppClient:
         challengers: tuple[str, ...] | list[str] = (),
         shadows: tuple[str, ...] | list[str] = (),
         fallback: str | None = None,
-        reason: str = "",
+        reason: str,
     ) -> Mapping[str, Any]:
         """Atomically activate an immutable role assignment revision."""
         target = self._deployment(deployment)
@@ -684,6 +749,50 @@ class MLAppClient:
             f"/serving/deployments/{target.id}/revisions",
             json={"assignments": assignments, "reason": reason},
         )
+
+    def deployment_revisions(
+        self,
+        deployment: str | Deployment,
+    ) -> list[Mapping[str, Any]]:
+        """List immutable service revisions from newest to oldest."""
+        target = self._deployment(deployment)
+        return self._request("GET", f"/serving/deployments/{target.id}/revisions")
+
+    def rollback_deployment(
+        self,
+        deployment: str | Deployment,
+        *,
+        revision_id: str,
+        reason: str,
+    ) -> Mapping[str, Any]:
+        """Activate a new revision copied from a selected historical revision."""
+        if not reason.strip():
+            raise ValueError("Rollback reason is required")
+        target = self._deployment(deployment)
+        return self._request(
+            "POST",
+            f"/serving/deployments/{target.id}/revisions/{revision_id}/rollback",
+            json={"reason": reason},
+        )
+
+    def set_deployment_status(
+        self,
+        deployment: str | Deployment,
+        *,
+        status: str,
+        reason: str,
+    ) -> Deployment:
+        """Start or stop a model service without deleting its revision history."""
+        if status not in {"running", "stopped"}:
+            raise ValueError("status must be running or stopped")
+        if not reason.strip():
+            raise ValueError("Deployment status change reason is required")
+        target = self._deployment(deployment)
+        return Deployment.from_api(self._request(
+            "POST",
+            f"/serving/deployments/{target.id}/status",
+            json={"status": status, "reason": reason},
+        ))
 
     def predict(
         self,

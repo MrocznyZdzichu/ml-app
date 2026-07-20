@@ -8,7 +8,7 @@ published pipeline versions, and polls bounded run metadata.
 ```python
 from ml_app_client import MLAppClient
 
-client = MLAppClient.from_env()
+client = MLAppClient.connect()
 dataset = client.upload_dataset_version(
     "training.parquet",
     business_case_name="Estates Sell Prices",
@@ -30,9 +30,10 @@ joined_id = client.output_dataset_id(finished)
 report = client.scoring_report_for_run(finished, business_case_name="Estates Sell Prices")
 ```
 
-Set `ML_APP_API_URL` (default: `http://localhost:8000/api/v1`) and
-`ML_APP_ACCESS_TOKEN`. For interactive use, call `client.login(login, password)`;
-the client does not persist credentials. Uploading with a `logical_id` creates
+Set `ML_APP_API_URL` (default: `http://localhost:8000/api/v1`) and optionally
+`ML_APP_ACCESS_TOKEN`. `MLAppClient.connect()` uses that token when present and
+otherwise prompts for a normal user's login and password without displaying or
+persisting the password. Uploading with a `logical_id` creates
 an immutable next version. Pipeline execution selects the newest published
 version and the backend records the resolved input versions, row counts and
 lineage. Dataset previews are bounded to at most 50,000 rows. Downloads stream
@@ -62,14 +63,20 @@ client.promote_model(
 )
 ```
 
-Allowed stages are `candidate`, `staging`, `production`, and `archived`.
+Allowed stages are `developed`, `staging`, `production`, and `archived`.
+The previous input value `candidate` remains a deprecated compatibility alias.
+
+Model services expose complete lifecycle operations through the same REST
+contract: `deployment_revisions(...)`, `rollback_deployment(...)`, and
+`set_deployment_status(...)` list history, create an auditable rollback revision,
+and start or stop an endpoint.
 Lifecycle stage describes model readiness; `champion`, `challenger`, `shadow`,
 and `fallback` remain separate roles configured on a serving deployment.
 
 ```python
 from ml_app_client import MLAppClient
 
-client = MLAppClient.from_env()
+client = MLAppClient.connect()
 service = client.create_deployment(
     name="Estates Sell Prices Service",
     model_name="Estates Sell Prices - AutoFEML - Model",

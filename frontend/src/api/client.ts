@@ -502,6 +502,18 @@ export type DeploymentRevision = {
   created_at: string;
 };
 
+export type ModelServingUsage = {
+  model_id: string;
+  deployment_id: string;
+  deployment_name: string;
+  deployment_slug: string;
+  deployment_status: Deployment["status"];
+  endpoint_url: string | null;
+  revision_id: string;
+  revision_version: number;
+  role: DeploymentRole;
+};
+
 export type ScoreResponse = {
   request_id: string;
   correlation_id: string;
@@ -1143,13 +1155,15 @@ export const api = {
       body: JSON.stringify(payload)
     }),
   listModels: () => request<ModelArtifact[]>("/models"),
-  promoteModel: (modelId: string, stage: "candidate" | "staging" | "production" | "archived") =>
-    request<ModelArtifact>(`/models/${encodeURIComponent(modelId)}/promote`, {
-      method: "POST",
+  promoteModel: (modelId: string, stage: "developed" | "staging" | "production" | "archived") =>
+    request<ModelArtifact>(`/models/${encodeURIComponent(modelId)}/stage`, {
+      method: "PATCH",
       body: JSON.stringify({ stage })
     }),
   listModelVersions: (logicalId: string) =>
     request<ModelArtifact[]>(`/models/${encodeURIComponent(logicalId)}/versions`),
+  listModelServingUsage: (logicalId: string) =>
+    request<ModelServingUsage[]>(`/serving/model-families/${encodeURIComponent(logicalId)}/usage`),
   getModel: (modelId: string) =>
     request<ModelArtifact>(`/models/${encodeURIComponent(modelId)}`),
   getModelDataLineage: (modelId: string) =>
@@ -1174,10 +1188,22 @@ export const api = {
       body: JSON.stringify(payload)
     }),
   listDeployments: () => request<Deployment[]>("/serving/deployments"),
+  listDeploymentRevisions: (deploymentId: string) =>
+    request<DeploymentRevision[]>(`/serving/deployments/${encodeURIComponent(deploymentId)}/revisions`),
   createDeploymentRevision: (deploymentId: string, assignments: Array<{ model_id: string; role: DeploymentRole }>, reason: string) =>
     request<DeploymentRevision>(`/serving/deployments/${encodeURIComponent(deploymentId)}/revisions`, {
       method: "POST",
       body: JSON.stringify({ assignments, reason })
+    }),
+  setDeploymentStatus: (deploymentId: string, status: "running" | "stopped", reason: string) =>
+    request<Deployment>(`/serving/deployments/${encodeURIComponent(deploymentId)}/status`, {
+      method: "POST",
+      body: JSON.stringify({ status, reason })
+    }),
+  rollbackDeployment: (deploymentId: string, revisionId: string, reason: string) =>
+    request<DeploymentRevision>(`/serving/deployments/${encodeURIComponent(deploymentId)}/revisions/${encodeURIComponent(revisionId)}/rollback`, {
+      method: "POST",
+      body: JSON.stringify({ reason })
     }),
   score: (
     deploymentId: string,

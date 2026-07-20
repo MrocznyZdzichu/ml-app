@@ -342,7 +342,7 @@ class PostgresBusinessCaseRepository:
                 metadata={
                     "model_name": row["model_name"] or "Pipeline model",
                     "algorithm": row["algorithm"] or "unknown",
-                    "stage": row["stage"] or "candidate",
+                    "stage": "developed" if (row["stage"] or "developed") == "candidate" else (row["stage"] or "developed"),
                     "problem_type": row["problem_type"] or "",
                     "model_hash": row["model_hash"] or "",
                     "logical_model_id": row["logical_model_id"] or logical_model_id,

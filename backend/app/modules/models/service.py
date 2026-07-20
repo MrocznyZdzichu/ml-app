@@ -2,6 +2,7 @@ from collections import defaultdict
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 
 from app.core.security import Principal
 from app.modules.models.domain import ModelArtifact, ModelStage, TrainingJob
@@ -12,7 +13,7 @@ from app.modules.business_cases.repository import PostgresBusinessCaseRepository
 from app.modules.pipelines.domain import PipelineRun, PipelineVersion
 from app.modules.pipelines.repository import PostgresPipelineRepository
 from app.modules.business_cases.service import BusinessCaseService
-from app.modules.sharing.domain import BC_ROLE_RANK, BusinessCaseAccessRole
+from app.modules.sharing.domain import AuditEvent, BC_ROLE_RANK, BusinessCaseAccessRole
 from app.modules.sharing.policy import access_policy
 from app.modules.datasets.repository import PostgresDatasetRepository
 from app.modules.sharing.domain import ResourceAccessRole, ResourceKind
@@ -195,8 +196,16 @@ class ModelService:
                     artifact.business_case_id,
                     BusinessCaseAccessRole.CONTRIBUTOR,
                 )
+            self._require_stage_compatible_with_active_serving(model_id, payload.stage)
+            previous_stage = str(artifact.metadata.get("stage") or ModelStage.DEVELOPED.value)
             artifact.metadata = {**artifact.metadata, "stage": payload.stage.value}
-            self.artifacts.update_artifact(artifact)
+            try:
+                self.artifacts.update_artifact(artifact)
+            except IntegrityError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Model lifecycle changed concurrently with an active serving assignment; retry after updating the service revision",
+                ) from exc
             model = self._artifact_model(artifact)
             family = [
                 self._artifact_model(item)
@@ -209,6 +218,7 @@ class ModelService:
             if version is not None:
                 model.version = version.version
                 model.version_number = version.version_number
+            self._audit_stage_change(model, previous_stage, payload.stage, principal)
             return model
 
         model = self.get_model(model_id, principal)
@@ -218,8 +228,63 @@ class ModelService:
                 model.business_case_id,
                 BusinessCaseAccessRole.CONTRIBUTOR,
             )
+        self._require_stage_compatible_with_active_serving(model_id, payload.stage)
+        previous_stage = model.stage.value
         model.stage = payload.stage
-        return self.repository.update_model(model)
+        updated = self.repository.update_model(model)
+        self._audit_stage_change(updated, previous_stage, payload.stage, principal)
+        return updated
+
+    @staticmethod
+    def _audit_stage_change(
+        model: ModelArtifact,
+        previous_stage: str,
+        next_stage: ModelStage,
+        principal: Principal,
+    ) -> None:
+        from app.modules.sharing.repository import PostgresSharingRepository
+
+        if previous_stage == next_stage.value:
+            return
+        PostgresSharingRepository().add_audit(AuditEvent(
+            id=str(uuid4()),
+            actor_id=principal.user_id,
+            action="model.stage_changed",
+            subject_type="model_version",
+            subject_id=model.id,
+            resource_kind="business_case" if model.business_case_id else "model_version",
+            resource_id=model.business_case_id or model.id,
+            previous_state={"stage": previous_stage},
+            new_state={"stage": next_stage.value},
+        ))
+
+    @staticmethod
+    def _require_stage_compatible_with_active_serving(model_id: str, stage: ModelStage) -> None:
+        from app.modules.serving.repository import PostgresServingRepository
+
+        usages = PostgresServingRepository().active_assignments_for_model(model_id)
+        incompatible = [
+            usage for usage in usages
+            if (
+                usage["role"] in {"champion", "fallback"}
+                and stage != ModelStage.PRODUCTION
+            ) or (
+                usage["role"] in {"challenger", "shadow"}
+                and stage not in {ModelStage.STAGING, ModelStage.PRODUCTION}
+            )
+        ]
+        if not incompatible:
+            return
+        blockers = ", ".join(
+            f"{item['deployment_name']} ({item['role']})" for item in incompatible[:5]
+        )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Model stage cannot be changed to {stage.value} while it is actively assigned to: "
+                f"{blockers}. Activate a compatible deployment revision or stop the service first."
+            ),
+        )
 
     @staticmethod
     def _logical_model_id(model: ModelArtifact) -> str:
@@ -317,7 +382,11 @@ class ModelService:
             algorithm=str(metadata.get("algorithm") or "unknown"),
             artifact_uri=str(metadata.get("location_uri") or ""),
             logical_id=str(metadata.get("logical_model_id") or ""),
-            stage=ModelStage(str(metadata.get("stage") or ModelStage.CANDIDATE.value)),
+            stage=ModelStage(
+                ModelStage.DEVELOPED.value
+                if str(metadata.get("stage") or "") == "candidate"
+                else str(metadata.get("stage") or ModelStage.DEVELOPED.value)
+            ),
             metrics=dict(metadata.get("metrics") or {}),
             business_case_id=artifact.business_case_id or "",
             pipeline_id=str(lineage.get("pipeline_id") or ""),

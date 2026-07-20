@@ -6,10 +6,13 @@ from app.modules.serving.schemas import (
     ChallengerReplayCreate,
     ChallengerReplayRead,
     DeploymentRead,
+    DeploymentRollbackRequest,
     DeploymentRevisionCreate,
     DeploymentRevisionRead,
+    DeploymentStatusUpdate,
     InferencePage,
     InferenceDetail,
+    ModelServingUsageRead,
     ScoreRequest,
     ScoreResponse,
 )
@@ -40,6 +43,14 @@ def list_deployments(principal: Principal = Depends(require_user)) -> list[Deplo
     return [_deployment_read(item) for item in service.list_deployments(principal)]
 
 
+@router.get("/model-families/{logical_id}/usage", response_model=list[ModelServingUsageRead])
+def list_model_family_usage(
+    logical_id: str,
+    principal: Principal = Depends(require_user),
+) -> list[ModelServingUsageRead]:
+    return [ModelServingUsageRead.model_validate(item) for item in service.list_model_family_usage(logical_id, principal)]
+
+
 @router.get("/deployments/{deployment_id}", response_model=DeploymentRead)
 def get_deployment(deployment_id: str, principal: Principal = Depends(require_user)) -> DeploymentRead:
     return _deployment_read(service.get_deployment(deployment_id, principal))
@@ -60,6 +71,33 @@ def create_revision(
     principal: Principal = Depends(require_user),
 ) -> DeploymentRevisionRead:
     return DeploymentRevisionRead.model_validate(service.create_revision(deployment_id, payload, principal))
+
+
+@router.post("/deployments/{deployment_id}/status", response_model=DeploymentRead)
+def update_deployment_status(
+    deployment_id: str,
+    payload: DeploymentStatusUpdate,
+    principal: Principal = Depends(require_user),
+) -> DeploymentRead:
+    return _deployment_read(service.set_deployment_status(
+        deployment_id, payload.status, payload.reason, principal
+    ))
+
+
+@router.post(
+    "/deployments/{deployment_id}/revisions/{revision_id}/rollback",
+    response_model=DeploymentRevisionRead,
+    status_code=201,
+)
+def rollback_deployment(
+    deployment_id: str,
+    revision_id: str,
+    payload: DeploymentRollbackRequest,
+    principal: Principal = Depends(require_user),
+) -> DeploymentRevisionRead:
+    return DeploymentRevisionRead.model_validate(service.rollback_deployment(
+        deployment_id, revision_id, payload.reason, principal
+    ))
 
 
 @router.post("/deployments/{deployment_id}/predictions", response_model=ScoreResponse)

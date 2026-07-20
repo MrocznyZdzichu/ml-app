@@ -353,6 +353,95 @@ def _index_model_family_metadata(connection: Connection) -> None:
     ))
 
 
+def _rename_candidate_model_stage(connection: Connection) -> None:
+    """Canonicalize the model lifecycle stage without changing AutoML terminology."""
+    connection.execute(text(
+        "UPDATE mlapp.artifacts "
+        "SET metadata = jsonb_set(metadata::jsonb, '{stage}', to_jsonb('developed'::text), true)::json "
+        "WHERE type = 'model_version' AND metadata->>'stage' = 'candidate'"
+    ))
+
+
+def _enforce_active_model_lifecycle(connection: Connection) -> None:
+    """Materialize active model roles and enforce stage compatibility in PostgreSQL."""
+    statements = [
+        (
+            "CREATE TABLE IF NOT EXISTS mlapp.serving_active_model_assignments ("
+            "deployment_id VARCHAR(64) NOT NULL, revision_id VARCHAR(64) NOT NULL, "
+            "model_id VARCHAR(64) NOT NULL, role VARCHAR(32) NOT NULL, "
+            "PRIMARY KEY (deployment_id, model_id))"
+        ),
+        "CREATE INDEX IF NOT EXISTS ix_serving_active_model ON mlapp.serving_active_model_assignments (model_id)",
+        "TRUNCATE TABLE mlapp.serving_active_model_assignments",
+        (
+            "INSERT INTO mlapp.serving_active_model_assignments (deployment_id, revision_id, model_id, role) "
+            "SELECT d.id, r.id, assignment->>'model_id', assignment->>'role' "
+            "FROM mlapp.serving_deployments d "
+            "JOIN mlapp.serving_deployment_revisions r ON r.id = d.active_revision_id "
+            "CROSS JOIN LATERAL jsonb_array_elements(r.assignments::jsonb) assignment "
+            "WHERE d.status <> 'stopped'"
+        ),
+        (
+            "UPDATE mlapp.serving_deployments d SET status = 'degraded' "
+            "WHERE d.status <> 'stopped' AND EXISTS ("
+            "SELECT 1 FROM mlapp.serving_active_model_assignments a "
+            "JOIN mlapp.artifacts m ON m.id = a.model_id AND m.type = 'model_version' "
+            "WHERE a.deployment_id = d.id AND ("
+            "(a.role IN ('champion', 'fallback') AND coalesce(m.metadata->>'stage', 'developed') <> 'production') OR "
+            "(a.role IN ('challenger', 'shadow') AND coalesce(m.metadata->>'stage', 'developed') NOT IN ('staging', 'production'))))"
+        ),
+        (
+            "CREATE OR REPLACE FUNCTION mlapp.validate_active_model_assignment() RETURNS trigger AS $$ "
+            "DECLARE current_stage TEXT; BEGIN "
+            "PERFORM pg_advisory_xact_lock(hashtextextended(NEW.model_id, 0)); "
+            "SELECT coalesce(metadata->>'stage', 'developed') INTO current_stage "
+            "FROM mlapp.artifacts WHERE id = NEW.model_id AND type = 'model_version'; "
+            "IF current_stage IS NULL THEN RETURN NEW; END IF; "
+            "IF (NEW.role IN ('champion', 'fallback') AND current_stage <> 'production') "
+            "OR (NEW.role IN ('challenger', 'shadow') AND current_stage NOT IN ('staging', 'production')) THEN "
+            "RAISE EXCEPTION 'Model stage % cannot be assigned as %', current_stage, NEW.role USING ERRCODE = '23514'; "
+            "END IF; RETURN NEW; END; $$ LANGUAGE plpgsql"
+        ),
+        "DROP TRIGGER IF EXISTS trg_validate_active_model_assignment ON mlapp.serving_active_model_assignments",
+        (
+            "CREATE TRIGGER trg_validate_active_model_assignment BEFORE INSERT OR UPDATE "
+            "ON mlapp.serving_active_model_assignments FOR EACH ROW "
+            "EXECUTE FUNCTION mlapp.validate_active_model_assignment()"
+        ),
+        (
+            "CREATE OR REPLACE FUNCTION mlapp.prevent_invalid_model_stage_change() RETURNS trigger AS $$ "
+            "DECLARE next_stage TEXT; BEGIN "
+            "IF NEW.type <> 'model_version' THEN RETURN NEW; END IF; "
+            "next_stage := coalesce(NEW.metadata->>'stage', 'developed'); "
+            "IF next_stage = 'candidate' THEN next_stage := 'developed'; END IF; "
+            "PERFORM pg_advisory_xact_lock(hashtextextended(NEW.id, 0)); "
+            "IF EXISTS (SELECT 1 FROM mlapp.serving_active_model_assignments a WHERE a.model_id = NEW.id AND ("
+            "(a.role IN ('champion', 'fallback') AND next_stage <> 'production') OR "
+            "(a.role IN ('challenger', 'shadow') AND next_stage NOT IN ('staging', 'production')))) THEN "
+            "RAISE EXCEPTION 'Model stage % is incompatible with an active serving assignment', next_stage USING ERRCODE = '23514'; "
+            "END IF; RETURN NEW; END; $$ LANGUAGE plpgsql"
+        ),
+        "DROP TRIGGER IF EXISTS trg_prevent_invalid_model_stage_change ON mlapp.artifacts",
+        (
+            "CREATE TRIGGER trg_prevent_invalid_model_stage_change BEFORE UPDATE OF metadata "
+            "ON mlapp.artifacts FOR EACH ROW EXECUTE FUNCTION mlapp.prevent_invalid_model_stage_change()"
+        ),
+    ]
+    for statement in statements:
+        connection.execute(text(statement))
+
+
+def _harden_inference_audit_contract(connection: Connection) -> None:
+    statements = [
+        "ALTER TABLE mlapp.serving_inference_requests ADD COLUMN IF NOT EXISTS request_hash VARCHAR(64) NOT NULL DEFAULT ''",
+        "ALTER TABLE mlapp.serving_inference_items ADD COLUMN IF NOT EXISTS status VARCHAR(32) NOT NULL DEFAULT 'succeeded'",
+        "ALTER TABLE mlapp.serving_inference_items ADD COLUMN IF NOT EXISTS error_message TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE mlapp.serving_inference_items ADD COLUMN IF NOT EXISTS latency_ms INTEGER",
+    ]
+    for statement in statements:
+        connection.execute(text(statement))
+
+
 MIGRATIONS = [
     Migration(
         version="20260703_0001",
@@ -383,5 +472,20 @@ MIGRATIONS = [
         version="20260719_0006",
         description="Index model family metadata for bounded version history reads",
         apply=_index_model_family_metadata,
+    ),
+    Migration(
+        version="20260720_0007",
+        description="Rename the candidate model lifecycle stage to developed",
+        apply=_rename_candidate_model_stage,
+    ),
+    Migration(
+        version="20260720_0008",
+        description="Enforce model lifecycle compatibility for active serving assignments",
+        apply=_enforce_active_model_lifecycle,
+    ),
+    Migration(
+        version="20260720_0009",
+        description="Bind idempotency to request content and retain every model execution outcome",
+        apply=_harden_inference_audit_contract,
     ),
 ]

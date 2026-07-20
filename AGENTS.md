@@ -286,7 +286,9 @@ zmianą funkcji zawsze je zweryfikuj.
   FE i fitted state. Nie pozwalaj niezależnie dobierać niezgodnych elementów ani
   refitować transformacji na batchu scoringowym.
 - Rozdzielaj etap gotowości wersji modelu od jej roli w konkretnej usłudze.
-  `ModelStage` obejmuje `candidate`, `staging`, `production` i `archived`:
+  `ModelStage` obejmuje `developed`, `staging`, `production` i `archived`:
+  `developed` oznacza ukończoną wersję pozostającą poza etapami walidacji i
+  produkcji; nie jest rolą challengera ani inną rolą deploymentu.
   `staging` oznacza model dostępny do jawnych testów, lecz niepodpięty jako
   champion publicznego endpointu, a `production` oznacza ukończony i dopuszczony
   do produkcyjnego użycia model. Wiele wersji może jednocześnie mieć etap
@@ -313,7 +315,9 @@ zmianą funkcji zawsze je zweryfikuj.
   role i ustawienia runtime. Promocja challengera do championa, przypisanie
   fallbacku i rollback tworzą atomowo nową, audytowaną rewizję bez zmiany
   publicznego adresu. Poprzedni champion może zostać zachowany jako fallback.
-  Produkcyjna operacjonalizacja powinna mieć jawny Approval Gate.
+  Approval Gate dla produkcyjnej operacjonalizacji pozostaje odłożony do czasu
+  zaprojektowania odrębnej roli decyzyjnej Business Case albo odpowiedzialności
+  administratora; nie implementuj go niejawnie w bieżącym modelu ról.
 - Pierwszym adapterem uruchomieniowym online serving jest Docker Compose. Klient
   wywołuje centralne API platformy, które uwierzytelnia, autoryzuje, waliduje,
   limituje i kieruje żądanie do prywatnego model runtime; nie wystawiaj runtime

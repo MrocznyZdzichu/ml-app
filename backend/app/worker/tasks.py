@@ -617,6 +617,24 @@ def replay_challenger(replay_job_id: str) -> dict[str, str | int]:
     }
 
 
+@celery_app.task(name="app.worker.tasks.prune_serving_inference_history")
+def prune_serving_inference_history() -> dict[str, int]:
+    from datetime import datetime, timedelta, timezone
+
+    from app.modules.serving.repository import PostgresServingRepository
+
+    repository = PostgresServingRepository()
+    now = datetime.now(timezone.utc)
+    deleted = 0
+    deployments = repository.list_all_deployments()
+    for deployment in deployments:
+        deleted += repository.prune_expired(
+            deployment.id,
+            now - timedelta(days=deployment.retention_days),
+        )
+    return {"deployments_checked": len(deployments), "requests_deleted": deleted}
+
+
 @celery_app.task(name="app.worker.tasks.export_resource")
 def export_resource(export_job_id: str) -> dict[str, str]:
     return {"export_job_id": export_job_id, "status": "queued"}

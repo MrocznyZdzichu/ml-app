@@ -8,9 +8,11 @@ import type {
   BusinessCase,
   ChallengerReplay,
   Deployment,
+  DeploymentRevision,
   DeploymentRole,
   InferenceRequest,
   ModelArtifact,
+  ModelServingUsage,
   Pipeline,
   ScoreResponse
 } from "../api/client";
@@ -39,6 +41,7 @@ export function ModelsPanel({
 }) {
   const [query, setQuery] = useState("");
   const [businessCaseId, setBusinessCaseId] = useState(initialBusinessCaseId);
+  const [stageFilter, setStageFilter] = useState("");
   const [purposeFilter, setPurposeFilter] = useState("");
   const [pipelineFilter, setPipelineFilter] = useState("");
   const [selectedModel, setSelectedModel] = useState<ModelArtifact | null>(null);
@@ -67,6 +70,7 @@ export function ModelsPanel({
     const normalized = query.trim().toLowerCase();
     return modelFamilies.filter(({ latest, versions }) =>
       (!businessCaseId || latest.business_case_id === businessCaseId)
+      && (!stageFilter || latest.stage === stageFilter)
       && pipelineMatches(latest.pipeline_id, pipelines, purposeFilter, pipelineFilter)
       && (!normalized || [
         latest.name,
@@ -75,7 +79,7 @@ export function ModelsPanel({
         ...versions.map((version) => version.version)
       ].some((value) => value.toLowerCase().includes(normalized)))
     );
-  }, [businessCaseId, modelFamilies, pipelineFilter, pipelines, purposeFilter, query]);
+  }, [businessCaseId, modelFamilies, pipelineFilter, pipelines, purposeFilter, query, stageFilter]);
   const availablePipelines = businessCaseId
     ? pipelines.filter((pipeline) => pipeline.business_case_id === businessCaseId)
     : pipelines;
@@ -118,6 +122,16 @@ export function ModelsPanel({
             }}>
               <option value="">All business cases</option>
               {businessCases.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+            </select>
+          </label>
+          <label>
+            <span><SlidersHorizontal size={14} /> Status</span>
+            <select aria-label="Model status" value={stageFilter} onChange={(event) => setStageFilter(event.target.value)}>
+              <option value="">All statuses</option>
+              <option value="developed">Developed</option>
+              <option value="staging">Staging</option>
+              <option value="production">Production</option>
+              <option value="archived">Archived</option>
             </select>
           </label>
         </div>
@@ -167,7 +181,7 @@ export function ModelsPanel({
             </div>
           ))}
           {!visibleFamilies.length && (
-            <div className="catalog-empty">No models match the selected name and Business Case filters.</div>
+            <div className="catalog-empty">No models match the selected filters.</div>
           )}
         </div>
       </div>
@@ -216,13 +230,20 @@ export function ModelVersionHistoryDialog({
   onView: (model: ModelArtifact) => Promise<void> | void;
 }) {
   const [versions, setVersions] = useState<ModelArtifact[]>([]);
+  const [servingUsage, setServingUsage] = useState<ModelServingUsage[]>([]);
   const [error, setError] = useState("");
   const [openingModelId, setOpeningModelId] = useState("");
 
   useEffect(() => {
     let active = true;
-    api.listModelVersions(model.logical_id)
-      .then((items) => active && setVersions([...items].sort((left, right) => right.version_number - left.version_number)))
+    Promise.all([
+      api.listModelVersions(model.logical_id),
+      api.listModelServingUsage(model.logical_id)
+    ])
+      .then(([items, usage]) => { if (active) {
+        setVersions([...items].sort((left, right) => right.version_number - left.version_number));
+        setServingUsage(usage);
+      } })
       .catch((requestError) => active && setError(
         requestError instanceof Error ? requestError.message : "Could not load model versions"
       ));
@@ -243,8 +264,9 @@ export function ModelVersionHistoryDialog({
         {error && <div className="error-banner">{error}</div>}
         {!versions.length && !error && <div className="empty-state">Loading model versions…</div>}
         <div className="model-version-list">
-          {versions.map((version, index) => (
-            <article key={version.id}>
+          {versions.map((version, index) => {
+            const usages = servingUsage.filter((item) => item.model_id === version.id);
+            return <article key={version.id} className={usages.length ? "model-version-in-use" : ""}>
               <div className="model-version-marker"><span>{version.version}</span></div>
               <div>
                 <strong>
@@ -256,6 +278,16 @@ export function ModelVersionHistoryDialog({
                   pipeline definition {shortId(version.pipeline_version_id)}
                   {" · "}model hash {shortId(version.model_hash)}
                 </small>
+                {usages.length > 0 ? (
+                  <div className="model-serving-usage">
+                    <b><Rocket size={13} /> In production use · {usages.length} {usages.length === 1 ? "service" : "services"}</b>
+                    {usages.map((usage) => (
+                      <span key={`${usage.deployment_id}-${usage.role}`}>
+                        {usage.deployment_name} · {usage.role} · revision v{usage.revision_version} · {usage.deployment_status}
+                      </span>
+                    ))}
+                  </div>
+                ) : <span className="model-version-unused">Not assigned to an active service</span>}
               </div>
               <button className="secondary-button compact-button" type="button" disabled={openingModelId === version.id} onClick={async () => {
                 setOpeningModelId(version.id);
@@ -267,8 +299,8 @@ export function ModelVersionHistoryDialog({
               }}>
                 <Eye size={14} /> {openingModelId === version.id ? "Opening…" : "View"}
               </button>
-            </article>
-          ))}
+            </article>;
+          })}
         </div>
       </div>
     </div>
@@ -291,13 +323,13 @@ export function ModelDetailsDialog({
   onStageChanged?: (model: ModelArtifact) => Promise<void> | void;
 }) {
   const [tab, setTab] = useState<"overview" | "training" | "search" | "parameters" | "lineage">("overview");
-  const [nextStage, setNextStage] = useState<"candidate" | "staging" | "production" | "archived">(model.stage as "candidate" | "staging" | "production" | "archived");
+  const [nextStage, setNextStage] = useState<"developed" | "staging" | "production" | "archived">(model.stage as "developed" | "staging" | "production" | "archived");
   const [stageBusy, setStageBusy] = useState(false);
   const [dataLineage, setDataLineage] = useState<DatasetLineageReference[]>([]);
   const [lineageError, setLineageError] = useState("");
   const weights = model.model_parameters.weights ?? [];
   const optimization = optimizationSummary(model.metrics);
-  useEffect(() => setNextStage(model.stage as "candidate" | "staging" | "production" | "archived"), [model.id, model.stage]);
+  useEffect(() => setNextStage(model.stage as "developed" | "staging" | "production" | "archived"), [model.id, model.stage]);
   useEffect(() => {
     if (model.id.startsWith("dry-run:")) {
       setDataLineage([]);
@@ -344,7 +376,7 @@ export function ModelDetailsDialog({
               </div>
               <div className="model-stage-actions">
                 <select aria-label="Model lifecycle stage" value={nextStage} onChange={(event) => setNextStage(event.target.value as typeof nextStage)}>
-                  <option value="candidate">Candidate</option>
+                  <option value="developed">Developed</option>
                   <option value="staging">Staging</option>
                   <option value="production">Production</option>
                   <option value="archived">Archived</option>
@@ -1147,16 +1179,18 @@ function shortId(value: string) {
 export function ServingPanel({
   deployments,
   models,
+  initialDeploymentId = "",
   onRefresh,
   setNotice
 }: {
   deployments: Deployment[];
   models: ModelArtifact[];
+  initialDeploymentId?: string;
   onRefresh: () => Promise<void>;
   setNotice: NoticeSetter;
 }) {
   type ServingTab = "overview" | "test" | "traffic" | "access";
-  type ServingModal = "create" | "revision" | "credential" | "replay" | "inference" | null;
+  type ServingModal = "create" | "revision" | "history" | "lifecycle" | "credential" | "replay" | "inference" | null;
   const [serviceName, setServiceName] = useState("");
   const [modelId, setModelId] = useState("");
   const [deploymentId, setDeploymentId] = useState("");
@@ -1169,14 +1203,24 @@ export function ServingPanel({
   const [history, setHistory] = useState<InferenceRequest[]>([]);
   const [inferenceDetail, setInferenceDetail] = useState<Record<string, unknown> | null>(null);
   const [replays, setReplays] = useState<ChallengerReplay[]>([]);
+  const [revisions, setRevisions] = useState<DeploymentRevision[]>([]);
   const [historyError, setHistoryError] = useState("");
   const [roleByModel, setRoleByModel] = useState<Record<string, DeploymentRole | "">>({});
   const [revisionReason, setRevisionReason] = useState("");
+  const [lifecycleReason, setLifecycleReason] = useState("");
+  const [rollbackRevisionId, setRollbackRevisionId] = useState("");
   const [credential, setCredential] = useState("");
   const [busy, setBusy] = useState(false);
   const selectedDeployment = deployments.find((item) => item.id === deploymentId);
   const eligibleModels = models.filter((item) => item.business_case_id === selectedDeployment?.business_case_id);
   const productionModels = models.filter((item) => item.stage === "production" && item.business_case_id);
+
+  useEffect(() => {
+    if (initialDeploymentId && deployments.some((item) => item.id === initialDeploymentId)) {
+      setDeploymentId(initialDeploymentId);
+      setActiveTab("overview");
+    }
+  }, [deployments, initialDeploymentId]);
 
   useEffect(() => {
     const assignments = selectedDeployment?.active_revision?.assignments ?? [];
@@ -1188,8 +1232,16 @@ export function ServingPanel({
     }
     let active = true;
     setHistoryError("");
-    Promise.all([api.inferenceLog(selectedDeployment.id, 50), api.listChallengerReplays(selectedDeployment.id)])
-      .then(([page, replayItems]) => { if (active) { setHistory(page.items); setReplays(replayItems); } })
+    Promise.all([
+      api.inferenceLog(selectedDeployment.id, 50),
+      api.listChallengerReplays(selectedDeployment.id),
+      api.listDeploymentRevisions(selectedDeployment.id)
+    ])
+      .then(([page, replayItems, revisionItems]) => { if (active) {
+        setHistory(page.items);
+        setReplays(replayItems);
+        setRevisions(revisionItems);
+      } })
       .catch((error) => active && setHistoryError(error instanceof Error ? error.message : "Could not load inference history"));
     return () => { active = false; };
   }, [selectedDeployment?.id, selectedDeployment?.active_revision_id]);
@@ -1257,6 +1309,36 @@ export function ServingPanel({
       setRevisionReason("");
       setModal(null);
       setNotice("New immutable service revision activated");
+      await onRefresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function changeDeploymentStatus() {
+    if (!selectedDeployment || !lifecycleReason.trim()) return;
+    const nextStatus = selectedDeployment.status === "running" ? "stopped" : "running";
+    setBusy(true);
+    try {
+      await api.setDeploymentStatus(selectedDeployment.id, nextStatus, lifecycleReason.trim());
+      setLifecycleReason("");
+      setModal(null);
+      setNotice(`Model service ${nextStatus === "running" ? "started" : "stopped"}`);
+      await onRefresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function rollbackDeployment() {
+    if (!selectedDeployment || !rollbackRevisionId || !revisionReason.trim()) return;
+    setBusy(true);
+    try {
+      await api.rollbackDeployment(selectedDeployment.id, rollbackRevisionId, revisionReason.trim());
+      setRevisionReason("");
+      setRollbackRevisionId("");
+      setModal(null);
+      setNotice("Rollback activated as a new immutable service revision");
       await onRefresh();
     } finally {
       setBusy(false);
@@ -1368,7 +1450,14 @@ export function ServingPanel({
       <button className="serving-back-button" type="button" onClick={() => setDeploymentId("")}><ArrowLeft size={16} /> All model services</button>
       <div className="serving-detail-header">
         <div><span className="builder-kicker">Online inference service</span><h2>{selectedDeployment.name}</h2><div className="serving-title-meta"><span className={`status-pill ${selectedDeployment.status}`}>{selectedDeployment.status}</span><span>Revision v{selectedDeployment.active_revision?.version_number ?? "—"}</span><span>Retention {selectedDeployment.retention_days} days</span></div></div>
-        <button className="secondary-button" type="button" onClick={() => setModal("revision")}><GitBranch size={16} /> Configure models</button>
+        <div className="model-row-actions">
+          <button className="secondary-button" type="button" onClick={() => setModal("history")}><History size={16} /> Revision history</button>
+          <button className="secondary-button" type="button" onClick={() => setModal("lifecycle")}>
+            {selectedDeployment.status === "running" ? <X size={16} /> : <Play size={16} />}
+            {selectedDeployment.status === "running" ? "Stop service" : selectedDeployment.status === "stopped" ? "Start service" : "Validate & resume"}
+          </button>
+          <button className="secondary-button" type="button" onClick={() => setModal("revision")}><GitBranch size={16} /> Configure models</button>
+        </div>
       </div>
       <div className="serving-endpoint-bar"><div><small>Stable production endpoint</small><code>{selectedDeployment.endpoint_url}</code></div><button className="icon-button" type="button" aria-label="Copy endpoint" title="Copy endpoint" onClick={() => navigator.clipboard.writeText(selectedDeployment.endpoint_url ?? "")}><Copy size={16} /></button></div>
 
@@ -1415,6 +1504,10 @@ export function ServingPanel({
       </div>}
 
       {modal === "revision" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog serving-revision-dialog" role="dialog" aria-modal="true" aria-labelledby="revision-title"><div className="modal-header"><div><span className="builder-kicker">Immutable configuration</span><h2 id="revision-title">Configure model roles</h2><p>Saving creates and immediately activates a new service revision. The previous revision remains auditable.</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body form-panel"><div className="serving-role-help"><span><strong>Champion</strong> public traffic</span><span><strong>Challenger</strong> direct tests and replay</span><span><strong>Shadow</strong> copied live traffic</span><span><strong>Fallback</strong> technical failures</span></div><div className="serving-role-grid">{eligibleModels.map((model) => <label key={model.id}><span>{model.name} · {model.version}<small>{model.stage}</small></span><select value={roleByModel[model.id] ?? ""} onChange={(event) => setRoleByModel((current) => ({ ...current, [model.id]: event.target.value as DeploymentRole | "" }))}><option value="">Not assigned</option><option value="champion" disabled={model.stage !== "production"}>Champion</option><option value="challenger" disabled={!['staging', 'production'].includes(model.stage)}>Challenger</option><option value="shadow" disabled={!['staging', 'production'].includes(model.stage)}>Shadow</option><option value="fallback" disabled={model.stage !== "production"}>Fallback</option></select></label>)}</div><label>Reason for change<input value={revisionReason} onChange={(event) => setRevisionReason(event.target.value)} placeholder="e.g. Add validated challenger v6" /></label></div><div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>Cancel</button><button className="primary-button" type="button" onClick={activateRevision} disabled={busy || !revisionReason.trim()}><GitBranch size={15} /> Activate new revision</button></div></div></div>}
+
+      {modal === "history" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog" role="dialog" aria-modal="true" aria-labelledby="history-title"><div className="modal-header"><div><span className="builder-kicker">Immutable history</span><h2 id="history-title">Service revisions</h2><p>Rollback copies a historical configuration into a new auditable revision.</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body form-panel"><div className="model-version-list">{revisions.map((revision) => <article key={revision.id}><div className="model-version-marker"><span>v{revision.version_number}</span></div><div><strong>Revision v{revision.version_number}</strong><span>{formatDate(revision.created_at)} · {revision.assignments.length} assigned model(s)</span><small>{revision.reason || "No reason recorded"}</small></div>{revision.id === selectedDeployment.active_revision_id ? <i className="pipeline-status published">active</i> : <button className="secondary-button compact-button" type="button" onClick={() => setRollbackRevisionId(revision.id)}>Select rollback</button>}</article>)}</div>{rollbackRevisionId && <label>Rollback reason<input value={revisionReason} onChange={(event) => setRevisionReason(event.target.value)} placeholder="Why is this revision being restored?" /></label>}</div><div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>Close</button><button className="primary-button" type="button" onClick={rollbackDeployment} disabled={busy || !rollbackRevisionId || !revisionReason.trim()}><History size={15} /> Roll back</button></div></div></div>}
+
+      {modal === "lifecycle" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog" role="dialog" aria-modal="true" aria-labelledby="lifecycle-title"><div className="modal-header"><div><span className="builder-kicker">Service lifecycle</span><h2 id="lifecycle-title">{selectedDeployment.status === "running" ? "Stop service" : "Validate and resume service"}</h2><p>{selectedDeployment.status === "running" ? "The endpoint will reject scoring while revision history remains available." : "The active revision will be validated before traffic is accepted."}</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body form-panel"><label>Reason<input value={lifecycleReason} onChange={(event) => setLifecycleReason(event.target.value)} placeholder="Reason for this operational change" /></label></div><div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>Cancel</button><button className="primary-button" type="button" onClick={changeDeploymentStatus} disabled={busy || !lifecycleReason.trim()}>{selectedDeployment.status === "running" ? "Stop service" : "Validate & resume"}</button></div></div></div>}
 
       {modal === "replay" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog" role="dialog" aria-modal="true" aria-labelledby="replay-title"><div className="modal-header"><div><span className="builder-kicker">Batch evaluation</span><h2 id="replay-title">Replay historical traffic</h2><p>Score up to 1,000 retained requests with a challenger. Production responses are not changed.</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body form-panel"><label>Challenger<select value={scoreTarget === "champion" ? "" : scoreTarget} onChange={(event) => setScoreTarget(event.target.value)}><option value="">Choose a challenger</option>{challengers.map((item) => <option key={item.model_id} value={item.model_id}>{modelLabel(item.model_id)}</option>)}</select></label><div className="serving-inline-warning">Replay uses the current immutable revision and retained historical inputs.</div></div><div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>Cancel</button><button className="primary-button" type="button" onClick={replayChallenger} disabled={busy || scoreTarget === "champion" || !scoreTarget}><History size={16} /> Queue replay</button></div></div></div>}
 

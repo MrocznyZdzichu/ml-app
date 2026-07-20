@@ -1698,7 +1698,7 @@ function dryRunModel(
     logical_id: "",
     version_number: 0,
     algorithm: output.algorithm || "unknown",
-    stage: "candidate",
+    stage: "developed",
     artifact_uri: output.location_uri,
     metrics: output.metrics ?? {},
     business_case_id: run.business_case_id,

@@ -82,6 +82,7 @@ class InferenceRequest:
     requested_by: str
     correlation_id: str
     idempotency_key: str
+    request_hash: str
     status: InferenceStatus
     record_count: int
     request_payload: dict[str, Any]

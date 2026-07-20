@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from typing import Any
 
@@ -65,6 +66,35 @@ def run_payload(status: str = "queued", **overrides: Any) -> dict[str, Any]:
 
 
 class MLAppClientTests(unittest.TestCase):
+    def test_connect_prompts_for_normal_user_without_persisting_password(self) -> None:
+        session = FakeSession([FakeResponse({"access_token": "user-token"})])
+
+        with patch.dict("os.environ", {"ML_APP_ACCESS_TOKEN": "", "ML_APP_LOGIN": ""}):
+            client = MLAppClient.connect(
+                session=session,
+                prompt=lambda message: "analyst@example.com",
+                password_prompt=lambda message: "secret-password",
+            )
+
+        self.assertEqual(session.headers["Authorization"], "Bearer user-token")
+        self.assertEqual(session.requests[0][2]["json"], {
+            "login": "analyst@example.com", "password": "secret-password",
+        })
+        client.close()
+
+    def test_list_model_serving_usage_returns_typed_assignments(self) -> None:
+        session = FakeSession([FakeResponse([{
+            "model_id": "model-v11", "deployment_id": "service-1",
+            "deployment_name": "Estates Service", "deployment_status": "running",
+            "revision_version": 3, "role": "champion", "endpoint_url": "/predictions",
+        }])])
+
+        usage = MLAppClient(session=session).list_model_serving_usage("family/estates")
+
+        self.assertEqual(usage[0].role, "champion")
+        self.assertEqual(usage[0].revision_version, 3)
+        self.assertIn("/model-families/family%2Festates/usage", session.requests[-1][1])
+
     def test_conflict_response_has_a_specific_client_error(self) -> None:
         session = FakeSession([FakeResponse(
             {"detail": "Business Case name 'Sales' is already in use"}, 409
@@ -303,7 +333,7 @@ class MLAppClientTests(unittest.TestCase):
 
         self.assertEqual(promoted["stage"], "staging")
         method, url, kwargs = session.requests[-1]
-        self.assertEqual((method, url), ("POST", "http://localhost:8000/api/v1/models/model-v10/promote"))
+        self.assertEqual((method, url), ("PATCH", "http://localhost:8000/api/v1/models/model-v10/stage"))
         self.assertEqual(kwargs["json"], {"stage": "staging"})
 
     def test_promote_model_uses_latest_version_and_validates_stage(self) -> None:
@@ -314,9 +344,46 @@ class MLAppClientTests(unittest.TestCase):
         client = MLAppClient(session=session)
 
         client.promote_model("Churn Model", "production")
-        self.assertIn("/models/model-v3/promote", session.requests[-1][1])
+        self.assertIn("/models/model-v3/stage", session.requests[-1][1])
         with self.assertRaises(ValueError):
             client.promote_model("Churn Model", "champion")
+
+    def test_candidate_stage_is_sent_as_developed_compatibility_alias(self) -> None:
+        session = FakeSession([
+            FakeResponse([{"id": "model-v1", "name": "Churn Model", "version_number": 1}]),
+            FakeResponse({"id": "model-v1", "stage": "developed"}),
+        ])
+        with self.assertWarns(DeprecationWarning):
+            MLAppClient(session=session).promote_model("Churn Model", "candidate")
+        self.assertEqual(session.requests[-1][2]["json"], {"stage": "developed"})
+
+    def test_service_lifecycle_revision_history_and_rollback_paths(self) -> None:
+        deployment = {
+            "id": "deployment-1", "name": "Estates Service", "slug": "estates-service",
+            "business_case_id": "bc-1", "status": "running", "endpoint_url": "/predictions",
+            "active_revision": {"id": "revision-2"},
+        }
+        session = FakeSession([
+            FakeResponse([deployment]),
+            FakeResponse([{"id": "revision-2", "version_number": 2}]),
+            FakeResponse([deployment]),
+            FakeResponse({"id": "revision-3", "version_number": 3}, 201),
+            FakeResponse([deployment]),
+            FakeResponse({**deployment, "status": "stopped"}),
+        ])
+        client = MLAppClient(session=session)
+
+        self.assertEqual(client.deployment_revisions("Estates Service")[0]["version_number"], 2)
+        client.rollback_deployment(
+            "Estates Service", revision_id="revision-1", reason="Regression"
+        )
+        stopped = client.set_deployment_status(
+            "Estates Service", status="stopped", reason="Maintenance"
+        )
+
+        self.assertEqual(stopped.status, "stopped")
+        self.assertIn("/revisions/revision-1/rollback", session.requests[3][1])
+        self.assertEqual(session.requests[-1][2]["json"]["reason"], "Maintenance")
 
 
 if __name__ == "__main__":

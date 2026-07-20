@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import json
 import logging
 import re
 import time
@@ -118,6 +120,13 @@ class ServingService:
             if self._can_read(principal, deployment.business_case_id)
         ]
 
+    def list_model_family_usage(self, logical_id: str, principal: Principal) -> list[dict[str, Any]]:
+        usage: list[dict[str, Any]] = []
+        for version in self.models.list_versions(logical_id, principal):
+            for assignment in self.repository.active_assignments_for_model(version.id):
+                usage.append({"model_id": version.id, **assignment})
+        return usage
+
     def get_deployment(self, deployment_id_or_slug: str, principal: Principal) -> Deployment:
         deployment = self.repository.get_deployment(deployment_id_or_slug)
         if not deployment:
@@ -178,6 +187,59 @@ class ServingService:
         })
         return revision
 
+    def set_deployment_status(
+        self,
+        deployment_id: str,
+        next_status: DeploymentStatus,
+        reason: str,
+        principal: Principal,
+    ) -> Deployment:
+        deployment = self.get_deployment(deployment_id, principal)
+        access_policy.require_business_case(
+            principal, deployment.business_case_id, BusinessCaseAccessRole.CONTRIBUTOR
+        )
+        if next_status not in {DeploymentStatus.RUNNING, DeploymentStatus.STOPPED}:
+            raise HTTPException(status_code=422, detail="Deployment may be started or stopped only")
+        previous_status = deployment.status
+        if next_status == previous_status:
+            return deployment
+        revision = self.get_active_revision(deployment)
+        if next_status == DeploymentStatus.RUNNING:
+            self._validate_assignments(revision.assignments, deployment.business_case_id, principal)
+        deployment.status = next_status
+        deployment.updated_by = principal.user_id
+        deployment.updated_at = datetime.now(timezone.utc)
+        self.repository.set_deployment_status(deployment, revision)
+        self._audit(principal, "serving.deployment_status_changed", deployment, {
+            "status": previous_status.value,
+        }, {"status": next_status.value, "reason": reason})
+        return deployment
+
+    def rollback_deployment(
+        self,
+        deployment_id: str,
+        revision_id: str,
+        reason: str,
+        principal: Principal,
+    ) -> DeploymentRevision:
+        deployment = self.get_deployment(deployment_id, principal)
+        source = self.repository.get_revision(revision_id)
+        if source is None or source.deployment_id != deployment.id:
+            raise HTTPException(status_code=404, detail="Deployment revision not found")
+        if source.id == deployment.active_revision_id:
+            raise HTTPException(status_code=409, detail="The selected revision is already active")
+        return self.create_revision(
+            deployment.id,
+            DeploymentRevisionCreate(
+                assignments=[
+                    {"model_id": item.model_id, "role": item.role}
+                    for item in source.assignments
+                ],
+                reason=f"Rollback to v{source.version_number}: {reason}",
+            ),
+            principal,
+        )
+
     def score(
         self,
         deployment_id_or_slug: str,
@@ -198,6 +260,17 @@ class ServingService:
         revision = self.repository.get_revision(_revision_id) if _revision_id else self.get_active_revision(deployment)
         if revision is None or revision.deployment_id != deployment.id:
             raise HTTPException(status_code=409, detail="Pinned deployment revision is unavailable")
+        if not _revision_id:
+            try:
+                self._validate_assignments(revision.assignments, deployment.business_case_id, principal)
+            except HTTPException as exc:
+                deployment.status = DeploymentStatus.DEGRADED
+                deployment.updated_at = datetime.now(timezone.utc)
+                self.repository.update_deployment(deployment)
+                raise HTTPException(
+                    status_code=503,
+                    detail="Active deployment revision no longer satisfies model lifecycle or inference contract requirements",
+                ) from exc
         assignments = {item.role: item for item in revision.assignments}
         primary_role = DeploymentRole.CHALLENGER if challenger_model_id else DeploymentRole.CHAMPION
         if challenger_model_id:
@@ -208,21 +281,37 @@ class ServingService:
         else:
             primary = assignments[DeploymentRole.CHAMPION]
 
-        existing = self.repository.find_idempotent(deployment.id, principal.user_id, idempotency_key)
+        normalized, warnings = self._normalize_instances(instances)
+        normalized_key = idempotency_key.strip()[:255]
+        request_hash = self._request_hash(
+            revision.id,
+            primary.model_id,
+            primary_role,
+            [
+                {"record_id": item.record_id, "features": dict(item.features)}
+                for item in instances
+            ],
+        )
+        existing = self.repository.find_idempotent(deployment.id, principal.user_id, normalized_key)
         if existing is not None:
+            if not existing.request_hash or existing.request_hash != request_hash:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Idempotency key was already used for a different request, model, or deployment revision",
+                )
             if existing.status == InferenceStatus.SUCCEEDED:
                 return ScoreResponse.model_validate(existing.response_payload)
             raise HTTPException(status_code=409, detail=f"Idempotency key belongs to request {existing.id} with status {existing.status.value}")
 
         request_id = str(uuid4())
-        normalized, warnings = self._normalize_instances(instances)
         inference = InferenceRequest(
             id=request_id,
             deployment_id=deployment.id,
             deployment_revision_id=revision.id,
             requested_by=principal.user_id,
             correlation_id=(correlation_id.strip() or request_id)[:128],
-            idempotency_key=idempotency_key.strip()[:255],
+            idempotency_key=normalized_key,
+            request_hash=request_hash,
             status=InferenceStatus.ACCEPTED,
             record_count=len(normalized),
             request_payload={"instances": normalized},
@@ -231,6 +320,16 @@ class ServingService:
         )
         try:
             self.repository.add_inference(inference)
+        except IntegrityError as exc:
+            concurrent = self.repository.find_idempotent(
+                deployment.id, principal.user_id, normalized_key
+            )
+            if concurrent is not None and concurrent.request_hash == request_hash:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Idempotent request {concurrent.id} is already {concurrent.status.value}; retry shortly",
+                ) from exc
+            raise HTTPException(status_code=409, detail="Idempotency key conflict") from exc
         except Exception as exc:
             raise HTTPException(status_code=503, detail="Inference audit storage is unavailable") from exc
 
@@ -238,36 +337,66 @@ class ServingService:
         execution_items: list[dict[str, Any]] = []
         fallback_used = False
         served = primary
+        primary_started = time.monotonic()
         try:
             primary_outputs = self._execute(primary, normalized, principal, request_id)
         except RuntimeInputError as input_error:
-            self._fail_inference(inference, "invalid_input", str(input_error), started)
+            execution_items.extend(self._failed_item_rows(
+                inference, normalized, primary, str(input_error), primary_started
+            ))
+            self._fail_inference(inference, "invalid_input", str(input_error), started, execution_items)
             raise HTTPException(status_code=422, detail=str(input_error)) from input_error
         except RuntimeUnavailableError as primary_error:
+            execution_items.extend(self._failed_item_rows(
+                inference, normalized, primary, str(primary_error), primary_started
+            ))
             fallback = assignments.get(DeploymentRole.FALLBACK) if not challenger_model_id else None
+            if not challenger_model_id:
+                self._set_runtime_status(
+                    deployment, DeploymentStatus.DEGRADED, principal,
+                    "Champion runtime became unavailable",
+                )
             if fallback is None:
-                self._fail_inference(inference, "runtime_unavailable", str(primary_error), started)
+                self._fail_inference(inference, "runtime_unavailable", str(primary_error), started, execution_items)
                 raise HTTPException(status_code=503, detail="Champion model runtime is unavailable") from primary_error
             served = fallback
             fallback_used = True
             warnings.append(f"Champion failed technically; fallback {fallback.model_id} served the request")
+            fallback_started = time.monotonic()
             try:
                 primary_outputs = self._execute(fallback, normalized, principal, request_id)
             except RuntimeInputError as input_error:
-                self._fail_inference(inference, "invalid_input", str(input_error), started)
+                execution_items.extend(self._failed_item_rows(
+                    inference, normalized, fallback, str(input_error), fallback_started
+                ))
+                self._fail_inference(inference, "invalid_input", str(input_error), started, execution_items)
                 raise HTTPException(status_code=422, detail=str(input_error)) from input_error
             except RuntimeUnavailableError as fallback_error:
-                self._fail_inference(inference, "fallback_unavailable", str(fallback_error), started)
+                execution_items.extend(self._failed_item_rows(
+                    inference, normalized, fallback, str(fallback_error), fallback_started
+                ))
+                self._fail_inference(inference, "fallback_unavailable", str(fallback_error), started, execution_items)
                 raise HTTPException(status_code=503, detail="Champion and fallback runtimes are unavailable") from fallback_error
 
-        execution_items.extend(self._item_rows(inference, normalized, primary_outputs, served))
+        successful_started = fallback_started if fallback_used else primary_started
+        execution_items.extend(self._item_rows(
+            inference, normalized, primary_outputs, served,
+            round((time.monotonic() - successful_started) * 1000),
+        ))
         if not challenger_model_id:
             for shadow in (item for item in revision.assignments if item.role == DeploymentRole.SHADOW):
+                shadow_started = time.monotonic()
                 try:
                     shadow_outputs = self._execute(shadow, normalized, principal, request_id)
-                    execution_items.extend(self._item_rows(inference, normalized, shadow_outputs, shadow))
+                    execution_items.extend(self._item_rows(
+                        inference, normalized, shadow_outputs, shadow,
+                        round((time.monotonic() - shadow_started) * 1000),
+                    ))
                 except (RuntimeUnavailableError, RuntimeInputError) as exc:
                     warnings.append(f"Shadow model {shadow.model_id} failed: {exc}")
+                    execution_items.extend(self._failed_item_rows(
+                        inference, normalized, shadow, str(exc), shadow_started
+                    ))
 
         predictions = [
             PredictionRead(
@@ -277,6 +406,15 @@ class ServingService:
             )
             for item, output in zip(normalized, primary_outputs, strict=True)
         ]
+        if (
+            not challenger_model_id
+            and not fallback_used
+            and deployment.status == DeploymentStatus.DEGRADED
+        ):
+            self._set_runtime_status(
+                deployment, DeploymentStatus.RUNNING, principal,
+                "Champion runtime recovered during a successful request",
+            )
         response = ScoreResponse(
             request_id=inference.id,
             correlation_id=inference.correlation_id,
@@ -401,15 +539,21 @@ class ServingService:
             user_id=account.id, email=account.email, display_name=account.display_name,
             login_name=account.login_name, roles=account.roles, session_version=account.session_version,
         )
-        deployment = self.get_deployment(job.deployment_id, principal)
-        access_policy.require_business_case(
-            principal, deployment.business_case_id, BusinessCaseAccessRole.CONTRIBUTOR
-        )
+        try:
+            deployment = self.get_deployment(job.deployment_id, principal)
+            access_policy.require_business_case(
+                principal, deployment.business_case_id, BusinessCaseAccessRole.CONTRIBUTOR
+            )
+        except Exception as exc:
+            job.status = ReplayStatus.FAILED
+            job.error_message = f"Replay authorization failed before execution: {exc}"[:4000]
+            job.completed_at = datetime.now(timezone.utc)
+            return self.repository.update_replay(job)
         job.status = ReplayStatus.RUNNING
         job.started_at = datetime.now(timezone.utc)
         self.repository.update_replay(job)
-        sources = self.repository.replay_sources(job)
         try:
+            sources = self.repository.replay_sources(job)
             for index, source in enumerate(sources, start=1):
                 try:
                     instances = [ScoreRecord.model_validate(item) for item in source.request_payload.get("instances", [])]
@@ -492,16 +636,49 @@ class ServingService:
             self._require_stage(model.stage, assignment.role)
             models.append(model)
         champion = models[[item.role for item in assignments].index(DeploymentRole.CHAMPION)]
-        expected = (champion.problem_type, tuple(champion.feature_columns))
-        incompatible = [model.id for model in models if (model.problem_type, tuple(model.feature_columns)) != expected]
+        expected = self._inference_contract(champion)
+        incompatible = [model.id for model in models if self._inference_contract(model) != expected]
         if incompatible:
             raise HTTPException(status_code=409, detail=f"Models have incompatible inference contracts: {', '.join(incompatible)}")
+
+    @staticmethod
+    def _inference_contract(model) -> tuple[Any, ...]:
+        feature_definition = model.feature_engineering_definition or {}
+        raw_features = feature_definition.get("feature_columns") or model.feature_columns
+        classes = (
+            model.model_parameters.get("classes")
+            or model.training_config.get("classes")
+            or []
+        )
+        output_schema = model.training_config.get("prediction_output_schema") or {}
+        return (
+            model.problem_type,
+            model.target_column,
+            tuple(raw_features),
+            tuple(str(item) for item in classes),
+            json.dumps(output_schema, sort_keys=True, separators=(",", ":")),
+        )
 
     @staticmethod
     def _require_stage(stage: ModelStage, role: DeploymentRole) -> None:
         allowed = {ModelStage.PRODUCTION} if role in {DeploymentRole.CHAMPION, DeploymentRole.FALLBACK} else {ModelStage.STAGING, ModelStage.PRODUCTION}
         if stage not in allowed:
             raise HTTPException(status_code=409, detail=f"Model stage {stage.value} cannot be assigned as {role.value}")
+
+    @staticmethod
+    def _request_hash(
+        revision_id: str,
+        model_id: str,
+        role: DeploymentRole,
+        instances: list[dict[str, Any]],
+    ) -> str:
+        canonical = json.dumps({
+            "revision_id": revision_id,
+            "model_id": model_id,
+            "role": role.value,
+            "instances": instances,
+        }, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _normalize_instances(instances: list[ScoreRecord]) -> tuple[list[dict[str, Any]], list[str]]:
@@ -530,6 +707,7 @@ class ServingService:
         instances: list[dict[str, Any]],
         outputs: list[dict[str, Any]],
         assignment: ModelAssignment,
+        latency_ms: int,
     ) -> list[dict[str, Any]]:
         return [{
             "id": f"{inference.id}:{assignment.model_id}:{index}",
@@ -540,17 +718,51 @@ class ServingService:
             "role": assignment.role.value,
             "input": instance["features"],
             "output": output,
+            "status": "succeeded",
+            "error_message": "",
+            "latency_ms": latency_ms,
             "created_at": inference.created_at,
         } for index, (instance, output) in enumerate(zip(instances, outputs, strict=True))]
 
-    def _fail_inference(self, inference: InferenceRequest, code: str, message: str, started: float) -> None:
+    @staticmethod
+    def _failed_item_rows(
+        inference: InferenceRequest,
+        instances: list[dict[str, Any]],
+        assignment: ModelAssignment,
+        error_message: str,
+        started: float,
+    ) -> list[dict[str, Any]]:
+        latency_ms = round((time.monotonic() - started) * 1000)
+        return [{
+            "id": f"{inference.id}:{assignment.model_id}:{index}",
+            "request_id": inference.id,
+            "deployment_id": inference.deployment_id,
+            "record_id": instance["record_id"],
+            "model_id": assignment.model_id,
+            "role": assignment.role.value,
+            "input": instance["features"],
+            "output": {},
+            "status": "failed",
+            "error_message": error_message[:4000],
+            "latency_ms": latency_ms,
+            "created_at": inference.created_at,
+        } for index, instance in enumerate(instances)]
+
+    def _fail_inference(
+        self,
+        inference: InferenceRequest,
+        code: str,
+        message: str,
+        started: float,
+        execution_items: list[dict[str, Any]] | None = None,
+    ) -> None:
         inference.status = InferenceStatus.FAILED
         inference.error_code = code
         inference.error_message = message[:4000]
         inference.latency_ms = round((time.monotonic() - started) * 1000)
         inference.completed_at = datetime.now(timezone.utc)
         try:
-            self.repository.complete_inference(inference, [])
+            self.repository.complete_inference(inference, execution_items or [])
         except Exception as exc:
             raise HTTPException(status_code=503, detail="Inference and audit storage are unavailable") from exc
 
@@ -562,6 +774,32 @@ class ServingService:
             suffix += 1
             slug = f"{base[:210]}-{suffix}"
         return slug
+
+    def _set_runtime_status(
+        self,
+        deployment: Deployment,
+        next_status: DeploymentStatus,
+        principal: Principal,
+        reason: str,
+    ) -> None:
+        if deployment.status == next_status:
+            return
+        previous = deployment.status
+        deployment.status = next_status
+        deployment.updated_by = principal.user_id
+        deployment.updated_at = datetime.now(timezone.utc)
+        try:
+            self.repository.update_deployment(deployment)
+            self._audit(principal, "serving.runtime_status_changed", deployment, {
+                "status": previous.value,
+            }, {"status": next_status.value, "reason": reason})
+        except Exception:
+            deployment.status = previous
+            logger.exception(
+                "Could not persist runtime deployment status deployment_id=%s status=%s",
+                deployment.id,
+                next_status.value,
+            )
 
     @staticmethod
     def _encode_cursor(item: InferenceRequest) -> str:

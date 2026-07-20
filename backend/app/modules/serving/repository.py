@@ -52,6 +52,14 @@ deployment_revisions_table = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
+active_model_assignments_table = Table(
+    "serving_active_model_assignments", metadata,
+    Column("deployment_id", String(64), primary_key=True),
+    Column("model_id", String(64), primary_key=True),
+    Column("revision_id", String(64), nullable=False, index=True),
+    Column("role", String(32), nullable=False),
+)
+
 inference_requests_table = Table(
     "serving_inference_requests", metadata,
     Column("id", String(64), primary_key=True),
@@ -60,6 +68,7 @@ inference_requests_table = Table(
     Column("requested_by", String(64), nullable=False, index=True),
     Column("correlation_id", String(128), nullable=False),
     Column("idempotency_key", String(255), nullable=False, default=""),
+    Column("request_hash", String(64), nullable=False, default=""),
     Column("status", String(32), nullable=False),
     Column("record_count", Integer, nullable=False),
     Column("request_payload", JSON, nullable=False),
@@ -86,6 +95,9 @@ inference_items_table = Table(
     Column("role", String(32), nullable=False),
     Column("input", JSON, nullable=False),
     Column("output", JSON, nullable=False),
+    Column("status", String(32), nullable=False, default="succeeded"),
+    Column("error_message", Text, nullable=False, default=""),
+    Column("latency_ms", Integer, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
@@ -119,6 +131,10 @@ class ServingRepository(Protocol):
     def add_revision(self, revision: DeploymentRevision, deployment: Deployment) -> DeploymentRevision: ...
     def get_revision(self, revision_id: str) -> DeploymentRevision | None: ...
     def list_revisions(self, deployment_id: str) -> list[DeploymentRevision]: ...
+    def active_assignments_for_model(self, model_id: str) -> list[dict[str, Any]]: ...
+    def clear_active_assignments(self, deployment_id: str) -> None: ...
+    def restore_active_assignments(self, deployment: Deployment, revision: DeploymentRevision) -> None: ...
+    def set_deployment_status(self, deployment: Deployment, revision: DeploymentRevision) -> Deployment: ...
     def add_inference(self, inference: InferenceRequest) -> InferenceRequest: ...
     def get_inference(self, request_id: str) -> InferenceRequest | None: ...
     def find_idempotent(self, deployment_id: str, requested_by: str, key: str) -> InferenceRequest | None: ...
@@ -143,6 +159,7 @@ class PostgresServingRepository:
         with self.engine.begin() as connection:
             connection.execute(deployments_table.insert().values(**self._deployment_record(deployment)))
             connection.execute(deployment_revisions_table.insert().values(**self._revision_record(revision)))
+            self._replace_active_assignments(connection, deployment.id, revision)
         return deployment
 
     def update_deployment(self, deployment: Deployment) -> Deployment:
@@ -187,6 +204,7 @@ class PostgresServingRepository:
                     status=deployment.status.value,
                 )
             )
+            self._replace_active_assignments(connection, deployment.id, revision)
         return revision
 
     def get_revision(self, revision_id: str) -> DeploymentRevision | None:
@@ -206,6 +224,78 @@ class PostgresServingRepository:
                 .order_by(deployment_revisions_table.c.version_number.desc())
             )
             return [self._revision(row._mapping) for row in rows]
+
+    def active_assignments_for_model(self, model_id: str) -> list[dict[str, Any]]:
+        self._ensure_initialized()
+        statement = (
+            select(
+                active_model_assignments_table.c.deployment_id,
+                active_model_assignments_table.c.revision_id,
+                active_model_assignments_table.c.role,
+                deployments_table.c.name.label("deployment_name"),
+                deployments_table.c.slug.label("deployment_slug"),
+                deployments_table.c.status.label("deployment_status"),
+                deployments_table.c.endpoint_url,
+                deployment_revisions_table.c.version_number.label("revision_version"),
+            )
+            .join(deployments_table, deployments_table.c.id == active_model_assignments_table.c.deployment_id)
+            .join(deployment_revisions_table, deployment_revisions_table.c.id == active_model_assignments_table.c.revision_id)
+            .where(active_model_assignments_table.c.model_id == model_id)
+        )
+        with self.engine.begin() as connection:
+            return [dict(row._mapping) for row in connection.execute(statement)]
+
+    def clear_active_assignments(self, deployment_id: str) -> None:
+        self._ensure_initialized()
+        with self.engine.begin() as connection:
+            connection.execute(
+                active_model_assignments_table.delete().where(
+                    active_model_assignments_table.c.deployment_id == deployment_id
+                )
+            )
+
+    def restore_active_assignments(self, deployment: Deployment, revision: DeploymentRevision) -> None:
+        self._ensure_initialized()
+        with self.engine.begin() as connection:
+            self._replace_active_assignments(connection, deployment.id, revision)
+
+    def set_deployment_status(self, deployment: Deployment, revision: DeploymentRevision) -> Deployment:
+        self._ensure_initialized()
+        with self.engine.begin() as connection:
+            if deployment.status == DeploymentStatus.STOPPED:
+                connection.execute(
+                    active_model_assignments_table.delete().where(
+                        active_model_assignments_table.c.deployment_id == deployment.id
+                    )
+                )
+            else:
+                self._replace_active_assignments(connection, deployment.id, revision)
+            connection.execute(
+                deployments_table.update().where(deployments_table.c.id == deployment.id).values(
+                    status=deployment.status.value,
+                    updated_by=deployment.updated_by,
+                    updated_at=deployment.updated_at,
+                )
+            )
+        return deployment
+
+    @staticmethod
+    def _replace_active_assignments(connection, deployment_id: str, revision: DeploymentRevision) -> None:
+        connection.execute(
+            active_model_assignments_table.delete().where(
+                active_model_assignments_table.c.deployment_id == deployment_id
+            )
+        )
+        if revision.assignments:
+            connection.execute(active_model_assignments_table.insert(), [
+                {
+                    "deployment_id": deployment_id,
+                    "revision_id": revision.id,
+                    "model_id": assignment.model_id,
+                    "role": assignment.role.value,
+                }
+                for assignment in revision.assignments
+            ])
 
     def add_inference(self, inference: InferenceRequest) -> InferenceRequest:
         self._ensure_initialized()

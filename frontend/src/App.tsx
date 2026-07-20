@@ -182,6 +182,7 @@ export default function App() {
   } | null>(null);
   const [modelBusinessCaseFilter, setModelBusinessCaseFilter] = useState("");
   const [reportBusinessCaseFilter, setReportBusinessCaseFilter] = useState("");
+  const [servingDeploymentId, setServingDeploymentId] = useState("");
   const [apiStatus, setApiStatus] = useState("checking");
   const [authStatus, setAuthStatus] = useState(getAccessToken() ? "checking" : "anonymous");
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
@@ -295,6 +296,11 @@ export default function App() {
     setActiveTab("scoring-reports");
   }
 
+  function openServingDeployment(deploymentId: string) {
+    setServingDeploymentId(deploymentId);
+    setActiveTab("serving");
+  }
+
   if (authStatus !== "authenticated" || !currentUser) {
     return (
       <AuthScreen
@@ -377,11 +383,13 @@ export default function App() {
             datasets={datasets}
             pipelines={pipelines}
             models={models}
+            deployments={deployments}
             scoringReports={scoringReports}
             onRefresh={refreshWorkspace}
             onEditPipeline={openPipelineEditor}
             onOpenModels={openBusinessCaseModels}
             onOpenScoringReports={openBusinessCaseScoringReports}
+            onOpenServing={openServingDeployment}
             onOpenDataset={openDatasetAnalysis}
             setNotice={setNotice}
           />
@@ -458,6 +466,7 @@ export default function App() {
             <ServingPanel
               deployments={deployments}
               models={models}
+              initialDeploymentId={servingDeploymentId}
               onRefresh={refreshWorkspace}
               setNotice={setNotice}
             />
@@ -484,11 +493,13 @@ function BusinessCasesPanel({
   datasets,
   pipelines,
   models,
+  deployments,
   scoringReports,
   onRefresh,
   onEditPipeline,
   onOpenModels,
   onOpenScoringReports,
+  onOpenServing,
   onOpenDataset,
   setNotice
 }: {
@@ -496,11 +507,13 @@ function BusinessCasesPanel({
   datasets: DataAsset[];
   pipelines: Pipeline[];
   models: ModelArtifact[];
+  deployments: Deployment[];
   scoringReports: ScoringReport[];
   onRefresh: () => Promise<void>;
   onEditPipeline: (pipelineId: string) => void;
   onOpenModels: (businessCaseId: string) => void;
   onOpenScoringReports: (businessCaseId: string) => void;
+  onOpenServing: (deploymentId: string) => void;
   onOpenDataset: (datasetId: string) => void;
   setNotice: (message: string) => void;
 }) {
@@ -531,7 +544,7 @@ function BusinessCasesPanel({
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isMappingFormOpen, setIsMappingFormOpen] = useState(false);
   const [editingAttachmentId, setEditingAttachmentId] = useState("");
-  const [activeWorkspace, setActiveWorkspace] = useState<"details" | "data" | "pipelines" | "models" | "reports" | null>(null);
+  const [activeWorkspace, setActiveWorkspace] = useState<"details" | "data" | "pipelines" | "models" | "services" | "reports" | null>(null);
   const [selectedBcModel, setSelectedBcModel] = useState<ModelArtifact | null>(null);
   const [selectedBcReport, setSelectedBcReport] = useState<ScoringReport | null>(null);
   const [bcModelHistory, setBcModelHistory] = useState<ModelArtifact | null>(null);
@@ -640,6 +653,10 @@ function BusinessCasesPanel({
       scoringReports.filter((report) => report.business_case_id === selectedBusinessCase?.id)
     ),
     [scoringReports, selectedBusinessCase]
+  );
+  const selectedBusinessCaseDeployments = useMemo(
+    () => deployments.filter((deployment) => deployment.business_case_id === selectedBusinessCase?.id),
+    [deployments, selectedBusinessCase]
   );
   const visibleAttachments = useMemo(
     () => activeAttachments.filter((attachment) => {
@@ -1055,6 +1072,17 @@ function BusinessCasesPanel({
                   type="button"
                   onClick={() => {
                     setSelectedBusinessCaseId(item.id);
+                    setActiveWorkspace("services");
+                  }}
+                >
+                  <Rocket size={14} />
+                  Services
+                </button>
+                <button
+                  className="secondary-button compact-button"
+                  type="button"
+                  onClick={() => {
+                    setSelectedBusinessCaseId(item.id);
                     setActiveWorkspace("reports");
                   }}
                 >
@@ -1098,6 +1126,10 @@ function BusinessCasesPanel({
               <button className={`secondary-button compact-button${activeWorkspace === "models" ? " active" : ""}`} type="button" onClick={() => setActiveWorkspace("models")}>
                 <Brain size={14} />
                 Models
+              </button>
+              <button className={`secondary-button compact-button${activeWorkspace === "services" ? " active" : ""}`} type="button" onClick={() => setActiveWorkspace("services")}>
+                <Rocket size={14} />
+                Services
               </button>
               <button className={`secondary-button compact-button${activeWorkspace === "reports" ? " active" : ""}`} type="button" onClick={() => setActiveWorkspace("reports")}>
                 <BarChart3 size={14} />
@@ -1445,6 +1477,56 @@ function BusinessCasesPanel({
                 { label: "Dependencies", icon: "dependencies", onClick: () => setDependencyTarget({ referenceId: item.id, artifactType: "model_version", title: item.name }) }
               ]
             }))} />
+          </div>
+        )}
+        {selectedBusinessCase && activeWorkspace === "services" && (
+          <div className="panel bc-services-panel">
+            <div className="panel-header">
+              <div>
+                <h2>Model services</h2>
+                <p>{selectedBusinessCaseDeployments.length} stable {selectedBusinessCaseDeployments.length === 1 ? "endpoint" : "endpoints"} in this business case</p>
+              </div>
+            </div>
+            {selectedBusinessCaseDeployments.length === 0 ? (
+              <div className="empty-state">No model services have been created for this business case.</div>
+            ) : (
+              <div className="bc-service-grid">
+                {selectedBusinessCaseDeployments.map((deployment) => {
+                  const assignments = deployment.active_revision?.assignments ?? [];
+                  return (
+                    <article className="bc-service-card" key={deployment.id}>
+                      <div className="bc-service-card-header">
+                        <div>
+                          <span className={`pipeline-status ${deployment.status}`}>{deployment.status}</span>
+                          <h3>{deployment.name}</h3>
+                          <code>{deployment.endpoint_url ?? "Endpoint unavailable"}</code>
+                        </div>
+                        <button className="secondary-button compact-button" type="button" onClick={() => onOpenServing(deployment.id)}>
+                          <Rocket size={14} /> Open service
+                        </button>
+                      </div>
+                      <div className="bc-service-meta">
+                        <span>Active revision <strong>v{deployment.active_revision?.version_number ?? "—"}</strong></span>
+                        <span>Retention <strong>{deployment.retention_days} days</strong></span>
+                        <span>Updated <strong>{formatDateTime(deployment.updated_at)}</strong></span>
+                      </div>
+                      <div className="bc-service-assignments">
+                        {assignments.map((assignment) => {
+                          const assignedModel = models.find((item) => item.id === assignment.model_id);
+                          return (
+                            <div key={`${deployment.id}-${assignment.model_id}`}>
+                              <span className="bc-service-role">{assignment.role}</span>
+                              <strong>{assignedModel ? `${assignedModel.name} · ${assignedModel.version}` : assignment.model_id}</strong>
+                              <small>model stage: {assignedModel?.stage ?? "unavailable"}</small>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
         {selectedBusinessCase && activeWorkspace === "reports" && (

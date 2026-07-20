@@ -25,7 +25,7 @@ class DeploymentCreate(BaseModel):
 
 class DeploymentRevisionCreate(BaseModel):
     assignments: list[ModelAssignmentPayload] = Field(min_length=1, max_length=32)
-    reason: str = Field(default="", max_length=2000)
+    reason: str = Field(min_length=1, max_length=2000)
 
     @model_validator(mode="after")
     def validate_roles(self) -> "DeploymentRevisionCreate":
@@ -38,6 +38,21 @@ class DeploymentRevisionCreate(BaseModel):
         if len(model_ids) != len(set(model_ids)):
             raise ValueError("A model may have only one role in a deployment revision")
         return self
+
+
+class DeploymentStatusUpdate(BaseModel):
+    status: DeploymentStatus
+    reason: str = Field(min_length=1, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_operator_status(self) -> "DeploymentStatusUpdate":
+        if self.status not in {DeploymentStatus.RUNNING, DeploymentStatus.STOPPED}:
+            raise ValueError("A user may set deployment status only to running or stopped")
+        return self
+
+
+class DeploymentRollbackRequest(BaseModel):
+    reason: str = Field(min_length=1, max_length=2000)
 
 
 class ModelAssignmentRead(BaseModel):
@@ -76,6 +91,18 @@ class DeploymentRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     active_revision: DeploymentRevisionRead | None = None
+
+
+class ModelServingUsageRead(BaseModel):
+    model_id: str
+    deployment_id: str
+    deployment_name: str
+    deployment_slug: str
+    deployment_status: DeploymentStatus
+    endpoint_url: str | None
+    revision_id: str
+    revision_version: int
+    role: DeploymentRole
 
 
 class ScoreRecord(BaseModel):
@@ -144,6 +171,9 @@ class InferenceExecutionItem(BaseModel):
     role: DeploymentRole
     input: dict[str, Any]
     output: dict[str, Any]
+    status: str
+    error_message: str
+    latency_ms: int | None
     created_at: datetime
 
 
