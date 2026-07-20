@@ -15,6 +15,7 @@ celery_app.conf.update(
         "app.worker.tasks.profile_dataset": {"queue": "analytics"},
         "app.worker.tasks.train_model": {"queue": "ml"},
         "app.worker.tasks.batch_score": {"queue": "serving"},
+        "app.worker.tasks.replay_challenger": {"queue": "serving"},
         "app.worker.tasks.export_resource": {"queue": "exports"},
     },
     task_serializer="json",

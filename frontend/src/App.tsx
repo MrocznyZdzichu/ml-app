@@ -437,6 +437,8 @@ export default function App() {
               pipelines={pipelines}
               initialBusinessCaseId={modelBusinessCaseFilter}
               onOpenDataset={openDatasetAnalysis}
+              onRefresh={refreshWorkspace}
+              setNotice={setNotice}
             />
           </DeferredPanel>
         )}

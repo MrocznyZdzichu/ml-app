@@ -11,7 +11,7 @@ if /i "%~1"=="help" goto help
 if /i "%~1"=="--help" goto help
 
 echo Refreshing application containers without rebuilding images...
-docker compose up -d --no-build postgres redis minio
+docker compose up -d --no-build postgres redis minio model-runtime
 if errorlevel 1 (
     echo.
     echo Infrastructure start failed.
@@ -42,7 +42,7 @@ goto end
 
 :cached_rebuild
 echo Rebuilding local application images with Docker cache...
-docker compose build api worker frontend
+docker compose build api worker frontend model-runtime
 if errorlevel 1 (
     echo.
     echo Build failed. Application was not restarted.
@@ -51,6 +51,13 @@ if errorlevel 1 (
 
 echo.
 echo Restarting rebuilt application containers...
+docker compose up -d --no-deps model-runtime
+if errorlevel 1 (
+    echo.
+    echo Model runtime restart failed.
+    exit /b 1
+)
+
 docker compose up -d --no-deps api worker
 if errorlevel 1 (
     echo.

@@ -15,6 +15,14 @@ from app.modules.business_cases.repository import (
     metadata as business_case_metadata,
 )
 from app.modules.auth.repository import user_accounts_table
+from app.modules.auth.api_credentials import api_credentials_table
+from app.modules.serving.repository import (
+    challenger_replay_jobs_table,
+    deployment_revisions_table,
+    deployments_table,
+    inference_items_table,
+    inference_requests_table,
+)
 from app.modules.sharing.repository import (
     access_groups_table,
     audit_events_table,
@@ -94,6 +102,16 @@ def _delete_test_accounts(user_ids: set[str]) -> None:
         ))
         connection.execute(delete(access_groups_table).where(access_groups_table.c.owner_id.in_(user_ids)))
         connection.execute(delete(audit_events_table).where(audit_events_table.c.actor_id.in_(user_ids)))
+        owned_deployments = select(deployments_table.c.id).where(deployments_table.c.owner_id.in_(user_ids))
+        owned_inference = select(inference_requests_table.c.id).where(
+            inference_requests_table.c.deployment_id.in_(owned_deployments)
+        )
+        connection.execute(delete(inference_items_table).where(inference_items_table.c.request_id.in_(owned_inference)))
+        connection.execute(delete(inference_requests_table).where(inference_requests_table.c.deployment_id.in_(owned_deployments)))
+        connection.execute(delete(challenger_replay_jobs_table).where(challenger_replay_jobs_table.c.deployment_id.in_(owned_deployments)))
+        connection.execute(delete(deployment_revisions_table).where(deployment_revisions_table.c.deployment_id.in_(owned_deployments)))
+        connection.execute(delete(deployments_table).where(deployments_table.c.owner_id.in_(user_ids)))
+        connection.execute(delete(api_credentials_table).where(api_credentials_table.c.user_id.in_(user_ids)))
         connection.execute(
             delete(pipeline_step_runs_table).where(pipeline_step_runs_table.c.owner_id.in_(user_ids))
         )

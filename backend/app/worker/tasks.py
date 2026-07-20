@@ -603,6 +603,20 @@ def batch_score(batch_job_id: str) -> dict[str, str]:
     return {"batch_job_id": batch_job_id, "status": "queued"}
 
 
+@celery_app.task(name="app.worker.tasks.replay_challenger", track_started=True)
+def replay_challenger(replay_job_id: str) -> dict[str, str | int]:
+    from app.modules.serving.service import ServingService
+
+    job = ServingService().run_replay(replay_job_id)
+    return {
+        "replay_job_id": job.id,
+        "status": job.status.value,
+        "processed_requests": job.processed_requests,
+        "processed_records": job.processed_records,
+        "failed_requests": job.failed_requests,
+    }
+
+
 @celery_app.task(name="app.worker.tasks.export_resource")
 def export_resource(export_job_id: str) -> dict[str, str]:
     return {"export_job_id": export_job_id, "status": "queued"}

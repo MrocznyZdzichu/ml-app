@@ -111,6 +111,58 @@ class PipelineRun:
         )
 
 
+@dataclass(frozen=True)
+class Deployment:
+    id: str
+    name: str
+    slug: str
+    business_case_id: str
+    status: str
+    endpoint_url: str
+    active_revision: Mapping[str, Any]
+    raw: Mapping[str, Any]
+
+    @classmethod
+    def from_api(cls, value: Mapping[str, Any]) -> "Deployment":
+        return cls(
+            id=str(value["id"]),
+            name=str(value["name"]),
+            slug=str(value["slug"]),
+            business_case_id=str(value["business_case_id"]),
+            status=str(value["status"]),
+            endpoint_url=str(value.get("endpoint_url") or ""),
+            active_revision=dict(value.get("active_revision") or {}),
+            raw=value,
+        )
+
+
+@dataclass(frozen=True)
+class PredictionResult:
+    request_id: str
+    deployment_id: str
+    deployment_revision_id: str
+    model_id: str
+    served_role: str
+    fallback_used: bool
+    predictions: tuple[Mapping[str, Any], ...]
+    warnings: tuple[str, ...]
+    raw: Mapping[str, Any]
+
+    @classmethod
+    def from_api(cls, value: Mapping[str, Any]) -> "PredictionResult":
+        return cls(
+            request_id=str(value["request_id"]),
+            deployment_id=str(value["deployment_id"]),
+            deployment_revision_id=str(value["deployment_revision_id"]),
+            model_id=str(value["model_id"]),
+            served_role=str(value["served_role"]),
+            fallback_used=bool(value.get("fallback_used")),
+            predictions=tuple(value.get("predictions") or ()),
+            warnings=tuple(str(item) for item in value.get("warnings") or ()),
+            raw=value,
+        )
+
+
 def _one_named(items: list[Mapping[str, Any]], name: str, resource: str) -> Mapping[str, Any]:
     matches = [item for item in items if item.get("name") == name]
     if not matches:
@@ -160,6 +212,24 @@ class MLAppClient:
         if not token:
             raise AuthenticationError("Login response did not contain an access token")
         self._session.headers["Authorization"] = f"Bearer {token}"
+
+    def create_api_credential(
+        self,
+        name: str,
+        *,
+        expires_at: str | None = None,
+    ) -> Mapping[str, Any]:
+        """Create a long-lived credential. Its token is returned only once."""
+        return self._request("POST", "/auth/api-credentials", json={
+            "name": name,
+            "expires_at": expires_at,
+        })
+
+    def list_api_credentials(self) -> list[Mapping[str, Any]]:
+        return self._request("GET", "/auth/api-credentials")
+
+    def revoke_api_credential(self, credential_id: str) -> None:
+        self._request("DELETE", f"/auth/api-credentials/{credential_id}")
 
     def close(self) -> None:
         self._session.close()
@@ -524,6 +594,223 @@ class MLAppClient:
             raise ApiError(f"Pipeline run {current.id} ended as {current.status}: {detail}")
         return current
 
+    def list_models(self) -> list[Mapping[str, Any]]:
+        """List model versions visible through the current Business Case grants."""
+        return self._request("GET", "/models")
+
+    def promote_model(
+        self,
+        model: str,
+        stage: str,
+        *,
+        version: str | int | None = None,
+    ) -> Mapping[str, Any]:
+        """Change a model version lifecycle stage using an ID or friendly name.
+
+        When ``model`` is a name, the newest version is selected by default.
+        Pass ``version="v5"`` or ``version=5`` to choose an explicit version.
+        """
+        allowed_stages = {"candidate", "staging", "production", "archived"}
+        if stage not in allowed_stages:
+            raise ValueError(
+                "stage must be one of: candidate, staging, production, archived"
+            )
+        models = self.list_models()
+        normalized = model.strip().casefold()
+        matches = [
+            item for item in models
+            if str(item.get("id") or "") == model
+            or str(item.get("name") or "").strip().casefold() == normalized
+        ]
+        if version is not None:
+            normalized_version = str(version).strip().casefold()
+            if normalized_version.isdigit():
+                normalized_version = f"v{normalized_version}"
+            matches = [
+                item for item in matches
+                if str(item.get("version") or "").casefold() == normalized_version
+                or str(item.get("version_number") or "") == str(version)
+            ]
+        if not matches:
+            suffix = "" if version is None else f" version {version!r}"
+            raise ResourceNotFoundError(f"Model {model!r}{suffix} was not found")
+        selected = max(matches, key=lambda item: int(item.get("version_number") or 0))
+        return self._request(
+            "POST",
+            f"/models/{selected['id']}/promote",
+            json={"stage": stage},
+        )
+
+    def list_deployments(self) -> list[Deployment]:
+        """List model services visible through the current Business Case grants."""
+        return [Deployment.from_api(item) for item in self._request("GET", "/serving/deployments")]
+
+    def create_deployment(
+        self,
+        *,
+        name: str,
+        model_id: str | None = None,
+        model_name: str | None = None,
+        retention_days: int = 365,
+    ) -> Deployment:
+        """Create a service with one production model as its initial champion."""
+        resolved_model_id = model_id or self._production_model_by_name(model_name or "")["id"]
+        payload = self._request("POST", "/serving/deployments", json={
+            "name": name,
+            "model_id": resolved_model_id,
+            "retention_days": retention_days,
+        })
+        return Deployment.from_api(payload)
+
+    def revise_deployment(
+        self,
+        deployment: str | Deployment,
+        *,
+        champion: str,
+        challengers: tuple[str, ...] | list[str] = (),
+        shadows: tuple[str, ...] | list[str] = (),
+        fallback: str | None = None,
+        reason: str = "",
+    ) -> Mapping[str, Any]:
+        """Atomically activate an immutable role assignment revision."""
+        target = self._deployment(deployment)
+        assignments = [{"model_id": champion, "role": "champion"}]
+        assignments.extend({"model_id": item, "role": "challenger"} for item in challengers)
+        assignments.extend({"model_id": item, "role": "shadow"} for item in shadows)
+        if fallback:
+            assignments.append({"model_id": fallback, "role": "fallback"})
+        return self._request(
+            "POST",
+            f"/serving/deployments/{target.id}/revisions",
+            json={"assignments": assignments, "reason": reason},
+        )
+
+    def predict(
+        self,
+        deployment: str | Deployment,
+        *,
+        features: Mapping[str, Any] | None = None,
+        record_id: str | None = None,
+        instances: list[Mapping[str, Any]] | None = None,
+        challenger_model_id: str | None = None,
+        idempotency_key: str | None = None,
+        correlation_id: str | None = None,
+    ) -> PredictionResult:
+        """Score one simple feature mapping or up to 1,000 explicit instances."""
+        target = self._deployment(deployment)
+        if (features is None) == (instances is None):
+            raise ValueError("Provide either features for one record or instances for a batch")
+        normalized = (
+            [{"record_id": record_id, "features": dict(features or {})}]
+            if features is not None
+            else [self._prediction_instance(item) for item in instances or []]
+        )
+        if not normalized or len(normalized) > 1000:
+            raise ValueError("Prediction batch must contain between 1 and 1,000 instances")
+        path = f"/serving/deployments/{target.id}/predictions"
+        if challenger_model_id:
+            path = f"/serving/deployments/{target.id}/challengers/{challenger_model_id}/predictions"
+        headers = {}
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
+        if correlation_id:
+            headers["X-Correlation-ID"] = correlation_id
+        return PredictionResult.from_api(
+            self._request("POST", path, json={"instances": normalized}, headers=headers)
+        )
+
+    def inference_history(
+        self,
+        deployment: str | Deployment,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+        record_id: str | None = None,
+    ) -> Mapping[str, Any]:
+        """Read one bounded page from the deployment's full inference log."""
+        if limit < 1 or limit > 200:
+            raise ValueError("History limit must be between 1 and 200")
+        target = self._deployment(deployment)
+        params: dict[str, Any] = {"limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        if record_id:
+            params["record_id"] = record_id
+        return self._request("GET", f"/serving/deployments/{target.id}/inference-log", params=params)
+
+    def inference_request(
+        self,
+        deployment: str | Deployment,
+        request_id: str,
+    ) -> Mapping[str, Any]:
+        """Read full champion/fallback/shadow executions for one audited request."""
+        target = self._deployment(deployment)
+        return self._request(
+            "GET", f"/serving/deployments/{target.id}/inference-log/{request_id}"
+        )
+
+    def replay_challenger(
+        self,
+        deployment: str | Deployment,
+        *,
+        challenger_model_id: str,
+        since: str | None = None,
+        until: str | None = None,
+        max_requests: int = 1000,
+    ) -> Mapping[str, Any]:
+        """Queue a pinned, asynchronous challenger replay over champion history."""
+        target = self._deployment(deployment)
+        return self._request(
+            "POST",
+            f"/serving/deployments/{target.id}/challenger-replays",
+            json={
+                "challenger_model_id": challenger_model_id,
+                "since": since,
+                "until": until,
+                "max_requests": max_requests,
+            },
+        )
+
+    def list_challenger_replays(self, deployment: str | Deployment) -> list[Mapping[str, Any]]:
+        target = self._deployment(deployment)
+        return self._request("GET", f"/serving/deployments/{target.id}/challenger-replays")
+
+    def _deployment(self, value: str | Deployment) -> Deployment:
+        if isinstance(value, Deployment):
+            return value
+        deployments = self.list_deployments()
+        normalized = value.strip().casefold()
+        matches = [
+            item for item in deployments
+            if value == item.id or normalized in {item.slug.casefold(), item.name.strip().casefold()}
+        ]
+        if not matches:
+            raise ResourceNotFoundError(f"Deployment {value!r} was not found")
+        if len(matches) > 1:
+            raise ResourceAmbiguousError(f"Deployment {value!r} is ambiguous")
+        return matches[0]
+
+    def _production_model_by_name(self, name: str) -> Mapping[str, Any]:
+        if not name.strip():
+            raise ValueError("Provide model_id or model_name")
+        normalized = name.strip().casefold()
+        candidates = [
+            item for item in self._request("GET", "/models")
+            if str(item.get("name") or "").strip().casefold() == normalized
+            and item.get("stage") == "production"
+        ]
+        if not candidates:
+            raise ResourceNotFoundError(f"Production model named {name!r} was not found")
+        return max(candidates, key=lambda item: int(item.get("version_number") or 0))
+
+    @staticmethod
+    def _prediction_instance(value: Mapping[str, Any]) -> dict[str, Any]:
+        if "features" in value:
+            return {"record_id": value.get("record_id"), "features": dict(value["features"])}
+        return {"record_id": value.get("record_id"), "features": {
+            key: item for key, item in value.items() if key != "record_id"
+        }}
+
     def _business_case_by_name(self, name: str) -> Mapping[str, Any]:
         return _one_named(self._request("GET", "/business-cases"), name, "Business Case")
 
@@ -534,6 +821,8 @@ class MLAppClient:
         except requests.RequestException as exc:
             raise ApiError(f"{method} {path} failed: {exc}") from exc
         self._raise_for_status(response, method, path)
+        if response.status_code == 204:
+            return None
         try:
             return response.json()
         except ValueError as exc:

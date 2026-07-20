@@ -93,12 +93,18 @@ class BusinessCaseRepository(Protocol):
     def get_artifact(self, artifact_id: str) -> Artifact | None:
         ...
 
+    def update_artifact(self, artifact: Artifact) -> Artifact:
+        ...
+
     def list_artifacts(self, owner_id: str, artifact_type: ArtifactType | None = None) -> list[Artifact]:
         ...
 
     def list_artifacts_for_business_cases(
         self, business_case_ids: set[str], artifact_type: ArtifactType | None = None
     ) -> list[Artifact]:
+        ...
+
+    def list_model_version_artifacts(self, logical_model_id: str) -> list[Artifact]:
         ...
 
     def find_artifact(self, owner_id: str, reference_id: str, business_case_id: str | None) -> Artifact | None:
@@ -150,6 +156,10 @@ class InMemoryBusinessCaseRepository:
     def get_artifact(self, artifact_id: str) -> Artifact | None:
         return self._artifacts.get(artifact_id)
 
+    def update_artifact(self, artifact: Artifact) -> Artifact:
+        self._artifacts[artifact.id] = artifact
+        return artifact
+
     def list_artifacts(self, owner_id: str, artifact_type: ArtifactType | None = None) -> list[Artifact]:
         return [
             item for item in self._artifacts.values()
@@ -161,6 +171,13 @@ class InMemoryBusinessCaseRepository:
     ) -> list[Artifact]:
         return [item for item in self._artifacts.values()
                 if item.business_case_id in business_case_ids and (artifact_type is None or item.type == artifact_type)]
+
+    def list_model_version_artifacts(self, logical_model_id: str) -> list[Artifact]:
+        return [
+            item for item in self._artifacts.values()
+            if item.type == ArtifactType.MODEL_VERSION
+            and str(item.metadata.get("logical_model_id") or "") == logical_model_id
+        ]
 
     def find_artifact(self, owner_id: str, reference_id: str, business_case_id: str | None) -> Artifact | None:
         for artifact in self._artifacts.values():
@@ -252,6 +269,15 @@ class PostgresBusinessCaseRepository:
             row = connection.execute(statement).first()
         return self._artifact_from_record(row._mapping) if row else None
 
+    def update_artifact(self, artifact: Artifact) -> Artifact:
+        self._ensure_initialized()
+        with self.engine.begin() as connection:
+            connection.execute(
+                artifacts_table.update().where(artifacts_table.c.id == artifact.id)
+                .values(**self._artifact_to_record(artifact))
+            )
+        return artifact
+
     def list_artifacts(self, owner_id: str, artifact_type: ArtifactType | None = None) -> list[Artifact]:
         self._ensure_initialized()
         statement = select(artifacts_table).where(artifacts_table.c.owner_id == owner_id)
@@ -273,6 +299,65 @@ class PostgresBusinessCaseRepository:
         statement = statement.order_by(artifacts_table.c.created_at.desc())
         with self.engine.begin() as connection:
             return [self._artifact_from_record(row._mapping) for row in connection.execute(statement)]
+
+    def list_model_version_artifacts(self, logical_model_id: str) -> list[Artifact]:
+        """Read one model family without materializing the full model registry."""
+        self._ensure_initialized()
+        statement = (
+            select(
+                artifacts_table.c.id,
+                artifacts_table.c.owner_id,
+                artifacts_table.c.reference_id,
+                artifacts_table.c.business_case_id,
+                artifacts_table.c.created_by,
+                artifacts_table.c.created_at,
+                artifacts_table.c.metadata["model_name"].as_string().label("model_name"),
+                artifacts_table.c.metadata["algorithm"].as_string().label("algorithm"),
+                artifacts_table.c.metadata["stage"].as_string().label("stage"),
+                artifacts_table.c.metadata["problem_type"].as_string().label("problem_type"),
+                artifacts_table.c.metadata["model_hash"].as_string().label("model_hash"),
+                artifacts_table.c.metadata["logical_model_id"].as_string().label("logical_model_id"),
+                artifacts_table.c.metadata["lineage"]["pipeline_id"].as_string().label("pipeline_id"),
+                artifacts_table.c.metadata["lineage"]["pipeline_version_id"].as_string().label("pipeline_version_id"),
+                artifacts_table.c.metadata["lineage"]["pipeline_run_id"].as_string().label("pipeline_run_id"),
+                artifacts_table.c.metadata["lineage"]["pipeline_step_id"].as_string().label("pipeline_step_id"),
+            )
+            .where(
+                artifacts_table.c.type == ArtifactType.MODEL_VERSION.value,
+                artifacts_table.c.metadata["logical_model_id"].as_string() == logical_model_id,
+            )
+            .order_by(artifacts_table.c.created_at.asc(), artifacts_table.c.id.asc())
+        )
+        with self.engine.begin() as connection:
+            rows = [row._mapping for row in connection.execute(statement)]
+        return [
+            Artifact(
+                id=row["id"],
+                owner_id=row["owner_id"],
+                type=ArtifactType.MODEL_VERSION,
+                reference_id=row["reference_id"],
+                origin=ArtifactOrigin.PLATFORM_GENERATED,
+                business_case_id=row["business_case_id"],
+                external_notes="",
+                metadata={
+                    "model_name": row["model_name"] or "Pipeline model",
+                    "algorithm": row["algorithm"] or "unknown",
+                    "stage": row["stage"] or "candidate",
+                    "problem_type": row["problem_type"] or "",
+                    "model_hash": row["model_hash"] or "",
+                    "logical_model_id": row["logical_model_id"] or logical_model_id,
+                    "lineage": {
+                        "pipeline_id": row["pipeline_id"] or "",
+                        "pipeline_version_id": row["pipeline_version_id"] or "",
+                        "pipeline_run_id": row["pipeline_run_id"] or "",
+                        "pipeline_step_id": row["pipeline_step_id"] or "",
+                    },
+                },
+                created_by=row["created_by"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
 
     def find_artifact(self, owner_id: str, reference_id: str, business_case_id: str | None) -> Artifact | None:
         self._ensure_initialized()

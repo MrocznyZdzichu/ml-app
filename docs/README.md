@@ -26,6 +26,7 @@ content describes the current contract unless marked otherwise.
 - [Training and Test Scoring](model-training-scoring-stage-1.md) — executable artifact path and score contract.
 - [Batch Scoring](batch-scoring-stage-1.md) — immutable production predictions and inference bundle.
 - [Monitoring](monitoring-pipeline-stage-1.md) — target joining, metrics, report, and lineage.
+- [Online Model Serving](online-model-serving-stage-1.md) — versioned services, roles, secure predictions, fallback, replay, and Inference Log.
 
 ## Historical audits
 

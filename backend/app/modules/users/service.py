@@ -36,18 +36,20 @@ class UserAdministrationService:
         roles = set(payload.roles)
         if not roles or "user" not in roles or not roles <= PLATFORM_ROLES:
             raise HTTPException(status_code=422, detail="Roles must contain user and only supported platform roles")
-        if user.id == "root" and (not payload.is_active or "administrator" not in roles):
+        next_is_technical = user.is_technical if payload.is_technical is None else payload.is_technical
+        if user.id == "root" and (not payload.is_active or "administrator" not in roles or not next_is_technical):
             raise HTTPException(status_code=409, detail="Root cannot be disabled or demoted")
-        previous = {"roles": list(user.roles), "is_active": user.is_active}
-        changed = set(user.roles) != roles or user.is_active != payload.is_active
+        previous = {"roles": list(user.roles), "is_active": user.is_active, "is_technical": user.is_technical}
+        changed = set(user.roles) != roles or user.is_active != payload.is_active or user.is_technical != next_is_technical
         user.roles = tuple(role for role in ("user", "governance_steward", "administrator") if role in roles)
         user.is_active = payload.is_active
+        user.is_technical = next_is_technical
         user.updated_at = datetime.now(timezone.utc)
         if changed:
             user.session_version += 1
         self.users.update(user)
         self._audit(principal, "user.updated", user.id, previous, {
-            "roles": list(user.roles), "is_active": user.is_active,
+            "roles": list(user.roles), "is_active": user.is_active, "is_technical": user.is_technical,
         })
         return user
 

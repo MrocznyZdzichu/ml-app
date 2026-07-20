@@ -475,15 +475,84 @@ export type DatasetLineageReference = {
 
 export type Deployment = {
   id: string;
+  owner_id: string;
+  business_case_id: string;
   name: string;
-  model_id: string;
-  status: string;
+  slug: string;
+  status: "requested" | "building" | "running" | "degraded" | "failed" | "stopped";
+  active_revision_id: string;
   endpoint_url: string | null;
+  retention_days: number;
+  created_by: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+  active_revision: DeploymentRevision | null;
+};
+
+export type DeploymentRole = "champion" | "challenger" | "shadow" | "fallback";
+
+export type DeploymentRevision = {
+  id: string;
+  deployment_id: string;
+  version_number: number;
+  assignments: Array<{ model_id: string; role: DeploymentRole }>;
+  created_by: string;
+  reason: string;
+  created_at: string;
 };
 
 export type ScoreResponse = {
+  request_id: string;
+  correlation_id: string;
   deployment_id: string;
-  predictions: Array<Record<string, unknown>>;
+  deployment_revision_id: string;
+  model_id: string;
+  served_role: DeploymentRole;
+  fallback_used: boolean;
+  predictions: Array<{ record_id: string; prediction: unknown; outputs: Record<string, unknown> }>;
+  warnings: string[];
+};
+
+export type InferenceRequest = {
+  id: string;
+  deployment_id: string;
+  deployment_revision_id: string;
+  requested_by: string;
+  correlation_id: string;
+  status: "accepted" | "succeeded" | "failed";
+  record_count: number;
+  request_payload: Record<string, unknown>;
+  response_payload: Record<string, unknown>;
+  warnings: string[];
+  error_code: string;
+  error_message: string;
+  champion_model_id: string;
+  served_model_id: string;
+  served_role: string;
+  fallback_used: boolean;
+  latency_ms: number | null;
+  created_at: string;
+  completed_at: string | null;
+};
+
+export type InferencePage = {
+  items: InferenceRequest[];
+  next_cursor: string | null;
+};
+
+export type ChallengerReplay = {
+  id: string;
+  deployment_id: string;
+  deployment_revision_id: string;
+  challenger_model_id: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  max_requests: number;
+  processed_requests: number;
+  processed_records: number;
+  failed_requests: number;
+  error_message: string;
+  created_at: string;
 };
 
 export type BusinessCase = {
@@ -1074,8 +1143,15 @@ export const api = {
       body: JSON.stringify(payload)
     }),
   listModels: () => request<ModelArtifact[]>("/models"),
+  promoteModel: (modelId: string, stage: "candidate" | "staging" | "production" | "archived") =>
+    request<ModelArtifact>(`/models/${encodeURIComponent(modelId)}/promote`, {
+      method: "POST",
+      body: JSON.stringify({ stage })
+    }),
   listModelVersions: (logicalId: string) =>
     request<ModelArtifact[]>(`/models/${encodeURIComponent(logicalId)}/versions`),
+  getModel: (modelId: string) =>
+    request<ModelArtifact>(`/models/${encodeURIComponent(modelId)}`),
   getModelDataLineage: (modelId: string) =>
     request<DatasetLineageReference[]>(`/models/${encodeURIComponent(modelId)}/data-lineage`),
   listScoringReports: (businessCaseId?: string) =>
@@ -1098,10 +1174,44 @@ export const api = {
       body: JSON.stringify(payload)
     }),
   listDeployments: () => request<Deployment[]>("/serving/deployments"),
-  score: (deploymentId: string, records: Array<Record<string, unknown>>) =>
-    request<ScoreResponse>(`/serving/deployments/${deploymentId}/score`, {
+  createDeploymentRevision: (deploymentId: string, assignments: Array<{ model_id: string; role: DeploymentRole }>, reason: string) =>
+    request<DeploymentRevision>(`/serving/deployments/${encodeURIComponent(deploymentId)}/revisions`, {
       method: "POST",
-      body: JSON.stringify({ records })
+      body: JSON.stringify({ assignments, reason })
+    }),
+  score: (
+    deploymentId: string,
+    instances: Array<{ record_id?: string; features: Record<string, unknown> }>,
+    challengerModelId?: string
+  ) =>
+    request<ScoreResponse>(
+      challengerModelId
+        ? `/serving/deployments/${encodeURIComponent(deploymentId)}/challengers/${encodeURIComponent(challengerModelId)}/predictions`
+        : `/serving/deployments/${encodeURIComponent(deploymentId)}/predictions`,
+      {
+        method: "POST",
+        body: JSON.stringify({ instances })
+      }
+    ),
+  inferenceLog: (deploymentId: string, limit = 50, cursor = "", recordId = "") => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (cursor) params.set("cursor", cursor);
+    if (recordId) params.set("record_id", recordId);
+    return request<InferencePage>(`/serving/deployments/${encodeURIComponent(deploymentId)}/inference-log?${params}`);
+  },
+  inferenceDetail: (deploymentId: string, requestId: string) =>
+    request<Record<string, unknown>>(`/serving/deployments/${encodeURIComponent(deploymentId)}/inference-log/${encodeURIComponent(requestId)}`),
+  createChallengerReplay: (deploymentId: string, challengerModelId: string, maxRequests = 1000) =>
+    request<ChallengerReplay>(`/serving/deployments/${encodeURIComponent(deploymentId)}/challenger-replays`, {
+      method: "POST",
+      body: JSON.stringify({ challenger_model_id: challengerModelId, max_requests: maxRequests })
+    }),
+  listChallengerReplays: (deploymentId: string) =>
+    request<ChallengerReplay[]>(`/serving/deployments/${encodeURIComponent(deploymentId)}/challenger-replays`),
+  createApiCredential: (name: string, expiresAt: string | null) =>
+    request<Record<string, unknown>>("/auth/api-credentials", {
+      method: "POST",
+      body: JSON.stringify({ name, expires_at: expiresAt })
     }),
   listDirectoryUsers: () => request<DirectoryUser[]>("/sharing/directory/users"),
   listAdminUsers: () => request<DirectoryUser[]>("/users"),

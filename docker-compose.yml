@@ -49,6 +49,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://mlapp:mlapp@postgres:5432/mlapp}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       OBJECT_STORAGE_ENDPOINT: ${OBJECT_STORAGE_ENDPOINT:-minio:9000}
+      MODEL_RUNTIME_URL: ${MODEL_RUNTIME_URL:-http://model-runtime:8000}
     ports:
       - "${API_PORT:-8000}:8000"
     depends_on:
@@ -58,6 +59,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_started
+      model-runtime:
+        condition: service_healthy
     volumes:
       - ./backend/app:/app/app
       - ./backend/tests:/app/tests:ro
@@ -67,7 +70,7 @@ services:
   worker:
     build:
       context: ./backend
-    command: celery -A app.worker.celery_app.celery_app worker --loglevel=INFO --concurrency=${PROFILE_WORKER_CONCURRENCY:-2} --prefetch-multiplier=1
+    command: celery -A app.worker.celery_app.celery_app worker --loglevel=INFO --concurrency=${PROFILE_WORKER_CONCURRENCY:-2} --prefetch-multiplier=1 --queues=celery,analytics,ml,serving,exports
     env_file:
       - .env.example
     environment:
@@ -97,16 +100,17 @@ services:
       - ./frontend/src:/app/src
 
   model-runtime:
-    profiles:
-      - serving
     build:
       context: ./services/model-runtime
     environment:
-      MODEL_ARTIFACT_URI: ${MODEL_ARTIFACT_URI:-/models/model.joblib}
-    ports:
-      - "8010:8000"
+      MODEL_REPOSITORY_ROOT: /app/data/repository
     volumes:
-      - ./models:/models:ro
+      - ./data:/app/data:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   postgres-data:

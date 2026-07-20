@@ -122,9 +122,17 @@ def require_user(
     if scheme.lower() != "bearer" or not token:
         raise _credentials_error()
 
-    token_principal = decode_access_token(token)
-    if not token_principal.user_id:
-        raise _credentials_error()
+    api_user_id: str | None = None
+    if token.startswith("mlapp_pat_"):
+        from app.modules.auth.api_credentials import ApiCredentialRepository
+        api_user_id = ApiCredentialRepository().authenticate(token)
+        if not api_user_id:
+            raise _credentials_error()
+        token_principal = Principal(user_id=api_user_id, email="", display_name="")
+    else:
+        token_principal = decode_access_token(token)
+        if not token_principal.user_id:
+            raise _credentials_error()
     # Roles, account state and session invalidation are authoritative in the DB,
     # not in a potentially stale bearer token.
     from app.modules.auth.repository import PostgresUserRepository
@@ -133,7 +141,7 @@ def require_user(
     if (
         account is None
         or not account.is_active
-        or account.session_version != token_principal.session_version
+        or (api_user_id is None and account.session_version != token_principal.session_version)
     ):
         raise _credentials_error()
     return Principal(

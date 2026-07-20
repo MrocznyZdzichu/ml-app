@@ -1,4 +1,4 @@
-import { Brain, Eye, GitBranch, History, Play, Plus, Rocket, Search, SlidersHorizontal, X } from "lucide-react";
+import { Activity, ArrowLeft, Brain, Copy, Eye, GitBranch, History, KeyRound, Play, Plus, Rocket, Search, Settings2, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../api/client";
@@ -6,7 +6,10 @@ import type {
   DataAsset,
   DatasetLineageReference,
   BusinessCase,
+  ChallengerReplay,
   Deployment,
+  DeploymentRole,
+  InferenceRequest,
   ModelArtifact,
   Pipeline,
   ScoreResponse
@@ -22,13 +25,17 @@ export function ModelsPanel({
   businessCases,
   pipelines,
   initialBusinessCaseId = "",
-  onOpenDataset
+  onOpenDataset,
+  onRefresh,
+  setNotice
 }: {
   models: ModelArtifact[];
   businessCases: BusinessCase[];
   pipelines: Pipeline[];
   initialBusinessCaseId?: string;
   onOpenDataset?: (datasetId: string) => void;
+  onRefresh: () => Promise<void>;
+  setNotice: NoticeSetter;
 }) {
   const [query, setQuery] = useState("");
   const [businessCaseId, setBusinessCaseId] = useState(initialBusinessCaseId);
@@ -171,6 +178,11 @@ export function ModelsPanel({
           pipelineName={pipelineById.get(selectedModel.pipeline_id)?.name ?? "Unknown pipeline"}
           onClose={() => setSelectedModel(null)}
           onOpenDataset={onOpenDataset}
+          onStageChanged={async (updated) => {
+            setSelectedModel(updated);
+            await onRefresh();
+            setNotice(`Model ${updated.version} stage changed to ${updated.stage}`);
+          }}
         />
       )}
       {historyModel && (
@@ -179,9 +191,10 @@ export function ModelsPanel({
           businessCaseName={businessCaseById.get(historyModel.business_case_id)?.name ?? "Unassigned"}
           pipelineName={pipelineById.get(historyModel.pipeline_id)?.name ?? "Unknown pipeline"}
           onClose={() => setHistoryModel(null)}
-          onView={(version) => {
+          onView={async (version) => {
+            const fullModel = await api.getModel(version.id);
             setHistoryModel(null);
-            setSelectedModel(version);
+            setSelectedModel(fullModel);
           }}
         />
       )}
@@ -200,10 +213,11 @@ export function ModelVersionHistoryDialog({
   businessCaseName: string;
   pipelineName: string;
   onClose: () => void;
-  onView: (model: ModelArtifact) => void;
+  onView: (model: ModelArtifact) => Promise<void> | void;
 }) {
   const [versions, setVersions] = useState<ModelArtifact[]>([]);
   const [error, setError] = useState("");
+  const [openingModelId, setOpeningModelId] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -243,8 +257,15 @@ export function ModelVersionHistoryDialog({
                   {" · "}model hash {shortId(version.model_hash)}
                 </small>
               </div>
-              <button className="secondary-button compact-button" type="button" onClick={() => onView(version)}>
-                <Eye size={14} /> View
+              <button className="secondary-button compact-button" type="button" disabled={openingModelId === version.id} onClick={async () => {
+                setOpeningModelId(version.id);
+                try {
+                  await onView(version);
+                } finally {
+                  setOpeningModelId("");
+                }
+              }}>
+                <Eye size={14} /> {openingModelId === version.id ? "Opening…" : "View"}
               </button>
             </article>
           ))}
@@ -259,19 +280,24 @@ export function ModelDetailsDialog({
   businessCaseName,
   pipelineName,
   onClose,
-  onOpenDataset
+  onOpenDataset,
+  onStageChanged
 }: {
   model: ModelArtifact;
   businessCaseName: string;
   pipelineName: string;
   onClose: () => void;
   onOpenDataset?: (datasetId: string) => void;
+  onStageChanged?: (model: ModelArtifact) => Promise<void> | void;
 }) {
   const [tab, setTab] = useState<"overview" | "training" | "search" | "parameters" | "lineage">("overview");
+  const [nextStage, setNextStage] = useState<"candidate" | "staging" | "production" | "archived">(model.stage as "candidate" | "staging" | "production" | "archived");
+  const [stageBusy, setStageBusy] = useState(false);
   const [dataLineage, setDataLineage] = useState<DatasetLineageReference[]>([]);
   const [lineageError, setLineageError] = useState("");
   const weights = model.model_parameters.weights ?? [];
   const optimization = optimizationSummary(model.metrics);
+  useEffect(() => setNextStage(model.stage as "candidate" | "staging" | "production" | "archived"), [model.id, model.stage]);
   useEffect(() => {
     if (model.id.startsWith("dry-run:")) {
       setDataLineage([]);
@@ -311,6 +337,29 @@ export function ModelDetailsDialog({
               <DetailMetric label="Problem" value={model.problem_type || "not recorded"} />
               <DetailMetric label="Target" value={model.target_column || "not recorded"} />
             </div>
+            <section className="model-detail-section model-stage-control">
+              <div>
+                <h3>Lifecycle stage</h3>
+                <p>Stage describes model readiness. Service roles such as champion or challenger are configured separately in Serving.</p>
+              </div>
+              <div className="model-stage-actions">
+                <select aria-label="Model lifecycle stage" value={nextStage} onChange={(event) => setNextStage(event.target.value as typeof nextStage)}>
+                  <option value="candidate">Candidate</option>
+                  <option value="staging">Staging</option>
+                  <option value="production">Production</option>
+                  <option value="archived">Archived</option>
+                </select>
+                <button className="secondary-button" type="button" disabled={stageBusy || nextStage === model.stage} onClick={async () => {
+                  setStageBusy(true);
+                  try {
+                    const updated = await api.promoteModel(model.id, nextStage);
+                    await onStageChanged?.(updated);
+                  } finally {
+                    setStageBusy(false);
+                  }
+                }}>Update stage</button>
+              </div>
+            </section>
             <section className="model-detail-section">
               <h3>Evaluation metrics</h3>
               <MetricsGrid metrics={model.metrics} />
@@ -1106,78 +1155,272 @@ export function ServingPanel({
   onRefresh: () => Promise<void>;
   setNotice: NoticeSetter;
 }) {
+  type ServingTab = "overview" | "test" | "traffic" | "access";
+  type ServingModal = "create" | "revision" | "credential" | "replay" | "inference" | null;
+  const [serviceName, setServiceName] = useState("");
   const [modelId, setModelId] = useState("");
   const [deploymentId, setDeploymentId] = useState("");
+  const [activeTab, setActiveTab] = useState<ServingTab>("overview");
+  const [modal, setModal] = useState<ServingModal>(null);
+  const [recordId, setRecordId] = useState("");
+  const [featuresJson, setFeaturesJson] = useState("{\n  \"area\": 84,\n  \"rooms\": 4\n}");
+  const [scoreTarget, setScoreTarget] = useState("champion");
   const [scoreResult, setScoreResult] = useState<ScoreResponse | null>(null);
+  const [history, setHistory] = useState<InferenceRequest[]>([]);
+  const [inferenceDetail, setInferenceDetail] = useState<Record<string, unknown> | null>(null);
+  const [replays, setReplays] = useState<ChallengerReplay[]>([]);
+  const [historyError, setHistoryError] = useState("");
+  const [roleByModel, setRoleByModel] = useState<Record<string, DeploymentRole | "">>({});
+  const [revisionReason, setRevisionReason] = useState("");
+  const [credential, setCredential] = useState("");
+  const [busy, setBusy] = useState(false);
+  const selectedDeployment = deployments.find((item) => item.id === deploymentId);
+  const eligibleModels = models.filter((item) => item.business_case_id === selectedDeployment?.business_case_id);
+  const productionModels = models.filter((item) => item.stage === "production" && item.business_case_id);
+
+  useEffect(() => {
+    const assignments = selectedDeployment?.active_revision?.assignments ?? [];
+    setRoleByModel(Object.fromEntries(assignments.map((item) => [item.model_id, item.role])));
+    setScoreTarget("champion");
+    if (!selectedDeployment) {
+      setHistory([]);
+      return;
+    }
+    let active = true;
+    setHistoryError("");
+    Promise.all([api.inferenceLog(selectedDeployment.id, 50), api.listChallengerReplays(selectedDeployment.id)])
+      .then(([page, replayItems]) => { if (active) { setHistory(page.items); setReplays(replayItems); } })
+      .catch((error) => active && setHistoryError(error instanceof Error ? error.message : "Could not load inference history"));
+    return () => { active = false; };
+  }, [selectedDeployment?.id, selectedDeployment?.active_revision_id]);
 
   async function createDeployment() {
-    const selectedModel = modelId || models[0]?.id || "demo-model";
-    await api.createDeployment({
-      model_id: selectedModel,
-      name: "online-scorer"
-    });
-    setNotice("Deployment requested");
-    await onRefresh();
+    if (!serviceName.trim() || !modelId) {
+      setNotice("Choose a production model and enter a service name");
+      return;
+    }
+    setBusy(true);
+    try {
+      const created = await api.createDeployment({ model_id: modelId, name: serviceName.trim(), retention_days: 365 });
+      setDeploymentId(created.id);
+      setActiveTab("overview");
+      setModal(null);
+      setServiceName("");
+      setNotice("Model service created with revision v1");
+      await onRefresh();
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function score() {
-    const selectedDeployment = deploymentId || deployments[0]?.id;
     if (!selectedDeployment) {
       setNotice("Create a deployment first");
       return;
     }
-    const result = await api.score(selectedDeployment, [{ age: 39, income: 65000 }]);
-    setScoreResult(result);
-    setNotice("Online scoring completed");
+    let features: Record<string, unknown>;
+    try {
+      features = JSON.parse(featuresJson) as Record<string, unknown>;
+    } catch {
+      setNotice("Features must be a valid JSON object");
+      return;
+    }
+    setBusy(true);
+    try {
+      const challenger = scoreTarget === "champion" ? undefined : scoreTarget;
+      const result = await api.score(selectedDeployment.id, [{ record_id: recordId || undefined, features }], challenger);
+      setScoreResult(result);
+      const page = await api.inferenceLog(selectedDeployment.id, 50);
+      setHistory(page.items);
+      setNotice(`Scored with ${result.served_role} model ${shortId(result.model_id)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function activateRevision() {
+    if (!selectedDeployment) return;
+    const assignments = Object.entries(roleByModel)
+      .filter((entry): entry is [string, DeploymentRole] => Boolean(entry[1]))
+      .map(([assignedModelId, role]) => ({ model_id: assignedModelId, role }));
+    if (assignments.filter((item) => item.role === "champion").length !== 1) {
+      setNotice("Choose exactly one champion");
+      return;
+    }
+    if (assignments.filter((item) => item.role === "fallback").length > 1) {
+      setNotice("Choose at most one fallback");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api.createDeploymentRevision(selectedDeployment.id, assignments, revisionReason);
+      setRevisionReason("");
+      setModal(null);
+      setNotice("New immutable service revision activated");
+      await onRefresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function createCredential() {
+    setBusy(true);
+    try {
+      const created = await api.createApiCredential(`${selectedDeployment?.slug ?? "serving"}-client`, null);
+      setCredential(String(created.token ?? ""));
+      setNotice("Credential created; copy it now because it will not be shown again");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function replayChallenger() {
+    if (!selectedDeployment || scoreTarget === "champion") {
+      setNotice("Select a challenger as the test target first");
+      return;
+    }
+    const job = await api.createChallengerReplay(selectedDeployment.id, scoreTarget, 1000);
+    setReplays((current) => [job, ...current]);
+    setModal(null);
+    setNotice("Challenger replay queued over up to 1,000 historical requests");
+  }
+
+  function openDeployment(deployment: Deployment) {
+    setDeploymentId(deployment.id);
+    setActiveTab("overview");
+    setScoreResult(null);
+    setInferenceDetail(null);
+  }
+
+  const assignments = selectedDeployment?.active_revision?.assignments ?? [];
+  const champion = assignments.find((item) => item.role === "champion");
+  const challengers = assignments.filter((item) => item.role === "challenger");
+  const shadows = assignments.filter((item) => item.role === "shadow");
+  const fallback = assignments.find((item) => item.role === "fallback");
+
+  function modelLabel(assignedModelId: string | undefined) {
+    if (!assignedModelId) return "Not configured";
+    const model = models.find((item) => item.id === assignedModelId);
+    return model ? `${model.name} · ${model.version}` : shortId(assignedModelId);
+  }
+
+  function closeModal() {
+    setModal(null);
+    if (modal === "inference") setInferenceDetail(null);
+  }
+
+  if (!selectedDeployment) {
+    return (
+      <section className="serving-catalog">
+        <div className="serving-page-header">
+          <div>
+            <span className="builder-kicker">Online inference</span>
+            <h2>Model services</h2>
+            <p>Publish stable prediction endpoints and manage the models behind them.</p>
+          </div>
+          <button className="primary-button" type="button" onClick={() => setModal("create")}>
+            <Plus size={16} /> New service
+          </button>
+        </div>
+
+        <div className="serving-guidance" role="note">
+          <Rocket size={20} />
+          <div><strong>Start with a production model.</strong><span>Create one service, then add challengers, shadows or a fallback from its Overview.</span></div>
+        </div>
+
+        <div className="serving-service-grid">
+          {deployments.map((deployment) => {
+            const activeAssignments = deployment.active_revision?.assignments ?? [];
+            const activeChampion = activeAssignments.find((item) => item.role === "champion");
+            return <button className="serving-service-card" type="button" key={deployment.id} onClick={() => openDeployment(deployment)}>
+              <span className="serving-card-top"><span className={`status-pill ${deployment.status}`}>{deployment.status}</span><span>Revision v{deployment.active_revision?.version_number ?? "—"}</span></span>
+              <strong>{deployment.name}</strong>
+              <code>{deployment.slug}</code>
+              <span className="serving-card-model"><Rocket size={15} /><span><small>Champion</small>{modelLabel(activeChampion?.model_id)}</span></span>
+              <span className="serving-card-footer"><span>{activeAssignments.filter((item) => item.role === "challenger").length} challengers</span><span>{activeAssignments.filter((item) => item.role === "shadow").length} shadows</span><span>Open service →</span></span>
+            </button>;
+          })}
+          {!deployments.length && <div className="panel serving-empty-state">
+            <Rocket size={28} />
+            <h3>No model services yet</h3>
+            <p>Create a stable endpoint backed by your first production model.</p>
+            <button className="primary-button" type="button" onClick={() => setModal("create")}><Plus size={16} /> Create first service</button>
+          </div>}
+        </div>
+
+        {modal === "create" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}>
+          <div className="modal-dialog serving-action-dialog" role="dialog" aria-modal="true" aria-labelledby="create-serving-title">
+            <div className="modal-header"><div><span className="builder-kicker">New endpoint</span><h2 id="create-serving-title">Create model service</h2><p>The service name and endpoint stay stable when you change model versions later.</p></div><button className="icon-button" type="button" onClick={closeModal} aria-label="Close"><X size={18} /></button></div>
+            <div className="serving-modal-body form-panel">
+              <label>Service name<input autoFocus value={serviceName} onChange={(event) => setServiceName(event.target.value)} placeholder="Estates Sell Prices Service" /></label>
+              <label>Initial champion<select value={modelId} onChange={(event) => setModelId(event.target.value)}><option value="">Choose a production model</option>{productionModels.map((model) => <option key={model.id} value={model.id}>{model.name} · {model.version}</option>)}</select><small>Only production models can receive public traffic as champion.</small></label>
+              {!productionModels.length && <div className="serving-inline-warning">No production models are available. Promote a validated model from the Models section first.</div>}
+            </div>
+            <div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>Cancel</button><button className="primary-button" onClick={createDeployment} type="button" disabled={busy || !serviceName.trim() || !modelId}><Plus size={16} /> Create service</button></div>
+          </div>
+        </div>}
+      </section>
+    );
   }
 
   return (
-    <section className="two-column">
-      <div className="panel form-panel">
-        <div className="panel-header">
-          <h2>Deploy and score</h2>
-          <Rocket size={18} />
-        </div>
-        <label>
-          Model
-          <select value={modelId} onChange={(event) => setModelId(event.target.value)}>
-            <option value="">Demo model</option>
-            {models.map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Deployment
-          <select value={deploymentId} onChange={(event) => setDeploymentId(event.target.value)}>
-            <option value="">First available</option>
-            {deployments.map((deployment) => (
-              <option key={deployment.id} value={deployment.id}>
-                {deployment.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="button-row">
-          <button className="secondary-button" onClick={createDeployment} type="button">
-            <Plus size={16} />
-            Deploy
-          </button>
-          <button className="primary-button" onClick={score} type="button">
-            <Play size={16} />
-            Score
-          </button>
-        </div>
+    <section className="serving-detail-screen">
+      <button className="serving-back-button" type="button" onClick={() => setDeploymentId("")}><ArrowLeft size={16} /> All model services</button>
+      <div className="serving-detail-header">
+        <div><span className="builder-kicker">Online inference service</span><h2>{selectedDeployment.name}</h2><div className="serving-title-meta"><span className={`status-pill ${selectedDeployment.status}`}>{selectedDeployment.status}</span><span>Revision v{selectedDeployment.active_revision?.version_number ?? "—"}</span><span>Retention {selectedDeployment.retention_days} days</span></div></div>
+        <button className="secondary-button" type="button" onClick={() => setModal("revision")}><GitBranch size={16} /> Configure models</button>
       </div>
+      <div className="serving-endpoint-bar"><div><small>Stable production endpoint</small><code>{selectedDeployment.endpoint_url}</code></div><button className="icon-button" type="button" aria-label="Copy endpoint" title="Copy endpoint" onClick={() => navigator.clipboard.writeText(selectedDeployment.endpoint_url ?? "")}><Copy size={16} /></button></div>
 
-      <div className="panel">
-        <div className="panel-header">
-          <h2>Scoring output</h2>
+      <nav className="serving-tabs" aria-label="Model service sections">
+        {([
+          ["overview", "Overview", Rocket], ["test", "Test endpoint", Play], ["traffic", "Traffic & audit", Activity], ["access", "API access", KeyRound]
+        ] as const).map(([tab, label, Icon]) => <button key={tab} className={activeTab === tab ? "active" : ""} type="button" onClick={() => setActiveTab(tab)}><Icon size={16} />{label}{tab === "traffic" && history.length > 0 && <span>{history.length}</span>}</button>)}
+      </nav>
+
+      {activeTab === "overview" && <div className="serving-tab-content">
+        <div className="serving-summary-grid">
+          <article className="panel serving-role-card primary"><span><Rocket size={18} />Champion</span><strong>{modelLabel(champion?.model_id)}</strong><small>Receives all requests sent to the stable endpoint.</small></article>
+          <article className="panel serving-role-card"><span><GitBranch size={18} />Challengers</span><strong>{challengers.length}</strong><small>{challengers.length ? challengers.map((item) => modelLabel(item.model_id)).join(", ") : "None configured"}</small></article>
+          <article className="panel serving-role-card"><span><Activity size={18} />Shadows</span><strong>{shadows.length}</strong><small>{shadows.length ? shadows.map((item) => modelLabel(item.model_id)).join(", ") : "None configured"}</small></article>
+          <article className="panel serving-role-card"><span><ShieldCheck size={18} />Fallback</span><strong>{fallback ? "Ready" : "Not set"}</strong><small>{modelLabel(fallback?.model_id)}</small></article>
         </div>
-        <pre className="json-output">{JSON.stringify(scoreResult ?? { status: "waiting" }, null, 2)}</pre>
-      </div>
+        <div className="panel serving-next-steps"><div className="panel-header"><div><span className="builder-kicker">Recommended workflow</span><h3>What would you like to do?</h3></div></div><div className="serving-action-grid">
+          <button type="button" onClick={() => setActiveTab("test")}><Play size={18} /><span><strong>Test the endpoint</strong><small>Send one example and inspect the response.</small></span></button>
+          <button type="button" onClick={() => setModal("revision")}><Settings2 size={18} /><span><strong>Change model roles</strong><small>Add a challenger, shadow or fallback in a new revision.</small></span></button>
+          <button type="button" onClick={() => setActiveTab("traffic")}><History size={18} /><span><strong>Review traffic</strong><small>Inspect auditable requests and model executions.</small></span></button>
+        </div></div>
+      </div>}
+
+      {activeTab === "test" && <div className="serving-tab-content serving-test-layout">
+        <div className="panel form-panel"><div className="panel-header"><div><span className="builder-kicker">Single request</span><h3>Test endpoint</h3></div><Play size={18} /></div><p className="serving-section-intro">Use the champion endpoint or call a challenger directly without changing production traffic.</p>
+          <label>Target<select value={scoreTarget} onChange={(event) => setScoreTarget(event.target.value)}><option value="champion">Champion · public endpoint</option>{challengers.map((item) => <option key={item.model_id} value={item.model_id}>Challenger · {modelLabel(item.model_id)}</option>)}</select></label>
+          <label>Record ID <span className="optional-label">recommended</span><input value={recordId} onChange={(event) => setRecordId(event.target.value)} placeholder="e.g. property-1042" /><small>Needed later to join predictions with actual outcomes.</small></label>
+          <label>Features JSON<textarea className="json-input" value={featuresJson} onChange={(event) => setFeaturesJson(event.target.value)} rows={10} /></label>
+          <div className="button-row"><button className="primary-button" onClick={score} type="button" disabled={busy}><Play size={16} /> Send test request</button>{scoreTarget !== "champion" && <button className="secondary-button" onClick={() => setModal("replay")} type="button"><History size={16} /> Replay history</button>}</div>
+        </div>
+        <div className="panel serving-response-panel"><div className="panel-header"><div><span className="builder-kicker">Response</span><h3>{scoreResult ? "Prediction returned" : "Waiting for a request"}</h3></div>{scoreResult && <span className="status-pill active">{scoreResult.served_role}</span>}</div>{scoreResult ? <pre className="json-output">{JSON.stringify(scoreResult, null, 2)}</pre> : <div className="serving-response-empty"><Play size={26} /><p>Your prediction, request ID and warnings will appear here.</p></div>}</div>
+      </div>}
+
+      {activeTab === "traffic" && <div className="serving-tab-content">
+        <div className="serving-section-header"><div><span className="builder-kicker">Full payload retention</span><h3>Inference log</h3><p>Every accepted request and model execution is retained for audit and future monitoring.</p></div>{challengers.length > 0 && <button className="secondary-button" type="button" onClick={() => { setScoreTarget(challengers[0].model_id); setModal("replay"); }}><History size={16} /> Replay challenger</button>}</div>
+        {historyError && <div className="error-banner">{historyError}</div>}
+        <div className="panel inference-log-list serving-traffic-list">{history.map((item) => <article key={item.id}><span><strong>{item.status}</strong><small>{formatDate(item.created_at)} · {item.record_count} records</small></span><span><code>{shortId(item.served_model_id || item.champion_model_id)}</code><small>{item.served_role || "champion"}{item.fallback_used ? " · fallback used" : ""}</small></span><span><strong>{item.latency_ms ?? "—"} ms</strong><small>{item.warnings[0] ?? item.error_message}</small></span><button className="secondary-button compact-button" type="button" onClick={() => api.inferenceDetail(selectedDeployment.id, item.id).then((detail) => { setInferenceDetail(detail); setModal("inference"); })}><Eye size={14} /> Details</button></article>)}{!history.length && !historyError && <div className="serving-list-empty"><History size={24} /><strong>No requests recorded yet</strong><span>Use Test endpoint or call the REST API to generate the first auditable request.</span></div>}</div>
+        {replays.length > 0 && <div className="serving-replay-section"><h3>Challenger replays</h3><div className="panel inference-log-list">{replays.slice(0, 10).map((item) => <article key={item.id}><span><strong>{item.status}</strong><small>{formatDate(item.created_at)}</small></span><span><code>{shortId(item.challenger_model_id)}</code><small>revision {shortId(item.deployment_revision_id)}</small></span><span><strong>{item.processed_records} records</strong><small>{item.failed_requests} failed request(s)</small></span></article>)}</div></div>}
+      </div>}
+
+      {activeTab === "access" && <div className="serving-tab-content serving-access-layout">
+        <div className="panel"><div className="panel-header"><div><span className="builder-kicker">REST API</span><h3>Call this service directly</h3></div><ShieldCheck size={18} /></div><p className="serving-section-intro">Authenticate as an existing platform account. Business Case grants still determine access.</p><div className="serving-code-block"><code>POST {selectedDeployment.endpoint_url}</code><button className="icon-button" type="button" onClick={() => navigator.clipboard.writeText(selectedDeployment.endpoint_url ?? "")}><Copy size={15} /></button></div><pre className="json-output serving-code-example">{JSON.stringify({ instances: [{ record_id: "property-1042", features: { area: 84, rooms: 4 } }] }, null, 2)}</pre></div>
+        <div className="panel"><div className="panel-header"><div><span className="builder-kicker">Python client</span><h3>Create client credential</h3></div><KeyRound size={18} /></div><p className="serving-section-intro">Create a revocable credential for scripts and notebooks. The secret is displayed only once.</p><button className="primary-button" type="button" onClick={() => { setCredential(""); setModal("credential"); }}><KeyRound size={16} /> Generate credential</button></div>
+      </div>}
+
+      {modal === "revision" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog serving-revision-dialog" role="dialog" aria-modal="true" aria-labelledby="revision-title"><div className="modal-header"><div><span className="builder-kicker">Immutable configuration</span><h2 id="revision-title">Configure model roles</h2><p>Saving creates and immediately activates a new service revision. The previous revision remains auditable.</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body form-panel"><div className="serving-role-help"><span><strong>Champion</strong> public traffic</span><span><strong>Challenger</strong> direct tests and replay</span><span><strong>Shadow</strong> copied live traffic</span><span><strong>Fallback</strong> technical failures</span></div><div className="serving-role-grid">{eligibleModels.map((model) => <label key={model.id}><span>{model.name} · {model.version}<small>{model.stage}</small></span><select value={roleByModel[model.id] ?? ""} onChange={(event) => setRoleByModel((current) => ({ ...current, [model.id]: event.target.value as DeploymentRole | "" }))}><option value="">Not assigned</option><option value="champion" disabled={model.stage !== "production"}>Champion</option><option value="challenger" disabled={!['staging', 'production'].includes(model.stage)}>Challenger</option><option value="shadow" disabled={!['staging', 'production'].includes(model.stage)}>Shadow</option><option value="fallback" disabled={model.stage !== "production"}>Fallback</option></select></label>)}</div><label>Reason for change<input value={revisionReason} onChange={(event) => setRevisionReason(event.target.value)} placeholder="e.g. Add validated challenger v6" /></label></div><div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>Cancel</button><button className="primary-button" type="button" onClick={activateRevision} disabled={busy || !revisionReason.trim()}><GitBranch size={15} /> Activate new revision</button></div></div></div>}
+
+      {modal === "replay" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog" role="dialog" aria-modal="true" aria-labelledby="replay-title"><div className="modal-header"><div><span className="builder-kicker">Batch evaluation</span><h2 id="replay-title">Replay historical traffic</h2><p>Score up to 1,000 retained requests with a challenger. Production responses are not changed.</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body form-panel"><label>Challenger<select value={scoreTarget === "champion" ? "" : scoreTarget} onChange={(event) => setScoreTarget(event.target.value)}><option value="">Choose a challenger</option>{challengers.map((item) => <option key={item.model_id} value={item.model_id}>{modelLabel(item.model_id)}</option>)}</select></label><div className="serving-inline-warning">Replay uses the current immutable revision and retained historical inputs.</div></div><div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>Cancel</button><button className="primary-button" type="button" onClick={replayChallenger} disabled={busy || scoreTarget === "champion" || !scoreTarget}><History size={16} /> Queue replay</button></div></div></div>}
+
+      {modal === "credential" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog" role="dialog" aria-modal="true" aria-labelledby="credential-title"><div className="modal-header"><div><span className="builder-kicker">Python client</span><h2 id="credential-title">{credential ? "Copy your credential" : "Generate client credential"}</h2><p>{credential ? "This secret will not be shown again after you close this window." : "The credential inherits your current account and Business Case permissions."}</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body">{credential ? <div className="credential-once"><strong>Copy now — shown once</strong><code>{credential}</code><button className="secondary-button" type="button" onClick={() => navigator.clipboard.writeText(credential)}><Copy size={15} /> Copy credential</button></div> : <div className="serving-credential-explainer"><ShieldCheck size={24} /><p>You can revoke this credential later through the API. Creating it does not bypass platform permissions.</p></div>}</div><div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>{credential ? "Done" : "Cancel"}</button>{!credential && <button className="primary-button" type="button" onClick={createCredential} disabled={busy}><KeyRound size={16} /> Generate credential</button>}</div></div></div>}
+
+      {modal === "inference" && inferenceDetail && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog serving-inference-dialog" role="dialog" aria-modal="true" aria-labelledby="inference-title"><div className="modal-header"><div><span className="builder-kicker">Audited request</span><h2 id="inference-title">Inference details</h2><p>Stored request, response and per-model executions.</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body"><pre className="json-output">{JSON.stringify(inferenceDetail, null, 2)}</pre></div></div></div>}
     </section>
   );
 }

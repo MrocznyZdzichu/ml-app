@@ -109,6 +109,7 @@ def test_pipeline_runs_are_presented_as_versions_of_one_logical_model() -> None:
     artifacts.list_artifacts.side_effect = lambda owner_id, artifact_type: (
         pipeline_models if artifact_type == ArtifactType.MODEL_VERSION else []
     )
+    artifacts.list_model_version_artifacts.return_value = pipeline_models
     pipelines = Mock()
     pipelines.get_run.side_effect = lambda run_id: SimpleNamespace(
         owner_id="owner-1",
@@ -136,6 +137,8 @@ def test_pipeline_runs_are_presented_as_versions_of_one_logical_model() -> None:
         "model-1",
         "model-2",
     ]
+    artifacts.list_model_version_artifacts.assert_called_once_with(models[0].logical_id)
+    assert artifacts.list_artifacts.call_count == 2
 
 
 def test_batch_scoring_contract_prefers_autofe_recipe_and_matching_step_state() -> None:

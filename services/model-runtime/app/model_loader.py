@@ -1,37 +1,42 @@
-from functools import cached_property
-from pathlib import Path
+from __future__ import annotations
 
+import hashlib
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+import joblib
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class RuntimeSettings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
-    model_artifact_uri: str = "/models/model.joblib"
-
-
-class NullModel:
-    def predict(self, records: list[dict]) -> list[float]:
-        return [0.0 for _ in records]
+    model_repository_root: str = "/app/data/repository"
 
 
 class ModelLoader:
     def __init__(self, settings: RuntimeSettings | None = None) -> None:
         self.settings = settings or RuntimeSettings()
+        self.root = Path(self.settings.model_repository_root).resolve()
 
-    @property
-    def is_loaded(self) -> bool:
-        return Path(self.settings.model_artifact_uri).exists()
+    def load(self, artifact_uri: str, expected_hash: str) -> dict[str, Any]:
+        path = Path(artifact_uri.removeprefix("file://")).resolve()
+        try:
+            path.relative_to(self.root)
+        except ValueError as exc:
+            raise ValueError("Model artifact is outside the allowed repository") from exc
+        if not path.is_file():
+            raise FileNotFoundError("Model artifact does not exist")
+        actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+        if expected_hash and actual_hash != expected_hash:
+            raise ValueError("Model artifact hash does not match registry metadata")
+        return self._load_cached(str(path), actual_hash)
 
-    @cached_property
-    def _model(self):
-        artifact = Path(self.settings.model_artifact_uri)
-        if not artifact.exists():
-            return NullModel()
-
-        import joblib
-
-        return joblib.load(artifact)
-
-    def load(self):
-        return self._model
+    @staticmethod
+    @lru_cache(maxsize=32)
+    def _load_cached(path: str, artifact_hash: str) -> dict[str, Any]:
+        bundle = joblib.load(path)
+        if not isinstance(bundle, dict) or "estimator" not in bundle or "feature_columns" not in bundle:
+            raise ValueError("Unsupported model bundle contract")
+        return bundle

@@ -4,7 +4,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from fastapi import HTTPException, status
 
 from app.core.security import Principal
-from app.modules.models.domain import ModelArtifact, TrainingJob
+from app.modules.models.domain import ModelArtifact, ModelStage, TrainingJob
 from app.modules.models.repository import InMemoryModelRepository, ModelRepository
 from app.modules.models.schemas import PromoteModelRequest, TrainingRequest
 from app.modules.business_cases.domain import Artifact, ArtifactType
@@ -137,12 +137,48 @@ class ModelService:
         return model
 
     def list_versions(self, logical_id: str, principal: Principal) -> list[ModelArtifact]:
-        versions = [
-            item for item in self.list_models(principal)
-            if item.logical_id == logical_id
-        ]
+        # Version history is a metadata-only read. Do not call list_models here:
+        # that path enriches every visible model with fitted transforms and
+        # pipeline definitions for scoring, which is unnecessary for a family
+        # history modal and becomes increasingly expensive with registry size.
+        artifacts = self.artifacts.list_model_version_artifacts(logical_id)
+        if principal.is_administrator:
+            visible_artifacts = artifacts
+        elif isinstance(self.artifacts, PostgresBusinessCaseRepository):
+            readable_case_ids = {
+                case.id for case in self.business_cases.list_business_cases(principal)
+                if case.access_role
+                and BC_ROLE_RANK[BusinessCaseAccessRole(case.access_role)]
+                >= BC_ROLE_RANK[BusinessCaseAccessRole.READER]
+            }
+            visible_artifacts = [
+                artifact for artifact in artifacts
+                if artifact.business_case_id in readable_case_ids
+            ]
+        else:
+            visible_artifacts = [
+                artifact for artifact in artifacts
+                if artifact.owner_id == principal.user_id
+            ]
+        versions = [self._artifact_model(artifact) for artifact in visible_artifacts]
+        for version in versions:
+            version.logical_id = version.logical_id or logical_id
+
+        # Keep support for legacy in-memory models, which are not registered as
+        # pipeline artifacts. They are already bounded to the current owner.
+        legacy_models = (
+            self.repository.list_all_models()
+            if principal.is_administrator
+            else self.repository.list_models(principal.user_id)
+        )
+        versions.extend(
+            model for model in legacy_models
+            if (model.logical_id or model.id) == logical_id
+            and all(existing.id != model.id for existing in versions)
+        )
         if not versions:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Logical model not found")
+        self._assign_version_numbers(versions)
         return sorted(versions, key=lambda item: item.version_number)
 
     def promote_model(
@@ -151,9 +187,37 @@ class ModelService:
         payload: PromoteModelRequest,
         principal: Principal,
     ) -> ModelArtifact:
+        artifact = self.artifacts.get_artifact(model_id)
+        if artifact is not None and artifact.type == ArtifactType.MODEL_VERSION:
+            if artifact.business_case_id:
+                access_policy.require_business_case(
+                    principal,
+                    artifact.business_case_id,
+                    BusinessCaseAccessRole.CONTRIBUTOR,
+                )
+            artifact.metadata = {**artifact.metadata, "stage": payload.stage.value}
+            self.artifacts.update_artifact(artifact)
+            model = self._artifact_model(artifact)
+            family = [
+                self._artifact_model(item)
+                for item in self.artifacts.list_model_version_artifacts(
+                    model.logical_id or model.id
+                )
+            ]
+            self._assign_version_numbers(family)
+            version = next((item for item in family if item.id == model.id), None)
+            if version is not None:
+                model.version = version.version
+                model.version_number = version.version_number
+            return model
+
         model = self.get_model(model_id, principal)
         if model.business_case_id:
-            access_policy.require_business_case(principal, model.business_case_id, BusinessCaseAccessRole.CONTRIBUTOR)
+            access_policy.require_business_case(
+                principal,
+                model.business_case_id,
+                BusinessCaseAccessRole.CONTRIBUTOR,
+            )
         model.stage = payload.stage
         return self.repository.update_model(model)
 
@@ -253,6 +317,7 @@ class ModelService:
             algorithm=str(metadata.get("algorithm") or "unknown"),
             artifact_uri=str(metadata.get("location_uri") or ""),
             logical_id=str(metadata.get("logical_model_id") or ""),
+            stage=ModelStage(str(metadata.get("stage") or ModelStage.CANDIDATE.value)),
             metrics=dict(metadata.get("metrics") or {}),
             business_case_id=artifact.business_case_id or "",
             pipeline_id=str(lineage.get("pipeline_id") or ""),

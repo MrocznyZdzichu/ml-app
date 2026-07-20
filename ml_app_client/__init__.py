@@ -5,9 +5,11 @@ from .client import (
     AuthenticationError,
     AuthorizationError,
     ConflictError,
+    Deployment,
     Dataset,
     MLAppClient,
     PipelineRun,
+    PredictionResult,
     ResourceAmbiguousError,
     ResourceNotFoundError,
 )
@@ -17,9 +19,11 @@ __all__ = [
     "AuthenticationError",
     "AuthorizationError",
     "ConflictError",
+    "Deployment",
     "Dataset",
     "MLAppClient",
     "PipelineRun",
+    "PredictionResult",
     "ResourceAmbiguousError",
     "ResourceNotFoundError",
 ]

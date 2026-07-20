@@ -39,6 +39,62 @@ lineage. Dataset previews are bounded to at most 50,000 rows. Downloads stream
 the authorized persistent CSV/Parquet file to disk without buffering the full
 dataset in client memory.
 
+## Online model serving
+
+The same client creates versioned model services, scores through their stable
+champion endpoint, and reads bounded pages from the durable inference log. A
+model must first be promoted to the `production` stage.
+
+Change the lifecycle stage by a friendly model name. The newest version is
+selected unless an explicit version is provided:
+
+```python
+client.promote_model(
+    "Estates Sell Prices - AutoFEML - Model",
+    "staging",
+    version="v11",
+)
+
+client.promote_model(
+    "Estates Sell Prices - AutoFEML - Model",
+    "production",
+    version=11,
+)
+```
+
+Allowed stages are `candidate`, `staging`, `production`, and `archived`.
+Lifecycle stage describes model readiness; `champion`, `challenger`, `shadow`,
+and `fallback` remain separate roles configured on a serving deployment.
+
+```python
+from ml_app_client import MLAppClient
+
+client = MLAppClient.from_env()
+service = client.create_deployment(
+    name="Estates Sell Prices Service",
+    model_name="Estates Sell Prices - AutoFEML - Model",
+)
+
+result = client.predict(
+    service,
+    record_id="estate-2026-0001",
+    features={"area": 84.0, "rooms": 4, "year_built": 2018},
+    idempotency_key="valuation-2026-0001",
+)
+print(result.predictions[0]["prediction"])
+
+page = client.inference_history(service, record_id="estate-2026-0001")
+```
+
+For machine integrations, create a revocable credential once and store only
+the returned token in a secret manager. The credential authenticates the same
+account and therefore uses the existing Business Case group grants.
+
+```python
+credential = client.create_api_credential("estates-production", expires_at="2027-01-01T00:00:00Z")
+print(credential["token"])  # shown only in this response
+```
+
 ## Estates demo bootstrap
 
 Run the portable bootstrap after starting a new installation:

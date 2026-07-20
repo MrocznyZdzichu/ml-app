@@ -274,6 +274,85 @@ def _identity_and_access_control(connection: Connection) -> None:
             connection.execute(text(statement))
 
 
+def _online_model_serving(connection: Connection) -> None:
+    """Create durable deployment revisions, credentials and inference history."""
+    statements = [
+        (
+            "CREATE TABLE IF NOT EXISTS mlapp.serving_deployments ("
+            "id VARCHAR(64) PRIMARY KEY, owner_id VARCHAR(64) NOT NULL, "
+            "business_case_id VARCHAR(64) NOT NULL, name VARCHAR(255) NOT NULL, "
+            "slug VARCHAR(255) NOT NULL UNIQUE, status VARCHAR(32) NOT NULL, "
+            "active_revision_id VARCHAR(64) NOT NULL DEFAULT '', endpoint_url TEXT, "
+            "retention_days INTEGER NOT NULL DEFAULT 365, created_by VARCHAR(64) NOT NULL, "
+            "updated_by VARCHAR(64) NOT NULL, created_at TIMESTAMPTZ NOT NULL, "
+            "updated_at TIMESTAMPTZ NOT NULL)"
+        ),
+        "CREATE INDEX IF NOT EXISTS ix_serving_deployments_bc ON mlapp.serving_deployments (business_case_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_serving_deployment_bc_name ON mlapp.serving_deployments (business_case_id, lower(name))",
+        (
+            "CREATE TABLE IF NOT EXISTS mlapp.serving_deployment_revisions ("
+            "id VARCHAR(64) PRIMARY KEY, deployment_id VARCHAR(64) NOT NULL, "
+            "version_number INTEGER NOT NULL, assignments JSONB NOT NULL, "
+            "created_by VARCHAR(64) NOT NULL, reason TEXT NOT NULL DEFAULT '', "
+            "created_at TIMESTAMPTZ NOT NULL, UNIQUE(deployment_id, version_number))"
+        ),
+        "CREATE INDEX IF NOT EXISTS ix_serving_revisions_deployment ON mlapp.serving_deployment_revisions (deployment_id, version_number DESC)",
+        (
+            "CREATE TABLE IF NOT EXISTS mlapp.serving_inference_requests ("
+            "id VARCHAR(64) PRIMARY KEY, deployment_id VARCHAR(64) NOT NULL, "
+            "deployment_revision_id VARCHAR(64) NOT NULL, requested_by VARCHAR(64) NOT NULL, "
+            "correlation_id VARCHAR(128) NOT NULL, idempotency_key VARCHAR(255) NOT NULL DEFAULT '', "
+            "status VARCHAR(32) NOT NULL, record_count INTEGER NOT NULL, "
+            "request_payload JSONB NOT NULL, response_payload JSONB NOT NULL DEFAULT '{}'::jsonb, "
+            "warnings JSONB NOT NULL DEFAULT '[]'::jsonb, error_code VARCHAR(128) NOT NULL DEFAULT '', "
+            "error_message TEXT NOT NULL DEFAULT '', champion_model_id VARCHAR(64) NOT NULL DEFAULT '', "
+            "served_model_id VARCHAR(64) NOT NULL DEFAULT '', served_role VARCHAR(32) NOT NULL DEFAULT '', "
+            "fallback_used BOOLEAN NOT NULL DEFAULT FALSE, latency_ms INTEGER, "
+            "created_at TIMESTAMPTZ NOT NULL, completed_at TIMESTAMPTZ)"
+        ),
+        "CREATE INDEX IF NOT EXISTS ix_serving_inference_deployment_created ON mlapp.serving_inference_requests (deployment_id, created_at DESC, id DESC)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_serving_inference_idempotency ON mlapp.serving_inference_requests (deployment_id, requested_by, idempotency_key) WHERE idempotency_key <> ''",
+        (
+            "CREATE TABLE IF NOT EXISTS mlapp.serving_inference_items ("
+            "id VARCHAR(128) PRIMARY KEY, request_id VARCHAR(64) NOT NULL, "
+            "deployment_id VARCHAR(64) NOT NULL, record_id VARCHAR(512) NOT NULL, "
+            "model_id VARCHAR(64) NOT NULL, role VARCHAR(32) NOT NULL, "
+            "input JSONB NOT NULL, output JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL)"
+        ),
+        "CREATE INDEX IF NOT EXISTS ix_serving_items_request ON mlapp.serving_inference_items (request_id)",
+        "CREATE INDEX IF NOT EXISTS ix_serving_items_record ON mlapp.serving_inference_items (deployment_id, record_id, created_at DESC)",
+        (
+            "CREATE TABLE IF NOT EXISTS mlapp.api_credentials ("
+            "id VARCHAR(64) PRIMARY KEY, user_id VARCHAR(64) NOT NULL, name VARCHAR(255) NOT NULL, "
+            "token_hash VARCHAR(64) NOT NULL UNIQUE, expires_at TIMESTAMPTZ, revoked_at TIMESTAMPTZ, "
+            "last_used_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL)"
+        ),
+        "CREATE INDEX IF NOT EXISTS ix_api_credentials_user ON mlapp.api_credentials (user_id, created_at DESC)",
+        (
+            "CREATE TABLE IF NOT EXISTS mlapp.serving_challenger_replay_jobs ("
+            "id VARCHAR(64) PRIMARY KEY, deployment_id VARCHAR(64) NOT NULL, "
+            "deployment_revision_id VARCHAR(64) NOT NULL, challenger_model_id VARCHAR(64) NOT NULL, "
+            "requested_by VARCHAR(64) NOT NULL, status VARCHAR(32) NOT NULL, "
+            "source_before TIMESTAMPTZ NOT NULL, source_since TIMESTAMPTZ, source_until TIMESTAMPTZ, "
+            "max_requests INTEGER NOT NULL, processed_requests INTEGER NOT NULL DEFAULT 0, "
+            "processed_records INTEGER NOT NULL DEFAULT 0, failed_requests INTEGER NOT NULL DEFAULT 0, "
+            "error_message TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL, "
+            "started_at TIMESTAMPTZ, completed_at TIMESTAMPTZ)"
+        ),
+        "CREATE INDEX IF NOT EXISTS ix_serving_replays_deployment ON mlapp.serving_challenger_replay_jobs (deployment_id, created_at DESC)",
+    ]
+    for statement in statements:
+        connection.execute(text(statement))
+
+
+def _index_model_family_metadata(connection: Connection) -> None:
+    connection.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_artifacts_model_logical_id "
+        "ON mlapp.artifacts ((metadata->>'logical_model_id'), created_at) "
+        "WHERE type = 'model_version'"
+    ))
+
+
 MIGRATIONS = [
     Migration(
         version="20260703_0001",
@@ -294,5 +373,15 @@ MIGRATIONS = [
         version="20260717_0004",
         description="Enforce globally unique case-insensitive Business Case names",
         apply=_enforce_unique_business_case_names,
+    ),
+    Migration(
+        version="20260719_0005",
+        description="Add versioned online model serving, inference history and API credentials",
+        apply=_online_model_serving,
+    ),
+    Migration(
+        version="20260719_0006",
+        description="Index model family metadata for bounded version history reads",
+        apply=_index_model_family_metadata,
     ),
 ]

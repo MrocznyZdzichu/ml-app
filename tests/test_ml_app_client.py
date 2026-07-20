@@ -244,6 +244,80 @@ class MLAppClientTests(unittest.TestCase):
         self.assertEqual(session.requests[1][1], "http://localhost:8000/api/v1/scoring-reports")
         self.assertEqual(session.requests[1][2]["params"], {"business_case_id": "bc-1"})
 
+    def test_serving_prediction_resolves_name_and_sends_governance_headers(self) -> None:
+        deployment = {
+            "id": "deployment-1", "name": "Estates Service", "slug": "estates-service",
+            "business_case_id": "bc-1", "status": "running", "endpoint_url": "/predictions",
+            "active_revision": {"id": "revision-2"},
+        }
+        response = {
+            "request_id": "request-1", "deployment_id": "deployment-1",
+            "deployment_revision_id": "revision-2", "model_id": "model-1",
+            "served_role": "champion", "fallback_used": False,
+            "predictions": [{"record_id": "estate-1", "prediction": 42.0, "outputs": {}}],
+            "warnings": [],
+        }
+        session = FakeSession([FakeResponse([deployment]), FakeResponse(response)])
+        result = MLAppClient(session=session).predict(
+            "Estates Service", record_id="estate-1", features={"area": 84},
+            idempotency_key="valuation-1", correlation_id="crm-1",
+        )
+
+        self.assertEqual(result.predictions[0]["prediction"], 42.0)
+        method, url, kwargs = session.requests[-1]
+        self.assertEqual((method, url), ("POST", "http://localhost:8000/api/v1/serving/deployments/deployment-1/predictions"))
+        self.assertEqual(kwargs["headers"]["Idempotency-Key"], "valuation-1")
+        self.assertEqual(kwargs["json"]["instances"][0]["record_id"], "estate-1")
+
+    def test_create_deployment_by_model_name_chooses_latest_production_version(self) -> None:
+        session = FakeSession([
+            FakeResponse([
+                {"id": "candidate", "name": "Estates Model", "stage": "candidate", "version_number": 9},
+                {"id": "production-v1", "name": "Estates Model", "stage": "production", "version_number": 1},
+                {"id": "production-v3", "name": "Estates Model", "stage": "production", "version_number": 3},
+            ]),
+            FakeResponse({
+                "id": "deployment-1", "name": "Estates Service", "slug": "estates-service",
+                "business_case_id": "bc-1", "status": "running", "endpoint_url": "/predictions",
+                "active_revision": {"id": "revision-1"},
+            }, 201),
+        ])
+        deployment = MLAppClient(session=session).create_deployment(
+            name="Estates Service", model_name="Estates Model"
+        )
+        self.assertEqual(deployment.slug, "estates-service")
+        self.assertEqual(session.requests[-1][2]["json"]["model_id"], "production-v3")
+
+    def test_promote_model_resolves_friendly_name_and_explicit_version(self) -> None:
+        session = FakeSession([
+            FakeResponse([
+                {"id": "model-v10", "name": "Estates Model", "version": "v10", "version_number": 10},
+                {"id": "model-v11", "name": "Estates Model", "version": "v11", "version_number": 11},
+            ]),
+            FakeResponse({"id": "model-v10", "name": "Estates Model", "version": "v10", "stage": "staging"}),
+        ])
+
+        promoted = MLAppClient(session=session).promote_model(
+            "Estates Model", "staging", version=10
+        )
+
+        self.assertEqual(promoted["stage"], "staging")
+        method, url, kwargs = session.requests[-1]
+        self.assertEqual((method, url), ("POST", "http://localhost:8000/api/v1/models/model-v10/promote"))
+        self.assertEqual(kwargs["json"], {"stage": "staging"})
+
+    def test_promote_model_uses_latest_version_and_validates_stage(self) -> None:
+        session = FakeSession([FakeResponse([
+            {"id": "model-v1", "name": "Churn Model", "version_number": 1},
+            {"id": "model-v3", "name": "Churn Model", "version_number": 3},
+        ]), FakeResponse({"id": "model-v3", "stage": "production"})])
+        client = MLAppClient(session=session)
+
+        client.promote_model("Churn Model", "production")
+        self.assertIn("/models/model-v3/promote", session.requests[-1][1])
+        with self.assertRaises(ValueError):
+            client.promote_model("Churn Model", "champion")
+
 
 if __name__ == "__main__":
     unittest.main()
