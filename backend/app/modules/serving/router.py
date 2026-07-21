@@ -6,12 +6,14 @@ from app.modules.serving.schemas import (
     ChallengerReplayCreate,
     ChallengerReplayRead,
     DeploymentRead,
+    DeploymentModelOptionRead,
     DeploymentRollbackRequest,
     DeploymentRevisionCreate,
     DeploymentRevisionRead,
     DeploymentStatusUpdate,
     InferencePage,
     InferenceDetail,
+    InferenceInputContractRead,
     ModelServingUsageRead,
     ScoreRequest,
     ScoreResponse,
@@ -39,8 +41,11 @@ def create_deployment(
 
 
 @router.get("/deployments", response_model=list[DeploymentRead])
-def list_deployments(principal: Principal = Depends(require_user)) -> list[DeploymentRead]:
-    return [_deployment_read(item) for item in service.list_deployments(principal)]
+def list_deployments(
+    include_archived: bool = Query(default=False),
+    principal: Principal = Depends(require_user),
+) -> list[DeploymentRead]:
+    return [_deployment_read(item) for item in service.list_deployments(principal, include_archived=include_archived)]
 
 
 @router.get("/model-families/{logical_id}/usage", response_model=list[ModelServingUsageRead])
@@ -54,6 +59,34 @@ def list_model_family_usage(
 @router.get("/deployments/{deployment_id}", response_model=DeploymentRead)
 def get_deployment(deployment_id: str, principal: Principal = Depends(require_user)) -> DeploymentRead:
     return _deployment_read(service.get_deployment(deployment_id, principal))
+
+
+@router.get(
+    "/deployments/{deployment_id}/input-contract",
+    response_model=InferenceInputContractRead,
+)
+def get_input_contract(
+    deployment_id: str,
+    challenger_model_id: str = Query(default="", max_length=64),
+    principal: Principal = Depends(require_user),
+) -> InferenceInputContractRead:
+    return InferenceInputContractRead.model_validate(
+        service.input_contract(deployment_id, principal, challenger_model_id=challenger_model_id)
+    )
+
+
+@router.get(
+    "/deployments/{deployment_id}/model-options",
+    response_model=list[DeploymentModelOptionRead],
+)
+def get_deployment_model_options(
+    deployment_id: str,
+    principal: Principal = Depends(require_user),
+) -> list[DeploymentModelOptionRead]:
+    return [
+        DeploymentModelOptionRead.model_validate(item)
+        for item in service.deployment_model_options(deployment_id, principal)
+    ]
 
 
 @router.get("/deployments/{deployment_id}/revisions", response_model=list[DeploymentRevisionRead])

@@ -546,6 +546,39 @@ class DuckDbFeatureEngineeringEngine:
             connection.close()
             temporary_directory.cleanup()
 
+    def categorical_suggestions(
+        self,
+        *,
+        fitted_state_artifact_id: str,
+        owner_id: str,
+        limit: int = 5,
+    ) -> dict[str, list[str]]:
+        """Return bounded top categories from persisted full-training fitted state."""
+        if not fitted_state_artifact_id or limit < 1:
+            return {}
+        state = self._load_state(fitted_state_artifact_id, owner_id)
+        suggestions: dict[str, list[str]] = {}
+        for transform in (state.get("transforms") or {}).values():
+            if not isinstance(transform, dict):
+                continue
+            for column, fitted in (transform.get("columns") or {}).items():
+                if not isinstance(fitted, dict):
+                    continue
+                frequencies = fitted.get("frequencies") or {}
+                if not isinstance(frequencies, dict):
+                    continue
+                ranked = sorted(
+                    (
+                        (str(value), int(count))
+                        for value, count in frequencies.items()
+                        if isinstance(count, (int, float))
+                    ),
+                    key=lambda item: (-item[1], item[0]),
+                )
+                if ranked:
+                    suggestions[str(column)] = [value for value, _ in ranked[:limit]]
+        return suggestions
+
     def _prepare_evaluation(
         self,
         connection: duckdb.DuckDBPyConnection,

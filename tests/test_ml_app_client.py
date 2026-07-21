@@ -10,6 +10,7 @@ from ml_app_client import (
     ApiError,
     AuthorizationError,
     ConflictError,
+    Deployment,
     MLAppClient,
     PipelineRun,
     ResourceAmbiguousError,
@@ -336,6 +337,126 @@ class MLAppClientTests(unittest.TestCase):
         self.assertEqual((method, url), ("PATCH", "http://localhost:8000/api/v1/models/model-v10/stage"))
         self.assertEqual(kwargs["json"], {"stage": "staging"})
 
+    def test_promote_model_normalizes_display_punctuation_in_friendly_name(self) -> None:
+        session = FakeSession([
+            FakeResponse([{
+                "id": "model-v1",
+                "logical_id": "churn-family",
+                "name": "Storage Subscription Churn - Experiment 3 - AutoML+ champion",
+                "version": "v1",
+                "version_number": 1,
+            }]),
+            FakeResponse([{
+                "id": "model-v1",
+                "logical_id": "churn-family",
+                "name": "Storage Subscription Churn - Experiment 3 - AutoML+ champion",
+                "version": "v1",
+                "version_number": 1,
+            }]),
+            FakeResponse({"id": "model-v1", "stage": "archived"}),
+        ])
+
+        archived = MLAppClient(session=session).promote_model(
+            "Storage Subscription Churn - Experiment 3- AutoML champion",
+            "archived",
+            version="v1",
+        )
+
+        self.assertEqual(archived["stage"], "archived")
+        self.assertIn("/models/model-v1/stage", session.requests[-1][1])
+
+    def test_promote_model_prefers_exact_name_before_punctuation_fallback(self) -> None:
+        session = FakeSession([
+            FakeResponse([
+                {
+                    "id": "automl-plus-v4", "logical_id": "automl-plus",
+                    "name": "Storage Subscription Churn - Experiment 3- AutoML+ champion",
+                    "version": "v4", "version_number": 4,
+                },
+                {
+                    "id": "automl-v4", "logical_id": "automl",
+                    "name": "Storage Subscription Churn - Experiment 3- AutoML champion",
+                    "version": "v4", "version_number": 4,
+                },
+            ]),
+            FakeResponse([{
+                "id": "automl-v4", "logical_id": "automl",
+                "name": "Storage Subscription Churn - Experiment 3- AutoML champion",
+                "version": "v4", "version_number": 4,
+            }]),
+            FakeResponse({"id": "automl-v4", "stage": "archived"}),
+        ])
+
+        archived = MLAppClient(session=session).promote_model(
+            "Storage Subscription Churn - Experiment 3- AutoML champion",
+            "archived",
+            version="v4",
+        )
+
+        self.assertEqual(archived["id"], "automl-v4")
+        self.assertIn("/models/automl-v4/stage", session.requests[-1][1])
+
+    def test_promote_model_resolves_old_version_from_complete_family_history(self) -> None:
+        session = FakeSession([
+            FakeResponse([{
+                "id": "model-v9", "logical_id": "churn-family",
+                "name": "Storage Subscription Churn - Experiment 3- AutoML champion",
+                "version": "v9", "version_number": 9,
+            }]),
+            FakeResponse([
+                {
+                    "id": "model-v1", "logical_id": "churn-family",
+                    "name": "Storage Subscription Churn - Experiment 3 - AutoML champion",
+                    "version": "v1", "version_number": 1,
+                },
+                {
+                    "id": "model-v9", "logical_id": "churn-family",
+                    "name": "Storage Subscription Churn - Experiment 3- AutoML champion",
+                    "version": "v9", "version_number": 9,
+                },
+            ]),
+            FakeResponse({"id": "model-v1", "stage": "archived"}),
+        ])
+
+        archived = MLAppClient(session=session).promote_model(
+            "Storage Subscription Churn - Experiment 3- AutoML champion",
+            "archived",
+            version="v1",
+        )
+
+        self.assertEqual(archived["id"], "model-v1")
+        self.assertIn("/models/churn-family/versions", session.requests[1][1])
+        self.assertIn("/models/model-v1/stage", session.requests[-1][1])
+
+    def test_promote_model_versions_resolves_family_once_and_preserves_order(self) -> None:
+        session = FakeSession([
+            FakeResponse([{
+                "id": "model-v3", "logical_id": "churn-family",
+                "name": "Churn Model", "version": "v3", "version_number": 3,
+            }]),
+            FakeResponse([
+                {"id": "model-v1", "logical_id": "churn-family", "name": "Old Churn", "version": "v1", "version_number": 1},
+                {"id": "model-v2", "logical_id": "churn-family", "name": "Churn Model", "version": "v2", "version_number": 2},
+                {"id": "model-v3", "logical_id": "churn-family", "name": "Churn Model", "version": "v3", "version_number": 3},
+            ]),
+            FakeResponse({"id": "model-v2", "stage": "archived"}),
+            FakeResponse({"id": "model-v1", "stage": "archived"}),
+        ])
+
+        updated = MLAppClient(session=session).promote_model_versions(
+            "Churn Model", "archived", versions=["v2", 1]
+        )
+
+        self.assertEqual([item["id"] for item in updated], ["model-v2", "model-v1"])
+        self.assertEqual(
+            [request[0] for request in session.requests],
+            ["GET", "GET", "PATCH", "PATCH"],
+        )
+        self.assertEqual(
+            sum("/models/churn-family/versions" in request[1] for request in session.requests),
+            1,
+        )
+
     def test_promote_model_uses_latest_version_and_validates_stage(self) -> None:
         session = FakeSession([FakeResponse([
             {"id": "model-v1", "name": "Churn Model", "version_number": 1},
@@ -384,6 +505,45 @@ class MLAppClientTests(unittest.TestCase):
         self.assertEqual(stopped.status, "stopped")
         self.assertIn("/revisions/revision-1/rollback", session.requests[3][1])
         self.assertEqual(session.requests[-1][2]["json"]["reason"], "Maintenance")
+
+    def test_deployment_input_contract_uses_same_target_contract_as_ui(self) -> None:
+        deployment = Deployment.from_api({
+            "id": "deployment-1", "name": "Churn", "slug": "churn",
+            "business_case_id": "bc-1", "status": "running", "endpoint_url": "/predictions",
+            "active_revision": {"id": "revision-1"},
+        })
+        contract = {
+            "deployment_id": "deployment-1", "model_id": "challenger-1",
+            "role": "challenger", "fields": [], "example_features": {},
+        }
+        session = FakeSession([FakeResponse(contract)])
+
+        result = MLAppClient(session=session).deployment_input_contract(
+            deployment, challenger_model_id="challenger-1"
+        )
+
+        self.assertEqual(result["model_id"], "challenger-1")
+        self.assertEqual(
+            session.requests[-1][2]["params"],
+            {"challenger_model_id": "challenger-1"},
+        )
+
+    def test_deployment_model_options_exposes_api_contract(self) -> None:
+        deployment = Deployment.from_api({
+            "id": "deployment-1", "name": "Churn", "slug": "churn",
+            "business_case_id": "bc-1", "status": "running", "endpoint_url": "/predictions",
+            "active_revision": {"id": "revision-1"},
+        })
+        session = FakeSession([FakeResponse([{
+            "model_id": "model-1", "stage": "staging",
+            "contract_signature": "abc", "compatible_with_active_champion": True,
+            "allowed_roles": ["challenger", "shadow"],
+        }])])
+
+        options = MLAppClient(session=session).deployment_model_options(deployment)
+
+        self.assertEqual(options[0]["allowed_roles"], ["challenger", "shadow"])
+        self.assertIn("/deployments/deployment-1/model-options", session.requests[-1][1])
 
 
 if __name__ == "__main__":

@@ -61,6 +61,13 @@ client.promote_model(
     "production",
     version=11,
 )
+
+# Resolve the registry and family only once when changing several versions.
+client.promote_model_versions(
+    "Estates Sell Prices - AutoFEML - Model",
+    "archived",
+    versions=["v1", "v2", "v3"],
+)
 ```
 
 Allowed stages are `developed`, `staging`, `production`, and `archived`.
@@ -69,7 +76,10 @@ The previous input value `candidate` remains a deprecated compatibility alias.
 Model services expose complete lifecycle operations through the same REST
 contract: `deployment_revisions(...)`, `rollback_deployment(...)`, and
 `set_deployment_status(...)` list history, create an auditable rollback revision,
-and start or stop an endpoint.
+and start, stop or archive an endpoint. Archiving is terminal: it removes the
+service from default listings and active model usage while preserving revisions,
+Inference Log and audit records. Use `list_deployments(include_archived=True)`
+when archived services must be inspected.
 Lifecycle stage describes model readiness; `champion`, `challenger`, `shadow`,
 and `fallback` remain separate roles configured on a serving deployment.
 
@@ -91,7 +101,18 @@ result = client.predict(
 print(result.predictions[0]["prediction"])
 
 page = client.inference_history(service, record_id="estate-2026-0001")
+
+# Retire a trial service without destroying its governed history.
+client.set_deployment_status(
+    service,
+    status="archived",
+    reason="Trial endpoint is no longer needed",
+)
 ```
+
+The equivalent REST operation is
+`POST /api/v1/serving/deployments/{deployment_id}/status` with
+`{"status":"archived","reason":"Trial endpoint is no longer needed"}`.
 
 For machine integrations, create a revocable credential once and store only
 the returned token in a secret manager. The credential authenticates the same

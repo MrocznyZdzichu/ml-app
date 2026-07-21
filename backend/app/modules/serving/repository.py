@@ -262,7 +262,7 @@ class PostgresServingRepository:
     def set_deployment_status(self, deployment: Deployment, revision: DeploymentRevision) -> Deployment:
         self._ensure_initialized()
         with self.engine.begin() as connection:
-            if deployment.status == DeploymentStatus.STOPPED:
+            if deployment.status in {DeploymentStatus.STOPPED, DeploymentStatus.ARCHIVED}:
                 connection.execute(
                     active_model_assignments_table.delete().where(
                         active_model_assignments_table.c.deployment_id == deployment.id

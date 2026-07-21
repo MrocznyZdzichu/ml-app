@@ -5,6 +5,7 @@ import { api } from "../api/client";
 import type { BusinessCase, DatasetLineageReference, Pipeline, ScoringReport } from "../api/client";
 import { ModelPerformanceReport } from "../pipelines/PipelineRunDialogs";
 import { ArtifactFilters, pipelineMatches } from "../components/ArtifactFilters";
+import { DialogNavigationActions, useVersionedResourceNavigation } from "../components/dialogNavigation";
 import { DatasetLineageList } from "./DatasetLineageList";
 
 export function ScoringReportsPanel({
@@ -24,8 +25,7 @@ export function ScoringReportsPanel({
   const [businessCaseId, setBusinessCaseId] = useState(initialBusinessCaseId);
   const [purposeFilter, setPurposeFilter] = useState("");
   const [pipelineFilter, setPipelineFilter] = useState("");
-  const [selected, setSelected] = useState<ScoringReport | null>(null);
-  const [history, setHistory] = useState<ScoringReport | null>(null);
+  const reportNavigation = useVersionedResourceNavigation<ScoringReport>();
   const [sort, setSort] = useState<{
     key: "report" | "business_case" | "pipeline" | "problem" | "created" | "scope";
     direction: "asc" | "desc";
@@ -163,10 +163,10 @@ export function ScoringReportsPanel({
               <span>{latest.evaluated_row_count.toLocaleString()} rows</span>
               <span>
                 <div className="model-row-actions">
-                  <button className="secondary-button compact-button" type="button" onClick={() => setHistory(latest)}>
+                  <button className="secondary-button compact-button" type="button" onClick={() => reportNavigation.openHistory(latest)}>
                     <History size={14} /> Versions
                   </button>
-                  <button className="secondary-button compact-button" type="button" onClick={() => setSelected(latest)}>
+                  <button className="secondary-button compact-button" type="button" onClick={() => reportNavigation.openDirect(latest)}>
                     <Eye size={14} /> View latest
                   </button>
                 </div>
@@ -176,16 +176,15 @@ export function ScoringReportsPanel({
           {!visible.length && <div className="catalog-empty">No scoring reports match these filters.</div>}
         </div>
       </div>
-      {selected && <ScoringReportDialog report={selected} onClose={() => setSelected(null)}
+      {reportNavigation.selected && <ScoringReportDialog report={reportNavigation.selected}
+        onClose={reportNavigation.closeAll}
+        onBack={reportNavigation.hasBack ? reportNavigation.back : undefined}
         onOpenDataset={onOpenDataset} />}
-      {history && (
+      {reportNavigation.showHistory && reportNavigation.history && (
         <ScoringReportHistoryDialog
-          report={history}
-          onClose={() => setHistory(null)}
-          onView={(version) => {
-            setHistory(null);
-            setSelected(version);
-          }}
+          report={reportNavigation.history}
+          onClose={reportNavigation.closeHistory}
+          onView={reportNavigation.openVersion}
         />
       )}
     </section>
@@ -213,10 +212,12 @@ function SortHeader({
 export function ScoringReportDialog({
   report,
   onClose,
+  onBack,
   onOpenDataset
 }: {
   report: ScoringReport;
   onClose: () => void;
+  onBack?: () => void;
   onOpenDataset?: (datasetId: string) => void;
 }) {
   const [dataLineage, setDataLineage] = useState<DatasetLineageReference[]>([]);
@@ -239,7 +240,7 @@ export function ScoringReportDialog({
             <h2>{report.name}</h2>
             <p>Run {shortId(report.pipeline_run_id)} · full scope · {report.evaluated_row_count.toLocaleString()} evaluated rows</p>
           </div>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="Close scoring report"><X size={18} /></button>
+          <DialogNavigationActions onBack={onBack} onClose={onClose} closeLabel="Close scoring report" />
         </div>
         <DatasetLineageList
           items={dataLineage.filter((item) => ["test", "prediction"].includes(item.role))}

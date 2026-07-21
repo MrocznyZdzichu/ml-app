@@ -479,7 +479,7 @@ export type Deployment = {
   business_case_id: string;
   name: string;
   slug: string;
-  status: "requested" | "building" | "running" | "degraded" | "failed" | "stopped";
+  status: "requested" | "building" | "running" | "degraded" | "failed" | "stopped" | "archived";
   active_revision_id: string;
   endpoint_url: string | null;
   retention_days: number;
@@ -524,6 +524,34 @@ export type ScoreResponse = {
   fallback_used: boolean;
   predictions: Array<{ record_id: string; prediction: unknown; outputs: Record<string, unknown> }>;
   warnings: string[];
+};
+
+export type InferenceInputField = {
+  name: string;
+  value_type: "number" | "integer" | "string" | "boolean";
+  required: boolean;
+  default_value: unknown;
+  description: string;
+  minimum: number | null;
+  maximum: number | null;
+  options: unknown[];
+};
+
+export type InferenceInputContract = {
+  deployment_id: string;
+  deployment_revision_id: string;
+  model_id: string;
+  role: DeploymentRole;
+  fields: InferenceInputField[];
+  example_features: Record<string, unknown>;
+};
+
+export type DeploymentModelOption = {
+  model_id: string;
+  stage: string;
+  contract_signature: string;
+  compatible_with_active_champion: boolean;
+  allowed_roles: DeploymentRole[];
 };
 
 export type InferenceRequest = {
@@ -1187,7 +1215,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload)
     }),
-  listDeployments: () => request<Deployment[]>("/serving/deployments"),
+  listDeployments: (includeArchived = false) => request<Deployment[]>(`/serving/deployments${includeArchived ? "?include_archived=true" : ""}`),
   listDeploymentRevisions: (deploymentId: string) =>
     request<DeploymentRevision[]>(`/serving/deployments/${encodeURIComponent(deploymentId)}/revisions`),
   createDeploymentRevision: (deploymentId: string, assignments: Array<{ model_id: string; role: DeploymentRole }>, reason: string) =>
@@ -1195,7 +1223,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ assignments, reason })
     }),
-  setDeploymentStatus: (deploymentId: string, status: "running" | "stopped", reason: string) =>
+  setDeploymentStatus: (deploymentId: string, status: "running" | "stopped" | "archived", reason: string) =>
     request<Deployment>(`/serving/deployments/${encodeURIComponent(deploymentId)}/status`, {
       method: "POST",
       body: JSON.stringify({ status, reason })
@@ -1219,6 +1247,14 @@ export const api = {
         body: JSON.stringify({ instances })
       }
     ),
+  deploymentInputContract: (deploymentId: string, challengerModelId?: string) => {
+    const params = new URLSearchParams();
+    if (challengerModelId) params.set("challenger_model_id", challengerModelId);
+    const query = params.size ? `?${params}` : "";
+    return request<InferenceInputContract>(`/serving/deployments/${encodeURIComponent(deploymentId)}/input-contract${query}`);
+  },
+  deploymentModelOptions: (deploymentId: string) =>
+    request<DeploymentModelOption[]>(`/serving/deployments/${encodeURIComponent(deploymentId)}/model-options`),
   inferenceLog: (deploymentId: string, limit = 50, cursor = "", recordId = "") => {
     const params = new URLSearchParams({ limit: String(limit) });
     if (cursor) params.set("cursor", cursor);

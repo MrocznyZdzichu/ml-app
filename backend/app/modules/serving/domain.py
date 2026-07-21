@@ -11,6 +11,7 @@ class DeploymentStatus(str, Enum):
     DEGRADED = "degraded"
     FAILED = "failed"
     STOPPED = "stopped"
+    ARCHIVED = "archived"
 
 
 class DeploymentRole(str, Enum):

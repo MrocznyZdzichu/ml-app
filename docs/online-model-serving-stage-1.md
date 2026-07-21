@@ -32,6 +32,35 @@ changes.
 Services can be stopped and started without deleting history. Starting validates
 the active revision again. Rollback copies a selected historical configuration
 into a new immutable revision rather than reactivating or mutating the old row.
+Archiving is terminal: it disables the endpoint, removes active assignments and
+hides the service from default listings while preserving revisions, Inference
+Log and audit history.
+
+## UI lifecycle test
+
+Prepare three compatible immutable model versions in one Business Case before
+starting: an initial `production` champion, a replacement `production` champion,
+and a `staging` or `production` shadow. Also prepare one valid feature payload
+matching the models' inference contract.
+
+1. Open **Online inference > Model services**, choose **New service**, enter a
+   unique name, select the initial champion, and create the service. Confirm that
+   the Overview shows revision `v1`, status `running`, and the expected champion.
+2. Open the **Test** tab. Enter a stable record ID and the JSON feature payload,
+   leave the target set to `champion`, and run scoring. Record the request ID,
+   returned model, prediction and revision. Confirm the request in Inference Log.
+3. Return to **Overview** and select **Configure models**. Assign the replacement
+   model as the only `champion`, assign the selected model as `shadow`, enter a
+   reason, and activate the revision. Confirm revision `v2`; the endpoint URL
+   must remain unchanged.
+4. Return to **Test** and score the same feature payload again. Use a new request
+   or idempotency key if the UI exposes it. Confirm the response used the new
+   champion and the detailed Inference Log contains both `champion` and `shadow`
+   executions. The shadow output must not replace the response.
+5. Return to **All model services**, select **Archive**, enter a reason, and
+   confirm. The service must disappear from the active table and its endpoint
+   must no longer accept scoring. Its governed history remains available through
+   `GET /serving/deployments?include_archived=true` or the Python client.
 
 ## REST contract
 
@@ -75,6 +104,9 @@ POST /api/v1/serving/deployments/{deployment_id}/revisions/{revision_id}/rollbac
 
 POST /api/v1/serving/deployments/{deployment_id}/status
 {"status":"stopped","reason":"Scheduled maintenance"}
+
+POST /api/v1/serving/deployments/{deployment_id}/status
+{"status":"archived","reason":"Lifecycle test complete"}
 ```
 
 ## Audit and failure guarantees

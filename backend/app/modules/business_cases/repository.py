@@ -107,6 +107,14 @@ class BusinessCaseRepository(Protocol):
     def list_model_version_artifacts(self, logical_model_id: str) -> list[Artifact]:
         ...
 
+    def find_feature_transform_artifact(
+        self,
+        business_case_id: str,
+        pipeline_run_id: str,
+        pipeline_step_id: str,
+    ) -> Artifact | None:
+        ...
+
     def find_artifact(self, owner_id: str, reference_id: str, business_case_id: str | None) -> Artifact | None:
         ...
 
@@ -178,6 +186,20 @@ class InMemoryBusinessCaseRepository:
             if item.type == ArtifactType.MODEL_VERSION
             and str(item.metadata.get("logical_model_id") or "") == logical_model_id
         ]
+
+    def find_feature_transform_artifact(
+        self,
+        business_case_id: str,
+        pipeline_run_id: str,
+        pipeline_step_id: str,
+    ) -> Artifact | None:
+        return next((
+            item for item in self._artifacts.values()
+            if item.type == ArtifactType.FEATURE_TRANSFORM
+            and item.business_case_id == business_case_id
+            and str((item.metadata.get("lineage") or {}).get("pipeline_run_id") or "") == pipeline_run_id
+            and str((item.metadata.get("lineage") or {}).get("pipeline_step_id") or "") == pipeline_step_id
+        ), None)
 
     def find_artifact(self, owner_id: str, reference_id: str, business_case_id: str | None) -> Artifact | None:
         for artifact in self._artifacts.values():
@@ -358,6 +380,29 @@ class PostgresBusinessCaseRepository:
             )
             for row in rows
         ]
+
+    def find_feature_transform_artifact(
+        self,
+        business_case_id: str,
+        pipeline_run_id: str,
+        pipeline_step_id: str,
+    ) -> Artifact | None:
+        """Resolve one immutable fitted transform without scanning the registry."""
+        self._ensure_initialized()
+        statement = (
+            select(artifacts_table)
+            .where(
+                artifacts_table.c.type == ArtifactType.FEATURE_TRANSFORM.value,
+                artifacts_table.c.business_case_id == business_case_id,
+                artifacts_table.c.metadata["lineage"]["pipeline_run_id"].as_string() == pipeline_run_id,
+                artifacts_table.c.metadata["lineage"]["pipeline_step_id"].as_string() == pipeline_step_id,
+            )
+            .order_by(artifacts_table.c.created_at.desc())
+            .limit(1)
+        )
+        with self.engine.begin() as connection:
+            row = connection.execute(statement).first()
+        return self._artifact_from_record(row._mapping) if row else None
 
     def find_artifact(self, owner_id: str, reference_id: str, business_case_id: str | None) -> Artifact | None:
         self._ensure_initialized()

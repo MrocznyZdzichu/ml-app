@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import mimetypes
 import os
+import re
 import time
 import warnings
 from dataclasses import dataclass
@@ -200,6 +201,53 @@ def _one_named(items: list[Mapping[str, Any]], name: str, resource: str) -> Mapp
             f"{resource} name {name!r} is ambiguous ({len(matches)} matches)"
         )
     return matches[0]
+
+
+def _friendly_name_key(value: str) -> str:
+    """Normalize harmless display punctuation without guessing between resources.
+
+    Punctuation and whitespace are presentation details in UI labels. Callers must
+    still reject multiple resources that share the resulting key.
+    """
+    return " ".join(re.sub(r"[^\w]+", " ", value.casefold()).split())
+
+
+def _exact_name_key(value: str) -> str:
+    """Normalize casing and repeated whitespace while preserving meaningful punctuation."""
+    return " ".join(value.casefold().split())
+
+
+def _named_candidates(
+    items: list[Mapping[str, Any]], name: str
+) -> list[Mapping[str, Any]]:
+    exact_key = _exact_name_key(name)
+    exact = [
+        item for item in items
+        if _exact_name_key(str(item.get("name") or "")) == exact_key
+    ]
+    if exact:
+        return exact
+    friendly_key = _friendly_name_key(name)
+    return [
+        item for item in items
+        if _friendly_name_key(str(item.get("name") or "")) == friendly_key
+    ]
+
+
+def _model_stage(value: str) -> str:
+    if value == "candidate":
+        warnings.warn(
+            "Model stage 'candidate' is deprecated; use 'developed' instead",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        value = "developed"
+    allowed_stages = {"developed", "staging", "production", "archived"}
+    if value not in allowed_stages:
+        raise ValueError(
+            "stage must be one of: developed, staging, production, archived"
+        )
+    return value
 
 
 class MLAppClient:
@@ -651,6 +699,11 @@ class MLAppClient:
         """List model versions visible through the current Business Case grants."""
         return self._request("GET", "/models")
 
+    def list_model_versions(self, logical_model_id: str) -> list[Mapping[str, Any]]:
+        """List the complete version history of one logical model family."""
+        path = f"/models/{quote(logical_model_id, safe='')}/versions"
+        return self._request("GET", path)
+
     def promote_model(
         self,
         model: str,
@@ -663,25 +716,35 @@ class MLAppClient:
         When ``model`` is a name, the newest version is selected by default.
         Pass ``version="v5"`` or ``version=5`` to choose an explicit version.
         """
-        if stage == "candidate":
-            warnings.warn(
-                "Model stage 'candidate' is deprecated; use 'developed' instead",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            stage = "developed"
-        allowed_stages = {"developed", "staging", "production", "archived"}
-        if stage not in allowed_stages:
-            raise ValueError(
-                "stage must be one of: developed, staging, production, archived"
-            )
+        stage = _model_stage(stage)
         models = self.list_models()
-        normalized = model.strip().casefold()
-        matches = [
-            item for item in models
-            if str(item.get("id") or "") == model
-            or str(item.get("name") or "").strip().casefold() == normalized
-        ]
+        id_matches = [item for item in models if str(item.get("id") or "") == model]
+        matches = id_matches or _named_candidates(models, model)
+        if not matches:
+            suffix = "" if version is None else f" version {version!r}"
+            raise ResourceNotFoundError(f"Model {model!r}{suffix} was not found")
+
+        matching_families = {
+            str(item.get("logical_id") or _friendly_name_key(str(item.get("name") or "")))
+            for item in matches
+        }
+        if len(matching_families) > 1:
+            candidates = ", ".join(
+                f"{item.get('name')} {item.get('version') or 'v' + str(item.get('version_number'))} ({item.get('id')})"
+                for item in matches[:8]
+            )
+            raise ResourceAmbiguousError(
+                f"Model {model!r} is ambiguous; use an exact model ID. Candidates: {candidates}"
+            )
+
+        logical_ids = {
+            str(item["logical_id"])
+            for item in matches
+            if item.get("logical_id")
+        }
+        if not id_matches and len(logical_ids) == 1:
+            matches = self.list_model_versions(next(iter(logical_ids)))
+        available_versions = matches
         if version is not None:
             normalized_version = str(version).strip().casefold()
             if normalized_version.isdigit():
@@ -693,7 +756,28 @@ class MLAppClient:
             ]
         if not matches:
             suffix = "" if version is None else f" version {version!r}"
+            available_versions = (
+                self.list_model_versions(next(iter(logical_ids)))
+                if id_matches and len(logical_ids) == 1
+                else available_versions
+            )
+            if available_versions:
+                available = ", ".join(sorted({
+                    str(item.get("version") or f"v{item.get('version_number')}")
+                    for item in available_versions
+                }))
+                raise ResourceNotFoundError(
+                    f"Model {model!r}{suffix} was not found; available versions: {available}"
+                )
             raise ResourceNotFoundError(f"Model {model!r}{suffix} was not found")
+        if version is not None and len(matches) > 1:
+            candidates = ", ".join(
+                f"{item.get('name')} {item.get('version') or 'v' + str(item.get('version_number'))} ({item.get('id')})"
+                for item in matches[:8]
+            )
+            raise ResourceAmbiguousError(
+                f"Model {model!r} is ambiguous; use an exact model ID. Candidates: {candidates}"
+            )
         selected = max(matches, key=lambda item: int(item.get("version_number") or 0))
         return self._request(
             "PATCH",
@@ -701,9 +785,100 @@ class MLAppClient:
             json={"stage": stage},
         )
 
-    def list_deployments(self) -> list[Deployment]:
-        """List model services visible through the current Business Case grants."""
-        return [Deployment.from_api(item) for item in self._request("GET", "/serving/deployments")]
+    def promote_model_versions(
+        self,
+        model: str,
+        stage: str,
+        *,
+        versions: list[str | int] | tuple[str | int, ...],
+    ) -> list[Mapping[str, Any]]:
+        """Change several versions in one family without repeatedly resolving it.
+
+        Every version still uses the standard audited stage-change endpoint. The
+        optimization only removes redundant registry and family-history reads.
+        Results preserve the order supplied in ``versions``.
+        """
+        stage = _model_stage(stage)
+        requested = list(versions)
+        if not requested:
+            raise ValueError("versions must contain at least one model version")
+
+        models = self.list_models()
+        id_matches = [item for item in models if str(item.get("id") or "") == model]
+        matches = id_matches or _named_candidates(models, model)
+        if not matches:
+            raise ResourceNotFoundError(f"Model {model!r} was not found")
+        family_ids = {
+            str(item.get("logical_id") or _friendly_name_key(str(item.get("name") or "")))
+            for item in matches
+        }
+        if len(family_ids) > 1:
+            candidates = ", ".join(
+                f"{item.get('name')} {item.get('version') or 'v' + str(item.get('version_number'))} ({item.get('id')})"
+                for item in matches[:8]
+            )
+            raise ResourceAmbiguousError(
+                f"Model {model!r} is ambiguous; use an exact model ID. Candidates: {candidates}"
+            )
+
+        logical_ids = {str(item["logical_id"]) for item in matches if item.get("logical_id")}
+        family = (
+            self.list_model_versions(next(iter(logical_ids)))
+            if len(logical_ids) == 1
+            else matches
+        )
+        by_version: dict[str, list[Mapping[str, Any]]] = {}
+        for item in family:
+            labels = {
+                str(item.get("version") or "").strip().casefold(),
+                str(item.get("version_number") or "").strip().casefold(),
+            }
+            for label in labels:
+                if label:
+                    by_version.setdefault(label, []).append(item)
+                    if label.isdigit():
+                        by_version.setdefault(f"v{label}", []).append(item)
+
+        selected: list[Mapping[str, Any]] = []
+        missing: list[str] = []
+        for version in requested:
+            normalized = str(version).strip().casefold()
+            if normalized.isdigit():
+                normalized = f"v{normalized}"
+            candidates = {
+                str(item.get("id")): item for item in by_version.get(normalized, [])
+            }
+            if not candidates:
+                missing.append(str(version))
+                continue
+            if len(candidates) > 1:
+                raise ResourceAmbiguousError(
+                    f"Model {model!r} version {version!r} is ambiguous; use exact model IDs"
+                )
+            selected.append(next(iter(candidates.values())))
+        if missing:
+            available = ", ".join(
+                str(item.get("version") or f"v{item.get('version_number')}")
+                for item in family
+            )
+            raise ResourceNotFoundError(
+                f"Model {model!r} versions {', '.join(missing)} were not found; "
+                f"available versions: {available}"
+            )
+
+        return [
+            self._request(
+                "PATCH",
+                f"/models/{item['id']}/stage",
+                json={"stage": stage},
+            )
+            for item in selected
+        ]
+
+    def list_deployments(self, *, include_archived: bool = False) -> list[Deployment]:
+        """List visible model services, excluding archived services by default."""
+        params = {"include_archived": "true"} if include_archived else None
+        return [Deployment.from_api(item) for item in self._request("GET", "/serving/deployments", params=params)]
 
     def list_model_serving_usage(self, logical_model_id: str) -> list[ModelServingUsage]:
         """List active service assignments for every version in a model family."""
@@ -782,9 +957,9 @@ class MLAppClient:
         status: str,
         reason: str,
     ) -> Deployment:
-        """Start or stop a model service without deleting its revision history."""
-        if status not in {"running", "stopped"}:
-            raise ValueError("status must be running or stopped")
+        """Start, stop or irreversibly archive a service while preserving its history."""
+        if status not in {"running", "stopped", "archived"}:
+            raise ValueError("status must be running, stopped or archived")
         if not reason.strip():
             raise ValueError("Deployment status change reason is required")
         target = self._deployment(deployment)
@@ -826,6 +1001,35 @@ class MLAppClient:
             headers["X-Correlation-ID"] = correlation_id
         return PredictionResult.from_api(
             self._request("POST", path, json={"instances": normalized}, headers=headers)
+        )
+
+    def deployment_input_contract(
+        self,
+        deployment: str | Deployment,
+        *,
+        challenger_model_id: str | None = None,
+    ) -> Mapping[str, Any]:
+        """Return the model-derived input contract used by the endpoint form."""
+        target = self._deployment(deployment)
+        params = (
+            {"challenger_model_id": challenger_model_id}
+            if challenger_model_id
+            else None
+        )
+        return self._request(
+            "GET",
+            f"/serving/deployments/{target.id}/input-contract",
+            params=params,
+        )
+
+    def deployment_model_options(
+        self,
+        deployment: str | Deployment,
+    ) -> list[Mapping[str, Any]]:
+        """List role eligibility and inference-contract compatibility for a service."""
+        target = self._deployment(deployment)
+        return self._request(
+            "GET", f"/serving/deployments/{target.id}/model-options"
         )
 
     def inference_history(
@@ -902,14 +1106,21 @@ class MLAppClient:
     def _production_model_by_name(self, name: str) -> Mapping[str, Any]:
         if not name.strip():
             raise ValueError("Provide model_id or model_name")
-        normalized = name.strip().casefold()
+        models = self._request("GET", "/models")
         candidates = [
-            item for item in self._request("GET", "/models")
-            if str(item.get("name") or "").strip().casefold() == normalized
-            and item.get("stage") == "production"
+            item for item in _named_candidates(models, name)
+            if item.get("stage") == "production"
         ]
         if not candidates:
             raise ResourceNotFoundError(f"Production model named {name!r} was not found")
+        families = {
+            str(item.get("logical_id") or _friendly_name_key(str(item.get("name") or "")))
+            for item in candidates
+        }
+        if len(families) > 1:
+            raise ResourceAmbiguousError(
+                f"Production model {name!r} is ambiguous; provide model_id explicitly"
+            )
         return max(candidates, key=lambda item: int(item.get("version_number") or 0))
 
     @staticmethod

@@ -47,6 +47,7 @@ import type {
   UserProfile
 } from "./api/client";
 import { AssetList } from "./components/AssetList";
+import { useVersionedResourceNavigation } from "./components/dialogNavigation";
 import { ArtifactDependenciesDialog } from "./operational/ArtifactDependenciesDialog";
 import {
   ArtifactFilters,
@@ -545,10 +546,8 @@ function BusinessCasesPanel({
   const [isMappingFormOpen, setIsMappingFormOpen] = useState(false);
   const [editingAttachmentId, setEditingAttachmentId] = useState("");
   const [activeWorkspace, setActiveWorkspace] = useState<"details" | "data" | "pipelines" | "models" | "services" | "reports" | null>(null);
-  const [selectedBcModel, setSelectedBcModel] = useState<ModelArtifact | null>(null);
-  const [selectedBcReport, setSelectedBcReport] = useState<ScoringReport | null>(null);
-  const [bcModelHistory, setBcModelHistory] = useState<ModelArtifact | null>(null);
-  const [bcReportHistory, setBcReportHistory] = useState<ScoringReport | null>(null);
+  const bcModelNavigation = useVersionedResourceNavigation<ModelArtifact>();
+  const bcReportNavigation = useVersionedResourceNavigation<ScoringReport>();
   const [bcDatasetHistory, setBcDatasetHistory] = useState<DataAsset | null>(null);
   const [bcPipelineHistory, setBcPipelineHistory] = useState<Pipeline | null>(null);
   const [bcRunDialog, setBcRunDialog] = useState<{
@@ -1472,8 +1471,8 @@ function BusinessCasesPanel({
               meta: `${item.algorithm} · ${item.problem_type} · ${businessCaseName(businessCases, item.business_case_id)}`,
               status: item.stage,
               actions: [
-                { label: "Versions", icon: "versions", onClick: () => setBcModelHistory(item) },
-                { label: "View", icon: "view", onClick: () => setSelectedBcModel(item) },
+                { label: "Versions", icon: "versions", onClick: () => bcModelNavigation.openHistory(item) },
+                { label: "View", icon: "view", onClick: () => bcModelNavigation.openDirect(item) },
                 { label: "Dependencies", icon: "dependencies", onClick: () => setDependencyTarget({ referenceId: item.id, artifactType: "model_version", title: item.name }) }
               ]
             }))} />
@@ -1549,8 +1548,8 @@ function BusinessCasesPanel({
               meta: `${pipelineName(pipelines, item.pipeline_id)} · ${item.problem_type} · ${item.evaluated_row_count.toLocaleString()} rows`,
               status: "ready",
               actions: [
-                { label: "Versions", icon: "versions", onClick: () => setBcReportHistory(item) },
-                { label: "View", icon: "view", onClick: () => setSelectedBcReport(item) },
+                { label: "Versions", icon: "versions", onClick: () => bcReportNavigation.openHistory(item) },
+                { label: "View", icon: "view", onClick: () => bcReportNavigation.openDirect(item) },
                 { label: "Dependencies", icon: "dependencies", onClick: () => setDependencyTarget({ referenceId: item.id, artifactType: "report", title: item.name }) }
               ]
             }))} />
@@ -1558,23 +1557,25 @@ function BusinessCasesPanel({
         )}
       </div>
       )}
-      {selectedBcModel && (
+      {bcModelNavigation.selected && (
         <DeferredPanel>
           <ModelDetailsDialog
-            model={selectedBcModel}
-            businessCaseName={businessCaseName(businessCases, selectedBcModel.business_case_id)}
-            pipelineName={pipelineName(pipelines, selectedBcModel.pipeline_id)}
+            model={bcModelNavigation.selected}
+            businessCaseName={businessCaseName(businessCases, bcModelNavigation.selected.business_case_id)}
+            pipelineName={pipelineName(pipelines, bcModelNavigation.selected.pipeline_id)}
             onOpenDataset={onOpenDataset}
-            onClose={() => setSelectedBcModel(null)}
+            onClose={bcModelNavigation.closeAll}
+            onBack={bcModelNavigation.hasBack ? bcModelNavigation.back : undefined}
           />
         </DeferredPanel>
       )}
-      {selectedBcReport && (
+      {bcReportNavigation.selected && (
         <DeferredPanel>
           <ScoringReportDialog
-            report={selectedBcReport}
+            report={bcReportNavigation.selected}
             onOpenDataset={onOpenDataset}
-            onClose={() => setSelectedBcReport(null)}
+            onClose={bcReportNavigation.closeAll}
+            onBack={bcReportNavigation.hasBack ? bcReportNavigation.back : undefined}
           />
         </DeferredPanel>
       )}
@@ -1596,29 +1597,23 @@ function BusinessCasesPanel({
           onOpenDataset={onOpenDataset}
         />
       )}
-      {bcModelHistory && (
+      {bcModelNavigation.showHistory && bcModelNavigation.history && (
         <DeferredPanel>
           <ModelVersionHistoryDialog
-            model={bcModelHistory}
-            businessCaseName={businessCaseName(businessCases, bcModelHistory.business_case_id)}
-            pipelineName={pipelineName(pipelines, bcModelHistory.pipeline_id)}
-            onClose={() => setBcModelHistory(null)}
-            onView={(model) => {
-              setBcModelHistory(null);
-              setSelectedBcModel(model);
-            }}
+            model={bcModelNavigation.history}
+            businessCaseName={businessCaseName(businessCases, bcModelNavigation.history.business_case_id)}
+            pipelineName={pipelineName(pipelines, bcModelNavigation.history.pipeline_id)}
+            onClose={bcModelNavigation.closeHistory}
+            onView={bcModelNavigation.openVersion}
           />
         </DeferredPanel>
       )}
-      {bcReportHistory && (
+      {bcReportNavigation.showHistory && bcReportNavigation.history && (
         <DeferredPanel>
           <ScoringReportHistoryDialog
-            report={bcReportHistory}
-            onClose={() => setBcReportHistory(null)}
-            onView={(report) => {
-              setBcReportHistory(null);
-              setSelectedBcReport(report);
-            }}
+            report={bcReportNavigation.history}
+            onClose={bcReportNavigation.closeHistory}
+            onView={bcReportNavigation.openVersion}
           />
         </DeferredPanel>
       )}
@@ -1736,7 +1731,11 @@ function BusinessCasesPanel({
       {bcSelectedRunDetails && (
         <PipelineRunDetailsDialog
           run={bcSelectedRunDetails}
-          onClose={() => setBcSelectedRunDetails(null)}
+          onBack={bcRunsPipelineId ? () => setBcSelectedRunDetails(null) : undefined}
+          onClose={() => {
+            setBcSelectedRunDetails(null);
+            setBcRunsPipelineId(null);
+          }}
           onChanged={async () => {
             setBcRunsRefreshKey((current) => current + 1);
             await onRefresh();
@@ -2859,7 +2858,11 @@ function PipelinesPanel({
         {selectedRunDetails && (
           <PipelineRunDetailsDialog
             run={selectedRunDetails}
-            onClose={() => setSelectedRunDetails(null)}
+            onBack={isRunHistoryOpen ? () => setSelectedRunDetails(null) : undefined}
+            onClose={() => {
+              setSelectedRunDetails(null);
+              setIsRunHistoryOpen(false);
+            }}
             onChanged={async () => {
               setRunHistoryRefreshKey((current) => current + 1);
             }}
@@ -3150,7 +3153,11 @@ function PipelinesPanel({
       {selectedRunDetails && selectedPipeline && (
         <PipelineRunDetailsDialog
           run={selectedRunDetails}
-          onClose={() => setSelectedRunDetails(null)}
+          onBack={isRunHistoryOpen ? () => setSelectedRunDetails(null) : undefined}
+          onClose={() => {
+            setSelectedRunDetails(null);
+            setIsRunHistoryOpen(false);
+          }}
           onChanged={async () => {
             setRuns(await api.listPipelineRuns(selectedPipeline.id));
             setRunHistoryRefreshKey((current) => current + 1);

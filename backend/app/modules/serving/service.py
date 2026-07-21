@@ -114,10 +114,11 @@ class ServingService:
         })
         return deployment
 
-    def list_deployments(self, principal: Principal) -> list[Deployment]:
+    def list_deployments(self, principal: Principal, *, include_archived: bool = False) -> list[Deployment]:
         return [
             deployment for deployment in self.repository.list_all_deployments()
             if self._can_read(principal, deployment.business_case_id)
+            and (include_archived or deployment.status != DeploymentStatus.ARCHIVED)
         ]
 
     def list_model_family_usage(self, logical_id: str, principal: Principal) -> list[dict[str, Any]]:
@@ -142,6 +143,165 @@ class ServingService:
             raise HTTPException(status_code=503, detail="Deployment has no valid active revision")
         return revision
 
+    def input_contract(
+        self,
+        deployment_id: str,
+        principal: Principal,
+        *,
+        challenger_model_id: str = "",
+    ) -> dict[str, Any]:
+        """Return a bounded UI contract derived from the pinned model metadata."""
+        deployment = self.get_deployment(deployment_id, principal)
+        revision = self.get_active_revision(deployment)
+        if challenger_model_id:
+            assignment = next((
+                item for item in revision.assignments
+                if item.role == DeploymentRole.CHALLENGER
+                and item.model_id == challenger_model_id
+            ), None)
+            if assignment is None:
+                raise HTTPException(status_code=404, detail="Challenger is not assigned to the active revision")
+        else:
+            assignment = next((
+                item for item in revision.assignments
+                if item.role == DeploymentRole.CHAMPION
+            ), None)
+            if assignment is None:
+                raise HTTPException(status_code=503, detail="Deployment has no champion")
+        model = self._model_for_inference(assignment.model_id, principal)
+        fields = self._input_fields(model)
+        return {
+            "deployment_id": deployment.id,
+            "deployment_revision_id": revision.id,
+            "model_id": model.id,
+            "role": assignment.role,
+            "fields": fields,
+            "example_features": {
+                field["name"]: field["default_value"] for field in fields
+            },
+        }
+
+    def deployment_model_options(
+        self,
+        deployment_id: str,
+        principal: Principal,
+    ) -> list[dict[str, Any]]:
+        """Expose role eligibility and an opaque compatibility contract to UI clients."""
+        deployment = self.get_deployment(deployment_id, principal)
+        revision = self.get_active_revision(deployment)
+        champion_assignment = next((
+            item for item in revision.assignments if item.role == DeploymentRole.CHAMPION
+        ), None)
+        if champion_assignment is None:
+            raise HTTPException(status_code=503, detail="Deployment has no champion")
+        champion = self._model_for_inference(champion_assignment.model_id, principal)
+        champion_signature = self._inference_contract_signature(champion)
+        options = []
+        for model in self.models.list_models(principal):
+            if (
+                model.business_case_id != deployment.business_case_id
+                or model.stage not in {ModelStage.STAGING, ModelStage.PRODUCTION}
+            ):
+                continue
+            allowed_roles = [DeploymentRole.CHALLENGER, DeploymentRole.SHADOW]
+            if model.stage == ModelStage.PRODUCTION:
+                allowed_roles = [
+                    DeploymentRole.CHAMPION,
+                    DeploymentRole.CHALLENGER,
+                    DeploymentRole.SHADOW,
+                    DeploymentRole.FALLBACK,
+                ]
+            signature = self._inference_contract_signature(model)
+            options.append({
+                "model_id": model.id,
+                "stage": model.stage.value,
+                "contract_signature": signature,
+                "compatible_with_active_champion": signature == champion_signature,
+                "allowed_roles": allowed_roles,
+            })
+        return options
+
+    @classmethod
+    def _inference_contract_signature(cls, model) -> str:
+        canonical = json.dumps(
+            cls._inference_contract(model),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _input_fields(self, model) -> list[dict[str, Any]]:
+        feature_definition = model.feature_engineering_definition or {}
+        raw_features = [
+            str(value) for value in (
+                feature_definition.get("feature_columns") or model.feature_columns
+            )
+        ]
+        auto_fe = model.training_config.get("auto_feature_engineering") or {}
+        decisions = {
+            str(item.get("column")): item
+            for item in auto_fe.get("column_decisions") or []
+            if isinstance(item, dict) and item.get("column")
+        }
+        suggestions: dict[str, list[str]] = {}
+        if model.fitted_transform_artifact_id:
+            try:
+                suggestions = DuckDbFeatureEngineeringEngine().categorical_suggestions(
+                    fitted_state_artifact_id=model.fitted_transform_artifact_id,
+                    owner_id=model.owner_id,
+                    limit=5,
+                )
+            except (OSError, ValueError, json.JSONDecodeError):
+                logger.warning(
+                    "Could not load categorical suggestions model_id=%s fitted_state=%s",
+                    model.id,
+                    model.fitted_transform_artifact_id,
+                )
+        fields: list[dict[str, Any]] = []
+        for name in raw_features:
+            decision = decisions.get(name, {})
+            raw_type = str(decision.get("type") or "").upper()
+            profile = decision.get("numeric_profile") or {}
+            if "BOOL" in raw_type:
+                value_type, default = "boolean", False
+            elif any(token in raw_type for token in ("INT", "HUGEINT", "UBIGINT")):
+                mean = profile.get("mean")
+                value_type = "integer"
+                default = round(float(mean)) if isinstance(mean, (int, float)) else 0
+            elif any(token in raw_type for token in ("DOUBLE", "FLOAT", "DECIMAL", "REAL", "NUMERIC")):
+                mean = profile.get("mean")
+                value_type = "number"
+                default = round(float(mean), 6) if isinstance(mean, (int, float)) else 0.0
+            elif any(token in raw_type for token in ("DATE", "TIME")):
+                value_type, default = "string", "2026-01-01"
+            elif decision.get("role") == "categorical" or any(
+                token in raw_type for token in ("CHAR", "TEXT", "STRING", "VARCHAR")
+            ):
+                options = suggestions.get(name, [])
+                value_type = "string"
+                default = options[0] if options else "example"
+            else:
+                # Estimator-ready legacy models are numeric unless their
+                # persisted training contract says otherwise.
+                value_type, default = "number", 0.0
+            minimum = profile.get("min") if isinstance(profile.get("min"), (int, float)) else None
+            maximum = profile.get("max") if isinstance(profile.get("max"), (int, float)) else None
+            description_parts = [raw_type or "type not recorded"]
+            if minimum is not None and maximum is not None:
+                description_parts.append(f"observed range {minimum:g}–{maximum:g}")
+            fields.append({
+                "name": name,
+                "value_type": value_type,
+                "required": True,
+                "default_value": default,
+                "description": " · ".join(description_parts),
+                "minimum": minimum,
+                "maximum": maximum,
+                "options": suggestions.get(name, []),
+            })
+        return fields
+
     def list_revisions(self, deployment_id: str, principal: Principal) -> list[DeploymentRevision]:
         deployment = self.get_deployment(deployment_id, principal)
         return self.repository.list_revisions(deployment.id)
@@ -153,6 +313,8 @@ class ServingService:
         principal: Principal,
     ) -> DeploymentRevision:
         deployment = self.get_deployment(deployment_id, principal)
+        if deployment.status == DeploymentStatus.ARCHIVED:
+            raise HTTPException(status_code=409, detail="An archived deployment cannot be revised")
         access_policy.require_business_case(
             principal, deployment.business_case_id, BusinessCaseAccessRole.CONTRIBUTOR
         )
@@ -198,11 +360,13 @@ class ServingService:
         access_policy.require_business_case(
             principal, deployment.business_case_id, BusinessCaseAccessRole.CONTRIBUTOR
         )
-        if next_status not in {DeploymentStatus.RUNNING, DeploymentStatus.STOPPED}:
-            raise HTTPException(status_code=422, detail="Deployment may be started or stopped only")
+        if next_status not in {DeploymentStatus.RUNNING, DeploymentStatus.STOPPED, DeploymentStatus.ARCHIVED}:
+            raise HTTPException(status_code=422, detail="Deployment may be started, stopped or archived only")
         previous_status = deployment.status
         if next_status == previous_status:
             return deployment
+        if previous_status == DeploymentStatus.ARCHIVED:
+            raise HTTPException(status_code=409, detail="An archived deployment cannot be restarted or changed")
         revision = self.get_active_revision(deployment)
         if next_status == DeploymentStatus.RUNNING:
             self._validate_assignments(revision.assignments, deployment.business_case_id, principal)
@@ -260,9 +424,12 @@ class ServingService:
         revision = self.repository.get_revision(_revision_id) if _revision_id else self.get_active_revision(deployment)
         if revision is None or revision.deployment_id != deployment.id:
             raise HTTPException(status_code=409, detail="Pinned deployment revision is unavailable")
+        resolved_models: dict[str, Any] = {}
         if not _revision_id:
             try:
-                self._validate_assignments(revision.assignments, deployment.business_case_id, principal)
+                resolved_models = self._validate_assignments(
+                    revision.assignments, deployment.business_case_id, principal
+                )
             except HTTPException as exc:
                 deployment.status = DeploymentStatus.DEGRADED
                 deployment.updated_at = datetime.now(timezone.utc)
@@ -339,7 +506,13 @@ class ServingService:
         served = primary
         primary_started = time.monotonic()
         try:
-            primary_outputs = self._execute(primary, normalized, principal, request_id)
+            primary_outputs = self._execute(
+                primary,
+                normalized,
+                principal,
+                request_id,
+                resolved_model=resolved_models.get(primary.model_id),
+            )
         except RuntimeInputError as input_error:
             execution_items.extend(self._failed_item_rows(
                 inference, normalized, primary, str(input_error), primary_started
@@ -364,7 +537,13 @@ class ServingService:
             warnings.append(f"Champion failed technically; fallback {fallback.model_id} served the request")
             fallback_started = time.monotonic()
             try:
-                primary_outputs = self._execute(fallback, normalized, principal, request_id)
+                primary_outputs = self._execute(
+                    fallback,
+                    normalized,
+                    principal,
+                    request_id,
+                    resolved_model=resolved_models.get(fallback.model_id),
+                )
             except RuntimeInputError as input_error:
                 execution_items.extend(self._failed_item_rows(
                     inference, normalized, fallback, str(input_error), fallback_started
@@ -387,7 +566,13 @@ class ServingService:
             for shadow in (item for item in revision.assignments if item.role == DeploymentRole.SHADOW):
                 shadow_started = time.monotonic()
                 try:
-                    shadow_outputs = self._execute(shadow, normalized, principal, request_id)
+                    shadow_outputs = self._execute(
+                        shadow,
+                        normalized,
+                        principal,
+                        request_id,
+                        resolved_model=resolved_models.get(shadow.model_id),
+                    )
                     execution_items.extend(self._item_rows(
                         inference, normalized, shadow_outputs, shadow,
                         round((time.monotonic() - shadow_started) * 1000),
@@ -589,9 +774,11 @@ class ServingService:
         instances: list[dict[str, Any]],
         principal: Principal,
         request_id: str,
+        *,
+        resolved_model: Any | None = None,
     ) -> list[dict[str, Any]]:
         try:
-            model = self.models.get_model(assignment.model_id, principal)
+            model = resolved_model or self._model_for_inference(assignment.model_id, principal)
         except Exception as exc:
             raise RuntimeUnavailableError(
                 f"Pinned model {assignment.model_id} is unavailable"
@@ -627,10 +814,10 @@ class ServingService:
         assignments: list[ModelAssignment],
         business_case_id: str,
         principal: Principal,
-    ) -> None:
+    ) -> dict[str, Any]:
         models = []
         for assignment in assignments:
-            model = self.models.get_model(assignment.model_id, principal)
+            model = self._model_for_inference(assignment.model_id, principal)
             if model.business_case_id != business_case_id:
                 raise HTTPException(status_code=409, detail="Every assigned model must belong to the deployment Business Case")
             self._require_stage(model.stage, assignment.role)
@@ -640,6 +827,11 @@ class ServingService:
         incompatible = [model.id for model in models if self._inference_contract(model) != expected]
         if incompatible:
             raise HTTPException(status_code=409, detail=f"Models have incompatible inference contracts: {', '.join(incompatible)}")
+        return {model.id: model for model in models}
+
+    def _model_for_inference(self, model_id: str, principal: Principal):
+        resolver = getattr(self.models, "get_model_for_inference", self.models.get_model)
+        return resolver(model_id, principal)
 
     @staticmethod
     def _inference_contract(model) -> tuple[Any, ...]:

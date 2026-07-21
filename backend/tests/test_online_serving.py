@@ -5,6 +5,7 @@ import pytest
 from app.core.security import Principal
 from app.modules.models.domain import ModelArtifact, ModelStage
 from app.modules.models.schemas import PromoteModelRequest
+from app.modules.pipelines.feature_engineering import DuckDbFeatureEngineeringEngine
 from app.modules.serving.domain import DeploymentRole, DeploymentStatus, InferenceStatus
 from app.modules.serving.runtime import RuntimeUnavailableError
 from app.modules.serving.schemas import DeploymentCreate, DeploymentRevisionCreate, ScoreRecord
@@ -74,7 +75,7 @@ class MemoryServingRepository:
     def active_assignments_for_model(self, model_id):
         result = []
         for deployment in self.deployments.values():
-            if deployment.status == DeploymentStatus.STOPPED:
+            if deployment.status in {DeploymentStatus.STOPPED, DeploymentStatus.ARCHIVED}:
                 continue
             revision = self.revisions.get(deployment.active_revision_id)
             for assignment in revision.assignments if revision else []:
@@ -112,6 +113,9 @@ class Models:
     def list_versions(self, logical_id, principal):
         return [item for item in self.models.values() if item.logical_id == logical_id]
 
+    def list_models(self, principal):
+        return list(self.models.values())
+
 
 class Runtime:
     def __init__(self, failures=()):
@@ -138,6 +142,32 @@ def test_candidate_input_is_canonicalized_to_developed() -> None:
     assert PromoteModelRequest(stage="candidate").stage == ModelStage.DEVELOPED
 
 
+def test_categorical_suggestions_are_ranked_from_persisted_training_frequencies(monkeypatch) -> None:
+    engine = DuckDbFeatureEngineeringEngine()
+    monkeypatch.setattr(engine, "_load_state", lambda *args: {
+        "transforms": {
+            "encode": {
+                "columns": {
+                    "region": {
+                        "frequencies": {
+                            "south": 12, "north": 30, "west": 40,
+                            "east": 25, "central": 18, "other": 1,
+                        }
+                    }
+                }
+            }
+        }
+    })
+
+    suggestions = engine.categorical_suggestions(
+        fitted_state_artifact_id="state-1", owner_id="owner", limit=5
+    )
+
+    assert suggestions == {
+        "region": ["west", "north", "east", "central", "south"]
+    }
+
+
 def test_model_family_usage_exposes_active_service_role(principal) -> None:
     repository = MemoryServingRepository()
     champion = model("model-v11")
@@ -160,6 +190,67 @@ def test_model_family_usage_exposes_active_service_role(principal) -> None:
         "revision_version": 1,
         "role": DeploymentRole.CHAMPION,
     }]
+
+
+def test_input_contract_uses_raw_features_types_and_profile_defaults(principal) -> None:
+    repository = MemoryServingRepository()
+    champion = model("model-v11")
+    champion.feature_engineering_definition = {
+        "feature_columns": ["age", "region", "is_active"]
+    }
+    champion.training_config = {
+        "auto_feature_engineering": {
+            "column_decisions": [
+                {
+                    "column": "age", "type": "BIGINT", "role": "numeric",
+                    "numeric_profile": {"min": 18, "max": 82, "mean": 41.4},
+                },
+                {"column": "region", "type": "VARCHAR", "role": "categorical"},
+                {"column": "is_active", "type": "BOOLEAN", "role": "categorical"},
+            ]
+        }
+    }
+    service = ServingService(repository=repository, runtime=Runtime(), models=Models([champion]))
+    deployment = service.create_deployment(
+        DeploymentCreate(name="Contract service", model_id=champion.id), principal
+    )
+
+    contract = service.input_contract(deployment.id, principal)
+
+    assert contract["model_id"] == champion.id
+    assert contract["role"] == DeploymentRole.CHAMPION
+    assert contract["example_features"] == {
+        "age": 41, "region": "example", "is_active": False,
+    }
+    assert contract["fields"][0]["minimum"] == 18
+    assert contract["fields"][0]["maximum"] == 82
+
+
+def test_deployment_model_options_expose_opaque_contract_compatibility(principal) -> None:
+    repository = MemoryServingRepository()
+    champion = model("champion")
+    compatible = model("compatible", ModelStage.STAGING)
+    incompatible = model("incompatible", ModelStage.STAGING)
+    incompatible.feature_columns = ["other_value"]
+    developed = model("developed", ModelStage.DEVELOPED)
+    service = ServingService(
+        repository=repository,
+        runtime=Runtime(),
+        models=Models([champion, compatible, incompatible, developed]),
+    )
+    deployment = service.create_deployment(
+        DeploymentCreate(name="Options service", model_id=champion.id), principal
+    )
+
+    options = service.deployment_model_options(deployment.id, principal)
+    by_id = {item["model_id"]: item for item in options}
+
+    assert set(by_id) == {"champion", "compatible", "incompatible"}
+    assert by_id["compatible"]["compatible_with_active_champion"] is True
+    assert by_id["incompatible"]["compatible_with_active_champion"] is False
+    assert by_id["compatible"]["allowed_roles"] == [
+        DeploymentRole.CHALLENGER, DeploymentRole.SHADOW,
+    ]
 
 
 @pytest.fixture
@@ -282,6 +373,18 @@ def test_service_stop_start_and_rollback_create_a_new_revision(principal) -> Non
         deployment.id, DeploymentStatus.RUNNING, "Maintenance complete", principal
     )
     assert started.status == DeploymentStatus.RUNNING
+
+    archived = service.set_deployment_status(
+        deployment.id, DeploymentStatus.ARCHIVED, "Trial service is no longer needed", principal
+    )
+    assert archived.status == DeploymentStatus.ARCHIVED
+    assert service.list_deployments(principal) == []
+    assert service.list_deployments(principal, include_archived=True) == [archived]
+    with pytest.raises(Exception) as archived_error:
+        service.set_deployment_status(
+            deployment.id, DeploymentStatus.RUNNING, "Attempt to restore", principal
+        )
+    assert getattr(archived_error.value, "status_code", None) == 409
 
 
 def test_success_is_not_returned_when_audit_completion_fails(principal) -> None:

@@ -46,8 +46,8 @@ class DeploymentStatusUpdate(BaseModel):
 
     @model_validator(mode="after")
     def validate_operator_status(self) -> "DeploymentStatusUpdate":
-        if self.status not in {DeploymentStatus.RUNNING, DeploymentStatus.STOPPED}:
-            raise ValueError("A user may set deployment status only to running or stopped")
+        if self.status not in {DeploymentStatus.RUNNING, DeploymentStatus.STOPPED, DeploymentStatus.ARCHIVED}:
+            raise ValueError("A user may set deployment status only to running, stopped or archived")
         return self
 
 
@@ -103,6 +103,34 @@ class ModelServingUsageRead(BaseModel):
     revision_id: str
     revision_version: int
     role: DeploymentRole
+
+
+class InferenceInputFieldRead(BaseModel):
+    name: str
+    value_type: str
+    required: bool = True
+    default_value: Any
+    description: str = ""
+    minimum: float | None = None
+    maximum: float | None = None
+    options: list[Any] = Field(default_factory=list)
+
+
+class InferenceInputContractRead(BaseModel):
+    deployment_id: str
+    deployment_revision_id: str
+    model_id: str
+    role: DeploymentRole
+    fields: list[InferenceInputFieldRead]
+    example_features: dict[str, Any]
+
+
+class DeploymentModelOptionRead(BaseModel):
+    model_id: str
+    stage: str
+    contract_signature: str
+    compatible_with_active_champion: bool
+    allowed_roles: list[DeploymentRole]
 
 
 class ScoreRecord(BaseModel):

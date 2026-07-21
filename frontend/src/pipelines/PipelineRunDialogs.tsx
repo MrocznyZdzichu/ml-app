@@ -4,6 +4,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 
 import { api } from "../api/client";
 import { ArtifactDependenciesDialog } from "../operational/ArtifactDependenciesDialog";
+import { DialogNavigationActions } from "../components/dialogNavigation";
 import type {
   BusinessCase,
   ModelArtifact,
@@ -95,7 +96,8 @@ export function PipelineVersionHistoryDialog({
           <PipelineDefinitionDialog
             pipeline={pipeline}
             version={selectedVersion}
-            onClose={() => setSelectedVersion(null)}
+            onBack={() => setSelectedVersion(null)}
+            onClose={onClose}
           />
         )}
       </div>
@@ -106,10 +108,12 @@ export function PipelineVersionHistoryDialog({
 function PipelineDefinitionDialog({
   pipeline,
   version,
+  onBack,
   onClose
 }: {
   pipeline: Pipeline;
   version: PipelineVersion;
+  onBack: () => void;
   onClose: () => void;
 }) {
   const [copied, setCopied] = useState(false);
@@ -156,7 +160,7 @@ function PipelineDefinitionDialog({
             <button className="primary-button" type="button" onClick={downloadDefinition}>
               <Download size={15} /> Download JSON
             </button>
-            <button className="icon-button" type="button" onClick={onClose} aria-label="Close definition"><X size={18} /></button>
+            <DialogNavigationActions onBack={onBack} onClose={onClose} closeLabel="Close pipeline version workflow" />
           </div>
         </header>
         {error && <div className="error-banner">{error}</div>}
@@ -498,7 +502,8 @@ function GeneratedArtifactsDialog({
               businessCaseName={`Business Case ${shortId(run.business_case_id)}`}
               pipelineName={`Pipeline ${shortId(run.pipeline_id)}`}
               onOpenDataset={onExamineDataset}
-              onClose={() => setSelectedModel(null)}
+              onBack={() => setSelectedModel(null)}
+              onClose={onClose}
             />
           </Suspense>
         )}
@@ -507,12 +512,14 @@ function GeneratedArtifactsDialog({
             <ScoringReportDialog
               report={selectedReport}
               onOpenDataset={onExamineDataset}
-              onClose={() => setSelectedReport(null)}
+              onBack={() => setSelectedReport(null)}
+              onClose={onClose}
             />
           </Suspense>
         )}
         {selectedTrainingReport && (
-          <TrainingReportDialog report={selectedTrainingReport} onClose={() => setSelectedTrainingReport(null)} />
+          <TrainingReportDialog report={selectedTrainingReport}
+            onBack={() => setSelectedTrainingReport(null)} onClose={onClose} />
         )}
       </div>
     </div>
@@ -522,10 +529,12 @@ function GeneratedArtifactsDialog({
 export function PipelineRunDetailsDialog({
   run,
   onClose,
+  onBack,
   onChanged
 }: {
   run: PipelineRun;
   onClose: () => void;
+  onBack?: () => void;
   onChanged: () => Promise<void>;
 }) {
   const [runId, setRunId] = useState(run.id);
@@ -613,9 +622,7 @@ export function PipelineRunDetailsDialog({
                 <RotateCcw size={15} /> Retry
               </button>
             )}
-            <button className="icon-button" type="button" onClick={onClose} aria-label="Close">
-              <X size={18} />
-            </button>
+            <DialogNavigationActions onBack={onBack} onClose={onClose} closeLabel="Close pipeline run workflow" />
           </div>
         </div>
         {error && <div className="error-banner">{error}</div>}
@@ -1067,18 +1074,21 @@ export function DryRunPreview({
             model={selectedModel}
             businessCaseName="Dry-run preview"
             pipelineName={`Pipeline ${run.pipeline_id.slice(0, 8)}`}
-            onClose={() => setSelectedModel(null)}
+            onBack={() => setSelectedModel(null)}
+            onClose={onClose}
           />
         </Suspense>
       )}
       {selectedReport && (
         <TemporaryScoringReportDialog
           report={selectedReport}
-          onClose={() => setSelectedReport(null)}
+          onBack={() => setSelectedReport(null)}
+          onClose={onClose}
         />
       )}
       {selectedTrainingReport && (
-        <TrainingReportDialog report={selectedTrainingReport} onClose={() => setSelectedTrainingReport(null)} />
+        <TrainingReportDialog report={selectedTrainingReport}
+          onBack={() => setSelectedTrainingReport(null)} onClose={onClose} />
       )}
     </section>
   );
@@ -1118,9 +1128,11 @@ function RunEventTimeline({ events }: { events: PipelineRunEvent[] }) {
 
 function TrainingReportDialog({
   report,
+  onBack,
   onClose
 }: {
   report: TrainingEvaluationReport;
+  onBack?: () => void;
   onClose: () => void;
 }) {
   const summary = report.sections.summary ?? {};
@@ -1139,7 +1151,7 @@ function TrainingReportDialog({
         aria-label="Training evaluation report">
         <div className="modal-header"><div><span className="builder-kicker">Training report</span>
           <h2>{report.name}</h2><p>Immutable model-selection and explainability snapshot.</p></div>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="Close"><X size={18} /></button>
+          <DialogNavigationActions onBack={onBack} onClose={onClose} closeLabel="Close training report workflow" />
         </div>
         <div className="evaluation-report">
           <div className="evaluation-scope">
@@ -1321,9 +1333,11 @@ export function ModelPerformanceReport({ report }: { report: ModelEvaluationSnap
 
 function TemporaryScoringReportDialog({
   report,
+  onBack,
   onClose
 }: {
   report: ModelEvaluationSnapshot;
+  onBack?: () => void;
   onClose: () => void;
 }) {
   return (
@@ -1344,9 +1358,7 @@ function TemporaryScoringReportDialog({
             <h2>Scoring report</h2>
             <p>Dry-run preview · no report version has been registered.</p>
           </div>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="Close scoring report">
-            <X size={18} />
-          </button>
+          <DialogNavigationActions onBack={onBack} onClose={onClose} closeLabel="Close scoring report workflow" />
         </div>
         <ModelPerformanceReport report={report} />
       </div>

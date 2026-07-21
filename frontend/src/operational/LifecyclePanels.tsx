@@ -1,4 +1,4 @@
-import { Activity, ArrowLeft, Brain, Copy, Eye, GitBranch, History, KeyRound, Play, Plus, Rocket, Search, Settings2, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
+import { Activity, Archive, ArrowLeft, Brain, Copy, Eye, GitBranch, History, KeyRound, Play, Plus, Rocket, Search, Settings2, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../api/client";
@@ -8,9 +8,11 @@ import type {
   BusinessCase,
   ChallengerReplay,
   Deployment,
+  DeploymentModelOption,
   DeploymentRevision,
   DeploymentRole,
   InferenceRequest,
+  InferenceInputContract,
   ModelArtifact,
   ModelServingUsage,
   Pipeline,
@@ -18,6 +20,7 @@ import type {
 } from "../api/client";
 import { AssetList } from "../components/AssetList";
 import { ArtifactFilters, pipelineMatches } from "../components/ArtifactFilters";
+import { DialogNavigationActions, useVersionedResourceNavigation } from "../components/dialogNavigation";
 import { DatasetLineageList } from "./DatasetLineageList";
 
 type NoticeSetter = (message: string) => void;
@@ -44,8 +47,7 @@ export function ModelsPanel({
   const [stageFilter, setStageFilter] = useState("");
   const [purposeFilter, setPurposeFilter] = useState("");
   const [pipelineFilter, setPipelineFilter] = useState("");
-  const [selectedModel, setSelectedModel] = useState<ModelArtifact | null>(null);
-  const [historyModel, setHistoryModel] = useState<ModelArtifact | null>(null);
+  const modelNavigation = useVersionedResourceNavigation<ModelArtifact>();
   const businessCaseById = useMemo(
     () => new Map(businessCases.map((item) => [item.id, item])),
     [businessCases]
@@ -170,10 +172,10 @@ export function ModelsPanel({
               <span><i className={`pipeline-status ${model.stage}`}>{model.stage}</i></span>
               <span>
                 <div className="model-row-actions">
-                  <button className="secondary-button compact-button" type="button" onClick={() => setHistoryModel(model)}>
+                  <button className="secondary-button compact-button" type="button" onClick={() => modelNavigation.openHistory(model)}>
                     <History size={14} /> Versions
                   </button>
-                  <button className="secondary-button compact-button" type="button" onClick={() => setSelectedModel(model)}>
+                  <button className="secondary-button compact-button" type="button" onClick={() => modelNavigation.openDirect(model)}>
                     <Eye size={14} /> View latest
                   </button>
                 </div>
@@ -185,30 +187,30 @@ export function ModelsPanel({
           )}
         </div>
       </div>
-      {selectedModel && (
+      {modelNavigation.selected && (
         <ModelDetailsDialog
-          model={selectedModel}
-          businessCaseName={businessCaseById.get(selectedModel.business_case_id)?.name ?? "Unassigned"}
-          pipelineName={pipelineById.get(selectedModel.pipeline_id)?.name ?? "Unknown pipeline"}
-          onClose={() => setSelectedModel(null)}
+          model={modelNavigation.selected}
+          businessCaseName={businessCaseById.get(modelNavigation.selected.business_case_id)?.name ?? "Unassigned"}
+          pipelineName={pipelineById.get(modelNavigation.selected.pipeline_id)?.name ?? "Unknown pipeline"}
+          onClose={modelNavigation.closeAll}
+          onBack={modelNavigation.hasBack ? modelNavigation.back : undefined}
           onOpenDataset={onOpenDataset}
           onStageChanged={async (updated) => {
-            setSelectedModel(updated);
+            modelNavigation.replaceSelected(updated);
             await onRefresh();
             setNotice(`Model ${updated.version} stage changed to ${updated.stage}`);
           }}
         />
       )}
-      {historyModel && (
+      {modelNavigation.showHistory && modelNavigation.history && (
         <ModelVersionHistoryDialog
-          model={historyModel}
-          businessCaseName={businessCaseById.get(historyModel.business_case_id)?.name ?? "Unassigned"}
-          pipelineName={pipelineById.get(historyModel.pipeline_id)?.name ?? "Unknown pipeline"}
-          onClose={() => setHistoryModel(null)}
+          model={modelNavigation.history}
+          businessCaseName={businessCaseById.get(modelNavigation.history.business_case_id)?.name ?? "Unassigned"}
+          pipelineName={pipelineById.get(modelNavigation.history.pipeline_id)?.name ?? "Unknown pipeline"}
+          onClose={modelNavigation.closeHistory}
           onView={async (version) => {
             const fullModel = await api.getModel(version.id);
-            setHistoryModel(null);
-            setSelectedModel(fullModel);
+            modelNavigation.openVersion(fullModel);
           }}
         />
       )}
@@ -272,6 +274,7 @@ export function ModelVersionHistoryDialog({
                 <strong>
                   {version.version}
                   {index === 0 && <i className="pipeline-status published">latest</i>}
+                  <i className={`model-stage-badge ${version.stage}`}>{version.stage}</i>
                 </strong>
                 <span>{formatDate(version.created_at)} · run {shortId(version.pipeline_run_id)}</span>
                 <small>
@@ -312,6 +315,7 @@ export function ModelDetailsDialog({
   businessCaseName,
   pipelineName,
   onClose,
+  onBack,
   onOpenDataset,
   onStageChanged
 }: {
@@ -319,6 +323,7 @@ export function ModelDetailsDialog({
   businessCaseName: string;
   pipelineName: string;
   onClose: () => void;
+  onBack?: () => void;
   onOpenDataset?: (datasetId: string) => void;
   onStageChanged?: (model: ModelArtifact) => Promise<void> | void;
 }) {
@@ -352,7 +357,7 @@ export function ModelDetailsDialog({
             <h2>{model.name}</h2>
             <p>{businessCaseName} · {pipelineName} · {model.version}</p>
           </div>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="Close model details"><X size={18} /></button>
+          <DialogNavigationActions onBack={onBack} onClose={onClose} closeLabel="Close model details" />
         </div>
         <div className="model-detail-tabs" role="tablist">
           {(["overview", "training", "search", "parameters", "lineage"] as const).map((item) => (
@@ -1190,16 +1195,25 @@ export function ServingPanel({
   setNotice: NoticeSetter;
 }) {
   type ServingTab = "overview" | "test" | "traffic" | "access";
-  type ServingModal = "create" | "revision" | "history" | "lifecycle" | "credential" | "replay" | "inference" | null;
+  type ServingModal = "create" | "revision" | "history" | "lifecycle" | "archive" | "credential" | "replay" | "inference" | null;
   const [serviceName, setServiceName] = useState("");
   const [modelId, setModelId] = useState("");
   const [deploymentId, setDeploymentId] = useState("");
   const [activeTab, setActiveTab] = useState<ServingTab>("overview");
   const [modal, setModal] = useState<ServingModal>(null);
   const [recordId, setRecordId] = useState("");
-  const [featuresJson, setFeaturesJson] = useState("{\n  \"area\": 84,\n  \"rooms\": 4\n}");
+  const [payloadJson, setPayloadJson] = useState("{\n  \"instances\": [\n    {\n      \"record_id\": \"example-1\",\n      \"features\": {}\n    }\n  ]\n}");
+  const [testInputMode, setTestInputMode] = useState<"form" | "json">("form");
+  const [inputContract, setInputContract] = useState<InferenceInputContract | null>(null);
+  const [featureValues, setFeatureValues] = useState<Record<string, unknown>>({});
+  const [contractError, setContractError] = useState("");
+  const [modelOptions, setModelOptions] = useState<DeploymentModelOption[]>([]);
+  const [revisionError, setRevisionError] = useState("");
   const [scoreTarget, setScoreTarget] = useState("champion");
   const [scoreResult, setScoreResult] = useState<ScoreResponse | null>(null);
+  const [scorePhase, setScorePhase] = useState<"idle" | "scoring" | "success" | "error">("idle");
+  const [scoreError, setScoreError] = useState("");
+  const [scoreElapsedSeconds, setScoreElapsedSeconds] = useState(0);
   const [history, setHistory] = useState<InferenceRequest[]>([]);
   const [inferenceDetail, setInferenceDetail] = useState<Record<string, unknown> | null>(null);
   const [replays, setReplays] = useState<ChallengerReplay[]>([]);
@@ -1212,7 +1226,10 @@ export function ServingPanel({
   const [credential, setCredential] = useState("");
   const [busy, setBusy] = useState(false);
   const selectedDeployment = deployments.find((item) => item.id === deploymentId);
-  const eligibleModels = models.filter((item) => item.business_case_id === selectedDeployment?.business_case_id);
+  const eligibleModels = models.filter((item) =>
+    item.business_case_id === selectedDeployment?.business_case_id
+    && ["staging", "production"].includes(item.stage)
+  );
   const productionModels = models.filter((item) => item.stage === "production" && item.business_case_id);
 
   useEffect(() => {
@@ -1235,16 +1252,52 @@ export function ServingPanel({
     Promise.all([
       api.inferenceLog(selectedDeployment.id, 50),
       api.listChallengerReplays(selectedDeployment.id),
-      api.listDeploymentRevisions(selectedDeployment.id)
+      api.listDeploymentRevisions(selectedDeployment.id),
+      api.deploymentModelOptions(selectedDeployment.id)
     ])
-      .then(([page, replayItems, revisionItems]) => { if (active) {
+      .then(([page, replayItems, revisionItems, options]) => { if (active) {
         setHistory(page.items);
         setReplays(replayItems);
         setRevisions(revisionItems);
+        setModelOptions(options);
       } })
       .catch((error) => active && setHistoryError(error instanceof Error ? error.message : "Could not load inference history"));
     return () => { active = false; };
   }, [selectedDeployment?.id, selectedDeployment?.active_revision_id]);
+
+  useEffect(() => {
+    if (!selectedDeployment) {
+      setInputContract(null);
+      setFeatureValues({});
+      return;
+    }
+    let active = true;
+    setContractError("");
+    const challenger = scoreTarget === "champion" ? undefined : scoreTarget;
+    api.deploymentInputContract(selectedDeployment.id, challenger)
+      .then((contract) => {
+        if (!active) return;
+        setInputContract(contract);
+        setFeatureValues(contract.example_features);
+      })
+      .catch((error) => {
+        if (!active) return;
+        setInputContract(null);
+        setFeatureValues({});
+        setContractError(error instanceof Error ? error.message : "Could not load the model input contract");
+      });
+    return () => { active = false; };
+  }, [selectedDeployment?.id, selectedDeployment?.active_revision_id, scoreTarget]);
+
+  useEffect(() => {
+    if (scorePhase !== "scoring") return;
+    const startedAt = Date.now();
+    setScoreElapsedSeconds(0);
+    const interval = window.setInterval(() => {
+      setScoreElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 250);
+    return () => window.clearInterval(interval);
+  }, [scorePhase]);
 
   async function createDeployment() {
     if (!serviceName.trim() || !modelId) {
@@ -1270,30 +1323,73 @@ export function ServingPanel({
       setNotice("Create a deployment first");
       return;
     }
-    let features: Record<string, unknown>;
-    try {
-      features = JSON.parse(featuresJson) as Record<string, unknown>;
-    } catch {
-      setNotice("Features must be a valid JSON object");
-      return;
+    let instances: Array<{ record_id?: string; features: Record<string, unknown> }>;
+    if (testInputMode === "json") {
+      try {
+        const payload = JSON.parse(payloadJson) as { instances?: unknown };
+        if (!Array.isArray(payload.instances) || !payload.instances.length) throw new Error();
+        instances = payload.instances as Array<{ record_id?: string; features: Record<string, unknown> }>;
+        if (instances.some((item) => !item || typeof item.features !== "object" || Array.isArray(item.features))) throw new Error();
+      } catch {
+        setNotice("Payload must contain a non-empty instances array with a features object in every item");
+        return;
+      }
+    } else {
+      const missing = inputContract?.fields.filter((field) => field.required && (featureValues[field.name] === "" || featureValues[field.name] == null)) ?? [];
+      if (missing.length) {
+        setNotice(`Complete required fields: ${missing.map((field) => field.name).join(", ")}`);
+        return;
+      }
+      instances = [{ record_id: recordId || undefined, features: featureValues }];
     }
     setBusy(true);
+    setScoreResult(null);
+    setScoreError("");
+    setScorePhase("scoring");
     try {
       const challenger = scoreTarget === "champion" ? undefined : scoreTarget;
-      const result = await api.score(selectedDeployment.id, [{ record_id: recordId || undefined, features }], challenger);
+      const result = await api.score(selectedDeployment.id, instances, challenger);
       setScoreResult(result);
-      const page = await api.inferenceLog(selectedDeployment.id, 50);
-      setHistory(page.items);
+      setScorePhase("success");
       setNotice(`Scored with ${result.served_role} model ${shortId(result.model_id)}`);
+      void api.inferenceLog(selectedDeployment.id, 50)
+        .then((page) => setHistory(page.items))
+        .catch((error) => setHistoryError(error instanceof Error ? error.message : "Prediction returned, but inference history could not be refreshed"));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "The scoring request failed";
+      setScoreError(message);
+      setScorePhase("error");
+      setNotice(message);
     } finally {
       setBusy(false);
     }
   }
 
+  function generatePayload() {
+    const payload = {
+      instances: [{
+        ...(recordId.trim() ? { record_id: recordId.trim() } : {}),
+        features: featureValues
+      }]
+    };
+    setPayloadJson(JSON.stringify(payload, null, 2));
+    setTestInputMode("json");
+    setNotice("Payload generated from the form; you can now edit or copy it as JSON");
+  }
+
+  function updateFeature(name: string, valueType: string, rawValue: string | boolean) {
+    let value: unknown = rawValue;
+    if ((valueType === "number" || valueType === "integer") && typeof rawValue === "string") {
+      value = rawValue === "" ? "" : Number(rawValue);
+    }
+    setFeatureValues((current) => ({ ...current, [name]: value }));
+  }
+
   async function activateRevision() {
     if (!selectedDeployment) return;
+    const eligibleModelIds = new Set(eligibleModels.map((model) => model.id));
     const assignments = Object.entries(roleByModel)
-      .filter((entry): entry is [string, DeploymentRole] => Boolean(entry[1]))
+      .filter((entry): entry is [string, DeploymentRole] => Boolean(entry[1]) && eligibleModelIds.has(entry[0]))
       .map(([assignedModelId, role]) => ({ model_id: assignedModelId, role }));
     if (assignments.filter((item) => item.role === "champion").length !== 1) {
       setNotice("Choose exactly one champion");
@@ -1303,13 +1399,30 @@ export function ServingPanel({
       setNotice("Choose at most one fallback");
       return;
     }
+    const selectedChampionId = assignments.find((item) => item.role === "champion")?.model_id;
+    const championSignature = modelOptions.find((item) => item.model_id === selectedChampionId)?.contract_signature;
+    const incompatible = assignments.filter((item) =>
+      item.model_id !== selectedChampionId
+      && modelOptions.find((option) => option.model_id === item.model_id)?.contract_signature !== championSignature
+    );
+    if (incompatible.length) {
+      const message = "All challenger, shadow and fallback models must have the same input and output contract as the selected champion.";
+      setRevisionError(message);
+      setNotice(message);
+      return;
+    }
     setBusy(true);
+    setRevisionError("");
     try {
       await api.createDeploymentRevision(selectedDeployment.id, assignments, revisionReason);
       setRevisionReason("");
       setModal(null);
       setNotice("New immutable service revision activated");
       await onRefresh();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not activate the service revision";
+      setRevisionError(message);
+      setNotice(`Revision was not activated: ${message}`);
     } finally {
       setBusy(false);
     }
@@ -1324,6 +1437,21 @@ export function ServingPanel({
       setLifecycleReason("");
       setModal(null);
       setNotice(`Model service ${nextStatus === "running" ? "started" : "stopped"}`);
+      await onRefresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function archiveDeployment() {
+    if (!selectedDeployment || !lifecycleReason.trim()) return;
+    setBusy(true);
+    try {
+      await api.setDeploymentStatus(selectedDeployment.id, "archived", lifecycleReason.trim());
+      setLifecycleReason("");
+      setModal(null);
+      setDeploymentId("");
+      setNotice("Model service archived; its revisions and inference history were preserved");
       await onRefresh();
     } finally {
       setBusy(false);
@@ -1371,6 +1499,8 @@ export function ServingPanel({
     setDeploymentId(deployment.id);
     setActiveTab("overview");
     setScoreResult(null);
+    setScorePhase("idle");
+    setScoreError("");
     setInferenceDetail(null);
   }
 
@@ -1379,6 +1509,22 @@ export function ServingPanel({
   const challengers = assignments.filter((item) => item.role === "challenger");
   const shadows = assignments.filter((item) => item.role === "shadow");
   const fallback = assignments.find((item) => item.role === "fallback");
+  const configuredChampionId = Object.entries(roleByModel).find(([, role]) => role === "champion")?.[0];
+  const configuredChampionSignature = modelOptions.find((item) => item.model_id === configuredChampionId)?.contract_signature;
+
+  function updateModelRole(assignedModelId: string, role: DeploymentRole | "") {
+    setRevisionError("");
+    setRoleByModel((current) => {
+      const next = { ...current };
+      if (role === "champion") {
+        for (const [modelId, currentRole] of Object.entries(next)) {
+          if (currentRole === "champion" && modelId !== assignedModelId) next[modelId] = "";
+        }
+      }
+      next[assignedModelId] = role;
+      return next;
+    });
+  }
 
   function modelLabel(assignedModelId: string | undefined) {
     if (!assignedModelId) return "Not configured";
@@ -1410,25 +1556,29 @@ export function ServingPanel({
           <div><strong>Start with a production model.</strong><span>Create one service, then add challengers, shadows or a fallback from its Overview.</span></div>
         </div>
 
-        <div className="serving-service-grid">
-          {deployments.map((deployment) => {
-            const activeAssignments = deployment.active_revision?.assignments ?? [];
-            const activeChampion = activeAssignments.find((item) => item.role === "champion");
-            return <button className="serving-service-card" type="button" key={deployment.id} onClick={() => openDeployment(deployment)}>
-              <span className="serving-card-top"><span className={`status-pill ${deployment.status}`}>{deployment.status}</span><span>Revision v{deployment.active_revision?.version_number ?? "—"}</span></span>
-              <strong>{deployment.name}</strong>
-              <code>{deployment.slug}</code>
-              <span className="serving-card-model"><Rocket size={15} /><span><small>Champion</small>{modelLabel(activeChampion?.model_id)}</span></span>
-              <span className="serving-card-footer"><span>{activeAssignments.filter((item) => item.role === "challenger").length} challengers</span><span>{activeAssignments.filter((item) => item.role === "shadow").length} shadows</span><span>Open service →</span></span>
-            </button>;
-          })}
+        {deployments.length > 0 && <div className="serving-table-wrap">
+          <table className="serving-table">
+            <thead><tr><th>Service</th><th>Status</th><th>Champion</th><th>Revision</th><th>Additional roles</th><th className="action-column">Actions</th></tr></thead>
+            <tbody>{deployments.map((deployment) => {
+              const activeAssignments = deployment.active_revision?.assignments ?? [];
+              const activeChampion = activeAssignments.find((item) => item.role === "champion");
+              return <tr key={deployment.id}>
+                <td><strong>{deployment.name}</strong><code>{deployment.slug}</code></td>
+                <td><span className={`status-pill ${deployment.status}`}>{deployment.status}</span></td>
+                <td>{modelLabel(activeChampion?.model_id)}</td>
+                <td>v{deployment.active_revision?.version_number ?? "—"}</td>
+                <td>{activeAssignments.filter((item) => item.role === "challenger").length} challengers · {activeAssignments.filter((item) => item.role === "shadow").length} shadows</td>
+                <td className="serving-table-actions"><button className="secondary-button compact-button" type="button" onClick={() => openDeployment(deployment)}>Open</button><button className="secondary-button compact-button danger-button" type="button" onClick={() => { openDeployment(deployment); setLifecycleReason(""); setModal("archive"); }}><Archive size={14} /> Archive</button></td>
+              </tr>;
+            })}</tbody>
+          </table>
+        </div>}
           {!deployments.length && <div className="panel serving-empty-state">
             <Rocket size={28} />
             <h3>No model services yet</h3>
             <p>Create a stable endpoint backed by your first production model.</p>
             <button className="primary-button" type="button" onClick={() => setModal("create")}><Plus size={16} /> Create first service</button>
           </div>}
-        </div>
 
         {modal === "create" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}>
           <div className="modal-dialog serving-action-dialog" role="dialog" aria-modal="true" aria-labelledby="create-serving-title">
@@ -1457,6 +1607,7 @@ export function ServingPanel({
             {selectedDeployment.status === "running" ? "Stop service" : selectedDeployment.status === "stopped" ? "Start service" : "Validate & resume"}
           </button>
           <button className="secondary-button" type="button" onClick={() => setModal("revision")}><GitBranch size={16} /> Configure models</button>
+          <button className="secondary-button danger-button" type="button" onClick={() => { setLifecycleReason(""); setModal("archive"); }}><Archive size={16} /> Archive</button>
         </div>
       </div>
       <div className="serving-endpoint-bar"><div><small>Stable production endpoint</small><code>{selectedDeployment.endpoint_url}</code></div><button className="icon-button" type="button" aria-label="Copy endpoint" title="Copy endpoint" onClick={() => navigator.clipboard.writeText(selectedDeployment.endpoint_url ?? "")}><Copy size={16} /></button></div>
@@ -1484,11 +1635,42 @@ export function ServingPanel({
       {activeTab === "test" && <div className="serving-tab-content serving-test-layout">
         <div className="panel form-panel"><div className="panel-header"><div><span className="builder-kicker">Single request</span><h3>Test endpoint</h3></div><Play size={18} /></div><p className="serving-section-intro">Use the champion endpoint or call a challenger directly without changing production traffic.</p>
           <label>Target<select value={scoreTarget} onChange={(event) => setScoreTarget(event.target.value)}><option value="champion">Champion · public endpoint</option>{challengers.map((item) => <option key={item.model_id} value={item.model_id}>Challenger · {modelLabel(item.model_id)}</option>)}</select></label>
-          <label>Record ID <span className="optional-label">recommended</span><input value={recordId} onChange={(event) => setRecordId(event.target.value)} placeholder="e.g. property-1042" /><small>Needed later to join predictions with actual outcomes.</small></label>
-          <label>Features JSON<textarea className="json-input" value={featuresJson} onChange={(event) => setFeaturesJson(event.target.value)} rows={10} /></label>
-          <div className="button-row"><button className="primary-button" onClick={score} type="button" disabled={busy}><Play size={16} /> Send test request</button>{scoreTarget !== "champion" && <button className="secondary-button" onClick={() => setModal("replay")} type="button"><History size={16} /> Replay history</button>}</div>
+          <div className="segmented-control serving-input-mode" aria-label="Test request input mode">
+            <button type="button" className={testInputMode === "form" ? "active" : ""} onClick={() => setTestInputMode("form")}>Form</button>
+            <button type="button" className={testInputMode === "json" ? "active" : ""} onClick={() => setTestInputMode("json")}>JSON payload</button>
+          </div>
+          {testInputMode === "form" ? <>
+            <label>Record ID <span className="optional-label">recommended</span><input value={recordId} onChange={(event) => setRecordId(event.target.value)} placeholder="e.g. customer-1042" /><small>Needed later to join predictions with actual outcomes.</small></label>
+            {contractError && <div className="error-banner">{contractError}</div>}
+            {!contractError && !inputContract && <div className="serving-contract-loading">Loading model input contract…</div>}
+            {inputContract && <div className="serving-feature-form">
+              <div className="serving-contract-summary"><strong>{inputContract.fields.length} required features</strong><small>Generated from model {shortId(inputContract.model_id)} in the active revision.</small></div>
+              {inputContract.fields.map((field) => <label key={field.name}>
+                <span className="serving-feature-label"><code>{field.name}</code><em>{field.value_type}</em>{field.required && <i>required</i>}</span>
+                {field.value_type === "boolean"
+                  ? <select value={String(Boolean(featureValues[field.name]))} onChange={(event) => updateFeature(field.name, field.value_type, event.target.value === "true")}><option value="false">false</option><option value="true">true</option></select>
+                  : <div className="serving-feature-input-wrap"><input
+                        type={field.value_type === "number" || field.value_type === "integer" ? "number" : "text"}
+                        step={field.value_type === "integer" ? 1 : field.value_type === "number" ? "any" : undefined}
+                        min={field.minimum ?? undefined}
+                        max={field.maximum ?? undefined}
+                        value={String(featureValues[field.name] ?? "")}
+                        onChange={(event) => updateFeature(field.name, field.value_type, event.target.value)}
+                      />{field.value_type === "string" && field.options.length > 0 && <div className="serving-category-suggest"><button type="button" className="serving-suggest-trigger">Suggest</button><div className="serving-suggest-popover" role="listbox" aria-label={`Suggested values for ${field.name}`}><small>Top categories in the full training set</small>{field.options.map((option) => <button type="button" role="option" key={String(option)} onClick={() => updateFeature(field.name, field.value_type, String(option))}>{String(option)}</button>)}</div></div>}</div>}
+                <small>{field.description}</small>
+              </label>)}
+              <button className="secondary-button" type="button" onClick={generatePayload}><Copy size={15} /> Generate payload</button>
+            </div>}
+          </> : <label>Request JSON<textarea className="json-input" value={payloadJson} onChange={(event) => setPayloadJson(event.target.value)} rows={18} /><small>Exact request body. It may contain up to 1,000 instances.</small></label>}
+          <div className="button-row"><button className="primary-button" onClick={score} type="button" disabled={busy}>{scorePhase === "scoring" ? <span className="serving-score-button-spinner" aria-hidden="true" /> : <Play size={16} />}{scorePhase === "scoring" ? `Scoring… ${scoreElapsedSeconds}s` : "Send test request"}</button>{scoreTarget !== "champion" && <button className="secondary-button" onClick={() => setModal("replay")} type="button"><History size={16} /> Replay history</button>}</div>
         </div>
-        <div className="panel serving-response-panel"><div className="panel-header"><div><span className="builder-kicker">Response</span><h3>{scoreResult ? "Prediction returned" : "Waiting for a request"}</h3></div>{scoreResult && <span className="status-pill active">{scoreResult.served_role}</span>}</div>{scoreResult ? <pre className="json-output">{JSON.stringify(scoreResult, null, 2)}</pre> : <div className="serving-response-empty"><Play size={26} /><p>Your prediction, request ID and warnings will appear here.</p></div>}</div>
+        <div className="panel serving-response-panel">
+          <div className="panel-header"><div><span className="builder-kicker">Response</span><h3>{scorePhase === "scoring" ? "Scoring request" : scorePhase === "error" ? "Request failed" : scoreResult ? "Prediction returned" : "Waiting for a request"}</h3></div>{scoreResult && <span className="status-pill active">{scoreResult.served_role}</span>}</div>
+          {scorePhase === "scoring" ? <div className="serving-response-progress" role="status" aria-live="polite"><span className="serving-score-spinner" aria-hidden="true" /><strong>Running the pinned service revision</strong><p>Validating the input contract, transforming features, scoring the champion and configured shadows, then durably writing the Inference Log.</p><small>{scoreElapsedSeconds ? `${scoreElapsedSeconds}s elapsed` : "Request accepted…"}</small></div>
+            : scorePhase === "error" ? <div className="serving-response-error" role="alert"><X size={26} /><strong>Prediction was not returned</strong><p>{scoreError}</p><small>No successful result is shown until the auditable inference record is safely persisted.</small></div>
+            : scoreResult ? <pre className="json-output">{JSON.stringify(scoreResult, null, 2)}</pre>
+              : <div className="serving-response-empty"><Play size={26} /><p>Your prediction, request ID and warnings will appear here.</p></div>}
+        </div>
       </div>}
 
       {activeTab === "traffic" && <div className="serving-tab-content">
@@ -1503,11 +1685,17 @@ export function ServingPanel({
         <div className="panel"><div className="panel-header"><div><span className="builder-kicker">Python client</span><h3>Create client credential</h3></div><KeyRound size={18} /></div><p className="serving-section-intro">Create a revocable credential for scripts and notebooks. The secret is displayed only once.</p><button className="primary-button" type="button" onClick={() => { setCredential(""); setModal("credential"); }}><KeyRound size={16} /> Generate credential</button></div>
       </div>}
 
-      {modal === "revision" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog serving-revision-dialog" role="dialog" aria-modal="true" aria-labelledby="revision-title"><div className="modal-header"><div><span className="builder-kicker">Immutable configuration</span><h2 id="revision-title">Configure model roles</h2><p>Saving creates and immediately activates a new service revision. The previous revision remains auditable.</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body form-panel"><div className="serving-role-help"><span><strong>Champion</strong> public traffic</span><span><strong>Challenger</strong> direct tests and replay</span><span><strong>Shadow</strong> copied live traffic</span><span><strong>Fallback</strong> technical failures</span></div><div className="serving-role-grid">{eligibleModels.map((model) => <label key={model.id}><span>{model.name} · {model.version}<small>{model.stage}</small></span><select value={roleByModel[model.id] ?? ""} onChange={(event) => setRoleByModel((current) => ({ ...current, [model.id]: event.target.value as DeploymentRole | "" }))}><option value="">Not assigned</option><option value="champion" disabled={model.stage !== "production"}>Champion</option><option value="challenger" disabled={!['staging', 'production'].includes(model.stage)}>Challenger</option><option value="shadow" disabled={!['staging', 'production'].includes(model.stage)}>Shadow</option><option value="fallback" disabled={model.stage !== "production"}>Fallback</option></select></label>)}</div><label>Reason for change<input value={revisionReason} onChange={(event) => setRevisionReason(event.target.value)} placeholder="e.g. Add validated challenger v6" /></label></div><div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>Cancel</button><button className="primary-button" type="button" onClick={activateRevision} disabled={busy || !revisionReason.trim()}><GitBranch size={15} /> Activate new revision</button></div></div></div>}
+        {modal === "revision" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog serving-revision-dialog" role="dialog" aria-modal="true" aria-labelledby="revision-title"><div className="modal-header"><div><span className="builder-kicker">Immutable configuration</span><h2 id="revision-title">Configure model roles</h2><p>Saving creates and immediately activates a new service revision. Only staging and production models with a compatible inference contract can share traffic.</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body form-panel"><div className="serving-role-help"><span><strong>Champion</strong> public traffic</span><span><strong>Challenger</strong> direct tests and replay</span><span><strong>Shadow</strong> copied live traffic</span><span><strong>Fallback</strong> technical failures</span></div>{revisionError && <div className="error-banner" role="alert">{revisionError}</div>}<div className="serving-role-grid">{eligibleModels.map((model) => {
+          const option = modelOptions.find((item) => item.model_id === model.id);
+          const compatible = !configuredChampionSignature || option?.contract_signature === configuredChampionSignature;
+          return <label key={model.id} className={!compatible && roleByModel[model.id] !== "champion" ? "serving-model-incompatible" : ""}><span>{model.name} · {model.version}<small>{model.stage}{!compatible && roleByModel[model.id] !== "champion" ? " · incompatible with selected champion" : ""}</small></span><select value={roleByModel[model.id] ?? ""} onChange={(event) => updateModelRole(model.id, event.target.value as DeploymentRole | "")}><option value="">Not assigned</option><option value="champion" disabled={!option?.allowed_roles.includes("champion")}>Champion</option><option value="challenger" disabled={!compatible || !option?.allowed_roles.includes("challenger")}>Challenger</option><option value="shadow" disabled={!compatible || !option?.allowed_roles.includes("shadow")}>Shadow</option><option value="fallback" disabled={!compatible || !option?.allowed_roles.includes("fallback")}>Fallback</option></select></label>;
+        })}</div>{!eligibleModels.length && <div className="serving-inline-warning">No staging or production models are available in this Business Case.</div>}<label>Reason for change<input value={revisionReason} onChange={(event) => setRevisionReason(event.target.value)} placeholder="e.g. Add validated challenger v6" /></label></div><div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>Cancel</button><button className="primary-button" type="button" onClick={activateRevision} disabled={busy || !revisionReason.trim()}><GitBranch size={15} /> Activate new revision</button></div></div></div>}
 
       {modal === "history" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog" role="dialog" aria-modal="true" aria-labelledby="history-title"><div className="modal-header"><div><span className="builder-kicker">Immutable history</span><h2 id="history-title">Service revisions</h2><p>Rollback copies a historical configuration into a new auditable revision.</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body form-panel"><div className="model-version-list">{revisions.map((revision) => <article key={revision.id}><div className="model-version-marker"><span>v{revision.version_number}</span></div><div><strong>Revision v{revision.version_number}</strong><span>{formatDate(revision.created_at)} · {revision.assignments.length} assigned model(s)</span><small>{revision.reason || "No reason recorded"}</small></div>{revision.id === selectedDeployment.active_revision_id ? <i className="pipeline-status published">active</i> : <button className="secondary-button compact-button" type="button" onClick={() => setRollbackRevisionId(revision.id)}>Select rollback</button>}</article>)}</div>{rollbackRevisionId && <label>Rollback reason<input value={revisionReason} onChange={(event) => setRevisionReason(event.target.value)} placeholder="Why is this revision being restored?" /></label>}</div><div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>Close</button><button className="primary-button" type="button" onClick={rollbackDeployment} disabled={busy || !rollbackRevisionId || !revisionReason.trim()}><History size={15} /> Roll back</button></div></div></div>}
 
       {modal === "lifecycle" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog" role="dialog" aria-modal="true" aria-labelledby="lifecycle-title"><div className="modal-header"><div><span className="builder-kicker">Service lifecycle</span><h2 id="lifecycle-title">{selectedDeployment.status === "running" ? "Stop service" : "Validate and resume service"}</h2><p>{selectedDeployment.status === "running" ? "The endpoint will reject scoring while revision history remains available." : "The active revision will be validated before traffic is accepted."}</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body form-panel"><label>Reason<input value={lifecycleReason} onChange={(event) => setLifecycleReason(event.target.value)} placeholder="Reason for this operational change" /></label></div><div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>Cancel</button><button className="primary-button" type="button" onClick={changeDeploymentStatus} disabled={busy || !lifecycleReason.trim()}>{selectedDeployment.status === "running" ? "Stop service" : "Validate & resume"}</button></div></div></div>}
+
+      {modal === "archive" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog" role="dialog" aria-modal="true" aria-labelledby="archive-title"><div className="modal-header"><div><span className="builder-kicker">Service lifecycle</span><h2 id="archive-title">Archive {selectedDeployment.name}?</h2><p>The endpoint will be permanently disabled and removed from the active list. Revision and inference history will be preserved for audit.</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body form-panel"><label>Reason<input autoFocus value={lifecycleReason} onChange={(event) => setLifecycleReason(event.target.value)} placeholder="Why is this service being archived?" /></label></div><div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>Cancel</button><button className="primary-button danger-button" type="button" onClick={archiveDeployment} disabled={busy || !lifecycleReason.trim()}><Archive size={16} /> Archive service</button></div></div></div>}
 
       {modal === "replay" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog" role="dialog" aria-modal="true" aria-labelledby="replay-title"><div className="modal-header"><div><span className="builder-kicker">Batch evaluation</span><h2 id="replay-title">Replay historical traffic</h2><p>Score up to 1,000 retained requests with a challenger. Production responses are not changed.</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body form-panel"><label>Challenger<select value={scoreTarget === "champion" ? "" : scoreTarget} onChange={(event) => setScoreTarget(event.target.value)}><option value="">Choose a challenger</option>{challengers.map((item) => <option key={item.model_id} value={item.model_id}>{modelLabel(item.model_id)}</option>)}</select></label><div className="serving-inline-warning">Replay uses the current immutable revision and retained historical inputs.</div></div><div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>Cancel</button><button className="primary-button" type="button" onClick={replayChallenger} disabled={busy || scoreTarget === "champion" || !scoreTarget}><History size={16} /> Queue replay</button></div></div></div>}
 

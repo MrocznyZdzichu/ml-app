@@ -132,8 +132,80 @@ class ModelService:
         return sorted(models, key=lambda item: (item.created_at, item.id), reverse=True)
 
     def get_model(self, model_id: str, principal: Principal) -> ModelArtifact:
-        model = next((item for item in self.list_models(principal) if item.id == model_id), None)
-        if model is None:
+        return self._get_model(model_id, principal, include_display_version=True)
+
+    def get_model_for_inference(self, model_id: str, principal: Principal) -> ModelArtifact:
+        """Resolve one immutable inference bundle without registry presentation work."""
+        return self._get_model(model_id, principal, include_display_version=False)
+
+    def _get_model(
+        self,
+        model_id: str,
+        principal: Principal,
+        *,
+        include_display_version: bool,
+    ) -> ModelArtifact:
+        artifact = self.artifacts.get_artifact(model_id)
+        if artifact is not None and artifact.type == ArtifactType.MODEL_VERSION:
+            if artifact.business_case_id:
+                access_policy.require_business_case(
+                    principal,
+                    artifact.business_case_id,
+                    BusinessCaseAccessRole.READER,
+                )
+            elif not principal.is_administrator and artifact.owner_id != principal.user_id:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model not found")
+
+            model = self._artifact_model(artifact)
+            if not model.pipeline_id and model.pipeline_run_id:
+                run = self.pipelines.get_run(model.pipeline_run_id)
+                if run is not None and run.owner_id == model.owner_id:
+                    model.pipeline_id = run.pipeline_id
+                    model.lineage = {**model.lineage, "pipeline_id": run.pipeline_id}
+
+            version = (
+                self.pipelines.get_version(model.pipeline_version_id)
+                if model.pipeline_version_id else None
+            )
+            if version is not None and version.owner_id == model.owner_id:
+                auto_fe = dict(model.training_config.get("auto_feature_engineering") or {})
+                resolved_recipe = auto_fe.get("resolved_recipe")
+                uses_autofe_recipe = isinstance(resolved_recipe, dict) and bool(resolved_recipe)
+                fitted_step_id = (
+                    model.pipeline_step_id
+                    if uses_autofe_recipe
+                    else self._upstream_feature_step_id(version.definition, model.pipeline_step_id)
+                )
+                fitted = (
+                    self.artifacts.find_feature_transform_artifact(
+                        model.business_case_id,
+                        model.pipeline_run_id,
+                        fitted_step_id,
+                    )
+                    if model.business_case_id and model.pipeline_run_id and fitted_step_id
+                    else None
+                )
+                self._enrich_batch_scoring_contract(
+                    model,
+                    {(model.pipeline_run_id, fitted_step_id): fitted} if fitted is not None else {},
+                    {version.id: version},
+                )
+
+            model.logical_id = model.logical_id or self._logical_model_id(model)
+            if include_display_version:
+                family = [
+                    self._artifact_model(item)
+                    for item in self.artifacts.list_model_version_artifacts(model.logical_id)
+                ]
+                self._assign_version_numbers(family)
+                matching_version = next((item for item in family if item.id == model.id), None)
+                if matching_version is not None:
+                    model.version = matching_version.version
+                    model.version_number = matching_version.version_number
+            return model
+
+        model = self.repository.get_model(model_id)
+        if model is None or (not principal.is_administrator and model.owner_id != principal.user_id):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model not found")
         return model
 
