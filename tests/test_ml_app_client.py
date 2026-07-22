@@ -10,6 +10,7 @@ from ml_app_client import (
     ApiError,
     AuthorizationError,
     ConflictError,
+    Dataset,
     Deployment,
     MLAppClient,
     PipelineRun,
@@ -677,6 +678,82 @@ class MLAppClientTests(unittest.TestCase):
             session.requests[-1][2]["params"],
             {"challenger_model_id": "challenger-1"},
         )
+
+    def test_online_monitoring_run_uses_typed_objects_and_full_time_window(self) -> None:
+        deployment = Deployment.from_api({
+            "id": "deployment-1", "name": "Churn", "slug": "churn",
+            "business_case_id": "bc-1", "status": "running",
+            "endpoint_url": "/predictions", "active_revision": {"id": "revision-1"},
+        })
+        actuals = Dataset.from_api(dataset_payload(id="actuals-v4", name="churn_actuals"))
+        response = {
+            "id": "monitoring-1", "deployment_id": deployment.id, "status": "queued",
+            "since": "2026-07-20T00:00:00+00:00", "until": "2026-07-21T00:00:00+00:00",
+            "actuals_dataset_id": actuals.id, "report": {}, "error_message": "",
+        }
+        session = FakeSession([FakeResponse(response, 202)])
+
+        run = MLAppClient(session=session).run_deployment_monitoring(
+            deployment,
+            actuals=actuals,
+            since="2026-07-20T00:00:00Z",
+            until="2026-07-21T00:00:00Z",
+            actuals_target_column="churned",
+            actuals_record_id_column="customer_id",
+        )
+
+        self.assertEqual(run.id, "monitoring-1")
+        method, url, kwargs = session.requests[-1]
+        self.assertEqual((method, url), (
+            "POST", "http://localhost:8000/api/v1/serving/deployments/deployment-1/monitoring-runs",
+        ))
+        self.assertEqual(kwargs["json"]["actuals_dataset_id"], "actuals-v4")
+        self.assertEqual(kwargs["json"]["join"], {
+            "strategy": "auto", "actuals_record_id_column": "customer_id",
+        })
+
+    def test_online_monitoring_default_since_is_relative_to_explicit_until(self) -> None:
+        deployment = Deployment.from_api({
+            "id": "deployment-1", "name": "Churn", "slug": "churn",
+            "business_case_id": "bc-1", "status": "running",
+            "endpoint_url": "/predictions", "active_revision": {"id": "revision-1"},
+        })
+        actuals = Dataset.from_api(dataset_payload(id="actuals-v4"))
+        session = FakeSession([FakeResponse({
+            "id": "monitoring-1", "deployment_id": deployment.id, "status": "queued",
+            "since": "2026-07-20T12:00:00+00:00", "until": "2026-07-21T12:00:00+00:00",
+            "actuals_dataset_id": actuals.id, "report": {}, "error_message": "",
+        }, 202)])
+
+        MLAppClient(session=session).run_deployment_monitoring(
+            deployment, actuals=actuals, until="2026-07-21T12:00:00Z",
+        )
+
+        self.assertEqual(
+            session.requests[-1][2]["json"]["since"],
+            "2026-07-20T12:00:00+00:00",
+        )
+
+    def test_online_monitoring_can_run_without_actuals(self) -> None:
+        deployment = Deployment.from_api({
+            "id": "deployment-1", "name": "Churn", "slug": "churn",
+            "business_case_id": "bc-1", "status": "running",
+            "endpoint_url": "/predictions", "active_revision": {"id": "revision-1"},
+        })
+        session = FakeSession([FakeResponse({
+            "id": "monitoring-1", "deployment_id": deployment.id, "status": "queued",
+            "since": "2026-07-20T00:00:00+00:00", "until": "2026-07-21T00:00:00+00:00",
+            "actuals_dataset_id": "", "report": {}, "error_message": "",
+        }, 202)])
+
+        run = MLAppClient(session=session).run_deployment_monitoring(
+            deployment,
+            since="2026-07-20T00:00:00Z",
+            until="2026-07-21T00:00:00Z",
+        )
+
+        self.assertEqual(run.actuals_dataset_id, "")
+        self.assertNotIn("actuals_dataset_id", session.requests[-1][2]["json"])
 
     def test_deployment_model_options_exposes_api_contract(self) -> None:
         deployment = Deployment.from_api({

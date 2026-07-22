@@ -17,6 +17,7 @@ celery_app.conf.update(
         "app.worker.tasks.train_model": {"queue": "ml"},
         "app.worker.tasks.batch_score": {"queue": "serving"},
         "app.worker.tasks.replay_challenger": {"queue": "serving"},
+        "app.worker.tasks.run_online_monitoring": {"queue": "serving"},
         "app.worker.tasks.prune_serving_inference_history": {"queue": "serving"},
         "app.worker.tasks.export_resource": {"queue": "exports"},
     },

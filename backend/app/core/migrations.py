@@ -442,6 +442,50 @@ def _harden_inference_audit_contract(connection: Connection) -> None:
         connection.execute(text(statement))
 
 
+def _online_serving_monitoring(connection: Connection) -> None:
+    """Add manual, immutable online monitoring runs without changing batch monitoring."""
+    statements = [
+        "ALTER TABLE mlapp.serving_inference_requests ADD COLUMN IF NOT EXISTS requested_model_id VARCHAR(64) NOT NULL DEFAULT ''",
+        "ALTER TABLE mlapp.serving_inference_requests ADD COLUMN IF NOT EXISTS requested_role VARCHAR(32) NOT NULL DEFAULT 'champion'",
+        (
+            "UPDATE mlapp.serving_inference_requests SET requested_role = "
+            "CASE WHEN served_role = 'challenger' THEN 'challenger' ELSE 'champion' END"
+        ),
+        (
+            "UPDATE mlapp.serving_inference_requests SET requested_model_id = "
+            "CASE WHEN served_role = 'challenger' THEN served_model_id ELSE champion_model_id END "
+            "WHERE requested_model_id = ''"
+        ),
+        (
+            "CREATE TABLE IF NOT EXISTS mlapp.serving_monitoring_runs ("
+            "id VARCHAR(64) PRIMARY KEY, deployment_id VARCHAR(64) NOT NULL, "
+            "business_case_id VARCHAR(64) NOT NULL, owner_id VARCHAR(64) NOT NULL, "
+            "requested_by VARCHAR(64) NOT NULL, status VARCHAR(32) NOT NULL, "
+            "since TIMESTAMPTZ NOT NULL, until TIMESTAMPTZ NOT NULL, source_before TIMESTAMPTZ NOT NULL, "
+            "actuals_dataset_id VARCHAR(64) NOT NULL, actuals_artifact_id VARCHAR(64) NOT NULL DEFAULT '', "
+            "join_strategy VARCHAR(32) NOT NULL DEFAULT 'auto', "
+            "actuals_prediction_id_column VARCHAR(255) NOT NULL DEFAULT 'prediction_id', "
+            "actuals_request_id_column VARCHAR(255) NOT NULL DEFAULT 'request_id', "
+            "actuals_record_id_column VARCHAR(255) NOT NULL DEFAULT '', "
+            "actuals_target_column VARCHAR(255) NOT NULL DEFAULT '', "
+            "problem_type VARCHAR(64) NOT NULL DEFAULT '', target_column VARCHAR(255) NOT NULL DEFAULT '', "
+            "time_basis VARCHAR(32) NOT NULL DEFAULT 'scored_at', "
+            "processed_request_count INTEGER NOT NULL DEFAULT 0, processed_row_count INTEGER NOT NULL DEFAULT 0, "
+            "matched_row_count INTEGER NOT NULL DEFAULT 0, missing_actuals_count INTEGER NOT NULL DEFAULT 0, "
+            "unmatched_actuals_count INTEGER NOT NULL DEFAULT 0, snapshot_dataset_id VARCHAR(64) NOT NULL DEFAULT '', "
+            "joined_dataset_id VARCHAR(64) NOT NULL DEFAULT '', report_artifact_id VARCHAR(64) NOT NULL DEFAULT '', "
+            "report JSONB NOT NULL DEFAULT '{}'::jsonb, warnings JSONB NOT NULL DEFAULT '[]'::jsonb, "
+            "error_message TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL, "
+            "started_at TIMESTAMPTZ, completed_at TIMESTAMPTZ)"
+        ),
+        "CREATE INDEX IF NOT EXISTS ix_serving_monitoring_deployment_created ON mlapp.serving_monitoring_runs (deployment_id, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS ix_serving_monitoring_bc_created ON mlapp.serving_monitoring_runs (business_case_id, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS ix_serving_monitoring_status ON mlapp.serving_monitoring_runs (status, created_at)",
+    ]
+    for statement in statements:
+        connection.execute(text(statement))
+
+
 MIGRATIONS = [
     Migration(
         version="20260703_0001",
@@ -487,5 +531,10 @@ MIGRATIONS = [
         version="20260720_0009",
         description="Bind idempotency to request content and retain every model execution outcome",
         apply=_harden_inference_audit_contract,
+    ),
+    Migration(
+        version="20260722_0010",
+        description="Add immutable manual monitoring runs over online inference history and actuals",
+        apply=_online_serving_monitoring,
     ),
 ]

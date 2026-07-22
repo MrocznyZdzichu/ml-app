@@ -495,6 +495,7 @@ export default function App() {
           <DeferredPanel>
             <ServingPanel
               deployments={deployments}
+              datasets={datasets}
               models={models}
               initialDeploymentId={servingDeploymentId}
               onRefresh={refreshWorkspace}

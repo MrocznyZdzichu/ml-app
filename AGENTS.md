@@ -341,8 +341,9 @@ zmianą funkcji zawsze je zweryfikuj.
   dni, konfigurowalną per deployment. Trwałe zarejestrowanie historii jest częścią
   kontraktu poprawnego scoringu: gdy zapis jest niedostępny lub nie może zostać
   zagwarantowany, zwróć `503` i nie przedstawiaj wyniku jako udanej predykcji.
-  Kontrolę skuteczności i dołączenie późniejszych actuals pozostaw jako przyszły
-  mechanizm, ale zachowaj dane i wersje potrzebne do jego implementacji.
+  Monitoring online może materializować jawnie wybrany zakres Inference Logu do
+  niemutowalnego prediction snapshotu i łączyć go z późniejszymi actuals bez
+  modyfikowania historii predykcji.
 - Online scoring dopuszcza do 1000 rekordów w jednym synchronicznym requeście.
   Traktuj request jako jedną operację, ale przechowuj elementy w postaci
   umożliwiającej wydajne wyszukanie po rekordzie bez parsowania dużych JSON-ów.
@@ -359,3 +360,50 @@ zmianą funkcji zawsze je zweryfikuj.
   bezpośrednie REST API oraz wspierać konfigurację poświadczeń kont technicznych.
 - Monitoring danych wejściowych i monitoring skuteczności to odrębne problemy.
   Skuteczność można liczyć dopiero po dostarczeniu actuals.
+
+### Monitoring usług online
+
+- Pierwszy etap monitoringu usług jest uruchamiany wyłącznie ręcznie z REST API,
+  `ml_app_client` lub UI. Run pozostaje asynchroniczny, raportuje postęp i tworzy
+  niemutowalny wynik; harmonogramy, alerty oraz automatyczne promocje, rollbacki
+  i inne decyzje operacjonalizacyjne pozostają poza tym etapem.
+- Aplikacja samodzielnie przetwarza pełny wskazany zakres Inference Logu. Czas
+  trwałego przyjęcia requestu przez platformę jest obowiązkowym `scored_at` i
+  podstawową osią czasu. Request nie musi dostarczać czasu biznesowego ani
+  identyfikatora okresu. Kontrakt prediction snapshotu zachowuje opcjonalne
+  `event_time`, `period_id` i ograniczone wymiary monitoringu jako przyszłe,
+  oddzielone od cech modelu rozszerzenie.
+- Online Monitoring Run materializuje niemutowalny, kolumnowy prediction snapshot
+  przypięty do deploymentu, zakresu czasu, cutoffu logu, rewizji usługi, modelu,
+  inference bundle, roli i konkretnej wersji datasetu actuals. PostgreSQL-owy
+  Inference Log pozostaje audytowym ledgerem i hot store'em; pełnozakresowe
+  obliczenia wykonuj strumieniowo lub na Parquet w DuckDB, bez ładowania całego
+  zakresu do pamięci procesu.
+- Dołączanie actuals preferuje stabilny `prediction_id`, następnie złożony klucz
+  `request_id + record_id`, a sam `record_id` jest dozwolony tylko wtedy, gdy jest
+  jednoznaczny w wybranym zakresie. Nulle, duplikaty i niejednoznaczne joiny
+  many-to-many muszą zatrzymać run z czytelną diagnozą. Metryki liczy się na
+  wszystkich dopasowanych rekordach, a raport zawsze pokazuje pełny mianownik,
+  actuals coverage, brakujące actuals i actuals bez predykcji.
+- Raport rozdziela skuteczność usługi od skuteczności modeli. Wynik usługi używa
+  faktycznie zwróconej predykcji championa albo fallbacku; wyniki modeli pozostają
+  rozdzielone co najmniej po `deployment_revision_id`, `model_id`, bundle i roli.
+  Shadow można porównywać na tym samym kohorcie; wynik fallbacku na selektywnym
+  kohorcie musi być odpowiednio oznaczony. Nie przedstawiaj challengera bez
+  actuals jako pomiaru skuteczności.
+- Ponowne przeliczenie tego samego okna z nowszą wersją actuals tworzy nowy run i
+  raport, nie zmieniając wcześniejszego wyniku. Target, typ problemu, kontrakt
+  score i baseline wywnioskuj z Business Case oraz lineage modelu, pozwalając na
+  jawne nadpisanie tylko tam, gdzie jest ono semantycznie bezpieczne.
+- Dashboard monitoringu jest wielousługowym read modelem nad ograniczonymi
+  agregatami runów. Pozwala wybrać checkboxami widoczne usługi i porównywać ich
+  wyniki dla jawnego zakresu; pokazuje zakres, oś czasu, liczebność i actuals
+  coverage. Łącz na jednym wykresie tylko metryki o zgodnej wersji i semantyce,
+  a nieporównywalność typów problemu, targetów, jednostek lub kontraktów cech
+  komunikuj zamiast tworzyć mylące zestawienie.
+- Istniejący batchowy template `monitoring` zachowuje swój publiczny kontrakt:
+  immutable prediction dataset + actuals -> Process & Join -> Performance Report.
+  Online monitoring dodaje adapter Inference Log -> prediction snapshot i może
+  współdzielić silnik joinu oraz metryk, lecz nie usuwa, nie zastępuje ani nie
+  rozszerza o obowiązkowe pola dotychczasowego workflow batchowego. Zmiany muszą
+  przechodzić regresję istniejących testów, klienta, notebooków i UI pipeline'u.

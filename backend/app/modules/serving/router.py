@@ -15,13 +15,17 @@ from app.modules.serving.schemas import (
     InferenceDetail,
     InferenceInputContractRead,
     ModelServingUsageRead,
+    OnlineMonitoringRunCreate,
+    OnlineMonitoringRunRead,
     ScoreRequest,
     ScoreResponse,
 )
 from app.modules.serving.service import ServingService
+from app.modules.serving.monitoring import OnlineMonitoringService
 
 router = APIRouter(prefix="/serving", tags=["serving"])
 service = ServingService()
+monitoring_service = OnlineMonitoringService(repository=service.repository, models=service.models)
 
 
 def _deployment_read(deployment) -> DeploymentRead:
@@ -235,3 +239,56 @@ def list_challenger_replays(
     principal: Principal = Depends(require_user),
 ) -> list[ChallengerReplayRead]:
     return [ChallengerReplayRead.model_validate(item) for item in service.list_replays(deployment_id, principal)]
+
+
+@router.post(
+    "/deployments/{deployment_id}/monitoring-runs",
+    response_model=OnlineMonitoringRunRead,
+    status_code=202,
+)
+def create_online_monitoring_run(
+    deployment_id: str,
+    payload: OnlineMonitoringRunCreate,
+    principal: Principal = Depends(require_user),
+) -> OnlineMonitoringRunRead:
+    return OnlineMonitoringRunRead.model_validate(
+        monitoring_service.create_run(deployment_id, payload, principal)
+    )
+
+
+@router.get(
+    "/deployments/{deployment_id}/monitoring-runs",
+    response_model=list[OnlineMonitoringRunRead],
+)
+def list_deployment_monitoring_runs(
+    deployment_id: str,
+    limit: int = Query(default=100, ge=1, le=200),
+    principal: Principal = Depends(require_user),
+) -> list[OnlineMonitoringRunRead]:
+    return [
+        OnlineMonitoringRunRead.model_validate(item)
+        for item in monitoring_service.list_runs(
+            principal, deployment_id=deployment_id, limit=limit
+        )
+    ]
+
+
+@router.get("/monitoring-runs", response_model=list[OnlineMonitoringRunRead])
+def list_online_monitoring_runs(
+    limit: int = Query(default=200, ge=1, le=200),
+    principal: Principal = Depends(require_user),
+) -> list[OnlineMonitoringRunRead]:
+    return [
+        OnlineMonitoringRunRead.model_validate(item)
+        for item in monitoring_service.list_runs(principal, limit=limit)
+    ]
+
+
+@router.get("/monitoring-runs/{run_id}", response_model=OnlineMonitoringRunRead)
+def get_online_monitoring_run(
+    run_id: str,
+    principal: Principal = Depends(require_user),
+) -> OnlineMonitoringRunRead:
+    return OnlineMonitoringRunRead.model_validate(
+        monitoring_service.get_run(run_id, principal)
+    )

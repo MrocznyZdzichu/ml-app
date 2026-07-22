@@ -297,8 +297,11 @@ def test_versioned_roles_fallback_and_inference_history(principal) -> None:
     assert result.fallback_used is True
     assert repository.deployments[deployment.id].status == DeploymentStatus.DEGRADED
     assert result.predictions[0].prediction == 42.0
+    assert result.predictions[0].prediction_id == f"{result.request_id}:{fallback.id}:0"
     assert "no stable record_id" in result.warnings[0]
     assert repository.inferences[result.request_id].status == InferenceStatus.SUCCEEDED
+    assert repository.inferences[result.request_id].requested_model_id == champion.id
+    assert repository.inferences[result.request_id].requested_role == DeploymentRole.CHAMPION
     assert {item["role"] for item in repository.items} == {"champion", "fallback", "shadow"}
     assert next(item for item in repository.items if item["role"] == "champion")["status"] == "failed"
     assert service.score(deployment.id, [ScoreRecord(features={"value": 42})], principal, idempotency_key="one").request_id == result.request_id

@@ -89,6 +89,10 @@ Content-Type: application/json
 `record_id` is optional, but the platform returns a governance warning when it
 has to generate one because future actuals cannot be joined reliably.
 
+Manual effectiveness and data-quality reports built from this log are described
+in [Online Service Monitoring](online-service-monitoring-stage-1.md). This is a
+separate execution path from the existing batch monitoring pipeline.
+
 History is cursor-paginated and may be filtered by record ID:
 
 ```http

@@ -8,6 +8,7 @@ from app.modules.serving.domain import (
     DeploymentRole,
     DeploymentStatus,
     InferenceStatus,
+    MonitoringRunStatus,
     ReplayStatus,
 )
 
@@ -143,6 +144,7 @@ class ScoreRequest(BaseModel):
 
 
 class PredictionRead(BaseModel):
+    prediction_id: str
     record_id: str
     prediction: Any
     outputs: dict[str, Any] = Field(default_factory=dict)
@@ -177,6 +179,8 @@ class InferenceRequestRead(BaseModel):
     error_code: str
     error_message: str
     champion_model_id: str
+    requested_model_id: str
+    requested_role: str
     served_model_id: str
     served_role: str
     fallback_used: bool
@@ -239,6 +243,72 @@ class ChallengerReplayRead(BaseModel):
     processed_requests: int
     processed_records: int
     failed_requests: int
+    error_message: str
+    created_at: datetime
+    started_at: datetime | None
+    completed_at: datetime | None
+
+
+class OnlineMonitoringJoinConfig(BaseModel):
+    strategy: str = Field(default="auto", pattern="^(auto|prediction_id|request_record_id|record_id)$")
+    actuals_prediction_id_column: str = Field(default="prediction_id", min_length=1, max_length=255)
+    actuals_request_id_column: str = Field(default="request_id", min_length=1, max_length=255)
+    actuals_record_id_column: str = Field(default="", max_length=255)
+
+
+class OnlineMonitoringRunCreate(BaseModel):
+    since: datetime
+    until: datetime
+    actuals_dataset_id: str = Field(default="", max_length=64)
+    actuals_target_column: str = Field(default="", max_length=255)
+    target_column: str = Field(default="", max_length=255)
+    problem_type: str = Field(
+        default="",
+        pattern="^(|binary_classification|multiclass_classification|regression)$",
+    )
+    join: OnlineMonitoringJoinConfig = Field(default_factory=OnlineMonitoringJoinConfig)
+
+    @model_validator(mode="after")
+    def validate_window(self) -> "OnlineMonitoringRunCreate":
+        if self.since.tzinfo is None or self.until.tzinfo is None:
+            raise ValueError("Monitoring since and until must include a timezone")
+        if self.since >= self.until:
+            raise ValueError("Monitoring since must be earlier than until")
+        return self
+
+
+class OnlineMonitoringRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    deployment_id: str
+    business_case_id: str
+    owner_id: str
+    requested_by: str
+    status: MonitoringRunStatus
+    since: datetime
+    until: datetime
+    source_before: datetime
+    actuals_dataset_id: str
+    actuals_artifact_id: str
+    join_strategy: str
+    actuals_prediction_id_column: str
+    actuals_request_id_column: str
+    actuals_record_id_column: str
+    actuals_target_column: str
+    problem_type: str
+    target_column: str
+    time_basis: str
+    processed_request_count: int
+    processed_row_count: int
+    matched_row_count: int
+    missing_actuals_count: int
+    unmatched_actuals_count: int
+    snapshot_dataset_id: str
+    joined_dataset_id: str
+    report_artifact_id: str
+    report: dict[str, Any]
+    warnings: list[str]
     error_message: str
     created_at: datetime
     started_at: datetime | None

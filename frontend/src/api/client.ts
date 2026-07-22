@@ -522,7 +522,7 @@ export type ScoreResponse = {
   model_id: string;
   served_role: DeploymentRole;
   fallback_used: boolean;
-  predictions: Array<{ record_id: string; prediction: unknown; outputs: Record<string, unknown> }>;
+  predictions: Array<{ prediction_id: string; record_id: string; prediction: unknown; outputs: Record<string, unknown> }>;
   warnings: string[];
 };
 
@@ -593,6 +593,42 @@ export type ChallengerReplay = {
   failed_requests: number;
   error_message: string;
   created_at: string;
+};
+
+export type OnlineMonitoringRun = {
+  id: string;
+  deployment_id: string;
+  business_case_id: string;
+  owner_id: string;
+  requested_by: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  since: string;
+  until: string;
+  source_before: string;
+  actuals_dataset_id: string;
+  actuals_artifact_id: string;
+  join_strategy: "auto" | "prediction_id" | "request_record_id" | "record_id" | "not_applicable";
+  actuals_prediction_id_column: string;
+  actuals_request_id_column: string;
+  actuals_record_id_column: string;
+  actuals_target_column: string;
+  problem_type: string;
+  target_column: string;
+  time_basis: "scored_at";
+  processed_request_count: number;
+  processed_row_count: number;
+  matched_row_count: number;
+  missing_actuals_count: number;
+  unmatched_actuals_count: number;
+  snapshot_dataset_id: string;
+  joined_dataset_id: string;
+  report_artifact_id: string;
+  report: Record<string, unknown>;
+  warnings: string[];
+  error_message: string;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
 };
 
 export type BusinessCase = {
@@ -1270,6 +1306,30 @@ export const api = {
     }),
   listChallengerReplays: (deploymentId: string) =>
     request<ChallengerReplay[]>(`/serving/deployments/${encodeURIComponent(deploymentId)}/challenger-replays`),
+  createOnlineMonitoringRun: (
+    deploymentId: string,
+    payload: {
+      since: string;
+      until: string;
+      actuals_dataset_id?: string;
+      actuals_target_column?: string;
+      join?: {
+        strategy?: "auto" | "prediction_id" | "request_record_id" | "record_id";
+        actuals_prediction_id_column?: string;
+        actuals_request_id_column?: string;
+        actuals_record_id_column?: string;
+      };
+    }
+  ) => request<OnlineMonitoringRun>(`/serving/deployments/${encodeURIComponent(deploymentId)}/monitoring-runs`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  }),
+  listDeploymentMonitoringRuns: (deploymentId: string, limit = 100) =>
+    request<OnlineMonitoringRun[]>(`/serving/deployments/${encodeURIComponent(deploymentId)}/monitoring-runs?limit=${limit}`),
+  listOnlineMonitoringRuns: (limit = 200) =>
+    request<OnlineMonitoringRun[]>(`/serving/monitoring-runs?limit=${limit}`),
+  getOnlineMonitoringRun: (runId: string) =>
+    request<OnlineMonitoringRun>(`/serving/monitoring-runs/${encodeURIComponent(runId)}`),
   createApiCredential: (name: string, expiresAt: string | null) =>
     request<Record<string, unknown>>("/auth/api-credentials", {
       method: "POST",

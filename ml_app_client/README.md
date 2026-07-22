@@ -102,6 +102,18 @@ print(result.predictions[0]["prediction"])
 
 page = client.inference_history(service, record_id="estate-2026-0001")
 
+# Later, attach an actuals dataset to the Business Case as monitoring_actuals.
+monitoring = client.run_deployment_monitoring(
+    service,
+    actuals="estates_actuals",
+    since="2026-07-01T00:00:00Z",
+    until="2026-07-08T00:00:00Z",
+    actuals_target_column="sale_price",
+    actuals_record_id_column="estate_id",
+)
+completed_monitoring = client.wait_for_online_monitoring_run(monitoring)
+print(completed_monitoring.report["performance"])
+
 # Retire a trial service without destroying its governed history.
 client.set_deployment_status(
     service,

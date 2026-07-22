@@ -484,6 +484,8 @@ class ServingService:
             request_payload={"instances": normalized},
             warnings=warnings,
             champion_model_id=assignments[DeploymentRole.CHAMPION].model_id,
+            requested_model_id=primary.model_id,
+            requested_role=primary_role.value,
         )
         try:
             self.repository.add_inference(inference)
@@ -585,11 +587,12 @@ class ServingService:
 
         predictions = [
             PredictionRead(
+                prediction_id=f"{inference.id}:{served.model_id}:{index}",
                 record_id=item["record_id"],
                 prediction=output.get("prediction"),
                 outputs={key: value for key, value in output.items() if key != "prediction"},
             )
-            for item, output in zip(normalized, primary_outputs, strict=True)
+            for index, (item, output) in enumerate(zip(normalized, primary_outputs, strict=True))
         ]
         if (
             not challenger_model_id

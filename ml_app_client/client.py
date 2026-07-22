@@ -13,6 +13,7 @@ import re
 import time
 import warnings
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from getpass import getpass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -188,6 +189,47 @@ class PredictionResult:
             fallback_used=bool(value.get("fallback_used")),
             predictions=tuple(value.get("predictions") or ()),
             warnings=tuple(str(item) for item in value.get("warnings") or ()),
+            raw=value,
+        )
+
+
+@dataclass(frozen=True)
+class OnlineMonitoringRun:
+    id: str
+    deployment_id: str
+    status: str
+    since: str
+    until: str
+    actuals_dataset_id: str
+    processed_request_count: int
+    processed_row_count: int
+    matched_row_count: int
+    missing_actuals_count: int
+    unmatched_actuals_count: int
+    report: Mapping[str, Any]
+    error_message: str
+    raw: Mapping[str, Any]
+
+    @property
+    def finished(self) -> bool:
+        return self.status in {"succeeded", "failed"}
+
+    @classmethod
+    def from_api(cls, value: Mapping[str, Any]) -> "OnlineMonitoringRun":
+        return cls(
+            id=str(value["id"]),
+            deployment_id=str(value["deployment_id"]),
+            status=str(value["status"]),
+            since=str(value["since"]),
+            until=str(value["until"]),
+            actuals_dataset_id=str(value.get("actuals_dataset_id") or ""),
+            processed_request_count=int(value.get("processed_request_count") or 0),
+            processed_row_count=int(value.get("processed_row_count") or 0),
+            matched_row_count=int(value.get("matched_row_count") or 0),
+            missing_actuals_count=int(value.get("missing_actuals_count") or 0),
+            unmatched_actuals_count=int(value.get("unmatched_actuals_count") or 0),
+            report=dict(value.get("report") or {}),
+            error_message=str(value.get("error_message") or ""),
             raw=value,
         )
 
@@ -1439,6 +1481,154 @@ class MLAppClient:
     def list_challenger_replays(self, deployment: str | Deployment) -> list[Mapping[str, Any]]:
         target = self._deployment(deployment)
         return self._request("GET", f"/serving/deployments/{target.id}/challenger-replays")
+
+    def run_deployment_monitoring(
+        self,
+        deployment: str | Deployment,
+        *,
+        actuals: str | Dataset | None = None,
+        since: str | datetime | None = None,
+        until: str | datetime | None = None,
+        actuals_target_column: str | None = None,
+        actuals_prediction_id_column: str | None = None,
+        actuals_request_id_column: str | None = None,
+        actuals_record_id_column: str | None = None,
+        join_strategy: str = "auto",
+    ) -> OnlineMonitoringRun:
+        """Queue a full-scope online report; actuals optionally add performance metrics."""
+        if join_strategy not in {"auto", "prediction_id", "request_record_id", "record_id"}:
+            raise ValueError(
+                "join_strategy must be auto, prediction_id, request_record_id or record_id"
+            )
+        target = self._deployment(deployment)
+        actuals_dataset = self._deployment_actuals(target, actuals) if actuals is not None else None
+        until_value = until or datetime.now(timezone.utc)
+        if since is None:
+            parsed_until = (
+                until_value
+                if isinstance(until_value, datetime)
+                else datetime.fromisoformat(until_value.replace("Z", "+00:00"))
+            )
+            if parsed_until.tzinfo is None:
+                raise ValueError("Monitoring datetimes must include a timezone")
+            since_value: str | datetime = parsed_until - timedelta(days=1)
+        else:
+            since_value = since
+        payload: dict[str, Any] = {
+            "since": self._datetime_value(since_value),
+            "until": self._datetime_value(until_value),
+            "join": {"strategy": join_strategy},
+        }
+        if actuals_dataset is not None:
+            payload["actuals_dataset_id"] = actuals_dataset.id
+        if actuals_target_column:
+            payload["actuals_target_column"] = actuals_target_column
+        if actuals_prediction_id_column:
+            payload["join"]["actuals_prediction_id_column"] = actuals_prediction_id_column
+        if actuals_request_id_column:
+            payload["join"]["actuals_request_id_column"] = actuals_request_id_column
+        if actuals_record_id_column:
+            payload["join"]["actuals_record_id_column"] = actuals_record_id_column
+        value = self._request(
+            "POST",
+            f"/serving/deployments/{target.id}/monitoring-runs",
+            json=payload,
+        )
+        return OnlineMonitoringRun.from_api(value)
+
+    def list_online_monitoring_runs(
+        self,
+        deployment: str | Deployment | None = None,
+        *,
+        limit: int = 100,
+    ) -> list[OnlineMonitoringRun]:
+        """List bounded immutable report runs, optionally for one service."""
+        if limit < 1 or limit > 200:
+            raise ValueError("Monitoring run limit must be between 1 and 200")
+        path = "/serving/monitoring-runs"
+        if deployment is not None:
+            target = self._deployment(deployment)
+            path = f"/serving/deployments/{target.id}/monitoring-runs"
+        values = self._request("GET", path, params={"limit": limit})
+        return [OnlineMonitoringRun.from_api(item) for item in values]
+
+    def get_online_monitoring_run(self, run_id: str) -> OnlineMonitoringRun:
+        return OnlineMonitoringRun.from_api(
+            self._request("GET", f"/serving/monitoring-runs/{run_id}")
+        )
+
+    def wait_for_online_monitoring_run(
+        self,
+        run: OnlineMonitoringRun,
+        *,
+        poll_interval: float = 2.0,
+        timeout: float | None = None,
+        on_update: Callable[[OnlineMonitoringRun], None] | None = None,
+    ) -> OnlineMonitoringRun:
+        """Poll an online monitoring run without downloading row-level snapshots."""
+        started = time.monotonic()
+        current = run
+        while not current.finished:
+            if timeout is not None and time.monotonic() - started >= timeout:
+                raise TimeoutError(
+                    f"Online monitoring run {run.id} did not finish within {timeout}s"
+                )
+            time.sleep(poll_interval)
+            current = self.get_online_monitoring_run(run.id)
+            if on_update is not None:
+                on_update(current)
+        if current.status != "succeeded":
+            raise ApiError(
+                f"Online monitoring run {current.id} failed: "
+                f"{current.error_message or 'no error detail returned'}"
+            )
+        return current
+
+    def _deployment_actuals(
+        self,
+        deployment: Deployment,
+        value: str | Dataset,
+    ) -> Dataset:
+        if isinstance(value, Dataset):
+            return value
+        visible = self.list_datasets()
+        by_id = {str(item.get("id")): item for item in visible}
+        if value in by_id:
+            return Dataset.from_api(by_id[value])
+        attachments = self.list_business_case_attachments(deployment.business_case_id)
+        candidates = [
+            by_id[str(item.get("data_asset_id"))]
+            for item in attachments
+            if item.get("role") == "monitoring_actuals"
+            and str(item.get("data_asset_id")) in by_id
+            and _exact_name_key(str(by_id[str(item.get("data_asset_id"))].get("name") or ""))
+            == _exact_name_key(value)
+        ]
+        if not candidates:
+            raise ResourceNotFoundError(
+                f"Actuals dataset {value!r} attached with role monitoring_actuals was not found"
+            )
+        logical_ids = {str(item.get("logical_id") or "") for item in candidates}
+        if len(logical_ids) != 1:
+            raise ResourceAmbiguousError(
+                f"Actuals dataset name {value!r} resolves to multiple dataset families"
+            )
+        family = [
+            item for item in visible
+            if str(item.get("logical_id") or "") == next(iter(logical_ids))
+        ]
+        return Dataset.from_api(max(family, key=lambda item: int(item.get("version_number") or 0)))
+
+    @staticmethod
+    def _datetime_value(value: str | datetime) -> str:
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                raise ValueError("Monitoring datetimes must include a timezone")
+            return value.isoformat()
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("Monitoring datetimes must include a timezone")
+        return value
 
     def _deployment(self, value: str | Deployment) -> Deployment:
         if isinstance(value, Deployment):
