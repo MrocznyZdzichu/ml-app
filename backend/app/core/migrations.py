@@ -274,6 +274,174 @@ def _identity_and_access_control(connection: Connection) -> None:
             connection.execute(text(statement))
 
 
+def _online_model_serving(connection: Connection) -> None:
+    """Create durable deployment revisions, credentials and inference history."""
+    statements = [
+        (
+            "CREATE TABLE IF NOT EXISTS mlapp.serving_deployments ("
+            "id VARCHAR(64) PRIMARY KEY, owner_id VARCHAR(64) NOT NULL, "
+            "business_case_id VARCHAR(64) NOT NULL, name VARCHAR(255) NOT NULL, "
+            "slug VARCHAR(255) NOT NULL UNIQUE, status VARCHAR(32) NOT NULL, "
+            "active_revision_id VARCHAR(64) NOT NULL DEFAULT '', endpoint_url TEXT, "
+            "retention_days INTEGER NOT NULL DEFAULT 365, created_by VARCHAR(64) NOT NULL, "
+            "updated_by VARCHAR(64) NOT NULL, created_at TIMESTAMPTZ NOT NULL, "
+            "updated_at TIMESTAMPTZ NOT NULL)"
+        ),
+        "CREATE INDEX IF NOT EXISTS ix_serving_deployments_bc ON mlapp.serving_deployments (business_case_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_serving_deployment_bc_name ON mlapp.serving_deployments (business_case_id, lower(name))",
+        (
+            "CREATE TABLE IF NOT EXISTS mlapp.serving_deployment_revisions ("
+            "id VARCHAR(64) PRIMARY KEY, deployment_id VARCHAR(64) NOT NULL, "
+            "version_number INTEGER NOT NULL, assignments JSONB NOT NULL, "
+            "created_by VARCHAR(64) NOT NULL, reason TEXT NOT NULL DEFAULT '', "
+            "created_at TIMESTAMPTZ NOT NULL, UNIQUE(deployment_id, version_number))"
+        ),
+        "CREATE INDEX IF NOT EXISTS ix_serving_revisions_deployment ON mlapp.serving_deployment_revisions (deployment_id, version_number DESC)",
+        (
+            "CREATE TABLE IF NOT EXISTS mlapp.serving_inference_requests ("
+            "id VARCHAR(64) PRIMARY KEY, deployment_id VARCHAR(64) NOT NULL, "
+            "deployment_revision_id VARCHAR(64) NOT NULL, requested_by VARCHAR(64) NOT NULL, "
+            "correlation_id VARCHAR(128) NOT NULL, idempotency_key VARCHAR(255) NOT NULL DEFAULT '', "
+            "status VARCHAR(32) NOT NULL, record_count INTEGER NOT NULL, "
+            "request_payload JSONB NOT NULL, response_payload JSONB NOT NULL DEFAULT '{}'::jsonb, "
+            "warnings JSONB NOT NULL DEFAULT '[]'::jsonb, error_code VARCHAR(128) NOT NULL DEFAULT '', "
+            "error_message TEXT NOT NULL DEFAULT '', champion_model_id VARCHAR(64) NOT NULL DEFAULT '', "
+            "served_model_id VARCHAR(64) NOT NULL DEFAULT '', served_role VARCHAR(32) NOT NULL DEFAULT '', "
+            "fallback_used BOOLEAN NOT NULL DEFAULT FALSE, latency_ms INTEGER, "
+            "created_at TIMESTAMPTZ NOT NULL, completed_at TIMESTAMPTZ)"
+        ),
+        "CREATE INDEX IF NOT EXISTS ix_serving_inference_deployment_created ON mlapp.serving_inference_requests (deployment_id, created_at DESC, id DESC)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_serving_inference_idempotency ON mlapp.serving_inference_requests (deployment_id, requested_by, idempotency_key) WHERE idempotency_key <> ''",
+        (
+            "CREATE TABLE IF NOT EXISTS mlapp.serving_inference_items ("
+            "id VARCHAR(128) PRIMARY KEY, request_id VARCHAR(64) NOT NULL, "
+            "deployment_id VARCHAR(64) NOT NULL, record_id VARCHAR(512) NOT NULL, "
+            "model_id VARCHAR(64) NOT NULL, role VARCHAR(32) NOT NULL, "
+            "input JSONB NOT NULL, output JSONB NOT NULL, created_at TIMESTAMPTZ NOT NULL)"
+        ),
+        "CREATE INDEX IF NOT EXISTS ix_serving_items_request ON mlapp.serving_inference_items (request_id)",
+        "CREATE INDEX IF NOT EXISTS ix_serving_items_record ON mlapp.serving_inference_items (deployment_id, record_id, created_at DESC)",
+        (
+            "CREATE TABLE IF NOT EXISTS mlapp.api_credentials ("
+            "id VARCHAR(64) PRIMARY KEY, user_id VARCHAR(64) NOT NULL, name VARCHAR(255) NOT NULL, "
+            "token_hash VARCHAR(64) NOT NULL UNIQUE, expires_at TIMESTAMPTZ, revoked_at TIMESTAMPTZ, "
+            "last_used_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL)"
+        ),
+        "CREATE INDEX IF NOT EXISTS ix_api_credentials_user ON mlapp.api_credentials (user_id, created_at DESC)",
+        (
+            "CREATE TABLE IF NOT EXISTS mlapp.serving_challenger_replay_jobs ("
+            "id VARCHAR(64) PRIMARY KEY, deployment_id VARCHAR(64) NOT NULL, "
+            "deployment_revision_id VARCHAR(64) NOT NULL, challenger_model_id VARCHAR(64) NOT NULL, "
+            "requested_by VARCHAR(64) NOT NULL, status VARCHAR(32) NOT NULL, "
+            "source_before TIMESTAMPTZ NOT NULL, source_since TIMESTAMPTZ, source_until TIMESTAMPTZ, "
+            "max_requests INTEGER NOT NULL, processed_requests INTEGER NOT NULL DEFAULT 0, "
+            "processed_records INTEGER NOT NULL DEFAULT 0, failed_requests INTEGER NOT NULL DEFAULT 0, "
+            "error_message TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL, "
+            "started_at TIMESTAMPTZ, completed_at TIMESTAMPTZ)"
+        ),
+        "CREATE INDEX IF NOT EXISTS ix_serving_replays_deployment ON mlapp.serving_challenger_replay_jobs (deployment_id, created_at DESC)",
+    ]
+    for statement in statements:
+        connection.execute(text(statement))
+
+
+def _index_model_family_metadata(connection: Connection) -> None:
+    connection.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_artifacts_model_logical_id "
+        "ON mlapp.artifacts ((metadata->>'logical_model_id'), created_at) "
+        "WHERE type = 'model_version'"
+    ))
+
+
+def _rename_candidate_model_stage(connection: Connection) -> None:
+    """Canonicalize the model lifecycle stage without changing AutoML terminology."""
+    connection.execute(text(
+        "UPDATE mlapp.artifacts "
+        "SET metadata = jsonb_set(metadata::jsonb, '{stage}', to_jsonb('developed'::text), true)::json "
+        "WHERE type = 'model_version' AND metadata->>'stage' = 'candidate'"
+    ))
+
+
+def _enforce_active_model_lifecycle(connection: Connection) -> None:
+    """Materialize active model roles and enforce stage compatibility in PostgreSQL."""
+    statements = [
+        (
+            "CREATE TABLE IF NOT EXISTS mlapp.serving_active_model_assignments ("
+            "deployment_id VARCHAR(64) NOT NULL, revision_id VARCHAR(64) NOT NULL, "
+            "model_id VARCHAR(64) NOT NULL, role VARCHAR(32) NOT NULL, "
+            "PRIMARY KEY (deployment_id, model_id))"
+        ),
+        "CREATE INDEX IF NOT EXISTS ix_serving_active_model ON mlapp.serving_active_model_assignments (model_id)",
+        "TRUNCATE TABLE mlapp.serving_active_model_assignments",
+        (
+            "INSERT INTO mlapp.serving_active_model_assignments (deployment_id, revision_id, model_id, role) "
+            "SELECT d.id, r.id, assignment->>'model_id', assignment->>'role' "
+            "FROM mlapp.serving_deployments d "
+            "JOIN mlapp.serving_deployment_revisions r ON r.id = d.active_revision_id "
+            "CROSS JOIN LATERAL jsonb_array_elements(r.assignments::jsonb) assignment "
+            "WHERE d.status <> 'stopped'"
+        ),
+        (
+            "UPDATE mlapp.serving_deployments d SET status = 'degraded' "
+            "WHERE d.status <> 'stopped' AND EXISTS ("
+            "SELECT 1 FROM mlapp.serving_active_model_assignments a "
+            "JOIN mlapp.artifacts m ON m.id = a.model_id AND m.type = 'model_version' "
+            "WHERE a.deployment_id = d.id AND ("
+            "(a.role IN ('champion', 'fallback') AND coalesce(m.metadata->>'stage', 'developed') <> 'production') OR "
+            "(a.role IN ('challenger', 'shadow') AND coalesce(m.metadata->>'stage', 'developed') NOT IN ('staging', 'production'))))"
+        ),
+        (
+            "CREATE OR REPLACE FUNCTION mlapp.validate_active_model_assignment() RETURNS trigger AS $$ "
+            "DECLARE current_stage TEXT; BEGIN "
+            "PERFORM pg_advisory_xact_lock(hashtextextended(NEW.model_id, 0)); "
+            "SELECT coalesce(metadata->>'stage', 'developed') INTO current_stage "
+            "FROM mlapp.artifacts WHERE id = NEW.model_id AND type = 'model_version'; "
+            "IF current_stage IS NULL THEN RETURN NEW; END IF; "
+            "IF (NEW.role IN ('champion', 'fallback') AND current_stage <> 'production') "
+            "OR (NEW.role IN ('challenger', 'shadow') AND current_stage NOT IN ('staging', 'production')) THEN "
+            "RAISE EXCEPTION 'Model stage % cannot be assigned as %', current_stage, NEW.role USING ERRCODE = '23514'; "
+            "END IF; RETURN NEW; END; $$ LANGUAGE plpgsql"
+        ),
+        "DROP TRIGGER IF EXISTS trg_validate_active_model_assignment ON mlapp.serving_active_model_assignments",
+        (
+            "CREATE TRIGGER trg_validate_active_model_assignment BEFORE INSERT OR UPDATE "
+            "ON mlapp.serving_active_model_assignments FOR EACH ROW "
+            "EXECUTE FUNCTION mlapp.validate_active_model_assignment()"
+        ),
+        (
+            "CREATE OR REPLACE FUNCTION mlapp.prevent_invalid_model_stage_change() RETURNS trigger AS $$ "
+            "DECLARE next_stage TEXT; BEGIN "
+            "IF NEW.type <> 'model_version' THEN RETURN NEW; END IF; "
+            "next_stage := coalesce(NEW.metadata->>'stage', 'developed'); "
+            "IF next_stage = 'candidate' THEN next_stage := 'developed'; END IF; "
+            "PERFORM pg_advisory_xact_lock(hashtextextended(NEW.id, 0)); "
+            "IF EXISTS (SELECT 1 FROM mlapp.serving_active_model_assignments a WHERE a.model_id = NEW.id AND ("
+            "(a.role IN ('champion', 'fallback') AND next_stage <> 'production') OR "
+            "(a.role IN ('challenger', 'shadow') AND next_stage NOT IN ('staging', 'production')))) THEN "
+            "RAISE EXCEPTION 'Model stage % is incompatible with an active serving assignment', next_stage USING ERRCODE = '23514'; "
+            "END IF; RETURN NEW; END; $$ LANGUAGE plpgsql"
+        ),
+        "DROP TRIGGER IF EXISTS trg_prevent_invalid_model_stage_change ON mlapp.artifacts",
+        (
+            "CREATE TRIGGER trg_prevent_invalid_model_stage_change BEFORE UPDATE OF metadata "
+            "ON mlapp.artifacts FOR EACH ROW EXECUTE FUNCTION mlapp.prevent_invalid_model_stage_change()"
+        ),
+    ]
+    for statement in statements:
+        connection.execute(text(statement))
+
+
+def _harden_inference_audit_contract(connection: Connection) -> None:
+    statements = [
+        "ALTER TABLE mlapp.serving_inference_requests ADD COLUMN IF NOT EXISTS request_hash VARCHAR(64) NOT NULL DEFAULT ''",
+        "ALTER TABLE mlapp.serving_inference_items ADD COLUMN IF NOT EXISTS status VARCHAR(32) NOT NULL DEFAULT 'succeeded'",
+        "ALTER TABLE mlapp.serving_inference_items ADD COLUMN IF NOT EXISTS error_message TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE mlapp.serving_inference_items ADD COLUMN IF NOT EXISTS latency_ms INTEGER",
+    ]
+    for statement in statements:
+        connection.execute(text(statement))
+
+
 MIGRATIONS = [
     Migration(
         version="20260703_0001",
@@ -294,5 +462,30 @@ MIGRATIONS = [
         version="20260717_0004",
         description="Enforce globally unique case-insensitive Business Case names",
         apply=_enforce_unique_business_case_names,
+    ),
+    Migration(
+        version="20260719_0005",
+        description="Add versioned online model serving, inference history and API credentials",
+        apply=_online_model_serving,
+    ),
+    Migration(
+        version="20260719_0006",
+        description="Index model family metadata for bounded version history reads",
+        apply=_index_model_family_metadata,
+    ),
+    Migration(
+        version="20260720_0007",
+        description="Rename the candidate model lifecycle stage to developed",
+        apply=_rename_candidate_model_stage,
+    ),
+    Migration(
+        version="20260720_0008",
+        description="Enforce model lifecycle compatibility for active serving assignments",
+        apply=_enforce_active_model_lifecycle,
+    ),
+    Migration(
+        version="20260720_0009",
+        description="Bind idempotency to request content and retain every model execution outcome",
+        apply=_harden_inference_audit_contract,
     ),
 ]

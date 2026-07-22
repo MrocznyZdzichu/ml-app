@@ -109,6 +109,7 @@ def test_pipeline_runs_are_presented_as_versions_of_one_logical_model() -> None:
     artifacts.list_artifacts.side_effect = lambda owner_id, artifact_type: (
         pipeline_models if artifact_type == ArtifactType.MODEL_VERSION else []
     )
+    artifacts.list_model_version_artifacts.return_value = pipeline_models
     pipelines = Mock()
     pipelines.get_run.side_effect = lambda run_id: SimpleNamespace(
         owner_id="owner-1",
@@ -136,6 +137,46 @@ def test_pipeline_runs_are_presented_as_versions_of_one_logical_model() -> None:
         "model-1",
         "model-2",
     ]
+    artifacts.list_model_version_artifacts.assert_called_once_with(models[0].logical_id)
+    assert artifacts.list_artifacts.call_count == 2
+
+
+def test_get_model_resolves_one_pipeline_artifact_without_listing_registry() -> None:
+    created_at = datetime.now(timezone.utc)
+    artifact = Artifact(
+        id="model-1",
+        owner_id="owner-1",
+        type=ArtifactType.MODEL_VERSION,
+        reference_id="model-reference-1",
+        origin=ArtifactOrigin.PLATFORM_GENERATED,
+        metadata={
+            "model_name": "Targeted model",
+            "algorithm": "ridge_classifier",
+            "logical_model_id": "family-1",
+            "lineage": {},
+        },
+        created_by="owner-1",
+        created_at=created_at,
+    )
+    artifacts = Mock()
+    artifacts.get_artifact.return_value = artifact
+    artifacts.list_model_version_artifacts.return_value = [artifact]
+    service = ModelService(
+        repository=InMemoryModelRepository(),
+        artifacts=artifacts,
+        pipelines=Mock(),
+    )
+
+    resolved = service.get_model(
+        "model-1",
+        Principal("owner-1", "owner@example.com", "Owner"),
+    )
+
+    assert resolved.id == "model-1"
+    assert resolved.version == "v1"
+    artifacts.get_artifact.assert_called_once_with("model-1")
+    artifacts.list_model_version_artifacts.assert_called_once_with("family-1")
+    artifacts.list_artifacts.assert_not_called()
 
 
 def test_batch_scoring_contract_prefers_autofe_recipe_and_matching_step_state() -> None:

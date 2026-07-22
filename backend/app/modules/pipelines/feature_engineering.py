@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -12,6 +13,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 import duckdb
+import pandas as pd
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor
@@ -495,6 +497,87 @@ class DuckDbFeatureEngineeringEngine:
             warnings=warnings,
             input_dataset_ids=input_dataset_ids,
         )
+
+    def transform_online_records(
+        self,
+        *,
+        definition: dict[str, Any],
+        fitted_state_artifact_id: str,
+        owner_id: str,
+        records: list[dict[str, Any]],
+        output_columns: list[str],
+    ) -> list[dict[str, Any]]:
+        """Apply one pinned fitted FE recipe to a bounded online request."""
+        if not fitted_state_artifact_id:
+            return records
+        payload = {
+            **definition,
+            "mode": "transform",
+            "fitted_state_artifact_id": fitted_state_artifact_id,
+        }
+        parsed = FeatureEngineeringDefinition.model_validate(payload)
+        state = self._load_state(fitted_state_artifact_id, owner_id)
+        if state.get("recipe_hash") not in _compatible_recipe_hashes(parsed):
+            raise ValueError("Online scoring recipe does not match the pinned fitted transform")
+        frame = pd.DataFrame.from_records(records)
+        temporary_directory = tempfile.TemporaryDirectory(prefix="mlapp-online-fe-")
+        connection = configured_duckdb_connection(Path(temporary_directory.name))
+        try:
+            connection.register("__mlapp_online_input_frame", frame)
+            current = "__mlapp_online_input_frame"
+            for transform in parsed.transformations:
+                fitted = (state.get("transforms") or {}).get(transform.transform_id)
+                if not isinstance(fitted, dict):
+                    raise ValueError(f"Pinned fitted transform is missing state for {transform.transform_id}")
+                current = self._apply_transform(connection, current, transform, fitted, "scoring")
+            available = set(relation_columns(connection, current))
+            missing = [column for column in output_columns if column not in available]
+            if missing:
+                raise ValueError(f"Fitted feature transform did not produce: {', '.join(missing)}")
+            cursor = connection.execute(
+                f"SELECT {', '.join(identifier(column) for column in output_columns)} "
+                f"FROM {identifier(current)}"
+            )
+            return [
+                {column: json_safe(value) for column, value in zip(output_columns, row, strict=True)}
+                for row in cursor.fetchall()
+            ]
+        finally:
+            connection.close()
+            temporary_directory.cleanup()
+
+    def categorical_suggestions(
+        self,
+        *,
+        fitted_state_artifact_id: str,
+        owner_id: str,
+        limit: int = 5,
+    ) -> dict[str, list[str]]:
+        """Return bounded top categories from persisted full-training fitted state."""
+        if not fitted_state_artifact_id or limit < 1:
+            return {}
+        state = self._load_state(fitted_state_artifact_id, owner_id)
+        suggestions: dict[str, list[str]] = {}
+        for transform in (state.get("transforms") or {}).values():
+            if not isinstance(transform, dict):
+                continue
+            for column, fitted in (transform.get("columns") or {}).items():
+                if not isinstance(fitted, dict):
+                    continue
+                frequencies = fitted.get("frequencies") or {}
+                if not isinstance(frequencies, dict):
+                    continue
+                ranked = sorted(
+                    (
+                        (str(value), int(count))
+                        for value, count in frequencies.items()
+                        if isinstance(count, (int, float))
+                    ),
+                    key=lambda item: (-item[1], item[0]),
+                )
+                if ranked:
+                    suggestions[str(column)] = [value for value, _ in ranked[:limit]]
+        return suggestions
 
     def _prepare_evaluation(
         self,

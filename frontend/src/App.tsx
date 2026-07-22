@@ -47,6 +47,7 @@ import type {
   UserProfile
 } from "./api/client";
 import { AssetList } from "./components/AssetList";
+import { useVersionedResourceNavigation } from "./components/dialogNavigation";
 import { ArtifactDependenciesDialog } from "./operational/ArtifactDependenciesDialog";
 import {
   ArtifactFilters,
@@ -182,6 +183,7 @@ export default function App() {
   } | null>(null);
   const [modelBusinessCaseFilter, setModelBusinessCaseFilter] = useState("");
   const [reportBusinessCaseFilter, setReportBusinessCaseFilter] = useState("");
+  const [servingDeploymentId, setServingDeploymentId] = useState("");
   const [apiStatus, setApiStatus] = useState("checking");
   const [authStatus, setAuthStatus] = useState(getAccessToken() ? "checking" : "anonymous");
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
@@ -192,6 +194,7 @@ export default function App() {
   const [scoringReports, setScoringReports] = useState<ScoringReport[]>([]);
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [notice, setNotice] = useState("Workspace ready");
+  const [isRefreshingWorkspace, setIsRefreshingWorkspace] = useState(false);
   const descriptiveProfileCache = useRef<Map<string, DescriptiveProfileCacheEntry>>(new Map());
 
   const activeConfig = useMemo(
@@ -217,6 +220,21 @@ export default function App() {
       setDeployments(deploymentItems);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "API request failed");
+      throw error;
+    }
+  }
+
+  async function handleGlobalRefresh() {
+    if (isRefreshingWorkspace) return;
+    setIsRefreshingWorkspace(true);
+    setNotice("Refreshing workspace data…");
+    try {
+      await refreshWorkspace();
+      setNotice("Workspace data refreshed");
+    } catch {
+      // refreshWorkspace already exposes the actionable API error in the notice bar.
+    } finally {
+      setIsRefreshingWorkspace(false);
     }
   }
 
@@ -248,7 +266,7 @@ export default function App() {
 
   useEffect(() => {
     if (authStatus === "authenticated") {
-      void refreshWorkspace();
+      void refreshWorkspace().catch(() => undefined);
     }
   }, [authStatus]);
 
@@ -293,6 +311,11 @@ export default function App() {
   function openBusinessCaseScoringReports(businessCaseId: string) {
     setReportBusinessCaseFilter(businessCaseId);
     setActiveTab("scoring-reports");
+  }
+
+  function openServingDeployment(deploymentId: string) {
+    setServingDeploymentId(deploymentId);
+    setActiveTab("serving");
   }
 
   if (authStatus !== "authenticated" || !currentUser) {
@@ -345,9 +368,22 @@ export default function App() {
               {activeConfig.label}
             </h1>
           </div>
-          <div className={`status-pill ${apiStatus}`}>
-            {apiStatus === "online" ? <CheckCircle2 size={16} /> : <Activity size={16} />}
-            <span>API {apiStatus}</span>
+          <div className="topbar-actions">
+            <div className={`status-pill ${apiStatus}`}>
+              {apiStatus === "online" ? <CheckCircle2 size={16} /> : <Activity size={16} />}
+              <span>API {apiStatus}</span>
+            </div>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => void handleGlobalRefresh()}
+              disabled={isRefreshingWorkspace}
+              aria-label="Refresh current workspace data"
+              title="Reload Business Cases, datasets, pipelines, models, reports and services"
+            >
+              <RotateCcw className={isRefreshingWorkspace ? "run-spinner" : undefined} size={16} />
+              {isRefreshingWorkspace ? "Refreshing…" : "Refresh"}
+            </button>
           </div>
           <div className="user-menu">
             <div>
@@ -377,11 +413,13 @@ export default function App() {
             datasets={datasets}
             pipelines={pipelines}
             models={models}
+            deployments={deployments}
             scoringReports={scoringReports}
             onRefresh={refreshWorkspace}
             onEditPipeline={openPipelineEditor}
             onOpenModels={openBusinessCaseModels}
             onOpenScoringReports={openBusinessCaseScoringReports}
+            onOpenServing={openServingDeployment}
             onOpenDataset={openDatasetAnalysis}
             setNotice={setNotice}
           />
@@ -437,6 +475,8 @@ export default function App() {
               pipelines={pipelines}
               initialBusinessCaseId={modelBusinessCaseFilter}
               onOpenDataset={openDatasetAnalysis}
+              onRefresh={refreshWorkspace}
+              setNotice={setNotice}
             />
           </DeferredPanel>
         )}
@@ -456,6 +496,7 @@ export default function App() {
             <ServingPanel
               deployments={deployments}
               models={models}
+              initialDeploymentId={servingDeploymentId}
               onRefresh={refreshWorkspace}
               setNotice={setNotice}
             />
@@ -482,11 +523,13 @@ function BusinessCasesPanel({
   datasets,
   pipelines,
   models,
+  deployments,
   scoringReports,
   onRefresh,
   onEditPipeline,
   onOpenModels,
   onOpenScoringReports,
+  onOpenServing,
   onOpenDataset,
   setNotice
 }: {
@@ -494,11 +537,13 @@ function BusinessCasesPanel({
   datasets: DataAsset[];
   pipelines: Pipeline[];
   models: ModelArtifact[];
+  deployments: Deployment[];
   scoringReports: ScoringReport[];
   onRefresh: () => Promise<void>;
   onEditPipeline: (pipelineId: string) => void;
   onOpenModels: (businessCaseId: string) => void;
   onOpenScoringReports: (businessCaseId: string) => void;
+  onOpenServing: (deploymentId: string) => void;
   onOpenDataset: (datasetId: string) => void;
   setNotice: (message: string) => void;
 }) {
@@ -526,14 +571,13 @@ function BusinessCasesPanel({
   const [mappingTargetColumn, setMappingTargetColumn] = useState("");
   const [attachments, setAttachments] = useState<BusinessCaseDataAttachment[]>([]);
   const [businessCaseSearch, setBusinessCaseSearch] = useState("");
+  const [isRefreshingWorkspace, setIsRefreshingWorkspace] = useState(false);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isMappingFormOpen, setIsMappingFormOpen] = useState(false);
   const [editingAttachmentId, setEditingAttachmentId] = useState("");
-  const [activeWorkspace, setActiveWorkspace] = useState<"details" | "data" | "pipelines" | "models" | "reports" | null>(null);
-  const [selectedBcModel, setSelectedBcModel] = useState<ModelArtifact | null>(null);
-  const [selectedBcReport, setSelectedBcReport] = useState<ScoringReport | null>(null);
-  const [bcModelHistory, setBcModelHistory] = useState<ModelArtifact | null>(null);
-  const [bcReportHistory, setBcReportHistory] = useState<ScoringReport | null>(null);
+  const [activeWorkspace, setActiveWorkspace] = useState<"details" | "data" | "pipelines" | "models" | "services" | "reports" | null>(null);
+  const bcModelNavigation = useVersionedResourceNavigation<ModelArtifact>();
+  const bcReportNavigation = useVersionedResourceNavigation<ScoringReport>();
   const [bcDatasetHistory, setBcDatasetHistory] = useState<DataAsset | null>(null);
   const [bcPipelineHistory, setBcPipelineHistory] = useState<Pipeline | null>(null);
   const [bcRunDialog, setBcRunDialog] = useState<{
@@ -638,6 +682,10 @@ function BusinessCasesPanel({
       scoringReports.filter((report) => report.business_case_id === selectedBusinessCase?.id)
     ),
     [scoringReports, selectedBusinessCase]
+  );
+  const selectedBusinessCaseDeployments = useMemo(
+    () => deployments.filter((deployment) => deployment.business_case_id === selectedBusinessCase?.id),
+    [deployments, selectedBusinessCase]
   );
   const visibleAttachments = useMemo(
     () => activeAttachments.filter((attachment) => {
@@ -954,6 +1002,19 @@ function BusinessCasesPanel({
     ? Boolean(bcRunSubmittingSessions[bcRunDialog.sessionId])
     : false;
 
+  async function handleWorkspaceRefresh() {
+    setIsRefreshingWorkspace(true);
+    setNotice("Refreshing workspace data…");
+    try {
+      await onRefresh();
+      setNotice("Workspace data refreshed");
+    } catch {
+      // refreshWorkspace already exposes the actionable API error in the notice bar.
+    } finally {
+      setIsRefreshingWorkspace(false);
+    }
+  }
+
   return (
     <section className="business-case-screen">
       <div className="panel business-case-catalog">
@@ -962,10 +1023,23 @@ function BusinessCasesPanel({
             <h2>Business cases</h2>
             <p>{filteredBusinessCases.length} of {businessCases.length} cases shown</p>
           </div>
-          <button className="primary-button" type="button" onClick={() => setIsCreateOpen(true)}>
-            <Plus size={16} />
-            Create BC
-          </button>
+          <div className="catalog-toolbar-actions">
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => void handleWorkspaceRefresh()}
+              disabled={isRefreshingWorkspace}
+              aria-label="Refresh workspace data"
+              title="Reload Business Cases and related workspace resources"
+            >
+              <RotateCcw className={isRefreshingWorkspace ? "run-spinner" : undefined} size={16} />
+              {isRefreshingWorkspace ? "Refreshing…" : "Refresh"}
+            </button>
+            <button className="primary-button" type="button" onClick={() => setIsCreateOpen(true)}>
+              <Plus size={16} />
+              Create BC
+            </button>
+          </div>
         </div>
 
         <label className="search-field">
@@ -1053,6 +1127,17 @@ function BusinessCasesPanel({
                   type="button"
                   onClick={() => {
                     setSelectedBusinessCaseId(item.id);
+                    setActiveWorkspace("services");
+                  }}
+                >
+                  <Rocket size={14} />
+                  Services
+                </button>
+                <button
+                  className="secondary-button compact-button"
+                  type="button"
+                  onClick={() => {
+                    setSelectedBusinessCaseId(item.id);
                     setActiveWorkspace("reports");
                   }}
                 >
@@ -1096,6 +1181,10 @@ function BusinessCasesPanel({
               <button className={`secondary-button compact-button${activeWorkspace === "models" ? " active" : ""}`} type="button" onClick={() => setActiveWorkspace("models")}>
                 <Brain size={14} />
                 Models
+              </button>
+              <button className={`secondary-button compact-button${activeWorkspace === "services" ? " active" : ""}`} type="button" onClick={() => setActiveWorkspace("services")}>
+                <Rocket size={14} />
+                Services
               </button>
               <button className={`secondary-button compact-button${activeWorkspace === "reports" ? " active" : ""}`} type="button" onClick={() => setActiveWorkspace("reports")}>
                 <BarChart3 size={14} />
@@ -1438,11 +1527,61 @@ function BusinessCasesPanel({
               meta: `${item.algorithm} · ${item.problem_type} · ${businessCaseName(businessCases, item.business_case_id)}`,
               status: item.stage,
               actions: [
-                { label: "Versions", icon: "versions", onClick: () => setBcModelHistory(item) },
-                { label: "View", icon: "view", onClick: () => setSelectedBcModel(item) },
+                { label: "Versions", icon: "versions", onClick: () => bcModelNavigation.openHistory(item) },
+                { label: "View", icon: "view", onClick: () => bcModelNavigation.openDirect(item) },
                 { label: "Dependencies", icon: "dependencies", onClick: () => setDependencyTarget({ referenceId: item.id, artifactType: "model_version", title: item.name }) }
               ]
             }))} />
+          </div>
+        )}
+        {selectedBusinessCase && activeWorkspace === "services" && (
+          <div className="panel bc-services-panel">
+            <div className="panel-header">
+              <div>
+                <h2>Model services</h2>
+                <p>{selectedBusinessCaseDeployments.length} stable {selectedBusinessCaseDeployments.length === 1 ? "endpoint" : "endpoints"} in this business case</p>
+              </div>
+            </div>
+            {selectedBusinessCaseDeployments.length === 0 ? (
+              <div className="empty-state">No model services have been created for this business case.</div>
+            ) : (
+              <div className="bc-service-grid">
+                {selectedBusinessCaseDeployments.map((deployment) => {
+                  const assignments = deployment.active_revision?.assignments ?? [];
+                  return (
+                    <article className="bc-service-card" key={deployment.id}>
+                      <div className="bc-service-card-header">
+                        <div>
+                          <span className={`pipeline-status ${deployment.status}`}>{deployment.status}</span>
+                          <h3>{deployment.name}</h3>
+                          <code>{deployment.endpoint_url ?? "Endpoint unavailable"}</code>
+                        </div>
+                        <button className="secondary-button compact-button" type="button" onClick={() => onOpenServing(deployment.id)}>
+                          <Rocket size={14} /> Open service
+                        </button>
+                      </div>
+                      <div className="bc-service-meta">
+                        <span>Active revision <strong>v{deployment.active_revision?.version_number ?? "—"}</strong></span>
+                        <span>Retention <strong>{deployment.retention_days} days</strong></span>
+                        <span>Updated <strong>{formatDateTime(deployment.updated_at)}</strong></span>
+                      </div>
+                      <div className="bc-service-assignments">
+                        {assignments.map((assignment) => {
+                          const assignedModel = models.find((item) => item.id === assignment.model_id);
+                          return (
+                            <div key={`${deployment.id}-${assignment.model_id}`}>
+                              <span className="bc-service-role">{assignment.role}</span>
+                              <strong>{assignedModel ? `${assignedModel.name} · ${assignedModel.version}` : assignment.model_id}</strong>
+                              <small>model stage: {assignedModel?.stage ?? "unavailable"}</small>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
         {selectedBusinessCase && activeWorkspace === "reports" && (
@@ -1465,8 +1604,8 @@ function BusinessCasesPanel({
               meta: `${pipelineName(pipelines, item.pipeline_id)} · ${item.problem_type} · ${item.evaluated_row_count.toLocaleString()} rows`,
               status: "ready",
               actions: [
-                { label: "Versions", icon: "versions", onClick: () => setBcReportHistory(item) },
-                { label: "View", icon: "view", onClick: () => setSelectedBcReport(item) },
+                { label: "Versions", icon: "versions", onClick: () => bcReportNavigation.openHistory(item) },
+                { label: "View", icon: "view", onClick: () => bcReportNavigation.openDirect(item) },
                 { label: "Dependencies", icon: "dependencies", onClick: () => setDependencyTarget({ referenceId: item.id, artifactType: "report", title: item.name }) }
               ]
             }))} />
@@ -1474,23 +1613,25 @@ function BusinessCasesPanel({
         )}
       </div>
       )}
-      {selectedBcModel && (
+      {bcModelNavigation.selected && (
         <DeferredPanel>
           <ModelDetailsDialog
-            model={selectedBcModel}
-            businessCaseName={businessCaseName(businessCases, selectedBcModel.business_case_id)}
-            pipelineName={pipelineName(pipelines, selectedBcModel.pipeline_id)}
+            model={bcModelNavigation.selected}
+            businessCaseName={businessCaseName(businessCases, bcModelNavigation.selected.business_case_id)}
+            pipelineName={pipelineName(pipelines, bcModelNavigation.selected.pipeline_id)}
             onOpenDataset={onOpenDataset}
-            onClose={() => setSelectedBcModel(null)}
+            onClose={bcModelNavigation.closeAll}
+            onBack={bcModelNavigation.hasBack ? bcModelNavigation.back : undefined}
           />
         </DeferredPanel>
       )}
-      {selectedBcReport && (
+      {bcReportNavigation.selected && (
         <DeferredPanel>
           <ScoringReportDialog
-            report={selectedBcReport}
+            report={bcReportNavigation.selected}
             onOpenDataset={onOpenDataset}
-            onClose={() => setSelectedBcReport(null)}
+            onClose={bcReportNavigation.closeAll}
+            onBack={bcReportNavigation.hasBack ? bcReportNavigation.back : undefined}
           />
         </DeferredPanel>
       )}
@@ -1512,29 +1653,23 @@ function BusinessCasesPanel({
           onOpenDataset={onOpenDataset}
         />
       )}
-      {bcModelHistory && (
+      {bcModelNavigation.showHistory && bcModelNavigation.history && (
         <DeferredPanel>
           <ModelVersionHistoryDialog
-            model={bcModelHistory}
-            businessCaseName={businessCaseName(businessCases, bcModelHistory.business_case_id)}
-            pipelineName={pipelineName(pipelines, bcModelHistory.pipeline_id)}
-            onClose={() => setBcModelHistory(null)}
-            onView={(model) => {
-              setBcModelHistory(null);
-              setSelectedBcModel(model);
-            }}
+            model={bcModelNavigation.history}
+            businessCaseName={businessCaseName(businessCases, bcModelNavigation.history.business_case_id)}
+            pipelineName={pipelineName(pipelines, bcModelNavigation.history.pipeline_id)}
+            onClose={bcModelNavigation.closeHistory}
+            onView={bcModelNavigation.openVersion}
           />
         </DeferredPanel>
       )}
-      {bcReportHistory && (
+      {bcReportNavigation.showHistory && bcReportNavigation.history && (
         <DeferredPanel>
           <ScoringReportHistoryDialog
-            report={bcReportHistory}
-            onClose={() => setBcReportHistory(null)}
-            onView={(report) => {
-              setBcReportHistory(null);
-              setSelectedBcReport(report);
-            }}
+            report={bcReportNavigation.history}
+            onClose={bcReportNavigation.closeHistory}
+            onView={bcReportNavigation.openVersion}
           />
         </DeferredPanel>
       )}
@@ -1652,7 +1787,11 @@ function BusinessCasesPanel({
       {bcSelectedRunDetails && (
         <PipelineRunDetailsDialog
           run={bcSelectedRunDetails}
-          onClose={() => setBcSelectedRunDetails(null)}
+          onBack={bcRunsPipelineId ? () => setBcSelectedRunDetails(null) : undefined}
+          onClose={() => {
+            setBcSelectedRunDetails(null);
+            setBcRunsPipelineId(null);
+          }}
           onChanged={async () => {
             setBcRunsRefreshKey((current) => current + 1);
             await onRefresh();
@@ -2775,7 +2914,11 @@ function PipelinesPanel({
         {selectedRunDetails && (
           <PipelineRunDetailsDialog
             run={selectedRunDetails}
-            onClose={() => setSelectedRunDetails(null)}
+            onBack={isRunHistoryOpen ? () => setSelectedRunDetails(null) : undefined}
+            onClose={() => {
+              setSelectedRunDetails(null);
+              setIsRunHistoryOpen(false);
+            }}
             onChanged={async () => {
               setRunHistoryRefreshKey((current) => current + 1);
             }}
@@ -3066,7 +3209,11 @@ function PipelinesPanel({
       {selectedRunDetails && selectedPipeline && (
         <PipelineRunDetailsDialog
           run={selectedRunDetails}
-          onClose={() => setSelectedRunDetails(null)}
+          onBack={isRunHistoryOpen ? () => setSelectedRunDetails(null) : undefined}
+          onClose={() => {
+            setSelectedRunDetails(null);
+            setIsRunHistoryOpen(false);
+          }}
           onChanged={async () => {
             setRuns(await api.listPipelineRuns(selectedPipeline.id));
             setRunHistoryRefreshKey((current) => current + 1);

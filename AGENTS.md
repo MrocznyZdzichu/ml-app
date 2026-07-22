@@ -45,6 +45,42 @@ zmianą funkcji zawsze je zweryfikuj.
   kolejkę workerów i React. Spark lub inną ciężką infrastrukturę wprowadzaj tylko
   po wykazaniu mierzalnej potrzeby i uwzględnieniu kosztu operacyjnego.
 
+## API-first, UI i klient Python
+
+- Projektuj istotne funkcje i kompletne workflow platformy w podejściu API-first.
+  Stabilne REST API jest źródłem kontraktu, a UI i `ml_app_client` są
+  równorzędnymi klientami tego samego API. Nie umieszczaj logiki domenowej
+  wyłącznie we frontendzie ani nie twórz dla klienta Python alternatywnej
+  semantyki. Wyjątki dla endpointów ściśle wewnętrznych lub administracyjnych
+  muszą być świadome i wyraźnie oznaczone jako niepubliczne.
+- Rozwijaj publiczne REST API, UI i `ml_app_client` razem w zakresie nowej
+  funkcji. Klient Python ma udostępniać typowane operacje wysokiego poziomu dla
+  całych workflow, nie tylko cienkie odpowiedniki surowych requestów HTTP.
+  Zachowuj między kanałami te same reguły autoryzacji, walidacji, idempotencji,
+  paginacji, zadań asynchronicznych, warningów i błędów oraz wersjonuj klienta z
+  poszanowaniem kompatybilności wstecznej.
+- Publiczne API i klient mają być proste także dla użytkownika, który nie zna
+  wewnętrznego modelu platformy. Wymagaj wyłącznie parametrów niezbędnych dla
+  intencji biznesowej, stosuj bezpieczne i przewidywalne wartości domyślne oraz
+  oferuj progresywne opcje zaawansowane zamiast zmuszać do konfiguracji całego
+  kontraktu. Nie wymagaj od użytkownika technicznych identyfikatorów, hashy,
+  lineage ani pól możliwych do jednoznacznego wywnioskowania lub odnalezienia.
+- Zapewniaj odkrywalność zasobów: pozwalaj wygodnie wskazywać obiekty stabilną
+  nazwą lub typowanym obiektem klienta, udostępniaj listowanie i wyszukiwanie, a
+  niejednoznaczności zgłaszaj czytelnym błędem z możliwymi rozwiązaniami. Surowe
+  ID zachowuj jako jednoznaczny kontrakt REST i opcję dla automatyzacji, ale nie
+  jako jedyną ergonomicznie dostępną ścieżkę w kliencie.
+- Każde publiczne workflow dokumentuj zwięzłym opisem kontraktu, minimalnym
+  działającym przykładem REST i Python oraz realistycznym przykładem end-to-end.
+  Dla większych workflow utrzymuj wykonywalne notebooki podobne do przykładów w
+  `examples/API-usage`. Przykłady muszą używać wspieranych metod klienta i być
+  weryfikowane wraz ze zmianami API, aby dokumentacja nie rozjeżdżała się z
+  implementacją.
+- Błędy publicznego API i klienta mają mówić, co jest niepoprawne i jak to
+  naprawić, bez ujawniania sekretów lub niedostępnych zasobów. Preferuj stabilne
+  kody błędów, czytelne komunikaty, typowane wyjątki klienta i ostrzeżenia przed
+  kosztowną, nieodwracalną lub ograniczającą monitoring operacją.
+
 ## Business Case i dane
 
 - `Business Case` jest kontekstem biznesowym spinającym artefakty. Jest
@@ -249,8 +285,77 @@ zmianą funkcji zawsze je zweryfikuj.
 - Inference używa atomowego bundle z jednego runu treningowego: modelu, receptury
   FE i fitted state. Nie pozwalaj niezależnie dobierać niezgodnych elementów ani
   refitować transformacji na batchu scoringowym.
-- Role `champion`, `challenger` i `shadow` dotyczą modelu/deploymentu, nie
-  pipeline'u. Produkcyjny deployment wiąże konkretny model, pipeline version i
-  kanały servingowe; operationalization powinno mieć jawny Approval Gate.
+- Rozdzielaj etap gotowości wersji modelu od jej roli w konkretnej usłudze.
+  `ModelStage` obejmuje `developed`, `staging`, `production` i `archived`:
+  `developed` oznacza ukończoną wersję pozostającą poza etapami walidacji i
+  produkcji; nie jest rolą challengera ani inną rolą deploymentu.
+  `staging` oznacza model dostępny do jawnych testów, lecz niepodpięty jako
+  champion publicznego endpointu, a `production` oznacza ukończony i dopuszczony
+  do produkcyjnego użycia model. Wiele wersji może jednocześnie mieć etap
+  `production`.
+- Role modelu w usłudze to `champion`, `challenger`, `shadow` i `fallback`; nie są
+  rolami pipeline'u ani zamiennikami `ModelStage`. Aktywna rewizja usługi ma
+  dokładnie jednego championa, najwyżej jeden fallback oraz zero lub więcej
+  challengerów i modeli shadow. Ta sama wersja modelu może pełnić różne role w
+  różnych usługach.
+- Champion obsługuje stabilny publiczny endpoint usługi. Shadow otrzymuje kopię
+  bieżących requestów online, jego wynik jest zapisywany, ale nie wpływa na
+  odpowiedź. Challenger nie otrzymuje automatycznie ruchu produkcyjnego: ma
+  chroniony endpoint testowy i może być asynchronicznie oceniany przez replay
+  jawnie wybranego zakresu historycznych wejść z Inference Log. Bez actuals
+  porównanie challengera nie jest pomiarem skuteczności; obejmuje co najwyżej
+  błędy, pokrycie, latency, rozkład predykcji i zgodność z championem.
+- Fallback jest używany automatycznie wyłącznie przy technicznej niedostępności
+  championa, np. timeout, niedostępny runtime lub błąd wykonania, nigdy przy
+  błędzie walidacji wejścia. Na pierwszym etapie wykonuj najwyżej jedną próbę
+  fallbacku i nie twórz kaskady fallbacków. Wszystkie modele przypięte do usługi
+  muszą przejść kontrolę zgodności kontraktu wejścia i wyjścia.
+- Usługa ma stabilną tożsamość i endpoint, a jej konfiguracja jest serią
+  niemutowalnych rewizji wskazujących konkretne wersje modelu, inference bundle,
+  role i ustawienia runtime. Promocja challengera do championa, przypisanie
+  fallbacku i rollback tworzą atomowo nową, audytowaną rewizję bez zmiany
+  publicznego adresu. Poprzedni champion może zostać zachowany jako fallback.
+  Approval Gate dla produkcyjnej operacjonalizacji pozostaje odłożony do czasu
+  zaprojektowania odrębnej roli decyzyjnej Business Case albo odpowiedzialności
+  administratora; nie implementuj go niejawnie w bieżącym modelu ról.
+- Pierwszym adapterem uruchomieniowym online serving jest Docker Compose. Klient
+  wywołuje centralne API platformy, które uwierzytelnia, autoryzuje, waliduje,
+  limituje i kieruje żądanie do prywatnego model runtime; nie wystawiaj runtime
+  bezpośrednio jako publicznego API. Każdy kontener musi mieć użyteczne logi
+  operacyjne i audytowe z request/correlation ID, bez ujawniania sekretów.
+- Integracje maszynowe używają kont technicznych objętych istniejącym modelem
+  kont, grup i grantów Business Case; nie twórz równoległego systemu uprawnień.
+  Długowieczne poświadczenie procesu jest tylko metodą uwierzytelnienia konta:
+  przechowuj wyłącznie jego hash, wspieraj nazwę, wygaśnięcie, rotację,
+  unieważnienie i last-used, a efektywny dostęp zawsze wyliczaj ze wspólnej
+  polityki zasób-akcja.
+- Każdy deployment ma jeden logiczny, przeglądalny i dostępny przez REST oraz
+  klienta `Inference Log`, a nie osobny artefakt lub ogólne zdarzenie audytowe na
+  request. Zapisuj request/correlation/idempotency ID, czas, wywołujące konto,
+  rewizję usługi, faktycznie użyty model i bundle, rolę/routing, użycie fallbacku,
+  wejścia, odpowiedzi, status, błędy, warningi i latency. Implementacja ma być
+  partycjonowana po deployment/czasie i obsługiwać filtrowanie, paginację
+  kursorową oraz eksport; nie twórz osobnej fizycznej tabeli na deployment ani
+  tysięcy obiektów artefaktowych. Zdarzenia zarządcze pozostają w ogólnym audycie.
+- Na pierwszym etapie zapisuj pełne wejścia i odpowiedzi z domyślną retencją 365
+  dni, konfigurowalną per deployment. Trwałe zarejestrowanie historii jest częścią
+  kontraktu poprawnego scoringu: gdy zapis jest niedostępny lub nie może zostać
+  zagwarantowany, zwróć `503` i nie przedstawiaj wyniku jako udanej predykcji.
+  Kontrolę skuteczności i dołączenie późniejszych actuals pozostaw jako przyszły
+  mechanizm, ale zachowaj dane i wersje potrzebne do jego implementacji.
+- Online scoring dopuszcza do 1000 rekordów w jednym synchronicznym requeście.
+  Traktuj request jako jedną operację, ale przechowuj elementy w postaci
+  umożliwiającej wydajne wyszukanie po rekordzie bez parsowania dużych JSON-ów.
+  Stabilny `record_id` jest zalecany, lecz opcjonalny; przy jego braku generuj
+  identyfikator techniczny i jawny warning, że późniejsze połączenie predykcji z
+  actuals i monitoring skuteczności nie będą wiarygodnie możliwe.
+- Rozwijaj `ml_app_client` równolegle z REST API online serving. Klient ma
+  udostępniać typowane, wygodne operacje tworzenia i odczytu usług oraz ich
+  rewizji, przypisywania ról, promocji i rollbacku, scoringu championem i przez
+  chroniony endpoint challengera, uruchamiania i śledzenia replay, a także
+  filtrowanego, kursorowo stronicowanego przeglądania i eksportu Inference Log.
+  Nie twórz w kliencie alternatywnej semantyki: ma zachowywać identyczne
+  kontrakty autoryzacji, idempotency/correlation ID, warningi, błędy i limity jak
+  bezpośrednie REST API oraz wspierać konfigurację poświadczeń kont technicznych.
 - Monitoring danych wejściowych i monitoring skuteczności to odrębne problemy.
   Skuteczność można liczyć dopiero po dostarczeniu actuals.

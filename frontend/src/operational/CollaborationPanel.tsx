@@ -1,4 +1,4 @@
-import { KeyRound, Plus, Shield, Share2, Trash2, UserCog, Users } from "lucide-react";
+import { KeyRound, Plus, RotateCcw, Shield, Share2, Trash2, UserCog, Users } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 
@@ -53,6 +53,7 @@ export function CollaborationPanel({
   const [newPassword, setNewPassword] = useState("");
   const [transferOwnerId, setTransferOwnerId] = useState("");
   const [activeTab, setActiveTab] = useState<CollaborationTab>("groups");
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   const manageableCases = useMemo(
     () => businessCases.filter((item) => isAdmin || item.access_role === "manager" || item.access_role === "owner"),
@@ -71,6 +72,28 @@ export function CollaborationPanel({
     setUsers(directory);
     setGroups(groupItems);
     if (isAdmin) setAdminUsers(await api.listAdminUsers());
+  }
+
+  async function handleRefresh() {
+    if (isRefreshing) return;
+    setIsRefreshing(true);
+    const selectedDataset = datasets.find((item) => item.id === selectedDatasetId);
+    try {
+      await Promise.all([
+        refreshDirectory(),
+        onRefresh(),
+        selectedGroupId ? api.listGroupMembers(selectedGroupId).then(setMembers) : Promise.resolve(),
+        selectedBusinessCaseId ? api.listBusinessCaseGrants(selectedBusinessCaseId).then(setBcGrants) : Promise.resolve(),
+        selectedDatasetId
+          ? api.listResourceGrants(selectedDataset?.source_type === "view" ? "data_view" : "dataset", selectedDatasetId).then(setResourceGrants)
+          : Promise.resolve(),
+      ]);
+      setNotice("Sharing data refreshed");
+    } catch (error) {
+      showError(error);
+    } finally {
+      setIsRefreshing(false);
+    }
   }
 
   useEffect(() => {
@@ -183,6 +206,12 @@ export function CollaborationPanel({
 
   return (
     <section className="collaboration-screen">
+      <div className="catalog-toolbar-actions">
+        <button className="secondary-button" type="button" onClick={() => void handleRefresh()} disabled={isRefreshing}>
+          <RotateCcw className={isRefreshing ? "run-spinner" : undefined} size={16} />
+          {isRefreshing ? "Refreshing…" : "Refresh"}
+        </button>
+      </div>
       <nav className="collaboration-tabs" aria-label="Share settings">
         <TabButton active={activeTab === "groups"} icon={<Users size={17} />} label="Groups" description="Teams and members" onClick={() => setActiveTab("groups")} />
         <TabButton active={activeTab === "sharing"} icon={<Share2 size={17} />} label="Object sharing" description="Business Cases and data" onClick={() => setActiveTab("sharing")} />

@@ -18,6 +18,7 @@ class UserRead(BaseModel):
 class AdminUserUpdate(BaseModel):
     roles: list[str]
     is_active: bool
+    is_technical: bool | None = None
 
 
 class AdminPasswordReset(BaseModel):

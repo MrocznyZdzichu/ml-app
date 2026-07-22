@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.schedules import crontab
 from celery.signals import worker_ready
 
 from app.core.config import settings
@@ -15,6 +16,8 @@ celery_app.conf.update(
         "app.worker.tasks.profile_dataset": {"queue": "analytics"},
         "app.worker.tasks.train_model": {"queue": "ml"},
         "app.worker.tasks.batch_score": {"queue": "serving"},
+        "app.worker.tasks.replay_challenger": {"queue": "serving"},
+        "app.worker.tasks.prune_serving_inference_history": {"queue": "serving"},
         "app.worker.tasks.export_resource": {"queue": "exports"},
     },
     task_serializer="json",
@@ -25,6 +28,12 @@ celery_app.conf.update(
     task_store_eager_result=settings.celery_task_always_eager,
     task_acks_late=True,
     worker_prefetch_multiplier=1,
+    beat_schedule={
+        "prune-serving-inference-history-daily": {
+            "task": "app.worker.tasks.prune_serving_inference_history",
+            "schedule": crontab(hour=2, minute=15),
+        },
+    },
 )
 
 celery_app.autodiscover_tasks(["app.worker"])

@@ -38,15 +38,16 @@ see [Current Implementation Boundaries](#current-implementation-boundaries).
 - `services/model-runtime` - template runtime for future model serving.
 - `infra` - local infrastructure bootstrap assets.
 - `examples/data` - sample CSV datasets for manual testing.
+- `examples/API-usage` - numbered, idempotent notebooks covering the complete ML lifecycle.
 - `ml_app_client` - supported Python client for dataset upload and pipeline execution.
 - `docs` - architecture, development, and feature reference notes.
 
 The Python integration client can be installed from this repository with
-`pip install -e .`. See
-[`examples/API-usage/estates_retraining_via_client.ipynb`](examples/API-usage/estates_retraining_via_client.ipynb)
-for an end-to-end retraining example using names instead of internal IDs.
-On a new installation, run `python examples/bootstrap_estates_sell_prices.py`
-to idempotently create or verify the portable Estates demo prerequisites.
+`pip install -e .`. Start with the numbered
+[`examples/API-usage`](examples/API-usage/README.md) series. It creates a
+explicitly named Business Case, uploads deterministic datasets, runs AutoML, batch
+scoring and monitoring, promotes and serves the model, and scores it through
+both the client and direct REST API. Every notebook can be safely re-run.
 
 ## Quick Start
 

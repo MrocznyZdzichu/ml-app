@@ -12,7 +12,9 @@ class TrainingStatus(str, Enum):
 
 
 class ModelStage(str, Enum):
-    CANDIDATE = "candidate"
+    DEVELOPED = "developed"
+    # Source-compatible alias for integrations importing the old enum member.
+    CANDIDATE = "developed"
     STAGING = "staging"
     PRODUCTION = "production"
     ARCHIVED = "archived"
@@ -43,7 +45,7 @@ class ModelArtifact:
     logical_id: str = ""
     version_number: int = 1
     metrics: dict[str, Any] = field(default_factory=dict)
-    stage: ModelStage = ModelStage.CANDIDATE
+    stage: ModelStage = ModelStage.DEVELOPED
     business_case_id: str = ""
     pipeline_id: str = ""
     pipeline_version_id: str = ""

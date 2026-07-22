@@ -65,7 +65,16 @@ def get_model_data_lineage(
     ]
 
 
-@router.post("/{model_id}/promote", response_model=ModelArtifactRead)
+@router.patch("/{model_id}/stage", response_model=ModelArtifactRead)
+def update_model_stage(
+    model_id: str,
+    payload: PromoteModelRequest,
+    principal: Principal = Depends(require_user),
+) -> ModelArtifactRead:
+    return ModelArtifactRead.model_validate(service.promote_model(model_id, payload, principal))
+
+
+@router.post("/{model_id}/promote", response_model=ModelArtifactRead, deprecated=True)
 def promote_model(
     model_id: str,
     payload: PromoteModelRequest,

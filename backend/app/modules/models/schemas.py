@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.modules.models.domain import ModelStage, TrainingStatus
 
@@ -62,6 +62,11 @@ class ModelArtifactRead(BaseModel):
 
 class PromoteModelRequest(BaseModel):
     stage: ModelStage
+
+    @field_validator("stage", mode="before")
+    @classmethod
+    def accept_legacy_candidate_stage(cls, value: object) -> object:
+        return ModelStage.DEVELOPED.value if value == "candidate" else value
 
 
 class DatasetLineageRead(BaseModel):

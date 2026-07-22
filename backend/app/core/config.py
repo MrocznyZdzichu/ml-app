@@ -55,6 +55,17 @@ class Settings(BaseSettings):
     )
     object_storage_bucket: str = Field(default="datasets", alias="OBJECT_STORAGE_BUCKET")
 
+    model_runtime_url: str = Field(
+        default="http://model-runtime:8000",
+        alias="MODEL_RUNTIME_URL",
+    )
+    model_runtime_timeout_seconds: float = Field(
+        default=15.0,
+        ge=0.1,
+        le=300.0,
+        alias="MODEL_RUNTIME_TIMEOUT_SECONDS",
+    )
+
     cors_origins: list[str] = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
