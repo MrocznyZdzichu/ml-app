@@ -486,6 +486,19 @@ def _online_serving_monitoring(connection: Connection) -> None:
         connection.execute(text(statement))
 
 
+def _archive_and_bucket_online_monitoring(connection: Connection) -> None:
+    """Add logical history cleanup and persisted time-bucket configuration."""
+    statements = [
+        "ALTER TABLE mlapp.serving_monitoring_runs ADD COLUMN IF NOT EXISTS aggregation_granularity VARCHAR(16) NOT NULL DEFAULT 'none'",
+        "ALTER TABLE mlapp.serving_monitoring_runs ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ",
+        "ALTER TABLE mlapp.serving_monitoring_runs ADD COLUMN IF NOT EXISTS archived_by VARCHAR(64) NOT NULL DEFAULT ''",
+        "ALTER TABLE mlapp.serving_monitoring_runs ADD COLUMN IF NOT EXISTS archive_reason TEXT NOT NULL DEFAULT ''",
+        "CREATE INDEX IF NOT EXISTS ix_serving_monitoring_visible_history ON mlapp.serving_monitoring_runs (deployment_id, archived_at, created_at DESC)",
+    ]
+    for statement in statements:
+        connection.execute(text(statement))
+
+
 MIGRATIONS = [
     Migration(
         version="20260703_0001",
@@ -536,5 +549,10 @@ MIGRATIONS = [
         version="20260722_0010",
         description="Add immutable manual monitoring runs over online inference history and actuals",
         apply=_online_serving_monitoring,
+    ),
+    Migration(
+        version="20260722_0011",
+        description="Add logical monitoring history archival and time-bucket configuration",
+        apply=_archive_and_bucket_online_monitoring,
     ),
 ]

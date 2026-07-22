@@ -139,6 +139,7 @@ monitoring_runs_table = Table(
     Column("until", DateTime(timezone=True), nullable=False),
     Column("source_before", DateTime(timezone=True), nullable=False),
     Column("actuals_dataset_id", String(64), nullable=False),
+    Column("aggregation_granularity", String(16), nullable=False, default="none"),
     Column("actuals_artifact_id", String(64), nullable=False, default=""),
     Column("join_strategy", String(32), nullable=False, default="auto"),
     Column("actuals_prediction_id_column", String(255), nullable=False, default="prediction_id"),
@@ -162,6 +163,9 @@ monitoring_runs_table = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("started_at", DateTime(timezone=True), nullable=True),
     Column("completed_at", DateTime(timezone=True), nullable=True),
+    Column("archived_at", DateTime(timezone=True), nullable=True, index=True),
+    Column("archived_by", String(64), nullable=False, default=""),
+    Column("archive_reason", Text, nullable=False, default=""),
 )
 
 
@@ -192,7 +196,8 @@ class ServingRepository(Protocol):
     def add_monitoring_run(self, run: OnlineMonitoringRun) -> OnlineMonitoringRun: ...
     def get_monitoring_run(self, run_id: str) -> OnlineMonitoringRun | None: ...
     def update_monitoring_run(self, run: OnlineMonitoringRun) -> OnlineMonitoringRun: ...
-    def list_monitoring_runs(self, deployment_id: str | None = None, limit: int = 200) -> list[OnlineMonitoringRun]: ...
+    def list_monitoring_runs(self, deployment_id: str | None = None, limit: int = 200, include_archived: bool = False) -> list[OnlineMonitoringRun]: ...
+    def archive_monitoring_runs(self, deployment_id: str, archived_by: str, archived_at: datetime, reason: str) -> int: ...
     def iter_monitoring_items(
         self, deployment_id: str, since: datetime, until: datetime, source_before: datetime
     ) -> Iterator[dict[str, Any]]: ...
@@ -523,16 +528,44 @@ class PostgresServingRepository:
         self,
         deployment_id: str | None = None,
         limit: int = 200,
+        include_archived: bool = False,
     ) -> list[OnlineMonitoringRun]:
         self._ensure_initialized()
         statement = select(monitoring_runs_table)
         if deployment_id:
             statement = statement.where(monitoring_runs_table.c.deployment_id == deployment_id)
+        if not include_archived:
+            statement = statement.where(monitoring_runs_table.c.archived_at.is_(None))
         statement = statement.order_by(
             monitoring_runs_table.c.created_at.desc(), monitoring_runs_table.c.id.desc()
         ).limit(limit)
         with self.engine.begin() as connection:
             return [self._monitoring_run(row._mapping) for row in connection.execute(statement)]
+
+    def archive_monitoring_runs(
+        self,
+        deployment_id: str,
+        archived_by: str,
+        archived_at: datetime,
+        reason: str,
+    ) -> int:
+        self._ensure_initialized()
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                monitoring_runs_table.update().where(
+                    monitoring_runs_table.c.deployment_id == deployment_id,
+                    monitoring_runs_table.c.archived_at.is_(None),
+                    monitoring_runs_table.c.status.in_([
+                        MonitoringRunStatus.SUCCEEDED.value,
+                        MonitoringRunStatus.FAILED.value,
+                    ]),
+                ).values(
+                    archived_at=archived_at,
+                    archived_by=archived_by,
+                    archive_reason=reason,
+                )
+            )
+        return int(result.rowcount or 0)
 
     def iter_monitoring_items(
         self,

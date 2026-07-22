@@ -201,6 +201,8 @@ class OnlineMonitoringRun:
     since: str
     until: str
     actuals_dataset_id: str
+    aggregation_granularity: str
+    archived_at: str | None
     processed_request_count: int
     processed_row_count: int
     matched_row_count: int
@@ -223,6 +225,8 @@ class OnlineMonitoringRun:
             since=str(value["since"]),
             until=str(value["until"]),
             actuals_dataset_id=str(value.get("actuals_dataset_id") or ""),
+            aggregation_granularity=str(value.get("aggregation_granularity") or "none"),
+            archived_at=(str(value["archived_at"]) if value.get("archived_at") else None),
             processed_request_count=int(value.get("processed_request_count") or 0),
             processed_row_count=int(value.get("processed_row_count") or 0),
             matched_row_count=int(value.get("matched_row_count") or 0),
@@ -1494,12 +1498,15 @@ class MLAppClient:
         actuals_request_id_column: str | None = None,
         actuals_record_id_column: str | None = None,
         join_strategy: str = "auto",
+        aggregation_granularity: str = "none",
     ) -> OnlineMonitoringRun:
         """Queue a full-scope online report; actuals optionally add performance metrics."""
         if join_strategy not in {"auto", "prediction_id", "request_record_id", "record_id"}:
             raise ValueError(
                 "join_strategy must be auto, prediction_id, request_record_id or record_id"
             )
+        if aggregation_granularity not in {"none", "hour", "day", "week", "month"}:
+            raise ValueError("aggregation_granularity must be none, hour, day, week or month")
         target = self._deployment(deployment)
         actuals_dataset = self._deployment_actuals(target, actuals) if actuals is not None else None
         until_value = until or datetime.now(timezone.utc)
@@ -1517,6 +1524,7 @@ class MLAppClient:
         payload: dict[str, Any] = {
             "since": self._datetime_value(since_value),
             "until": self._datetime_value(until_value),
+            "aggregation_granularity": aggregation_granularity,
             "join": {"strategy": join_strategy},
         }
         if actuals_dataset is not None:
@@ -1541,6 +1549,7 @@ class MLAppClient:
         deployment: str | Deployment | None = None,
         *,
         limit: int = 100,
+        include_archived: bool = False,
     ) -> list[OnlineMonitoringRun]:
         """List bounded immutable report runs, optionally for one service."""
         if limit < 1 or limit > 200:
@@ -1549,8 +1558,38 @@ class MLAppClient:
         if deployment is not None:
             target = self._deployment(deployment)
             path = f"/serving/deployments/{target.id}/monitoring-runs"
-        values = self._request("GET", path, params={"limit": limit})
+        values = self._request(
+            "GET", path,
+            params={"limit": limit, "include_archived": include_archived},
+        )
         return [OnlineMonitoringRun.from_api(item) for item in values]
+
+    def archive_online_monitoring_run(
+        self,
+        run: str | OnlineMonitoringRun,
+        *,
+        reason: str = "Archived from monitoring history",
+    ) -> OnlineMonitoringRun:
+        """Hide one finished run from default history without deleting its report or lineage."""
+        run_id = run.id if isinstance(run, OnlineMonitoringRun) else run
+        return OnlineMonitoringRun.from_api(self._request(
+            "POST", f"/serving/monitoring-runs/{run_id}/archive",
+            json={"reason": reason},
+        ))
+
+    def archive_deployment_monitoring_history(
+        self,
+        deployment: str | Deployment,
+        *,
+        reason: str = "Archived from monitoring history",
+    ) -> int:
+        """Archive every finished run for one service while preserving governed metadata."""
+        target = self._deployment(deployment)
+        value = self._request(
+            "POST", f"/serving/deployments/{target.id}/monitoring-runs/archive",
+            json={"reason": reason},
+        )
+        return int(value.get("archived_run_count") or 0)
 
     def get_online_monitoring_run(self, run_id: str) -> OnlineMonitoringRun:
         return OnlineMonitoringRun.from_api(

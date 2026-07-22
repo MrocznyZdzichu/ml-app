@@ -1,5 +1,5 @@
-import { Activity, Archive, ArrowLeft, Brain, Copy, Eye, GitBranch, History, KeyRound, Play, Plus, Rocket, RotateCcw, Search, Settings2, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { Activity, Archive, ArrowLeft, BarChart3, Brain, Copy, Eye, GitBranch, History, KeyRound, Play, Plus, Rocket, RotateCcw, Search, Settings2, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
+import { useEffect, useMemo, useState, type MouseEvent } from "react";
 
 import { api } from "../api/client";
 import type {
@@ -1201,6 +1201,97 @@ function monitoringHasActuals(run: OnlineMonitoringRun) {
   return actuals?.status === "provided" || (!actuals?.status && Boolean(run.actuals_dataset_id));
 }
 
+type MonitoringBucket = {
+  label: string;
+  bucket_start: string;
+  request_count: number;
+  failed_request_count: number;
+  fallback_request_count: number;
+  p95_latency_ms: number | null;
+  served_prediction_count: number;
+};
+
+function monitoringBuckets(run: OnlineMonitoringRun): MonitoringBucket[] {
+  const aggregation = run.report.time_aggregation as Record<string, unknown> | undefined;
+  if (!Array.isArray(aggregation?.buckets)) return [];
+  return (aggregation.buckets as Array<Record<string, unknown>>).map((bucket) => ({
+    label: String(bucket.label ?? ""),
+    bucket_start: String(bucket.bucket_start ?? ""),
+    request_count: Number(bucket.request_count ?? 0),
+    failed_request_count: Number(bucket.failed_request_count ?? 0),
+    fallback_request_count: Number(bucket.fallback_request_count ?? 0),
+    p95_latency_ms: bucket.p95_latency_ms == null ? null : Number(bucket.p95_latency_ms),
+    served_prediction_count: Number(bucket.served_prediction_count ?? 0)
+  }));
+}
+
+function MonitoringVisualizationModal({ run, onClose }: { run: OnlineMonitoringRun; onClose: () => void }) {
+  const buckets = monitoringBuckets(run);
+  const [selectedIndex, setSelectedIndex] = useState(Math.max(0, buckets.length - 1));
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => event.key === "Escape" && onClose();
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+  const selected = buckets[selectedIndex] ?? buckets[0];
+  const aggregation = run.report.time_aggregation as Record<string, unknown> | undefined;
+  const chartWidth = 1040;
+  const plotLeft = 66;
+  const plotRight = 1018;
+  const xAt = (index: number) => buckets.length <= 1
+    ? (plotLeft + plotRight) / 2
+    : plotLeft + (index / (buckets.length - 1)) * (plotRight - plotLeft);
+  const pickFromPointer = (event: MouseEvent<SVGSVGElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const svgX = ((event.clientX - rect.left) / rect.width) * chartWidth;
+    const ratio = Math.max(0, Math.min(1, (svgX - plotLeft) / (plotRight - plotLeft)));
+    setSelectedIndex(Math.round(ratio * Math.max(0, buckets.length - 1)));
+  };
+  const axisLabels = Array.from(new Set([0, Math.floor((buckets.length - 1) / 2), buckets.length - 1])).filter((index) => index >= 0);
+
+  function lineChart(
+    title: string,
+    series: Array<{ label: string; values: Array<number | null>; className: string }>,
+    valueLabel: (value: number) => string,
+  ) {
+    const values = series.flatMap((item) => item.values.filter((value): value is number => value != null));
+    const max = Math.max(1, ...values);
+    const top = 28;
+    const bottom = 166;
+    const yAt = (value: number) => bottom - (value / max) * (bottom - top);
+    return <div className="serving-monitoring-chart"><div className="serving-monitoring-chart-title"><strong>{title}</strong><span>{series.map((item) => <span key={item.label} className={item.className}><i />{item.label}</span>)}</span></div><svg viewBox={`0 0 ${chartWidth} 210`} role="img" aria-label={`${title} over ${buckets.length} ${String(aggregation?.granularity ?? "time")} buckets`} onMouseMove={pickFromPointer}>
+      {[0, 0.5, 1].map((ratio) => <g key={ratio}><line className="monitoring-chart-grid" x1={plotLeft} x2={plotRight} y1={bottom - ratio * (bottom - top)} y2={bottom - ratio * (bottom - top)} /><text className="monitoring-chart-axis" x={plotLeft - 10} y={bottom - ratio * (bottom - top) + 4} textAnchor="end">{valueLabel(max * ratio)}</text></g>)}
+      {axisLabels.map((index) => <text key={index} className="monitoring-chart-axis" x={xAt(index)} y={194} textAnchor={index === 0 ? "start" : index === buckets.length - 1 ? "end" : "middle"}>{buckets[index]?.label ?? ""}</text>)}
+      {series.map((item) => {
+        let drawing = false;
+        const path = item.values.map((value, index) => {
+          if (value == null) {
+            drawing = false;
+            return "";
+          }
+          const command = drawing ? "L" : "M";
+          drawing = true;
+          return `${command}${xAt(index)},${yAt(value)}`;
+        }).join(" ");
+        const selectedValue = item.values[selectedIndex];
+        return <g key={item.label} className={item.className}><path className="monitoring-chart-line" d={path} fill="none" />{selectedValue != null && <circle className="monitoring-chart-point" cx={xAt(selectedIndex)} cy={yAt(selectedValue)} r="5" />}</g>;
+      })}
+      <line className="monitoring-chart-cursor" x1={xAt(selectedIndex)} x2={xAt(selectedIndex)} y1={top} y2={bottom} />
+    </svg></div>;
+  }
+
+  if (!selected) return null;
+  return <div className="modal-backdrop serving-monitoring-visual-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className="modal-dialog serving-monitoring-visual-dialog" role="dialog" aria-modal="true" aria-labelledby="monitoring-visual-title"><div className="modal-header"><div><span className="builder-kicker">Interactive time series · scored_at · UTC</span><h2 id="monitoring-visual-title">Monitoring report visualization</h2><p>{formatDate(run.since)} — {formatDate(run.until)} · {buckets.length} {String(aggregation?.granularity ?? "time")} buckets</p></div><button className="icon-button" type="button" onClick={onClose} aria-label="Close monitoring visualization"><X size={18} /></button></div><div className="serving-monitoring-visual-content">
+    <div className="serving-monitoring-selected-period"><strong>{selected.label}</strong><span>{selected.request_count} requests</span><span>{selected.served_prediction_count} served</span><span>{selected.failed_request_count} failed</span><span>{selected.fallback_request_count} fallback</span><span>{selected.p95_latency_ms == null ? "No latency" : `${Math.round(selected.p95_latency_ms)} ms p95`}</span></div>
+    {lineChart("Traffic", [{ label: "Requests", values: buckets.map((item) => item.request_count), className: "series-requests" }, { label: "Served predictions", values: buckets.map((item) => item.served_prediction_count), className: "series-served" }], (value) => Math.round(value).toString())}
+    <div className="serving-monitoring-chart-pair">
+      {lineChart("Reliability events", [{ label: "Failed", values: buckets.map((item) => item.failed_request_count), className: "series-failed" }, { label: "Fallback", values: buckets.map((item) => item.fallback_request_count), className: "series-fallback" }], (value) => Math.round(value).toString())}
+      {lineChart("P95 latency", [{ label: "P95 latency", values: buckets.map((item) => item.p95_latency_ms), className: "series-latency" }], (value) => `${Math.round(value)} ms`)}
+    </div>
+    <label className="serving-monitoring-period-slider"><span>Selected period <strong>{selected.label}</strong></span><input type="range" min={0} max={Math.max(0, buckets.length - 1)} value={selectedIndex} onChange={(event) => setSelectedIndex(Number(event.target.value))} aria-label="Select monitoring period" /></label>
+  </div></div></div>;
+}
+
 export function ServingPanel({
   deployments,
   datasets,
@@ -1256,6 +1347,8 @@ export function ServingPanel({
   const [monitoringUntil, setMonitoringUntil] = useState(() => monitoringDateInput(new Date()));
   const [monitoringTargetColumn, setMonitoringTargetColumn] = useState("");
   const [monitoringRecordColumn, setMonitoringRecordColumn] = useState("");
+  const [monitoringAggregation, setMonitoringAggregation] = useState<"none" | "hour" | "day" | "week" | "month">("none");
+  const [monitoringVisualizationRunId, setMonitoringVisualizationRunId] = useState("");
   const [monitoringError, setMonitoringError] = useState("");
   const [selectedComparisonIds, setSelectedComparisonIds] = useState<string[]>([]);
   const selectedDeployment = deployments.find((item) => item.id === deploymentId);
@@ -1607,6 +1700,7 @@ export function ServingPanel({
       const run = await api.createOnlineMonitoringRun(selectedDeployment.id, {
         since: new Date(monitoringSince).toISOString(),
         until: new Date(monitoringUntil).toISOString(),
+        aggregation_granularity: monitoringAggregation,
         ...(actualsDatasetId ? { actuals_dataset_id: actualsDatasetId } : {}),
         ...(monitoringTargetColumn.trim() ? { actuals_target_column: monitoringTargetColumn.trim() } : {}),
         join: {
@@ -1634,6 +1728,30 @@ export function ServingPanel({
       setNotice("Monitoring reports refreshed");
     } catch (error) {
       setMonitoringError(error instanceof Error ? error.message : "Could not refresh monitoring reports");
+    }
+  }
+
+  async function archiveMonitoringRun(runId: string) {
+    if (!window.confirm("Archive this monitoring run? Its immutable report and lineage will remain available through the API.")) return;
+    try {
+      await api.archiveOnlineMonitoringRun(runId);
+      setMonitoringRuns((current) => current.filter((item) => item.id !== runId));
+      setNotice("Monitoring run archived");
+    } catch (error) {
+      setMonitoringError(error instanceof Error ? error.message : "Could not archive monitoring run");
+    }
+  }
+
+  async function archiveMonitoringHistory() {
+    if (!selectedDeployment || !window.confirm("Archive all finished monitoring runs for this service? Reports and lineage will remain available through the API.")) return;
+    try {
+      const result = await api.archiveDeploymentMonitoringHistory(selectedDeployment.id);
+      setMonitoringRuns((current) => current.filter((item) =>
+        item.deployment_id !== selectedDeployment.id || !["succeeded", "failed"].includes(item.status)
+      ));
+      setNotice(`${result.archived_run_count} monitoring run(s) archived`);
+    } catch (error) {
+      setMonitoringError(error instanceof Error ? error.message : "Could not archive monitoring history");
     }
   }
 
@@ -1695,6 +1813,7 @@ export function ServingPanel({
     const run = runs.find((item) => item.status === "succeeded") ?? runs[0];
     return [{ deployment, run }];
   });
+  const monitoringVisualizationRun = monitoringRuns.find((item) => item.id === monitoringVisualizationRunId) ?? null;
 
   if (!selectedDeployment) {
     return (
@@ -1878,13 +1997,14 @@ export function ServingPanel({
             setMonitoringRecordColumn(attachment?.primary_key_column ?? "");
           }}><option value="">No actuals · operational and distribution metrics only</option>{actualsOptions.map(({ attachment, dataset }) => <option key={dataset.id} value={dataset.id}>{dataset.name} · v{dataset.version_number} · {dataset.row_count ?? "?"} rows{attachment.target_column ? ` · target ${attachment.target_column}` : ""}</option>)}</select><small>Without actuals, performance metrics are explicitly marked as not evaluated. Eligible actuals must be attached to this Business Case with role monitoring_actuals.</small></label>
           {!actualsOptions.length && <div className="serving-inline-warning">No monitoring_actuals dataset is attached. You can still run operational, traffic, input and prediction monitoring.</div>}
-          <div className="serving-monitoring-window"><label>Since · scoring time<input type="datetime-local" value={monitoringSince} onChange={(event) => setMonitoringSince(event.target.value)} /></label><label>Until · scoring time<input type="datetime-local" value={monitoringUntil} onChange={(event) => setMonitoringUntil(event.target.value)} /></label></div>
+          <div className="serving-monitoring-window"><label>Since · scoring time<input type="datetime-local" value={monitoringSince} onChange={(event) => setMonitoringSince(event.target.value)} /></label><label><span className="serving-monitoring-time-label"><span>Until · scoring time</span><button type="button" onClick={() => setMonitoringUntil(monitoringDateInput(new Date()))}>Now</button></span><input type="datetime-local" value={monitoringUntil} onChange={(event) => setMonitoringUntil(event.target.value)} /></label></div>
+          <label>Time aggregation<select value={monitoringAggregation} onChange={(event) => setMonitoringAggregation(event.target.value as typeof monitoringAggregation)}><option value="none">No aggregation · one summary for the full window</option><option value="hour">Per hour</option><option value="day">Per day</option><option value="week">Per week</option><option value="month">Per month</option></select><small>Calendar buckets use scored_at and include empty intervals, so the report has one row per selected period.</small></label>
           {actualsDatasetId && <details><summary>Join overrides</summary><label>Actuals record ID column<input value={monitoringRecordColumn} onChange={(event) => setMonitoringRecordColumn(event.target.value)} placeholder="Inferred from attachment" /></label><label>Actuals target column<input value={monitoringTargetColumn} onChange={(event) => setMonitoringTargetColumn(event.target.value)} placeholder="Inferred from attachment or model" /></label><small>Auto join prefers prediction_id, then request_id + record ID, then a unique record ID in this window.</small></details>}
           {monitoringError && <div className="error-banner">{monitoringError}</div>}
           <button className="primary-button" type="button" onClick={() => void runOnlineMonitoring()} disabled={busy || !monitoringSince || !monitoringUntil}><Play size={16} /> {busy ? "Queuing…" : "Run monitoring report"}</button>
         </div>
         <div className="panel serving-monitoring-runs">
-          <div className="panel-header"><div><span className="builder-kicker">Immutable history</span><h3>Monitoring reports</h3></div><button className="secondary-button compact-button" type="button" onClick={() => void refreshMonitoringRuns()}><RotateCcw size={14} /> Refresh</button></div>
+          <div className="panel-header"><div><span className="builder-kicker">Immutable history</span><h3>Monitoring reports</h3></div><div className="catalog-toolbar-actions"><button className="secondary-button compact-button" type="button" onClick={() => void archiveMonitoringHistory()} disabled={!monitoringRuns.some((item) => item.deployment_id === selectedDeployment.id && ["succeeded", "failed"].includes(item.status))}><Archive size={14} /> Archive history</button><button className="secondary-button compact-button" type="button" onClick={() => void refreshMonitoringRuns()}><RotateCcw size={14} /> Refresh</button></div></div>
           {monitoringRuns.filter((item) => item.deployment_id === selectedDeployment.id).map((run) => {
             const scope = run.report.data_scope as Record<string, unknown> | undefined;
             const health = run.report.service_health as Record<string, unknown> | undefined;
@@ -1892,7 +2012,9 @@ export function ServingPanel({
             const hasActuals = monitoringHasActuals(run);
             const performance = run.report.performance as Record<string, unknown> | undefined;
             const modelsReport = Array.isArray(performance?.models) ? performance.models as Array<Record<string, unknown>> : [];
-            return <article key={run.id} className="serving-monitoring-run"><div className="serving-monitoring-run-head"><span><strong>{formatDate(run.since)} — {formatDate(run.until)}</strong><small>run {shortId(run.id)} · scored_at · {run.processed_request_count} requests</small></span><span className={`status-pill ${run.status}`}>{run.status}</span></div>{run.status === "failed" ? <div className="error-banner">{run.error_message}</div> : run.status !== "succeeded" ? <div className="serving-response-progress"><span className="serving-score-spinner" aria-hidden="true" /><strong>Processing retained inference history</strong><small>Full-scope snapshot and bounded aggregates run asynchronously.</small></div> : <><div className="serving-monitoring-kpis"><span><strong>{Number(scope?.processed_request_count ?? run.processed_request_count)}</strong><small>requests</small></span><span><strong>{Number(health?.record_count ?? 0)}</strong><small>records</small></span><span><strong>{Number(health?.failed_request_count ?? 0)}</strong><small>failed requests</small></span><span><strong>{Number(health?.fallback_request_count ?? 0)}</strong><small>fallback requests</small></span><span><strong>{health?.p95_latency_ms == null ? "—" : `${Math.round(Number(health.p95_latency_ms))} ms`}</strong><small>p95 latency</small></span><span><strong>{Number(scope?.served_prediction_count ?? 0)}</strong><small>served predictions</small></span>{hasActuals && <span><strong>{Math.round(Number(scope?.actuals_coverage ?? 0) * 100)}%</strong><small>actuals coverage</small></span>}{metrics.slice(0, 4).map((metric) => <span key={metric.id}><strong>{metric.value == null ? "—" : Number(metric.value).toFixed(3)}</strong><small>{metric.label}</small></span>)}</div>{!hasActuals && <div className="serving-inline-warning">Performance not evaluated · actuals not provided. Operational, input and prediction monitoring cover the full selected window.</div>}{hasActuals && <div className="serving-monitoring-models"><strong>Model and role results</strong>{modelsReport.map((item) => {
+            const aggregation = run.report.time_aggregation as Record<string, unknown> | undefined;
+            const buckets = Array.isArray(aggregation?.buckets) ? aggregation.buckets as Array<Record<string, unknown>> : [];
+            return <article key={run.id} className="serving-monitoring-run"><div className="serving-monitoring-run-head"><span><strong>{formatDate(run.since)} — {formatDate(run.until)}</strong><small>run {shortId(run.id)} · scored_at · {run.processed_request_count} requests</small></span><span className="serving-monitoring-run-actions"><span className={`status-pill ${run.status}`}>{run.status}</span>{["succeeded", "failed"].includes(run.status) && <button className="secondary-button compact-button" type="button" onClick={() => void archiveMonitoringRun(run.id)}><Archive size={13} /> Archive</button>}</span></div>{run.status === "failed" ? <div className="error-banner">{run.error_message}</div> : run.status !== "succeeded" ? <div className="serving-response-progress"><span className="serving-score-spinner" aria-hidden="true" /><strong>Processing retained inference history</strong><small>Full-scope snapshot and bounded aggregates run asynchronously.</small></div> : <><div className="serving-monitoring-kpis"><span><strong>{Number(scope?.processed_request_count ?? run.processed_request_count)}</strong><small>requests</small></span><span><strong>{Number(health?.record_count ?? 0)}</strong><small>records</small></span><span><strong>{Number(health?.failed_request_count ?? 0)}</strong><small>failed requests</small></span><span><strong>{Number(health?.fallback_request_count ?? 0)}</strong><small>fallback requests</small></span><span><strong>{health?.p95_latency_ms == null ? "—" : `${Math.round(Number(health.p95_latency_ms))} ms`}</strong><small>p95 latency</small></span><span><strong>{Number(scope?.served_prediction_count ?? 0)}</strong><small>served predictions</small></span>{hasActuals && <span><strong>{Math.round(Number(scope?.actuals_coverage ?? 0) * 100)}%</strong><small>actuals coverage</small></span>}{metrics.slice(0, 4).map((metric) => <span key={metric.id}><strong>{metric.value == null ? "—" : Number(metric.value).toFixed(3)}</strong><small>{metric.label}</small></span>)}</div>{buckets.length > 0 && <div className="serving-monitoring-buckets"><div className="serving-monitoring-bucket-toolbar"><strong>{String(aggregation?.granularity)} aggregation · scored_at · UTC</strong><button className="secondary-button compact-button" type="button" onClick={() => setMonitoringVisualizationRunId(run.id)}><BarChart3 size={14} /> Visualize</button></div><div className="serving-monitoring-bucket-table"><div className="serving-monitoring-bucket-head"><span>Period</span><span>Requests</span><span>Failed</span><span>Fallback</span><span>P95 latency</span><span>Served</span></div>{buckets.map((bucket) => <div key={String(bucket.bucket_start)}><span>{String(bucket.label)}</span><span>{Number(bucket.request_count ?? 0)}</span><span>{Number(bucket.failed_request_count ?? 0)}</span><span>{Number(bucket.fallback_request_count ?? 0)}</span><span>{bucket.p95_latency_ms == null ? "—" : `${Math.round(Number(bucket.p95_latency_ms))} ms`}</span><span>{Number(bucket.served_prediction_count ?? 0)}</span></div>)}</div></div>}{!hasActuals && <div className="serving-inline-warning">Performance not evaluated · actuals not provided. Operational, input and prediction monitoring cover the full selected window.</div>}{hasActuals && <div className="serving-monitoring-models"><strong>Model and role results</strong>{modelsReport.map((item) => {
               const evaluation = item.evaluation as Record<string, unknown> | undefined;
               const modelMetrics = Array.isArray(evaluation?.metrics) ? evaluation.metrics as Array<{ id: string; label: string; value: number | null }> : [];
               return <span key={`${item.deployment_revision_id}:${item.model_id}:${item.role}`}><code>{shortId(String(item.model_id))}</code><small>{String(item.role)} · revision {shortId(String(item.deployment_revision_id))} · {Number(item.scored_row_count ?? 0)} rows</small>{modelMetrics[0] && <strong>{modelMetrics[0].label}: {modelMetrics[0].value == null ? "—" : Number(modelMetrics[0].value).toFixed(3)}</strong>}</span>;
@@ -1907,7 +2029,9 @@ export function ServingPanel({
         <div className="panel"><div className="panel-header"><div><span className="builder-kicker">Python client</span><h3>Create client credential</h3></div><KeyRound size={18} /></div><p className="serving-section-intro">Create a revocable credential for scripts and notebooks. The secret is displayed only once.</p><button className="primary-button" type="button" onClick={() => { setCredential(""); setModal("credential"); }}><KeyRound size={16} /> Generate credential</button></div>
       </div>}
 
-        {modal === "revision" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog serving-revision-dialog" role="dialog" aria-modal="true" aria-labelledby="revision-title"><div className="modal-header"><div><span className="builder-kicker">Immutable configuration</span><h2 id="revision-title">Configure model roles</h2><p>Saving creates and immediately activates a new service revision. Only staging and production models with a compatible inference contract can share traffic.</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body form-panel"><div className="serving-role-help"><span><strong>Champion</strong> public traffic</span><span><strong>Challenger</strong> direct tests and replay</span><span><strong>Shadow</strong> copied live traffic</span><span><strong>Fallback</strong> technical failures</span></div>{revisionError && <div className="error-banner" role="alert">{revisionError}</div>}<div className="serving-role-grid">{eligibleModels.map((model) => {
+      {monitoringVisualizationRun && <MonitoringVisualizationModal key={monitoringVisualizationRun.id} run={monitoringVisualizationRun} onClose={() => setMonitoringVisualizationRunId("")} />}
+
+      {modal === "revision" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog serving-revision-dialog" role="dialog" aria-modal="true" aria-labelledby="revision-title"><div className="modal-header"><div><span className="builder-kicker">Immutable configuration</span><h2 id="revision-title">Configure model roles</h2><p>Saving creates and immediately activates a new service revision. Only staging and production models with a compatible inference contract can share traffic.</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body form-panel"><div className="serving-role-help"><span><strong>Champion</strong> public traffic</span><span><strong>Challenger</strong> direct tests and replay</span><span><strong>Shadow</strong> copied live traffic</span><span><strong>Fallback</strong> technical failures</span></div>{revisionError && <div className="error-banner" role="alert">{revisionError}</div>}<div className="serving-role-grid">{eligibleModels.map((model) => {
           const option = modelOptions.find((item) => item.model_id === model.id);
           const compatible = !configuredChampionSignature || option?.contract_signature === configuredChampionSignature;
           return <label key={model.id} className={!compatible && roleByModel[model.id] !== "champion" ? "serving-model-incompatible" : ""}><span>{model.name} · {model.version}<small>{model.stage}{!compatible && roleByModel[model.id] !== "champion" ? " · incompatible with selected champion" : ""}</small></span><select value={roleByModel[model.id] ?? ""} onChange={(event) => updateModelRole(model.id, event.target.value as DeploymentRole | "")}><option value="">Not assigned</option><option value="champion" disabled={!option?.allowed_roles.includes("champion")}>Champion</option><option value="challenger" disabled={!compatible || !option?.allowed_roles.includes("challenger")}>Challenger</option><option value="shadow" disabled={!compatible || !option?.allowed_roles.includes("shadow")}>Shadow</option><option value="fallback" disabled={!compatible || !option?.allowed_roles.includes("fallback")}>Fallback</option></select></label>;

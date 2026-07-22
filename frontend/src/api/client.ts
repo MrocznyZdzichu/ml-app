@@ -606,6 +606,7 @@ export type OnlineMonitoringRun = {
   until: string;
   source_before: string;
   actuals_dataset_id: string;
+  aggregation_granularity: "none" | "hour" | "day" | "week" | "month";
   actuals_artifact_id: string;
   join_strategy: "auto" | "prediction_id" | "request_record_id" | "record_id" | "not_applicable";
   actuals_prediction_id_column: string;
@@ -629,6 +630,9 @@ export type OnlineMonitoringRun = {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+  archived_at: string | null;
+  archived_by: string;
+  archive_reason: string;
 };
 
 export type BusinessCase = {
@@ -1312,6 +1316,7 @@ export const api = {
       since: string;
       until: string;
       actuals_dataset_id?: string;
+      aggregation_granularity?: "none" | "hour" | "day" | "week" | "month";
       actuals_target_column?: string;
       join?: {
         strategy?: "auto" | "prediction_id" | "request_record_id" | "record_id";
@@ -1324,12 +1329,22 @@ export const api = {
     method: "POST",
     body: JSON.stringify(payload)
   }),
-  listDeploymentMonitoringRuns: (deploymentId: string, limit = 100) =>
-    request<OnlineMonitoringRun[]>(`/serving/deployments/${encodeURIComponent(deploymentId)}/monitoring-runs?limit=${limit}`),
-  listOnlineMonitoringRuns: (limit = 200) =>
-    request<OnlineMonitoringRun[]>(`/serving/monitoring-runs?limit=${limit}`),
+  listDeploymentMonitoringRuns: (deploymentId: string, limit = 100, includeArchived = false) =>
+    request<OnlineMonitoringRun[]>(`/serving/deployments/${encodeURIComponent(deploymentId)}/monitoring-runs?limit=${limit}&include_archived=${includeArchived}`),
+  listOnlineMonitoringRuns: (limit = 200, includeArchived = false) =>
+    request<OnlineMonitoringRun[]>(`/serving/monitoring-runs?limit=${limit}&include_archived=${includeArchived}`),
   getOnlineMonitoringRun: (runId: string) =>
     request<OnlineMonitoringRun>(`/serving/monitoring-runs/${encodeURIComponent(runId)}`),
+  archiveOnlineMonitoringRun: (runId: string, reason = "Archived from monitoring history") =>
+    request<OnlineMonitoringRun>(`/serving/monitoring-runs/${encodeURIComponent(runId)}/archive`, {
+      method: "POST",
+      body: JSON.stringify({ reason })
+    }),
+  archiveDeploymentMonitoringHistory: (deploymentId: string, reason = "Archived from monitoring history") =>
+    request<{ archived_run_count: number }>(`/serving/deployments/${encodeURIComponent(deploymentId)}/monitoring-runs/archive`, {
+      method: "POST",
+      body: JSON.stringify({ reason })
+    }),
   createApiCredential: (name: string, expiresAt: string | null) =>
     request<Record<string, unknown>>("/auth/api-credentials", {
       method: "POST",

@@ -142,6 +142,7 @@ class OnlineMonitoringRun:
     until: datetime
     source_before: datetime
     actuals_dataset_id: str
+    aggregation_granularity: str = "none"
     actuals_artifact_id: str = ""
     join_strategy: str = "auto"
     actuals_prediction_id_column: str = "prediction_id"
@@ -165,6 +166,9 @@ class OnlineMonitoringRun:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    archived_at: datetime | None = None
+    archived_by: str = ""
+    archive_reason: str = ""
 
 
 @dataclass

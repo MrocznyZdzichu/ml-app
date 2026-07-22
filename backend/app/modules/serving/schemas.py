@@ -260,6 +260,9 @@ class OnlineMonitoringRunCreate(BaseModel):
     since: datetime
     until: datetime
     actuals_dataset_id: str = Field(default="", max_length=64)
+    aggregation_granularity: str = Field(
+        default="none", pattern="^(none|hour|day|week|month)$"
+    )
     actuals_target_column: str = Field(default="", max_length=255)
     target_column: str = Field(default="", max_length=255)
     problem_type: str = Field(
@@ -290,6 +293,7 @@ class OnlineMonitoringRunRead(BaseModel):
     until: datetime
     source_before: datetime
     actuals_dataset_id: str
+    aggregation_granularity: str
     actuals_artifact_id: str
     join_strategy: str
     actuals_prediction_id_column: str
@@ -313,6 +317,13 @@ class OnlineMonitoringRunRead(BaseModel):
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+    archived_at: datetime | None
+    archived_by: str
+    archive_reason: str
+
+
+class OnlineMonitoringArchiveRequest(BaseModel):
+    reason: str = Field(default="Archived from monitoring history", min_length=1, max_length=2000)
 
 
 class BatchScoreRequest(BaseModel):

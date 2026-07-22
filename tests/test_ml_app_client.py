@@ -750,10 +750,28 @@ class MLAppClientTests(unittest.TestCase):
             deployment,
             since="2026-07-20T00:00:00Z",
             until="2026-07-21T00:00:00Z",
+            aggregation_granularity="hour",
         )
 
         self.assertEqual(run.actuals_dataset_id, "")
         self.assertNotIn("actuals_dataset_id", session.requests[-1][2]["json"])
+        self.assertEqual(session.requests[-1][2]["json"]["aggregation_granularity"], "hour")
+
+    def test_archive_monitoring_run_preserves_a_typed_archived_result(self) -> None:
+        response = {
+            "id": "monitoring-1", "deployment_id": "deployment-1", "status": "succeeded",
+            "since": "2026-07-20T00:00:00+00:00", "until": "2026-07-21T00:00:00+00:00",
+            "actuals_dataset_id": "", "aggregation_granularity": "day",
+            "archived_at": "2026-07-22T12:00:00+00:00", "report": {}, "error_message": "",
+        }
+        session = FakeSession([FakeResponse(response)])
+
+        archived = MLAppClient(session=session).archive_online_monitoring_run(
+            "monitoring-1", reason="Clean dashboard"
+        )
+
+        self.assertEqual(archived.archived_at, "2026-07-22T12:00:00+00:00")
+        self.assertEqual(session.requests[-1][2]["json"], {"reason": "Clean dashboard"})
 
     def test_deployment_model_options_exposes_api_contract(self) -> None:
         deployment = Deployment.from_api({

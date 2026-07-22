@@ -42,6 +42,37 @@ def test_monitoring_request_allows_an_operational_run_without_actuals() -> None:
     assert payload.actuals_dataset_id == ""
 
 
+def test_hourly_aggregation_returns_one_row_per_calendar_hour_including_empty_hours() -> None:
+    connection = duckdb.connect(":memory:")
+    connection.execute(
+        "CREATE TABLE snapshot(request_id VARCHAR, scored_at TIMESTAMPTZ, "
+        "request_status VARCHAR, fallback_used BOOLEAN, request_latency_ms INTEGER, "
+        "served BOOLEAN)"
+    )
+    connection.execute(
+        "INSERT INTO snapshot VALUES "
+        "('request-1', '2026-07-01T00:30:00Z', 'succeeded', false, 100, true), "
+        "('request-1', '2026-07-01T00:30:00Z', 'succeeded', false, 100, false), "
+        "('request-2', '2026-07-01T02:15:00Z', 'failed', true, 300, false)"
+    )
+    run = monitoring_run(
+        since=datetime(2026, 7, 1, 0, 15, tzinfo=timezone.utc),
+        until=datetime(2026, 7, 1, 3, 0, tzinfo=timezone.utc),
+        aggregation_granularity="hour",
+    )
+
+    result = service_without_external_repositories()._time_aggregation(
+        connection, "snapshot", run
+    )
+
+    assert result["bucket_count"] == 3
+    assert result["buckets"][0]["label"] == "2026-07-01 00:00–00:59"
+    assert result["buckets"][0]["request_count"] == 1
+    assert result["buckets"][0]["execution_count"] == 2
+    assert result["buckets"][1]["request_count"] == 0
+    assert result["buckets"][2]["failed_request_count"] == 1
+
+
 def test_auto_join_prefers_prediction_id_and_returns_actual_for_served_record() -> None:
     connection = duckdb.connect(":memory:")
     connection.execute(

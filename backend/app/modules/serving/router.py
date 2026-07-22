@@ -15,6 +15,7 @@ from app.modules.serving.schemas import (
     InferenceDetail,
     InferenceInputContractRead,
     ModelServingUsageRead,
+    OnlineMonitoringArchiveRequest,
     OnlineMonitoringRunCreate,
     OnlineMonitoringRunRead,
     ScoreRequest,
@@ -263,12 +264,14 @@ def create_online_monitoring_run(
 def list_deployment_monitoring_runs(
     deployment_id: str,
     limit: int = Query(default=100, ge=1, le=200),
+    include_archived: bool = Query(default=False),
     principal: Principal = Depends(require_user),
 ) -> list[OnlineMonitoringRunRead]:
     return [
         OnlineMonitoringRunRead.model_validate(item)
         for item in monitoring_service.list_runs(
-            principal, deployment_id=deployment_id, limit=limit
+            principal, deployment_id=deployment_id, limit=limit,
+            include_archived=include_archived,
         )
     ]
 
@@ -276,12 +279,45 @@ def list_deployment_monitoring_runs(
 @router.get("/monitoring-runs", response_model=list[OnlineMonitoringRunRead])
 def list_online_monitoring_runs(
     limit: int = Query(default=200, ge=1, le=200),
+    include_archived: bool = Query(default=False),
     principal: Principal = Depends(require_user),
 ) -> list[OnlineMonitoringRunRead]:
     return [
         OnlineMonitoringRunRead.model_validate(item)
-        for item in monitoring_service.list_runs(principal, limit=limit)
+        for item in monitoring_service.list_runs(
+            principal, limit=limit, include_archived=include_archived
+        )
     ]
+
+
+@router.post(
+    "/deployments/{deployment_id}/monitoring-runs/archive",
+    response_model=dict[str, int],
+)
+def archive_deployment_monitoring_history(
+    deployment_id: str,
+    payload: OnlineMonitoringArchiveRequest,
+    principal: Principal = Depends(require_user),
+) -> dict[str, int]:
+    return {
+        "archived_run_count": monitoring_service.archive_history(
+            deployment_id, payload.reason, principal
+        )
+    }
+
+
+@router.post(
+    "/monitoring-runs/{run_id}/archive",
+    response_model=OnlineMonitoringRunRead,
+)
+def archive_online_monitoring_run(
+    run_id: str,
+    payload: OnlineMonitoringArchiveRequest,
+    principal: Principal = Depends(require_user),
+) -> OnlineMonitoringRunRead:
+    return OnlineMonitoringRunRead.model_validate(
+        monitoring_service.archive_run(run_id, payload.reason, principal)
+    )
 
 
 @router.get("/monitoring-runs/{run_id}", response_model=OnlineMonitoringRunRead)

@@ -11300,6 +11300,12 @@ textarea {
   gap: 0.2rem;
 }
 
+.serving-monitoring-run-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .serving-monitoring-kpis {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
@@ -11318,10 +11324,235 @@ textarea {
   font-size: 1.1rem;
 }
 
+.serving-monitoring-buckets {
+  display: grid;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.serving-monitoring-bucket-toolbar,
+.serving-monitoring-chart-title,
+.serving-monitoring-selected-period {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.serving-monitoring-bucket-table {
+  display: grid;
+  overflow-x: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 0.65rem;
+}
+
+.serving-monitoring-bucket-table > div {
+  display: grid;
+  grid-template-columns: minmax(185px, 1.5fr) repeat(5, minmax(82px, 0.7fr));
+  min-width: 650px;
+}
+
+.serving-monitoring-bucket-table > div + div {
+  border-top: 1px solid var(--border-color);
+}
+
+.serving-monitoring-bucket-table span {
+  padding: 0.55rem 0.65rem;
+}
+
+.serving-monitoring-bucket-head {
+  background: rgba(91, 124, 250, 0.08);
+  color: var(--muted-color, #8fa0ad);
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.serving-monitoring-visual-backdrop {
+  z-index: 140;
+}
+
+.serving-monitoring-visual-dialog.modal-dialog {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: min(1260px, calc(100vw - 40px));
+  max-width: 1260px;
+  max-height: calc(100vh - 40px);
+  padding: 0;
+  overflow: hidden;
+  color: inherit;
+}
+
+.serving-monitoring-visual-dialog .modal-header h2,
+.serving-monitoring-visual-dialog .modal-header p {
+  margin: 3px 0 0;
+}
+
+.serving-monitoring-visual-content {
+  display: grid;
+  gap: 1rem;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px;
+}
+
+.serving-monitoring-selected-period {
+  justify-content: flex-start;
+  padding-bottom: 0.8rem;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.serving-monitoring-selected-period strong {
+  margin-right: auto;
+}
+
+.serving-monitoring-selected-period span {
+  color: var(--muted-color);
+  font-variant-numeric: tabular-nums;
+}
+
+.serving-monitoring-chart-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.serving-monitoring-chart {
+  min-width: 0;
+}
+
+.serving-monitoring-chart-title > span {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+  color: var(--muted-color);
+  font-size: 0.75rem;
+}
+
+.serving-monitoring-chart-title > span > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.serving-monitoring-chart-title i {
+  display: inline-block;
+  width: 18px;
+  height: 3px;
+  background: currentColor;
+}
+
+.serving-monitoring-chart svg {
+  display: block;
+  width: 100%;
+  min-height: 190px;
+  color: var(--muted-color);
+  touch-action: none;
+}
+
+.monitoring-chart-grid {
+  stroke: var(--border-color);
+  stroke-width: 1;
+}
+
+.monitoring-chart-axis {
+  fill: var(--muted-color);
+  font-size: 11px;
+}
+
+.monitoring-chart-line {
+  stroke: currentColor;
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.monitoring-chart-point {
+  fill: Canvas;
+  stroke: currentColor;
+  stroke-width: 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.monitoring-chart-cursor {
+  stroke: var(--muted-color);
+  stroke-width: 1;
+  stroke-dasharray: 4 4;
+  vector-effect: non-scaling-stroke;
+}
+
+.series-requests {
+  color: var(--viz-series-1, LinkText);
+}
+
+.series-served {
+  color: var(--viz-series-2, Highlight);
+}
+
+.series-served .monitoring-chart-line,
+.series-fallback .monitoring-chart-line {
+  stroke-dasharray: 8 5;
+}
+
+.series-failed {
+  color: var(--viz-series-3, MarkText);
+}
+
+.series-fallback {
+  color: var(--viz-series-4, GrayText);
+}
+
+.series-latency {
+  color: var(--viz-series-5, LinkText);
+}
+
+.serving-monitoring-period-slider {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.serving-monitoring-period-slider > span {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.serving-monitoring-period-slider input {
+  width: 100%;
+  min-height: auto;
+  accent-color: var(--viz-series-1, Highlight);
+}
+
 .serving-monitoring-window {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0.75rem;
+}
+
+.serving-monitoring-time-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.serving-monitoring-time-label button {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: #53c8bc;
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.serving-monitoring-time-label button:hover {
+  color: #7ae2d7;
+  text-decoration: underline;
 }
 
 .serving-monitoring-models > span {
@@ -11333,7 +11564,8 @@ textarea {
 
 @media (max-width: 980px) {
   .serving-monitoring-layout,
-  .serving-monitoring-window {
+  .serving-monitoring-window,
+  .serving-monitoring-chart-pair {
     grid-template-columns: 1fr;
   }
 }

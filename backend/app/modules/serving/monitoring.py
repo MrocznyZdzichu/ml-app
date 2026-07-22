@@ -155,6 +155,7 @@ class OnlineMonitoringService:
             until=until,
             source_before=now,
             actuals_dataset_id=actuals_dataset_id,
+            aggregation_granularity=payload.aggregation_granularity,
             actuals_artifact_id=actuals_artifact_id,
             join_strategy=payload.join.strategy,
             actuals_prediction_id_column=payload.join.actuals_prediction_id_column,
@@ -193,14 +194,19 @@ class OnlineMonitoringService:
         *,
         deployment_id: str | None = None,
         limit: int = 200,
+        include_archived: bool = False,
     ) -> list[OnlineMonitoringRun]:
         if deployment_id:
             deployment = self._deployment(
                 deployment_id, principal, BusinessCaseAccessRole.REPORT_VIEWER
             )
-            return self.repository.list_monitoring_runs(deployment.id, limit)
+            return self.repository.list_monitoring_runs(
+                deployment.id, limit, include_archived=include_archived
+            )
         return [
-            run for run in self.repository.list_monitoring_runs(None, limit)
+            run for run in self.repository.list_monitoring_runs(
+                None, limit, include_archived=include_archived
+            )
             if self._can_view_report(principal, run.business_case_id)
         ]
 
@@ -209,6 +215,65 @@ class OnlineMonitoringService:
         if run is None or not self._can_view_report(principal, run.business_case_id):
             raise HTTPException(status_code=404, detail="Online monitoring run not found")
         return run
+
+    def archive_run(
+        self, run_id: str, reason: str, principal: Principal
+    ) -> OnlineMonitoringRun:
+        run = self.repository.get_monitoring_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Online monitoring run not found")
+        self._deployment(run.deployment_id, principal, BusinessCaseAccessRole.CONTRIBUTOR)
+        if run.status not in {MonitoringRunStatus.SUCCEEDED, MonitoringRunStatus.FAILED}:
+            raise HTTPException(status_code=409, detail="Only finished monitoring runs can be archived")
+        if run.archived_at is not None:
+            return run
+        run.archived_at = datetime.now(timezone.utc)
+        run.archived_by = principal.user_id
+        run.archive_reason = reason
+        self.repository.update_monitoring_run(run)
+        self._audit_archive(principal, run, reason, bulk=False)
+        return run
+
+    def archive_history(
+        self, deployment_id: str, reason: str, principal: Principal
+    ) -> int:
+        deployment = self._deployment(
+            deployment_id, principal, BusinessCaseAccessRole.CONTRIBUTOR
+        )
+        archived_at = datetime.now(timezone.utc)
+        count = self.repository.archive_monitoring_runs(
+            deployment.id, principal.user_id, archived_at, reason
+        )
+        self.sharing.add_audit(AuditEvent(
+            id=str(uuid4()),
+            actor_id=principal.user_id,
+            action="serving.monitoring_history_archived",
+            subject_type="deployment",
+            subject_id=deployment.id,
+            resource_kind="business_case",
+            resource_id=deployment.business_case_id,
+            new_state={"archived_run_count": count, "reason": reason},
+        ))
+        return count
+
+    def _audit_archive(
+        self,
+        principal: Principal,
+        run: OnlineMonitoringRun,
+        reason: str,
+        *,
+        bulk: bool,
+    ) -> None:
+        self.sharing.add_audit(AuditEvent(
+            id=str(uuid4()),
+            actor_id=principal.user_id,
+            action="serving.monitoring_history_archived" if bulk else "serving.monitoring_run_archived",
+            subject_type="online_monitoring_run",
+            subject_id=run.id,
+            resource_kind="business_case",
+            resource_id=run.business_case_id,
+            new_state={"archived_at": run.archived_at.isoformat() if run.archived_at else None, "reason": reason},
+        ))
 
     def execute_run(self, run_id: str) -> OnlineMonitoringRun:
         run = self.repository.get_monitoring_run(run_id)
@@ -355,6 +420,9 @@ class OnlineMonitoringService:
             prediction_monitoring = self._prediction_monitoring(
                 connection, snapshot_relation, run.problem_type
             )
+            time_aggregation = self._time_aggregation(
+                connection, snapshot_relation, run
+            )
         finally:
             connection.close()
             snapshot_csv.unlink(missing_ok=True)
@@ -449,6 +517,7 @@ class OnlineMonitoringService:
             "service_health": health,
             "input_monitoring": input_monitoring,
             "prediction_monitoring": prediction_monitoring,
+            "time_aggregation": time_aggregation,
             "performance": evaluation,
             "artifacts": {
                 "prediction_dataset_id": snapshot_dataset_id,
@@ -862,6 +931,132 @@ class OnlineMonitoringService:
         return {
             "scope": "full", "kind": "classification", "count": total,
             "distribution": distribution, "warnings": warnings,
+        }
+
+    @staticmethod
+    def _time_aggregation(
+        connection: Any,
+        snapshot_relation: str,
+        run: OnlineMonitoringRun,
+    ) -> dict[str, Any]:
+        granularity = run.aggregation_granularity
+        if granularity == "none":
+            return {
+                "granularity": "none",
+                "time_basis": run.time_basis,
+                "timezone": "UTC",
+                "bucket_count": 0,
+                "buckets": [],
+            }
+        intervals = {
+            "hour": "1 hour",
+            "day": "1 day",
+            "week": "1 week",
+            "month": "1 month",
+        }
+        interval = intervals.get(granularity)
+        if interval is None:
+            raise ValueError(f"Unsupported monitoring aggregation granularity {granularity!r}")
+        rows = connection.execute(
+            f"""
+            WITH bounds AS (
+                SELECT
+                    date_trunc('{granularity}', CAST(? AS TIMESTAMPTZ) AT TIME ZONE 'UTC') AS first_bucket,
+                    date_trunc('{granularity}', (CAST(? AS TIMESTAMPTZ) - INTERVAL '1 microsecond') AT TIME ZONE 'UTC') AS last_bucket
+            ),
+            buckets AS (
+                SELECT unnest(generate_series(first_bucket, last_bucket, INTERVAL '{interval}')) AS bucket_start
+                FROM bounds
+            ),
+            request_rows AS (
+                SELECT
+                    request_id,
+                    min(scored_at) AS scored_at,
+                    max(request_status) AS request_status,
+                    bool_or(fallback_used) AS fallback_used,
+                    max(request_latency_ms) AS request_latency_ms
+                FROM {snapshot_relation}
+                GROUP BY request_id
+            ),
+            request_aggregates AS (
+                SELECT
+                    date_trunc('{granularity}', scored_at AT TIME ZONE 'UTC') AS bucket_start,
+                    count(*) AS request_count,
+                    count(*) FILTER (WHERE request_status = 'succeeded') AS succeeded_request_count,
+                    count(*) FILTER (WHERE request_status = 'failed') AS failed_request_count,
+                    count(*) FILTER (WHERE fallback_used) AS fallback_request_count,
+                    avg(request_latency_ms) AS average_latency_ms,
+                    quantile_cont(request_latency_ms, 0.95) AS p95_latency_ms,
+                    max(request_latency_ms) AS maximum_latency_ms
+                FROM request_rows
+                GROUP BY 1
+            ),
+            execution_aggregates AS (
+                SELECT
+                    date_trunc('{granularity}', scored_at AT TIME ZONE 'UTC') AS bucket_start,
+                    count(*) AS execution_count,
+                    count(*) FILTER (WHERE served) AS served_prediction_count
+                FROM {snapshot_relation}
+                GROUP BY 1
+            )
+            SELECT
+                buckets.bucket_start,
+                buckets.bucket_start + INTERVAL '{interval}' AS bucket_end,
+                coalesce(request_aggregates.request_count, 0),
+                coalesce(request_aggregates.succeeded_request_count, 0),
+                coalesce(request_aggregates.failed_request_count, 0),
+                coalesce(request_aggregates.fallback_request_count, 0),
+                request_aggregates.average_latency_ms,
+                request_aggregates.p95_latency_ms,
+                request_aggregates.maximum_latency_ms,
+                coalesce(execution_aggregates.execution_count, 0),
+                coalesce(execution_aggregates.served_prediction_count, 0)
+            FROM buckets
+            LEFT JOIN request_aggregates USING (bucket_start)
+            LEFT JOIN execution_aggregates USING (bucket_start)
+            ORDER BY buckets.bucket_start
+            """,
+            [run.since, run.until],
+        ).fetchall()
+        buckets = []
+        for row in rows:
+            bucket_start, bucket_end = row[0], row[1]
+            if bucket_start.tzinfo is None:
+                bucket_start = bucket_start.replace(tzinfo=timezone.utc)
+            if bucket_end.tzinfo is None:
+                bucket_end = bucket_end.replace(tzinfo=timezone.utc)
+            observed_since = max(bucket_start, run.since)
+            observed_until = min(bucket_end, run.until)
+            if granularity == "hour":
+                label = f"{bucket_start:%Y-%m-%d %H}:00–{bucket_start:%H}:59"
+            elif granularity == "day":
+                label = f"{bucket_start:%Y-%m-%d}"
+            elif granularity == "week":
+                label = f"{bucket_start:%Y-%m-%d}–{(bucket_end - timedelta(days=1)):%Y-%m-%d}"
+            else:
+                label = f"{bucket_start:%Y-%m}"
+            buckets.append({
+                "label": label,
+                "bucket_start": bucket_start.isoformat(),
+                "bucket_end": bucket_end.isoformat(),
+                "observed_since": observed_since.isoformat(),
+                "observed_until": observed_until.isoformat(),
+                "request_count": int(row[2]),
+                "succeeded_request_count": int(row[3]),
+                "failed_request_count": int(row[4]),
+                "fallback_request_count": int(row[5]),
+                "average_latency_ms": float(row[6]) if row[6] is not None else None,
+                "p95_latency_ms": float(row[7]) if row[7] is not None else None,
+                "maximum_latency_ms": float(row[8]) if row[8] is not None else None,
+                "execution_count": int(row[9]),
+                "served_prediction_count": int(row[10]),
+            })
+        return {
+            "granularity": granularity,
+            "time_basis": run.time_basis,
+            "timezone": "UTC",
+            "bucket_count": len(buckets),
+            "buckets": buckets,
         }
 
     @staticmethod
