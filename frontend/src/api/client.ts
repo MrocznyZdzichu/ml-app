@@ -548,6 +548,9 @@ export type InferenceInputContract = {
 
 export type DeploymentModelOption = {
   model_id: string;
+  name: string;
+  version: string;
+  business_case_id: string;
   stage: string;
   contract_signature: string;
   compatible_with_active_champion: boolean;
@@ -576,8 +579,18 @@ export type InferenceRequest = {
   completed_at: string | null;
 };
 
+export type InferenceRequestSummary = Omit<
+  InferenceRequest,
+  "request_payload" | "response_payload"
+>;
+
 export type InferencePage = {
   items: InferenceRequest[];
+  next_cursor: string | null;
+};
+
+export type InferenceSummaryPage = {
+  items: InferenceRequestSummary[];
   next_cursor: string | null;
 };
 
@@ -1064,6 +1077,7 @@ export const api = {
   changePassword: (payload: { current_password: string; new_password: string }) =>
     request<void>("/auth/change-password", { method: "POST", body: JSON.stringify(payload) }),
   listDatasets: () => request<DataAsset[]>("/datasets"),
+  listDatasetSummaries: () => request<DataAsset[]>("/datasets?summary=true"),
   listDatasetVersions: (logicalId: string) =>
     request<DataAsset[]>(`/datasets/${datasetRouteId(logicalId)}/versions`),
   listBusinessCases: () => request<BusinessCase[]>("/business-cases"),
@@ -1223,6 +1237,7 @@ export const api = {
       body: JSON.stringify(payload)
     }),
   listModels: () => request<ModelArtifact[]>("/models"),
+  listModelSummaries: () => request<ModelArtifact[]>("/models?summary=true"),
   promoteModel: (modelId: string, stage: "developed" | "staging" | "production" | "archived") =>
     request<ModelArtifact>(`/models/${encodeURIComponent(modelId)}/stage`, {
       method: "PATCH",
@@ -1242,8 +1257,16 @@ export const api = {
         ? `/scoring-reports?business_case_id=${encodeURIComponent(businessCaseId)}`
         : "/scoring-reports"
     ),
+  listScoringReportSummaries: (businessCaseId?: string) =>
+    request<ScoringReport[]>(
+      businessCaseId
+        ? `/scoring-reports?business_case_id=${encodeURIComponent(businessCaseId)}&summary=true`
+        : "/scoring-reports?summary=true"
+    ),
   listScoringReportVersions: (logicalId: string) =>
-    request<ScoringReport[]>(`/scoring-reports/${encodeURIComponent(logicalId)}/versions`),
+    request<ScoringReport[]>(`/scoring-reports/${encodeURIComponent(logicalId)}/versions?summary=true`),
+  getScoringReport: (reportId: string) =>
+    request<ScoringReport>(`/scoring-reports/${encodeURIComponent(reportId)}`),
   getScoringReportDataLineage: (reportId: string) =>
     request<DatasetLineageReference[]>(`/scoring-reports/${encodeURIComponent(reportId)}/data-lineage`),
   getArtifactDependencies: (referenceId: string, artifactType: string) =>
@@ -1300,6 +1323,12 @@ export const api = {
     if (cursor) params.set("cursor", cursor);
     if (recordId) params.set("record_id", recordId);
     return request<InferencePage>(`/serving/deployments/${encodeURIComponent(deploymentId)}/inference-log?${params}`);
+  },
+  inferenceLogSummary: (deploymentId: string, limit = 50, cursor = "", recordId = "") => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (cursor) params.set("cursor", cursor);
+    if (recordId) params.set("record_id", recordId);
+    return request<InferenceSummaryPage>(`/serving/deployments/${encodeURIComponent(deploymentId)}/inference-log-summary?${params}`);
   },
   inferenceDetail: (deploymentId: string, requestId: string) =>
     request<Record<string, unknown>>(`/serving/deployments/${encodeURIComponent(deploymentId)}/inference-log/${encodeURIComponent(requestId)}`),

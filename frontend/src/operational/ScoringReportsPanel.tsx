@@ -166,7 +166,7 @@ export function ScoringReportsPanel({
                   <button className="secondary-button compact-button" type="button" onClick={() => reportNavigation.openHistory(latest)}>
                     <History size={14} /> Versions
                   </button>
-                  <button className="secondary-button compact-button" type="button" onClick={() => reportNavigation.openDirect(latest)}>
+                  <button className="secondary-button compact-button" type="button" onClick={() => void api.getScoringReport(latest.id).then(reportNavigation.openDirect)}>
                     <Eye size={14} /> View latest
                   </button>
                 </div>
@@ -184,7 +184,10 @@ export function ScoringReportsPanel({
         <ScoringReportHistoryDialog
           report={reportNavigation.history}
           onClose={reportNavigation.closeHistory}
-          onView={reportNavigation.openVersion}
+          onView={async (version) => {
+            const fullReport = await api.getScoringReport(version.id);
+            reportNavigation.openVersion(fullReport);
+          }}
         />
       )}
     </section>

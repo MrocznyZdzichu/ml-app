@@ -4,6 +4,7 @@ from unittest.mock import Mock
 
 from app.core.security import Principal
 from app.modules.business_cases.domain import Artifact, ArtifactOrigin, ArtifactType
+from app.modules.business_cases.repository import InMemoryBusinessCaseRepository
 from app.modules.models.repository import InMemoryModelRepository
 from app.modules.models.domain import ModelArtifact
 from app.modules.models.schemas import ModelArtifactRead
@@ -78,6 +79,34 @@ def test_pipeline_model_registry_exposes_governance_metadata_and_bounded_paramet
     assert response.created_at == created_at
 
 
+def test_model_summary_omits_heavy_metrics_without_mutating_full_model() -> None:
+    repository = InMemoryModelRepository()
+    full_model = ModelArtifact(
+        id="legacy-model-1",
+        owner_id="owner-1",
+        training_job_id="job-1",
+        name="Legacy model",
+        version="v1",
+        algorithm="linear",
+        artifact_uri="file:///model.joblib",
+        metrics={"optimization": {"trials": [{"score": 0.91}]}},
+        model_parameters={"weights": [{"feature": "x", "weight": 1.0}]},
+    )
+    repository.add_model(full_model)
+    service = ModelService(
+        repository=repository,
+        artifacts=InMemoryBusinessCaseRepository(),
+    )
+
+    summaries = service.list_model_summaries(
+        Principal("owner-1", "owner@example.com", "Owner")
+    )
+
+    assert summaries[0].metrics == {}
+    assert summaries[0].model_parameters == {}
+    assert full_model.metrics["optimization"]["trials"][0]["score"] == 0.91
+
+
 def test_pipeline_runs_are_presented_as_versions_of_one_logical_model() -> None:
     created_at = datetime.now(timezone.utc)
 
@@ -111,11 +140,10 @@ def test_pipeline_runs_are_presented_as_versions_of_one_logical_model() -> None:
     )
     artifacts.list_model_version_artifacts.return_value = pipeline_models
     pipelines = Mock()
-    pipelines.get_run.side_effect = lambda run_id: SimpleNamespace(
-        owner_id="owner-1",
-        pipeline_id="pipeline-1",
-        id=run_id,
-    )
+    pipelines.list_run_references.return_value = {
+        "run-1": ("owner-1", "pipeline-1"),
+        "run-2": ("owner-1", "pipeline-1"),
+    }
     pipelines.list_versions_for_pipelines.return_value = []
     service = ModelService(
         repository=InMemoryModelRepository(),

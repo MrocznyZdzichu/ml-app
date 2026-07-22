@@ -65,6 +65,13 @@ Classification outputs use an explicit ranking-score contract:
 The dataset metadata records class labels, positive class, score kind and column
 mapping so later analysis does not have to infer semantics from column names.
 
+Registry refreshes use `GET /api/v1/models?summary=true` and
+`GET /api/v1/scoring-reports?summary=true`. These bounded discovery contracts
+exclude large metrics, trial histories, model parameters and evaluation bodies.
+The model summary still contains the fitted-transform and workflow definitions
+needed to configure batch scoring. `GET /api/v1/models/{model_id}` and
+`GET /api/v1/scoring-reports/{report_id}` return the complete immutable detail.
+
 Arbitrary Python steps, distributed training, and automatic production
 deployment remain outside the current scope. AutoML and fold-local AutoFE are
 executable lifecycle blocks documented in

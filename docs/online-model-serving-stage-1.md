@@ -99,6 +99,15 @@ History is cursor-paginated and may be filtered by record ID:
 GET /api/v1/serving/deployments/{deployment_id}/inference-log?limit=50&record_id=estate-1
 ```
 
+For bounded catalog and UI refreshes, use the summary projection. It preserves
+cursor and record-ID filtering but omits retained request and response payloads;
+retrieve those from the request detail endpoint only when needed:
+
+```http
+GET /api/v1/serving/deployments/{deployment_id}/inference-log-summary?limit=50
+GET /api/v1/serving/deployments/{deployment_id}/inference-log/{request_id}
+```
+
 List and roll back immutable revisions or control endpoint availability:
 
 ```http

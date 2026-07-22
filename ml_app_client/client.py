@@ -421,8 +421,12 @@ class MLAppClient:
         return Dataset.from_api(payload)
 
     def list_datasets(self) -> list[Mapping[str, Any]]:
-        """List bounded dataset metadata visible to the authenticated user."""
+        """List complete dataset metadata visible to the authenticated user."""
         return self._request("GET", "/datasets")
+
+    def list_dataset_summaries(self) -> list[Mapping[str, Any]]:
+        """List catalog metadata without large, non-presented metadata extensions."""
+        return self._request("GET", "/datasets", params={"summary": True})
 
     def dataset_by_name(
         self,
@@ -802,6 +806,21 @@ class MLAppClient:
             )
         return matches[0]
 
+    def list_scoring_report_summaries(
+        self,
+        *,
+        business_case_id: str | None = None,
+    ) -> list[Mapping[str, Any]]:
+        """List scoring report catalog fields without full evaluation payloads."""
+        params: dict[str, Any] = {"summary": True}
+        if business_case_id is not None:
+            params["business_case_id"] = business_case_id
+        return self._request("GET", "/scoring-reports", params=params)
+
+    def get_scoring_report(self, report_id: str) -> Mapping[str, Any]:
+        """Fetch one complete immutable scoring report."""
+        return self._request("GET", f"/scoring-reports/{report_id}")
+
     def run_pipeline(
         self,
         pipeline_id: str,
@@ -976,6 +995,10 @@ class MLAppClient:
     def list_models(self) -> list[Mapping[str, Any]]:
         """List model versions visible through the current Business Case grants."""
         return self._request("GET", "/models")
+
+    def list_model_summaries(self) -> list[Mapping[str, Any]]:
+        """List model registry/workflow fields without experiment-heavy payloads."""
+        return self._request("GET", "/models", params={"summary": True})
 
     def model_by_name(
         self,
@@ -1458,6 +1481,29 @@ class MLAppClient:
         target = self._deployment(deployment)
         return self._request(
             "GET", f"/serving/deployments/{target.id}/inference-log/{request_id}"
+        )
+
+    def inference_history_summary(
+        self,
+        deployment: str | Deployment,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+        record_id: str | None = None,
+    ) -> Mapping[str, Any]:
+        """Read a bounded history page without retained request/response payloads."""
+        if limit < 1 or limit > 200:
+            raise ValueError("History limit must be between 1 and 200")
+        target = self._deployment(deployment)
+        params: dict[str, Any] = {"limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        if record_id:
+            params["record_id"] = record_id
+        return self._request(
+            "GET",
+            f"/serving/deployments/{target.id}/inference-log-summary",
+            params=params,
         )
 
     def replay_challenger(

@@ -162,6 +162,10 @@ class PipelineRepository(Protocol):
     def get_run(self, run_id: str) -> PipelineRun | None:
         ...
 
+    def list_run_references(self, run_ids: set[str]) -> dict[str, tuple[str, str]]:
+        """Map run ID to (owner ID, pipeline ID) without loading run payloads."""
+        ...
+
     def update_run(self, run: PipelineRun) -> PipelineRun:
         ...
 
@@ -273,6 +277,13 @@ class InMemoryPipelineRepository:
 
     def get_run(self, run_id: str) -> PipelineRun | None:
         return self._runs.get(run_id)
+
+    def list_run_references(self, run_ids: set[str]) -> dict[str, tuple[str, str]]:
+        return {
+            run.id: (run.owner_id, run.pipeline_id)
+            for run in self._runs.values()
+            if run.id in run_ids
+        }
 
     def update_run(self, run: PipelineRun) -> PipelineRun:
         self._runs[run.id] = run
@@ -469,6 +480,21 @@ class PostgresPipelineRepository:
         with self.engine.begin() as connection:
             row = connection.execute(statement).first()
         return self._run_from_record(row._mapping) if row else None
+
+    def list_run_references(self, run_ids: set[str]) -> dict[str, tuple[str, str]]:
+        if not run_ids:
+            return {}
+        self._ensure_initialized()
+        statement = select(
+            pipeline_runs_table.c.id,
+            pipeline_runs_table.c.owner_id,
+            pipeline_runs_table.c.pipeline_id,
+        ).where(pipeline_runs_table.c.id.in_(run_ids))
+        with self.engine.begin() as connection:
+            return {
+                row.id: (row.owner_id, row.pipeline_id)
+                for row in connection.execute(statement)
+            }
 
     def update_run(self, run: PipelineRun) -> PipelineRun:
         self._ensure_initialized()

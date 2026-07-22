@@ -511,7 +511,10 @@ used as sources of nested views.
 Important dataset endpoints:
 
 - `POST /api/v1/datasets/upload` - upload CSV.
-- `GET /api/v1/datasets` - list current user's datasets and views.
+- `GET /api/v1/datasets` - list current user's datasets and views with complete metadata.
+- `GET /api/v1/datasets?summary=true` - list the catalog projection used by
+  section refreshes; it retains source schema, data roles, view and pipeline
+  provenance but omits non-presented metadata extensions.
 - `GET /api/v1/datasets/{dataset_id}/preview` - preview dataset or view.
 - `POST /api/v1/datasets/{dataset_id}/query` - run read-only SQL.
 - `POST /api/v1/datasets/{dataset_id}/visualization` - execute a bounded,

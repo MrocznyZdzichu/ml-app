@@ -40,6 +40,16 @@ lineage. Dataset previews are bounded to at most 50,000 rows. Downloads stream
 the authorized persistent CSV/Parquet file to disk without buffering the full
 dataset in client memory.
 
+For interactive catalogs, request the bounded list projections and fetch full
+detail only after selecting an item:
+
+```python
+datasets = client.list_dataset_summaries()
+models = client.list_model_summaries()
+reports = client.list_scoring_report_summaries(business_case_id="bc-id")
+full_report = client.get_scoring_report(reports[0]["id"])
+```
+
 ## Online model serving
 
 The same client creates versioned model services, scores through their stable
@@ -100,7 +110,9 @@ result = client.predict(
 )
 print(result.predictions[0]["prediction"])
 
-page = client.inference_history(service, record_id="estate-2026-0001")
+page = client.inference_history_summary(service, record_id="estate-2026-0001")
+# Fetch retained payloads and per-model executions only for an opened row.
+request = client.inference_request(service, page["items"][0]["id"])
 
 # Later, attach an actuals dataset to the Business Case as monitoring_actuals.
 monitoring = client.run_deployment_monitoring(

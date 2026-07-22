@@ -186,6 +186,7 @@ class ServingRepository(Protocol):
     def find_idempotent(self, deployment_id: str, requested_by: str, key: str) -> InferenceRequest | None: ...
     def complete_inference(self, inference: InferenceRequest, items: list[dict[str, Any]]) -> InferenceRequest: ...
     def list_inference(self, deployment_id: str, limit: int, cursor: tuple[datetime, str] | None, record_id: str | None = None) -> list[InferenceRequest]: ...
+    def list_inference_summaries(self, deployment_id: str, limit: int, cursor: tuple[datetime, str] | None, record_id: str | None = None) -> list[dict[str, Any]]: ...
     def inference_items(self, request_id: str) -> list[dict[str, Any]]: ...
     def prune_expired(self, deployment_id: str, cutoff: datetime) -> int: ...
     def add_replay(self, job: ChallengerReplayJob) -> ChallengerReplayJob: ...
@@ -422,6 +423,41 @@ class PostgresServingRepository:
         ).limit(limit)
         with self.engine.begin() as connection:
             return [self._inference(row._mapping) for row in connection.execute(statement)]
+
+    def list_inference_summaries(
+        self,
+        deployment_id: str,
+        limit: int,
+        cursor: tuple[datetime, str] | None,
+        record_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Read list metadata without detoasting retained request/response payloads."""
+        self._ensure_initialized()
+        columns = [
+            column for column in inference_requests_table.c
+            if column.name not in {"request_payload", "response_payload", "request_hash", "idempotency_key"}
+        ]
+        statement = select(*columns).where(
+            inference_requests_table.c.deployment_id == deployment_id
+        )
+        if cursor:
+            created_at, request_id = cursor
+            statement = statement.where(or_(
+                inference_requests_table.c.created_at < created_at,
+                and_(inference_requests_table.c.created_at == created_at, inference_requests_table.c.id < request_id),
+            ))
+        if record_id:
+            statement = statement.where(inference_requests_table.c.id.in_(
+                select(inference_items_table.c.request_id).where(
+                    inference_items_table.c.deployment_id == deployment_id,
+                    inference_items_table.c.record_id == record_id,
+                )
+            ))
+        statement = statement.order_by(
+            inference_requests_table.c.created_at.desc(), inference_requests_table.c.id.desc()
+        ).limit(limit)
+        with self.engine.begin() as connection:
+            return [dict(row._mapping) for row in connection.execute(statement)]
 
     def inference_items(self, request_id: str) -> list[dict[str, Any]]:
         self._ensure_initialized()

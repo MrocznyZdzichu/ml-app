@@ -23,6 +23,21 @@ The application is organized around a common analytics lifecycle:
 - Redis: broker/cache for background work.
 - Model runtime: a small container image used to expose online scoring for a model artifact.
 
+## Refresh and catalog contracts
+
+The application refreshes the active section rather than reloading the complete
+workspace. A section coordinator reloads only its shared catalogs; panels with
+local state such as Jobs, Share, and Serving register an additional coordinator
+for the top Refresh action. A refresh inside a tab reloads only that tab's data.
+
+Large registries use explicit summary contracts for discovery:
+`GET /datasets?summary=true`, `GET /models?summary=true`, and
+`GET /scoring-reports?summary=true`. They preserve identifiers, governance,
+lineage fields and the workflow configuration required by the UI, while omitting
+large experiment/evaluation or non-presented metadata. Existing endpoints without
+`summary=true` remain backward compatible. Full payloads are fetched on demand
+from the resource detail endpoints.
+
 ## Backend Modules
 
 Each module follows the same direction:

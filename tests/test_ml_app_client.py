@@ -790,6 +790,48 @@ class MLAppClientTests(unittest.TestCase):
         self.assertEqual(options[0]["allowed_roles"], ["challenger", "shadow"])
         self.assertIn("/deployments/deployment-1/model-options", session.requests[-1][1])
 
+    def test_inference_history_summary_uses_bounded_endpoint(self) -> None:
+        deployment = Deployment.from_api({
+            "id": "deployment-1", "name": "Churn", "slug": "churn",
+            "business_case_id": "bc-1", "status": "running", "endpoint_url": "/predictions",
+            "active_revision": {"id": "revision-1"},
+        })
+        session = FakeSession([FakeResponse({"items": [], "next_cursor": None})])
+
+        page = MLAppClient(session=session).inference_history_summary(
+            deployment, limit=25, record_id="customer-1"
+        )
+
+        self.assertEqual(page["items"], [])
+        self.assertIn("/deployments/deployment-1/inference-log-summary", session.requests[-1][1])
+        self.assertEqual(
+            session.requests[-1][2]["params"],
+            {"limit": 25, "record_id": "customer-1"},
+        )
+
+    def test_catalog_summary_methods_request_bounded_contracts(self) -> None:
+        session = FakeSession([
+            FakeResponse([]),
+            FakeResponse([]),
+            FakeResponse([]),
+            FakeResponse({"id": "report-1", "evaluation": {"metrics": []}}),
+        ])
+        client = MLAppClient(session=session)
+
+        client.list_dataset_summaries()
+        client.list_model_summaries()
+        client.list_scoring_report_summaries(business_case_id="bc-1")
+        report = client.get_scoring_report("report-1")
+
+        self.assertEqual(session.requests[0][2]["params"], {"summary": True})
+        self.assertEqual(session.requests[1][2]["params"], {"summary": True})
+        self.assertEqual(
+            session.requests[2][2]["params"],
+            {"summary": True, "business_case_id": "bc-1"},
+        )
+        self.assertTrue(session.requests[3][1].endswith("/scoring-reports/report-1"))
+        self.assertEqual(report["id"], "report-1")
+
 
 if __name__ == "__main__":
     unittest.main()

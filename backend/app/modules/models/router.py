@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from app.core.security import Principal, require_user
 from app.modules.models.schemas import (
@@ -30,8 +30,12 @@ def list_training_jobs(principal: Principal = Depends(require_user)) -> list[Tra
 
 
 @router.get("", response_model=list[ModelArtifactRead])
-def list_models(principal: Principal = Depends(require_user)) -> list[ModelArtifactRead]:
-    return [ModelArtifactRead.model_validate(model) for model in service.list_models(principal)]
+def list_models(
+    summary: bool = Query(default=False),
+    principal: Principal = Depends(require_user),
+) -> list[ModelArtifactRead]:
+    models = service.list_model_summaries(principal) if summary else service.list_models(principal)
+    return [ModelArtifactRead.model_validate(model) for model in models]
 
 
 @router.get("/{logical_id}/versions", response_model=list[ModelArtifactRead])

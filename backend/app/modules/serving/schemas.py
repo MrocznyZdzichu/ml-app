@@ -128,6 +128,9 @@ class InferenceInputContractRead(BaseModel):
 
 class DeploymentModelOptionRead(BaseModel):
     model_id: str
+    name: str
+    version: str
+    business_case_id: str
     stage: str
     contract_signature: str
     compatible_with_active_champion: bool
@@ -189,8 +192,37 @@ class InferenceRequestRead(BaseModel):
     completed_at: datetime | None
 
 
+class InferenceRequestSummaryRead(BaseModel):
+    """Bounded list projection; retained payloads stay on the detail endpoint."""
+
+    id: str
+    deployment_id: str
+    deployment_revision_id: str
+    requested_by: str
+    correlation_id: str
+    status: InferenceStatus
+    record_count: int
+    warnings: list[str]
+    error_code: str
+    error_message: str
+    champion_model_id: str
+    requested_model_id: str
+    requested_role: str
+    served_model_id: str
+    served_role: str
+    fallback_used: bool
+    latency_ms: int | None
+    created_at: datetime
+    completed_at: datetime | None
+
+
 class InferencePage(BaseModel):
     items: list[InferenceRequestRead]
+    next_cursor: str | None = None
+
+
+class InferenceSummaryPage(BaseModel):
+    items: list[InferenceRequestSummaryRead]
     next_cursor: str | None = None
 
 

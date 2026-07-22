@@ -12,6 +12,7 @@ from app.modules.serving.schemas import (
     DeploymentRevisionRead,
     DeploymentStatusUpdate,
     InferencePage,
+    InferenceSummaryPage,
     InferenceDetail,
     InferenceInputContractRead,
     ModelServingUsageRead,
@@ -198,6 +199,26 @@ def inference_log(
     record_id: str = Query(default="", max_length=512),
 ) -> InferencePage:
     return service.inference_history(
+        deployment_id,
+        principal,
+        limit=limit,
+        cursor=cursor,
+        record_id=record_id,
+    )
+
+
+@router.get(
+    "/deployments/{deployment_id}/inference-log-summary",
+    response_model=InferenceSummaryPage,
+)
+def inference_log_summary(
+    deployment_id: str,
+    principal: Principal = Depends(require_user),
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: str = Query(default=""),
+    record_id: str = Query(default="", max_length=512),
+) -> InferenceSummaryPage:
+    return service.inference_history_summary(
         deployment_id,
         principal,
         limit=limit,

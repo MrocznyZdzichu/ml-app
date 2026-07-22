@@ -1,5 +1,5 @@
 import { Activity, Archive, ArrowLeft, BarChart3, Brain, Copy, Eye, GitBranch, History, KeyRound, Play, Plus, Rocket, RotateCcw, Search, Settings2, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
-import { useEffect, useMemo, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type MouseEvent } from "react";
 
 import { api } from "../api/client";
 import type {
@@ -12,7 +12,7 @@ import type {
   DeploymentModelOption,
   DeploymentRevision,
   DeploymentRole,
-  InferenceRequest,
+  InferenceRequestSummary,
   InferenceInputContract,
   ModelArtifact,
   ModelServingUsage,
@@ -177,7 +177,7 @@ export function ModelsPanel({
                   <button className="secondary-button compact-button" type="button" onClick={() => modelNavigation.openHistory(model)}>
                     <History size={14} /> Versions
                   </button>
-                  <button className="secondary-button compact-button" type="button" onClick={() => modelNavigation.openDirect(model)}>
+                  <button className="secondary-button compact-button" type="button" onClick={() => void api.getModel(model.id).then(modelNavigation.openDirect)}>
                     <Eye size={14} /> View latest
                   </button>
                 </div>
@@ -1298,6 +1298,7 @@ export function ServingPanel({
   models,
   initialDeploymentId = "",
   onRefresh,
+  onRegisterRefresh,
   setNotice
 }: {
   deployments: Deployment[];
@@ -1305,6 +1306,7 @@ export function ServingPanel({
   models: ModelArtifact[];
   initialDeploymentId?: string;
   onRefresh: () => Promise<void>;
+  onRegisterRefresh?: (handler: (() => Promise<void>) | null) => void;
   setNotice: NoticeSetter;
 }) {
   type ServingTab = "overview" | "test" | "traffic" | "monitoring" | "access";
@@ -1327,7 +1329,7 @@ export function ServingPanel({
   const [scorePhase, setScorePhase] = useState<"idle" | "scoring" | "success" | "error">("idle");
   const [scoreError, setScoreError] = useState("");
   const [scoreElapsedSeconds, setScoreElapsedSeconds] = useState(0);
-  const [history, setHistory] = useState<InferenceRequest[]>([]);
+  const [history, setHistory] = useState<InferenceRequestSummary[]>([]);
   const [inferenceDetail, setInferenceDetail] = useState<Record<string, unknown> | null>(null);
   const [replays, setReplays] = useState<ChallengerReplay[]>([]);
   const [revisions, setRevisions] = useState<DeploymentRevision[]>([]);
@@ -1408,17 +1410,13 @@ export function ServingPanel({
     setHistoryLoading(true);
     setHistoryError("");
     try {
-      const [page, replayItems, revisionItems, options] = await Promise.all([
-        api.inferenceLog(deployment.id, 50),
-        api.listChallengerReplays(deployment.id),
-        api.listDeploymentRevisions(deployment.id),
-        api.deploymentModelOptions(deployment.id)
+      const [page, replayItems] = await Promise.all([
+        api.inferenceLogSummary(deployment.id, 50),
+        api.listChallengerReplays(deployment.id)
       ]);
       setHistory(page.items);
       setReplays(replayItems);
-      setRevisions(revisionItems);
-      setModelOptions(options);
-      setNotice("Serving activity refreshed");
+      setNotice("Traffic & audit refreshed");
     } catch (error) {
       setHistoryError(error instanceof Error ? error.message : "Could not refresh serving activity");
     } finally {
@@ -1444,7 +1442,7 @@ export function ServingPanel({
     let active = true;
     setHistoryError("");
     Promise.all([
-      api.inferenceLog(selectedDeployment.id, 50),
+      api.inferenceLogSummary(selectedDeployment.id, 50),
       api.listChallengerReplays(selectedDeployment.id),
       api.listDeploymentRevisions(selectedDeployment.id),
       api.deploymentModelOptions(selectedDeployment.id)
@@ -1546,7 +1544,7 @@ export function ServingPanel({
       setScoreResult(result);
       setScorePhase("success");
       setNotice(`Scored with ${result.served_role} model ${shortId(result.model_id)}`);
-      void api.inferenceLog(selectedDeployment.id, 50)
+      void api.inferenceLogSummary(selectedDeployment.id, 50)
         .then((page) => setHistory(page.items))
         .catch((error) => setHistoryError(error instanceof Error ? error.message : "Prediction returned, but inference history could not be refreshed"));
     } catch (error) {
@@ -1723,13 +1721,62 @@ export function ServingPanel({
 
   async function refreshMonitoringRuns() {
     try {
-      setMonitoringRuns(await api.listOnlineMonitoringRuns());
+      const items = selectedDeployment
+        ? await api.listDeploymentMonitoringRuns(selectedDeployment.id)
+        : await api.listOnlineMonitoringRuns();
+      setMonitoringRuns((current) => selectedDeployment
+        ? [
+            ...items,
+            ...current.filter((item) => item.deployment_id !== selectedDeployment.id)
+          ]
+        : items);
       setMonitoringError("");
-      setNotice("Monitoring reports refreshed");
+      setNotice(selectedDeployment ? "Monitoring tab refreshed" : "Monitoring dashboard refreshed");
     } catch (error) {
       setMonitoringError(error instanceof Error ? error.message : "Could not refresh monitoring reports");
     }
   }
+
+  const refreshAllServingTabs = useCallback(async () => {
+    if (!selectedDeployment) {
+      const [, runs] = await Promise.all([onRefresh(), api.listOnlineMonitoringRuns()]);
+      setMonitoringRuns(runs);
+      setMonitoringError("");
+      return;
+    }
+
+    const challenger = scoreTarget === "champion" ? undefined : scoreTarget;
+    const [, page, replayItems, revisionItems, options, contract, runs, attachments] = await Promise.all([
+      onRefresh(),
+      api.inferenceLogSummary(selectedDeployment.id, 50),
+      api.listChallengerReplays(selectedDeployment.id),
+      api.listDeploymentRevisions(selectedDeployment.id),
+      api.deploymentModelOptions(selectedDeployment.id),
+      api.deploymentInputContract(selectedDeployment.id, challenger),
+      api.listDeploymentMonitoringRuns(selectedDeployment.id),
+      api.listBusinessCaseDataAttachments(selectedDeployment.business_case_id)
+    ]);
+    setHistory(page.items);
+    setReplays(replayItems);
+    setRevisions(revisionItems);
+    setModelOptions(options);
+    setInputContract(contract);
+    setFeatureValues(contract.example_features);
+    setMonitoringRuns((current) => [
+      ...runs,
+      ...current.filter((item) => item.deployment_id !== selectedDeployment.id)
+    ]);
+    setMonitoringAttachments(attachments);
+    setHistoryError("");
+    setContractError("");
+    setMonitoringError("");
+  }, [onRefresh, scoreTarget, selectedDeployment]);
+
+  useEffect(() => {
+    if (!onRegisterRefresh) return;
+    onRegisterRefresh(refreshAllServingTabs);
+    return () => onRegisterRefresh(null);
+  }, [onRegisterRefresh, refreshAllServingTabs]);
 
   async function archiveMonitoringRun(runId: string) {
     if (!window.confirm("Archive this monitoring run? Its immutable report and lineage will remain available through the API.")) return;
@@ -1797,6 +1844,8 @@ export function ServingPanel({
 
   function modelLabel(assignedModelId: string | undefined) {
     if (!assignedModelId) return "Not configured";
+    const option = modelOptions.find((item) => item.model_id === assignedModelId);
+    if (option) return `${option.name} · ${option.version}`;
     const model = models.find((item) => item.id === assignedModelId);
     return model ? `${model.name} · ${model.version}` : shortId(assignedModelId);
   }

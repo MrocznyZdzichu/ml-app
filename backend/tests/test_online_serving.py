@@ -66,6 +66,16 @@ class MemoryServingRepository:
         rows = [item for item in self.inferences.values() if item.deployment_id == deployment_id]
         return sorted(rows, key=lambda item: (item.created_at, item.id), reverse=True)[:limit]
 
+    def list_inference_summaries(self, deployment_id, limit, cursor, record_id=None):
+        rows = self.list_inference(deployment_id, limit, cursor, record_id)
+        return [
+            {
+                key: value for key, value in item.__dict__.items()
+                if key not in {"request_payload", "response_payload", "request_hash", "idempotency_key"}
+            }
+            for item in rows
+        ]
+
     def inference_items(self, request_id):
         return [item for item in self.items if item["request_id"] == request_id]
 
@@ -316,6 +326,11 @@ def test_versioned_roles_fallback_and_inference_history(principal) -> None:
         idempotency_key="two",
     )
     assert repository.deployments[deployment.id].status == DeploymentStatus.RUNNING
+    summary = service.inference_history_summary(deployment.id, principal, limit=1)
+    assert len(summary.items) == 1
+    assert summary.next_cursor is not None
+    assert "request_payload" not in summary.items[0].model_dump()
+    assert "response_payload" not in summary.items[0].model_dump()
 
 
 def test_developed_model_cannot_become_champion(principal) -> None:
