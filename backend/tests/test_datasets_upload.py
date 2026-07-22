@@ -364,6 +364,17 @@ def test_dataset_metadata_patch_merges_existing_metadata() -> None:
     assert metadata["data_roles"]["target_column"] == "target"
     assert metadata["data_roles"]["column_roles"]["amount"] == "feature_continuous"
 
+    summary = client.get(
+        "/api/v1/datasets?summary=true",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert summary.status_code == 200
+    summary_metadata = next(
+        item["metadata"] for item in summary.json() if item["id"] == dataset_id
+    )
+    assert "owner_notes" not in summary_metadata
+    assert summary_metadata["data_roles"]["target_column"] == "target"
+
 
 def test_dataset_sql_query_supports_quoted_dataset_name() -> None:
     client = TestClient(create_app())

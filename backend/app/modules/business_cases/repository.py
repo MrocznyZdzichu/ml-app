@@ -107,6 +107,21 @@ class BusinessCaseRepository(Protocol):
     def list_model_version_artifacts(self, logical_model_id: str) -> list[Artifact]:
         ...
 
+    def list_model_summary_artifacts_for_business_cases(
+        self, business_case_ids: set[str]
+    ) -> list[Artifact]:
+        ...
+
+    def list_feature_transform_summary_artifacts_for_business_cases(
+        self, business_case_ids: set[str]
+    ) -> list[Artifact]:
+        ...
+
+    def list_scoring_report_summary_artifacts_for_business_cases(
+        self, business_case_ids: set[str]
+    ) -> list[Artifact]:
+        ...
+
     def find_feature_transform_artifact(
         self,
         business_case_id: str,
@@ -185,6 +200,33 @@ class InMemoryBusinessCaseRepository:
             item for item in self._artifacts.values()
             if item.type == ArtifactType.MODEL_VERSION
             and str(item.metadata.get("logical_model_id") or "") == logical_model_id
+        ]
+
+    def list_model_summary_artifacts_for_business_cases(
+        self, business_case_ids: set[str]
+    ) -> list[Artifact]:
+        return [
+            item for item in self._artifacts.values()
+            if item.type == ArtifactType.MODEL_VERSION
+            and item.business_case_id in business_case_ids
+        ]
+
+    def list_feature_transform_summary_artifacts_for_business_cases(
+        self, business_case_ids: set[str]
+    ) -> list[Artifact]:
+        return [
+            item for item in self._artifacts.values()
+            if item.type == ArtifactType.FEATURE_TRANSFORM
+            and item.business_case_id in business_case_ids
+        ]
+
+    def list_scoring_report_summary_artifacts_for_business_cases(
+        self, business_case_ids: set[str]
+    ) -> list[Artifact]:
+        return [
+            item for item in self._artifacts.values()
+            if item.type == ArtifactType.REPORT
+            and item.business_case_id in business_case_ids
         ]
 
     def find_feature_transform_artifact(
@@ -373,6 +415,194 @@ class PostgresBusinessCaseRepository:
                         "pipeline_version_id": row["pipeline_version_id"] or "",
                         "pipeline_run_id": row["pipeline_run_id"] or "",
                         "pipeline_step_id": row["pipeline_step_id"] or "",
+                    },
+                },
+                created_by=row["created_by"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
+    def list_model_summary_artifacts_for_business_cases(
+        self, business_case_ids: set[str]
+    ) -> list[Artifact]:
+        """Project registry fields needed for discovery without large experiment payloads."""
+        self._ensure_initialized()
+        if not business_case_ids:
+            return []
+        statement = (
+            select(
+                artifacts_table.c.id,
+                artifacts_table.c.owner_id,
+                artifacts_table.c.reference_id,
+                artifacts_table.c.business_case_id,
+                artifacts_table.c.created_by,
+                artifacts_table.c.created_at,
+                artifacts_table.c.metadata["model_name"].as_string().label("model_name"),
+                artifacts_table.c.metadata["algorithm"].as_string().label("algorithm"),
+                artifacts_table.c.metadata["stage"].as_string().label("stage"),
+                artifacts_table.c.metadata["problem_type"].as_string().label("problem_type"),
+                artifacts_table.c.metadata["target_column"].as_string().label("target_column"),
+                artifacts_table.c.metadata["feature_columns"].label("feature_columns"),
+                artifacts_table.c.metadata["training_config"]["auto_feature_engineering"]["resolved_recipe"].label("resolved_recipe"),
+                artifacts_table.c.metadata["model_hash"].as_string().label("model_hash"),
+                artifacts_table.c.metadata["logical_model_id"].as_string().label("logical_model_id"),
+                artifacts_table.c.metadata["lineage"]["pipeline_id"].as_string().label("pipeline_id"),
+                artifacts_table.c.metadata["lineage"]["pipeline_version_id"].as_string().label("pipeline_version_id"),
+                artifacts_table.c.metadata["lineage"]["pipeline_run_id"].as_string().label("pipeline_run_id"),
+                artifacts_table.c.metadata["lineage"]["pipeline_step_id"].as_string().label("pipeline_step_id"),
+            )
+            .where(
+                artifacts_table.c.type == ArtifactType.MODEL_VERSION.value,
+                artifacts_table.c.business_case_id.in_(business_case_ids),
+            )
+            .order_by(artifacts_table.c.created_at.asc(), artifacts_table.c.id.asc())
+        )
+        with self.engine.begin() as connection:
+            rows = [row._mapping for row in connection.execute(statement)]
+        return [
+            Artifact(
+                id=row["id"],
+                owner_id=row["owner_id"],
+                type=ArtifactType.MODEL_VERSION,
+                reference_id=row["reference_id"],
+                origin=ArtifactOrigin.PLATFORM_GENERATED,
+                business_case_id=row["business_case_id"],
+                external_notes="",
+                metadata={
+                    "model_name": row["model_name"] or "Pipeline model",
+                    "algorithm": row["algorithm"] or "unknown",
+                    "stage": "developed" if (row["stage"] or "developed") == "candidate" else (row["stage"] or "developed"),
+                    "problem_type": row["problem_type"] or "",
+                    "target_column": row["target_column"] or "",
+                    "feature_columns": list(row["feature_columns"] or []),
+                    "training_config": {
+                        "auto_feature_engineering": {
+                            "resolved_recipe": dict(row["resolved_recipe"] or {})
+                        }
+                    } if row["resolved_recipe"] else {},
+                    "model_hash": row["model_hash"] or "",
+                    "logical_model_id": row["logical_model_id"] or row["id"],
+                    "lineage": {
+                        "pipeline_id": row["pipeline_id"] or "",
+                        "pipeline_version_id": row["pipeline_version_id"] or "",
+                        "pipeline_run_id": row["pipeline_run_id"] or "",
+                        "pipeline_step_id": row["pipeline_step_id"] or "",
+                    },
+                },
+                created_by=row["created_by"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
+    def list_feature_transform_summary_artifacts_for_business_cases(
+        self, business_case_ids: set[str]
+    ) -> list[Artifact]:
+        """Project only lineage used to bind models to fitted transforms."""
+        self._ensure_initialized()
+        if not business_case_ids:
+            return []
+        statement = (
+            select(
+                artifacts_table.c.id,
+                artifacts_table.c.owner_id,
+                artifacts_table.c.reference_id,
+                artifacts_table.c.business_case_id,
+                artifacts_table.c.created_by,
+                artifacts_table.c.created_at,
+                artifacts_table.c.metadata["lineage"]["pipeline_run_id"].as_string().label("pipeline_run_id"),
+                artifacts_table.c.metadata["lineage"]["pipeline_step_id"].as_string().label("pipeline_step_id"),
+            )
+            .where(
+                artifacts_table.c.type == ArtifactType.FEATURE_TRANSFORM.value,
+                artifacts_table.c.business_case_id.in_(business_case_ids),
+            )
+        )
+        with self.engine.begin() as connection:
+            rows = [row._mapping for row in connection.execute(statement)]
+        return [
+            Artifact(
+                id=row["id"],
+                owner_id=row["owner_id"],
+                type=ArtifactType.FEATURE_TRANSFORM,
+                reference_id=row["reference_id"],
+                origin=ArtifactOrigin.PLATFORM_GENERATED,
+                business_case_id=row["business_case_id"],
+                external_notes="",
+                metadata={
+                    "lineage": {
+                        "pipeline_run_id": row["pipeline_run_id"] or "",
+                        "pipeline_step_id": row["pipeline_step_id"] or "",
+                    }
+                },
+                created_by=row["created_by"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
+    def list_scoring_report_summary_artifacts_for_business_cases(
+        self, business_case_ids: set[str]
+    ) -> list[Artifact]:
+        """Project report catalog fields without the potentially large evaluation payload."""
+        self._ensure_initialized()
+        if not business_case_ids:
+            return []
+        statement = (
+            select(
+                artifacts_table.c.id,
+                artifacts_table.c.owner_id,
+                artifacts_table.c.reference_id,
+                artifacts_table.c.business_case_id,
+                artifacts_table.c.created_by,
+                artifacts_table.c.created_at,
+                artifacts_table.c.metadata["report_name"].as_string().label("report_name"),
+                artifacts_table.c.metadata["logical_report_id"].as_string().label("logical_report_id"),
+                artifacts_table.c.metadata["prediction_dataset_id"].as_string().label("prediction_dataset_id"),
+                artifacts_table.c.metadata["prediction_artifact_id"].as_string().label("prediction_artifact_id"),
+                artifacts_table.c.metadata["model_artifact_id"].as_string().label("model_artifact_id"),
+                artifacts_table.c.metadata["lineage"]["pipeline_id"].as_string().label("pipeline_id"),
+                artifacts_table.c.metadata["lineage"]["pipeline_version_id"].as_string().label("pipeline_version_id"),
+                artifacts_table.c.metadata["lineage"]["pipeline_run_id"].as_string().label("pipeline_run_id"),
+                artifacts_table.c.metadata["lineage"]["pipeline_step_id"].as_string().label("pipeline_step_id"),
+                artifacts_table.c.metadata["evaluation"]["problem_type"].as_string().label("problem_type"),
+                artifacts_table.c.metadata["evaluation"]["data_scope"]["evaluated_row_count"].as_integer().label("evaluated_row_count"),
+            )
+            .where(
+                artifacts_table.c.type == ArtifactType.REPORT.value,
+                artifacts_table.c.business_case_id.in_(business_case_ids),
+            )
+            .order_by(artifacts_table.c.created_at.desc())
+        )
+        with self.engine.begin() as connection:
+            rows = [row._mapping for row in connection.execute(statement)]
+        return [
+            Artifact(
+                id=row["id"],
+                owner_id=row["owner_id"],
+                type=ArtifactType.REPORT,
+                reference_id=row["reference_id"],
+                origin=ArtifactOrigin.PLATFORM_GENERATED,
+                business_case_id=row["business_case_id"],
+                external_notes="",
+                metadata={
+                    "report_name": row["report_name"] or "Scoring report",
+                    "logical_report_id": row["logical_report_id"] or row["id"],
+                    "prediction_dataset_id": row["prediction_dataset_id"] or "",
+                    "prediction_artifact_id": row["prediction_artifact_id"] or "",
+                    "model_artifact_id": row["model_artifact_id"] or "",
+                    "lineage": {
+                        "pipeline_id": row["pipeline_id"] or "",
+                        "pipeline_version_id": row["pipeline_version_id"] or "",
+                        "pipeline_run_id": row["pipeline_run_id"] or "",
+                        "pipeline_step_id": row["pipeline_step_id"] or "",
+                    },
+                    "evaluation": {
+                        "problem_type": row["problem_type"] or "",
+                        "data_scope": {
+                            "evaluated_row_count": int(row["evaluated_row_count"] or 0)
+                        },
                     },
                 },
                 created_by=row["created_by"],

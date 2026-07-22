@@ -1,4 +1,5 @@
 from collections import defaultdict
+from dataclasses import replace
 
 from fastapi import HTTPException, status
 
@@ -10,6 +11,8 @@ from app.modules.business_cases.repository import (
 )
 from app.modules.scoring_reports.domain import ScoringReport
 from app.modules.business_cases.service import BusinessCaseService
+from app.modules.sharing.domain import BusinessCaseAccessRole
+from app.modules.sharing.policy import access_policy
 
 
 class ScoringReportService:
@@ -21,6 +24,8 @@ class ScoringReportService:
         self,
         principal: Principal,
         business_case_id: str | None = None,
+        *,
+        summary: bool = False,
     ) -> list[ScoringReport]:
         if isinstance(self.artifacts, PostgresBusinessCaseRepository):
             cases = self.business_cases.list_business_cases(principal)
@@ -32,15 +37,57 @@ class ScoringReportService:
             case_ids = None
             owners = {principal.user_id}
         artifacts = (
-            self.artifacts.list_artifacts_for_business_cases(case_ids, ArtifactType.REPORT)
+            (
+                self.artifacts.list_scoring_report_summary_artifacts_for_business_cases(case_ids)
+                if summary
+                else self.artifacts.list_artifacts_for_business_cases(case_ids, ArtifactType.REPORT)
+            )
             if case_ids is not None
             else [item for owner_id in owners for item in self.artifacts.list_artifacts(owner_id, ArtifactType.REPORT)]
         )
         reports = [self._from_artifact(artifact) for artifact in artifacts]
+        if summary and case_ids is None:
+            reports = [
+                replace(
+                    report,
+                    evaluation={
+                        "problem_type": report.problem_type,
+                        "data_scope": {"evaluated_row_count": report.evaluated_row_count},
+                    },
+                )
+                for report in reports
+            ]
         self._assign_version_numbers(reports)
         return sorted(reports, key=lambda item: (item.created_at, item.id), reverse=True)
 
     def get_report(self, report_id: str, principal: Principal) -> ScoringReport:
+        if isinstance(self.artifacts, PostgresBusinessCaseRepository):
+            artifact = self.artifacts.get_artifact(report_id)
+            if artifact is None or artifact.type != ArtifactType.REPORT or not artifact.business_case_id:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Scoring report not found",
+                )
+            access_policy.require_business_case(
+                principal,
+                artifact.business_case_id,
+                BusinessCaseAccessRole.REPORT_VIEWER,
+            )
+            report = self._from_artifact(artifact)
+            summary = next(
+                (
+                    item for item in self.list_reports(
+                        principal,
+                        artifact.business_case_id,
+                        summary=True,
+                    )
+                    if item.id == report_id
+                ),
+                None,
+            )
+            if summary is not None:
+                report.version_number = summary.version_number
+            return report
         report = next(
             (item for item in self.list_reports(principal) if item.id == report_id),
             None,
@@ -52,10 +99,16 @@ class ScoringReportService:
             )
         return report
 
-    def list_versions(self, logical_id: str, principal: Principal) -> list[ScoringReport]:
+    def list_versions(
+        self,
+        logical_id: str,
+        principal: Principal,
+        *,
+        summary: bool = False,
+    ) -> list[ScoringReport]:
         versions = [
             item
-            for item in self.list_reports(principal)
+            for item in self.list_reports(principal, summary=summary)
             if item.logical_id == logical_id
         ]
         if not versions:

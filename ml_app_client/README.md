@@ -1,9 +1,10 @@
 # ML App Python client
 
 `ml_app_client` is the supported, deliberately small integration interface for
-dataset ingestion and pipeline execution. It streams CSV/Parquet uploads from
-disk, resolves human-readable Business Case, dataset and pipeline names, starts
-published pipeline versions, and polls bounded run metadata.
+dataset ingestion, pipeline execution, model lifecycle, scoring, online serving,
+and monitoring. It streams CSV/Parquet uploads from disk, resolves human-readable
+Business Case, dataset, pipeline, model, and service names, starts asynchronous
+workflows, and polls bounded run metadata.
 
 ```python
 from ml_app_client import MLAppClient
@@ -39,6 +40,16 @@ version and the backend records the resolved input versions, row counts and
 lineage. Dataset previews are bounded to at most 50,000 rows. Downloads stream
 the authorized persistent CSV/Parquet file to disk without buffering the full
 dataset in client memory.
+
+For interactive catalogs, request the bounded list projections and fetch full
+detail only after selecting an item:
+
+```python
+datasets = client.list_dataset_summaries()
+models = client.list_model_summaries()
+reports = client.list_scoring_report_summaries(business_case_id="bc-id")
+full_report = client.get_scoring_report(reports[0]["id"])
+```
 
 ## Online model serving
 
@@ -100,7 +111,29 @@ result = client.predict(
 )
 print(result.predictions[0]["prediction"])
 
-page = client.inference_history(service, record_id="estate-2026-0001")
+page = client.inference_history_summary(service, record_id="estate-2026-0001")
+# Fetch retained payloads and per-model executions only for an opened row.
+request = client.inference_request(service, page["items"][0]["id"])
+
+# Later, attach an actuals dataset to the Business Case as monitoring_actuals.
+monitoring = client.run_deployment_monitoring(
+    service,
+    actuals="estates_actuals",
+    since="2026-07-01T00:00:00Z",
+    until="2026-07-08T00:00:00Z",
+    aggregation_granularity="hour",
+    actuals_target_column="sale_price",
+    actuals_record_id_column="estate_id",
+)
+completed_monitoring = client.wait_for_online_monitoring_run(monitoring)
+print(completed_monitoring.report["performance"])
+
+# Numeric metrics are stored for every full UTC bucket. Fetch bounded chart
+# diagnostics for only the periods that should be compared (maximum eight).
+bucket_charts = client.get_online_monitoring_bucket_evaluations(
+    completed_monitoring,
+    ["2026-07-01T19:00:00+00:00", "2026-07-01T20:00:00+00:00"],
+)
 
 # Retire a trial service without destroying its governed history.
 client.set_deployment_status(

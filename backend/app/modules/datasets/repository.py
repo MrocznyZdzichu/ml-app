@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -25,6 +26,13 @@ from app.modules.datasets.domain import DataAssetStatus, SourceType
 
 DATASET_SCHEMA = "mlapp"
 metadata = MetaData(schema=DATASET_SCHEMA)
+DATASET_SUMMARY_METADATA_KEYS = (
+    "pipeline_output",
+    "origin",
+    "source_schema",
+    "data_roles",
+    "data_view",
+)
 
 data_assets_table = Table(
     "data_assets",
@@ -75,6 +83,9 @@ class DatasetRepository(Protocol):
     def list_all(self) -> list[DataAsset]:
         ...
 
+    def list_summaries(self, owner_id: str | None = None) -> list[DataAsset]:
+        ...
+
     def get(self, asset_id: str) -> DataAsset | None:
         ...
 
@@ -107,6 +118,20 @@ class InMemoryDatasetRepository:
 
     def list_all(self) -> list[DataAsset]:
         return list(self._items.values())
+
+    def list_summaries(self, owner_id: str | None = None) -> list[DataAsset]:
+        return [
+            replace(
+                asset,
+                metadata={
+                    key: asset.metadata[key]
+                    for key in DATASET_SUMMARY_METADATA_KEYS
+                    if key in asset.metadata
+                },
+            )
+            for asset in self._items.values()
+            if owner_id is None or asset.owner_id == owner_id
+        ]
 
     def get(self, asset_id: str) -> DataAsset | None:
         return self._items.get(asset_id)
@@ -177,6 +202,33 @@ class PostgresDatasetRepository:
         statement = select(data_assets_table).order_by(data_assets_table.c.created_at.desc())
         with self.engine.begin() as connection:
             return [self._from_record(row._mapping) for row in connection.execute(statement)]
+
+    def list_summaries(self, owner_id: str | None = None) -> list[DataAsset]:
+        """Project catalog fields and the small metadata subset consumed by the UI."""
+        self._ensure_initialized()
+        columns = [column for column in data_assets_table.c if column.name != "metadata"]
+        statement = select(
+            *columns,
+            *(
+                data_assets_table.c.metadata[key].label(f"metadata_{key}")
+                for key in DATASET_SUMMARY_METADATA_KEYS
+            ),
+        )
+        if owner_id is not None:
+            statement = statement.where(data_assets_table.c.owner_id == owner_id)
+        statement = statement.order_by(data_assets_table.c.created_at.desc())
+        with self.engine.begin() as connection:
+            rows = [row._mapping for row in connection.execute(statement)]
+        summaries: list[DataAsset] = []
+        for row in rows:
+            values = dict(row)
+            values["metadata"] = {
+                key: values.get(f"metadata_{key}")
+                for key in DATASET_SUMMARY_METADATA_KEYS
+                if values.get(f"metadata_{key}") is not None
+            }
+            summaries.append(self._from_record(values))
+        return summaries
 
     def get(self, asset_id: str) -> DataAsset | None:
         self._ensure_initialized()

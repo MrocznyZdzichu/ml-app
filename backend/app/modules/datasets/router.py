@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import FileResponse
 
 from app.core.security import Principal, require_user
@@ -79,8 +79,14 @@ def create_data_view(
 
 
 @router.get("", response_model=list[DataAssetRead])
-def list_datasets(principal: Principal = Depends(require_user)) -> list[DataAssetRead]:
-    return [DataAssetRead.model_validate(asset) for asset in service.list_assets(principal)]
+def list_datasets(
+    summary: bool = Query(default=False),
+    principal: Principal = Depends(require_user),
+) -> list[DataAssetRead]:
+    return [
+        DataAssetRead.model_validate(asset)
+        for asset in service.list_assets(principal, summary=summary)
+    ]
 
 
 @router.get("/{dataset_id}/preview", response_model=DataAssetPreviewRead)

@@ -4,17 +4,21 @@
 
 The application is organized around a common analytics lifecycle:
 
-1. Users authenticate and work inside isolated projects/workspaces.
-2. Data assets are registered from files, databases, APIs, or future connectors.
+1. Users authenticate and work inside governed Business Cases or with explicitly
+   shared loose data assets.
+2. Data assets are currently registered from local CSV/Parquet files or derived
+   views; databases, APIs, and object-storage connectors are future adapters.
 3. Data profiling, descriptive statistics, and visualizations are created.
 4. ML experiments train candidate models and record parameters, metrics, and artifacts.
-5. Approved models are deployed as isolated scoring services.
+5. Production-stage models are assigned to versioned scoring services. There is
+   no separate approval-gate role in the current lifecycle.
 6. Data, analyses, visualizations, models, and exports can be shared.
 
 ## Service Boundaries
 
 - API: owns HTTP contracts, authorization checks, orchestration, and metadata.
-- Worker: owns long-running jobs such as ingestion, profiling, training, export, and batch scoring.
+- Worker: owns long-running jobs such as ingestion, profiling, training, export,
+  batch scoring, challenger replay, and online monitoring.
 - PostgreSQL: stores users, permissions, metadata, experiment runs, and audit events.
 - Local repository (`data/repository`): currently stores uploaded datasets,
   generated Parquet, fitted transforms, reports, and trained model files.
@@ -23,19 +27,36 @@ The application is organized around a common analytics lifecycle:
 - Redis: broker/cache for background work.
 - Model runtime: a small container image used to expose online scoring for a model artifact.
 
+## Refresh and catalog contracts
+
+The application refreshes the active section rather than reloading the complete
+workspace. A section coordinator reloads only its shared catalogs; panels with
+local state such as Jobs, Share, and Serving register an additional coordinator
+for the top Refresh action. A refresh inside a tab reloads only that tab's data.
+
+Large registries use explicit summary contracts for discovery:
+`GET /datasets?summary=true`, `GET /models?summary=true`, and
+`GET /scoring-reports?summary=true`. They preserve identifiers, governance,
+lineage fields and the workflow configuration required by the UI, while omitting
+large experiment/evaluation or non-presented metadata. Existing endpoints without
+`summary=true` remain backward compatible. Full payloads are fetched on demand
+from the resource detail endpoints.
+
 ## Backend Modules
 
 Each module follows the same direction:
 
 - `schemas.py` contains API DTOs.
 - `domain.py` contains domain entities and enums.
-- `repository.py` contains persistence contracts and temporary in-memory adapters.
+- `repository.py` contains persistence contracts and their PostgreSQL or
+  explicitly process-local adapters.
 - `service.py` contains use-case oriented classes.
 - `router.py` exposes FastAPI endpoints.
 
 Dataset, auth, model, serving, sharing, analysis, and export modules follow this
-layout. Dataset, auth, sharing and audit metadata are backed by PostgreSQL
-repositories.
+layout. Dataset, pipeline, artifact, auth, sharing, audit, deployment, Inference
+Log, replay, and online-monitoring metadata are backed by PostgreSQL. Legacy
+standalone analysis/training state and export jobs remain process-local.
 
 ## Identity and Access Control
 
@@ -246,9 +267,24 @@ Batch/Test Scoring and Monitoring retain separate contracts. A prediction
 dataset is row-level and lineage-backed; a report contains bounded aggregates,
 diagnostics and provenance rather than copied prediction rows.
 
-The first version uses a reusable model runtime image. The registry stores model
-artifact metadata, and a deployment spec points to the artifact and runtime image.
-Online scoring calls `/score`; batch scoring is queued through the worker.
+Online serving stores durable services as immutable deployment revisions with
+champion, challenger, shadow, and fallback assignments. The central API owns
+authentication, authorization, input-contract validation, idempotency, routing,
+fallback, and the durable Inference Log. It applies the fitted feature transform
+from the pinned training bundle and calls a private reusable model runtime with
+the immutable model artifact. A response is successful only after its governed
+history is persisted.
+
+Manual online monitoring is a separate asynchronous workflow. It freezes a
+half-open `scored_at` window and log cutoff, streams the full matching Inference
+Log into a Parquet prediction snapshot, optionally joins later actuals, and
+creates an immutable `online_service_monitoring_report`. UTC calendar
+aggregations store full-bucket scalar metric series. Bounded chart diagnostics
+for up to eight explicitly selected buckets are calculated from the immutable
+joined Parquet relation and never return row-level data to the browser.
+
+The local Compose topology uses one private reusable runtime rather than one
+container per service. Batch scoring and monitoring remain queued worker jobs.
 
 For production, the same contract can be backed by Docker Engine, Kubernetes,
 ECS, or another scheduler without changing the user-facing API.

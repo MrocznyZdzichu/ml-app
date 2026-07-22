@@ -1,5 +1,5 @@
 import { KeyRound, Plus, RotateCcw, Shield, Share2, Trash2, UserCog, Users } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 
 import { api } from "../api/client";
@@ -23,12 +23,14 @@ export function CollaborationPanel({
   datasets,
   currentUser,
   onRefresh,
+  onRegisterRefresh,
   setNotice
 }: {
   businessCases: BusinessCase[];
   datasets: DataAsset[];
   currentUser: UserProfile;
   onRefresh: () => Promise<void>;
+  onRegisterRefresh: (handler: (() => Promise<void>) | null) => void;
   setNotice: NoticeSetter;
 }) {
   const isAdmin = currentUser.roles.includes("administrator");
@@ -67,28 +69,49 @@ export function CollaborationPanel({
     ? groups.map((group) => ({ id: group.id, label: group.name }))
     : users.map((user) => ({ id: user.id, label: user.display_name || user.email }));
 
-  async function refreshDirectory() {
+  const refreshDirectory = useCallback(async () => {
     const [directory, groupItems] = await Promise.all([api.listDirectoryUsers(), api.listGroups()]);
     setUsers(directory);
     setGroups(groupItems);
     if (isAdmin) setAdminUsers(await api.listAdminUsers());
-  }
+  }, [isAdmin]);
+
+  const refreshSelectedAccess = useCallback(async (includeAllTabs: boolean) => {
+    const selectedDataset = datasets.find((item) => item.id === selectedDatasetId);
+    await Promise.all([
+      (includeAllTabs || activeTab === "groups") && selectedGroupId
+        ? api.listGroupMembers(selectedGroupId).then(setMembers)
+        : Promise.resolve(),
+      (includeAllTabs || activeTab === "sharing") && selectedBusinessCaseId
+        ? api.listBusinessCaseGrants(selectedBusinessCaseId).then(setBcGrants)
+        : Promise.resolve(),
+      (includeAllTabs || activeTab === "sharing") && selectedDatasetId
+        ? api.listResourceGrants(
+            selectedDataset?.source_type === "view" ? "data_view" : "dataset",
+            selectedDatasetId
+          ).then(setResourceGrants)
+        : Promise.resolve(),
+    ]);
+  }, [activeTab, datasets, selectedBusinessCaseId, selectedDatasetId, selectedGroupId]);
+
+  const refreshAllShare = useCallback(async () => {
+    await Promise.all([refreshDirectory(), onRefresh(), refreshSelectedAccess(true)]);
+  }, [onRefresh, refreshDirectory, refreshSelectedAccess]);
 
   async function handleRefresh() {
     if (isRefreshing) return;
     setIsRefreshing(true);
-    const selectedDataset = datasets.find((item) => item.id === selectedDatasetId);
     try {
-      await Promise.all([
-        refreshDirectory(),
-        onRefresh(),
-        selectedGroupId ? api.listGroupMembers(selectedGroupId).then(setMembers) : Promise.resolve(),
-        selectedBusinessCaseId ? api.listBusinessCaseGrants(selectedBusinessCaseId).then(setBcGrants) : Promise.resolve(),
-        selectedDatasetId
-          ? api.listResourceGrants(selectedDataset?.source_type === "view" ? "data_view" : "dataset", selectedDatasetId).then(setResourceGrants)
-          : Promise.resolve(),
-      ]);
-      setNotice("Sharing data refreshed");
+      if (activeTab === "password") {
+        setNotice("Password form does not require remote refresh");
+      } else {
+        await Promise.all([
+          refreshDirectory(),
+          activeTab === "sharing" ? onRefresh() : Promise.resolve(),
+          refreshSelectedAccess(false),
+        ]);
+        setNotice(`${activeTab === "groups" ? "Groups" : "Sharing"} refreshed`);
+      }
     } catch (error) {
       showError(error);
     } finally {
@@ -97,8 +120,13 @@ export function CollaborationPanel({
   }
 
   useEffect(() => {
+    onRegisterRefresh(refreshAllShare);
+    return () => onRegisterRefresh(null);
+  }, [onRegisterRefresh, refreshAllShare]);
+
+  useEffect(() => {
     refreshDirectory().catch(showError);
-  }, [isAdmin]);
+  }, [refreshDirectory]);
 
   useEffect(() => {
     if (!selectedGroupId) {

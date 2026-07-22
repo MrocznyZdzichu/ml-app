@@ -617,6 +617,20 @@ def replay_challenger(replay_job_id: str) -> dict[str, str | int]:
     }
 
 
+@celery_app.task(name="app.worker.tasks.run_online_monitoring", track_started=True)
+def run_online_monitoring(run_id: str) -> dict[str, str | int]:
+    from app.modules.serving.monitoring import OnlineMonitoringService
+
+    run = OnlineMonitoringService().execute_run(run_id)
+    return {
+        "monitoring_run_id": run.id,
+        "status": run.status.value,
+        "processed_requests": run.processed_request_count,
+        "processed_rows": run.processed_row_count,
+        "matched_actuals": run.matched_row_count,
+    }
+
+
 @celery_app.task(name="app.worker.tasks.prune_serving_inference_history")
 def prune_serving_inference_history() -> dict[str, int]:
     from datetime import datetime, timedelta, timezone

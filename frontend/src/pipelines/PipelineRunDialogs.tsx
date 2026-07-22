@@ -1331,6 +1331,91 @@ export function ModelPerformanceReport({ report }: { report: ModelEvaluationSnap
   );
 }
 
+export function ModelPerformanceSeriesReport({
+  series
+}: {
+  series: Array<{ label: string; evaluation: ModelEvaluationSnapshot }>;
+}) {
+  const available = series.filter((item) => item.evaluation.status === "available");
+  if (!available.length) return <div className="evaluation-empty"><strong>No chart series available</strong><p>Select a period containing matched actuals.</p></div>;
+  const curveKeys = Array.from(new Set(available.flatMap((item) => Object.keys(item.evaluation.curves ?? {}))));
+  const hasScoreDistribution = available.some((item) => item.evaluation.distributions?.score_by_actual?.length);
+  const hasResiduals = available.some((item) => item.evaluation.residuals);
+  return <div className="evaluation-report evaluation-series-report">
+    <ComparisonLegend series={available} />
+    {curveKeys.length > 0 && <div className="evaluation-chart-grid">{curveKeys.map((key) => {
+      const curves = available.flatMap((item, index) => {
+        const curve = item.evaluation.curves?.[key];
+        return curve ? [{ label: item.label, curve, index }] : [];
+      });
+      return <section className="evaluation-section" key={key}><header><div><h4>{evaluationCurveTitle(key)}</h4><p>Selected aggregation periods on a shared scale.</p></div></header><ComparisonCurveChart series={curves} diagonal={key === "roc" || key === "calibration"} /></section>;
+    })}</div>}
+    {hasScoreDistribution && <section className="evaluation-section"><header><div><h4>Score distribution</h4><p>Normalized distribution for every selected period.</p></div></header><ComparisonDistributionChart series={available.flatMap((item, index) => {
+      const bins = item.evaluation.distributions?.score_by_actual;
+      return bins?.length ? [{ label: item.label, index, bins: bins.map((bin) => ({ lower: bin.lower, upper: bin.upper, count: bin.negative_count + bin.positive_count })) }] : [];
+    })} xLabel="Prediction score" /></section>}
+    {hasResiduals && <>
+      <section className="evaluation-section"><header><div><h4>Residual distribution</h4><p>Normalized residual distribution for every selected period.</p></div></header><ComparisonDistributionChart series={available.flatMap((item, index) => item.evaluation.residuals ? [{ label: item.label, index, bins: item.evaluation.residuals.histogram }] : [])} xLabel="Residual (predicted − actual)" /></section>
+      <section className="evaluation-section"><header><div><h4>Actual vs predicted</h4><p>Deterministic rendering samples, colored by selected period.</p></div></header><ComparisonScatterChart series={available.flatMap((item, index) => item.evaluation.residuals ? [{ label: item.label, index, points: item.evaluation.residuals.actual_vs_predicted.points }] : [])} /></section>
+      <section className="evaluation-section"><header><div><h4>Residual QQ-plot</h4><p>Full-data residual quantiles, colored by selected period.</p></div></header><ComparisonQqChart series={available.flatMap((item, index) => item.evaluation.residuals?.qq_plot ? [{ label: item.label, index, points: item.evaluation.residuals.qq_plot.points }] : [])} /></section>
+    </>}
+  </div>;
+}
+
+function ComparisonLegend({ series }: { series: Array<{ label: string }> }) {
+  return <div className="evaluation-comparison-legend" aria-label="Selected period series">{series.map((item, index) => <span key={item.label} className={`comparison-series-${index % 8}`}><i />{item.label}</span>)}</div>;
+}
+
+function ComparisonCurveChart({ series, diagonal }: {
+  series: Array<{ label: string; index: number; curve: NonNullable<ModelEvaluationSnapshot["curves"]>[string] }>;
+  diagonal: boolean;
+}) {
+  const plot = { left: 58, right: 535, top: 20, bottom: 250 };
+  const ticks = [0, 0.25, 0.5, 0.75, 1];
+  return <div className="evaluation-line-chart"><svg viewBox="0 0 560 300" role="img" aria-label="Comparison of selected period curves">
+    {ticks.map((tick) => <g key={tick}><line x1={plot.left + tick * (plot.right - plot.left)} y1={plot.top} x2={plot.left + tick * (plot.right - plot.left)} y2={plot.bottom} className="grid" /><line x1={plot.left} y1={plot.bottom - tick * (plot.bottom - plot.top)} x2={plot.right} y2={plot.bottom - tick * (plot.bottom - plot.top)} className="grid" /><text x={plot.left + tick * (plot.right - plot.left)} y={plot.bottom + 18} className="tick" textAnchor="middle">{tick.toFixed(2)}</text><text x={plot.left - 10} y={plot.bottom - tick * (plot.bottom - plot.top) + 4} className="tick" textAnchor="end">{tick.toFixed(2)}</text></g>)}
+    <line x1={plot.left} y1={plot.bottom} x2={plot.right} y2={plot.bottom} className="axis" /><line x1={plot.left} y1={plot.top} x2={plot.left} y2={plot.bottom} className="axis" />{diagonal && <line x1={plot.left} y1={plot.bottom} x2={plot.right} y2={plot.top} className="baseline" />}
+    {series.map((item) => <polyline key={item.label} className={`comparison-line comparison-series-${item.index % 8}`} points={[...item.curve.points].sort((a, b) => a.x - b.x).map((point) => `${plot.left + point.x * (plot.right - plot.left)},${plot.bottom - point.y * (plot.bottom - plot.top)}`).join(" ")} />)}
+    <text x={(plot.left + plot.right) / 2} y="292" className="axis-title" textAnchor="middle">{series[0]?.curve.x_label ?? "X"}</text><text x="15" y={(plot.top + plot.bottom) / 2} className="axis-title" textAnchor="middle" transform={`rotate(-90 15 ${(plot.top + plot.bottom) / 2})`}>{series[0]?.curve.y_label ?? "Y"}</text>
+  </svg></div>;
+}
+
+function ComparisonDistributionChart({ series, xLabel }: {
+  series: Array<{ label: string; index: number; bins: Array<{ lower: number; upper: number; count: number }> }>;
+  xLabel: string;
+}) {
+  const plot = { left: 62, right: 690, top: 28, bottom: 250 };
+  const allBins = series.flatMap((item) => item.bins);
+  if (!allBins.length) return <div className="catalog-empty">No distribution data.</div>;
+  const min = Math.min(...allBins.map((bin) => bin.lower));
+  const max = Math.max(...allBins.map((bin) => bin.upper));
+  const span = max - min || 1;
+  return <div className="evaluation-histogram-chart"><svg viewBox="0 0 720 300" role="img" aria-label={`${xLabel} comparison`}>
+    {[0, 0.25, 0.5, 0.75, 1].map((tick) => <g key={tick}><line x1={plot.left} y1={plot.bottom - tick * (plot.bottom - plot.top)} x2={plot.right} y2={plot.bottom - tick * (plot.bottom - plot.top)} className="grid" /><text x={plot.left - 10} y={plot.bottom - tick * (plot.bottom - plot.top) + 4} className="tick" textAnchor="end">{`${Math.round(tick * 100)}%`}</text></g>)}
+    <line x1={plot.left} y1={plot.bottom} x2={plot.right} y2={plot.bottom} className="axis" /><line x1={plot.left} y1={plot.top} x2={plot.left} y2={plot.bottom} className="axis" />
+    {series.map((item) => { const total = item.bins.reduce((sum, bin) => sum + bin.count, 0) || 1; return <polyline key={item.label} className={`comparison-line comparison-series-${item.index % 8}`} points={item.bins.map((bin) => `${plot.left + (((bin.lower + bin.upper) / 2 - min) / span) * (plot.right - plot.left)},${plot.bottom - (bin.count / total) * (plot.bottom - plot.top)}`).join(" ")} />; })}
+    {[0, 0.5, 1].map((tick) => <text key={tick} x={plot.left + tick * (plot.right - plot.left)} y={plot.bottom + 19} className="tick" textAnchor="middle">{formatChartTick(min + tick * span)}</text>)}<text x={(plot.left + plot.right) / 2} y="292" className="axis-title" textAnchor="middle">{xLabel}</text><text x="16" y={(plot.top + plot.bottom) / 2} className="axis-title" textAnchor="middle" transform={`rotate(-90 16 ${(plot.top + plot.bottom) / 2})`}>Share of rows</text>
+  </svg></div>;
+}
+
+function ComparisonScatterChart({ series }: { series: Array<{ label: string; index: number; points: Array<{ actual: number; predicted: number }> }> }) {
+  const points = series.flatMap((item) => item.points);
+  if (!points.length) return <div className="catalog-empty">No scatter points available.</div>;
+  const values = points.flatMap((point) => [point.actual, point.predicted]);
+  const min = Math.min(...values); const max = Math.max(...values); const span = max - min || 1;
+  const plot = { left: 72, right: 535, top: 22, bottom: 345 };
+  return <div className="evaluation-line-chart regression-chart"><svg viewBox="0 0 560 400" role="img" aria-label="Actual versus predicted by period"><line x1={plot.left} y1={plot.bottom} x2={plot.right} y2={plot.bottom} className="axis" /><line x1={plot.left} y1={plot.top} x2={plot.left} y2={plot.bottom} className="axis" /><line x1={plot.left} y1={plot.bottom} x2={plot.right} y2={plot.top} className="baseline" />{series.flatMap((item) => item.points.map((point, index) => <circle key={`${item.label}-${index}`} cx={plot.left + (point.actual - min) / span * (plot.right - plot.left)} cy={plot.bottom - (point.predicted - min) / span * (plot.bottom - plot.top)} r="2.2" className={`comparison-point comparison-series-${item.index % 8}`} />))}<text x={(plot.left + plot.right) / 2} y="392" className="axis-title" textAnchor="middle">Actual value</text><text x="16" y={(plot.top + plot.bottom) / 2} className="axis-title" textAnchor="middle" transform={`rotate(-90 16 ${(plot.top + plot.bottom) / 2})`}>Predicted value</text></svg></div>;
+}
+
+function ComparisonQqChart({ series }: { series: Array<{ label: string; index: number; points: Array<{ theoretical: number; observed: number }> }> }) {
+  const points = series.flatMap((item) => item.points);
+  if (!points.length) return <div className="catalog-empty">No residual quantiles available.</div>;
+  const xMin = Math.min(...points.map((point) => point.theoretical)); const xMax = Math.max(...points.map((point) => point.theoretical));
+  const yMin = Math.min(...points.map((point) => point.observed)); const yMax = Math.max(...points.map((point) => point.observed));
+  const xSpan = xMax - xMin || 1; const ySpan = yMax - yMin || 1; const plot = { left: 72, right: 535, top: 22, bottom: 345 };
+  return <div className="evaluation-line-chart regression-chart"><svg viewBox="0 0 560 400" role="img" aria-label="Residual QQ comparison"><line x1={plot.left} y1={plot.bottom} x2={plot.right} y2={plot.bottom} className="axis" /><line x1={plot.left} y1={plot.top} x2={plot.left} y2={plot.bottom} className="axis" />{series.map((item) => <polyline key={item.label} className={`comparison-line comparison-series-${item.index % 8}`} points={item.points.map((point) => `${plot.left + (point.theoretical - xMin) / xSpan * (plot.right - plot.left)},${plot.bottom - (point.observed - yMin) / ySpan * (plot.bottom - plot.top)}`).join(" ")} />)}<text x={(plot.left + plot.right) / 2} y="392" className="axis-title" textAnchor="middle">Theoretical normal quantile</text><text x="16" y={(plot.top + plot.bottom) / 2} className="axis-title" textAnchor="middle" transform={`rotate(-90 16 ${(plot.top + plot.bottom) / 2})`}>Observed residual quantile</text></svg></div>;
+}
+
 function TemporaryScoringReportDialog({
   report,
   onBack,

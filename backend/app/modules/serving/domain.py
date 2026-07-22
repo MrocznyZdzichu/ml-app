@@ -41,6 +41,13 @@ class ReplayStatus(str, Enum):
     FAILED = "failed"
 
 
+class MonitoringRunStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
 @dataclass(frozen=True)
 class ModelAssignment:
     model_id: str
@@ -92,6 +99,8 @@ class InferenceRequest:
     error_code: str = ""
     error_message: str = ""
     champion_model_id: str = ""
+    requested_model_id: str = ""
+    requested_role: str = "champion"
     served_model_id: str = ""
     served_role: str = ""
     fallback_used: bool = False
@@ -119,6 +128,47 @@ class ChallengerReplayJob:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     started_at: datetime | None = None
     completed_at: datetime | None = None
+
+
+@dataclass
+class OnlineMonitoringRun:
+    id: str
+    deployment_id: str
+    business_case_id: str
+    owner_id: str
+    requested_by: str
+    status: MonitoringRunStatus
+    since: datetime
+    until: datetime
+    source_before: datetime
+    actuals_dataset_id: str
+    aggregation_granularity: str = "none"
+    actuals_artifact_id: str = ""
+    join_strategy: str = "auto"
+    actuals_prediction_id_column: str = "prediction_id"
+    actuals_request_id_column: str = "request_id"
+    actuals_record_id_column: str = ""
+    actuals_target_column: str = ""
+    problem_type: str = ""
+    target_column: str = ""
+    time_basis: str = "scored_at"
+    processed_request_count: int = 0
+    processed_row_count: int = 0
+    matched_row_count: int = 0
+    missing_actuals_count: int = 0
+    unmatched_actuals_count: int = 0
+    snapshot_dataset_id: str = ""
+    joined_dataset_id: str = ""
+    report_artifact_id: str = ""
+    report: dict[str, Any] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    error_message: str = ""
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    archived_at: datetime | None = None
+    archived_by: str = ""
+    archive_reason: str = ""
 
 
 @dataclass

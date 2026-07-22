@@ -10,6 +10,7 @@ from ml_app_client import (
     ApiError,
     AuthorizationError,
     ConflictError,
+    Dataset,
     Deployment,
     MLAppClient,
     PipelineRun,
@@ -678,6 +679,122 @@ class MLAppClientTests(unittest.TestCase):
             {"challenger_model_id": "challenger-1"},
         )
 
+    def test_online_monitoring_run_uses_typed_objects_and_full_time_window(self) -> None:
+        deployment = Deployment.from_api({
+            "id": "deployment-1", "name": "Churn", "slug": "churn",
+            "business_case_id": "bc-1", "status": "running",
+            "endpoint_url": "/predictions", "active_revision": {"id": "revision-1"},
+        })
+        actuals = Dataset.from_api(dataset_payload(id="actuals-v4", name="churn_actuals"))
+        response = {
+            "id": "monitoring-1", "deployment_id": deployment.id, "status": "queued",
+            "since": "2026-07-20T00:00:00+00:00", "until": "2026-07-21T00:00:00+00:00",
+            "actuals_dataset_id": actuals.id, "report": {}, "error_message": "",
+        }
+        session = FakeSession([FakeResponse(response, 202)])
+
+        run = MLAppClient(session=session).run_deployment_monitoring(
+            deployment,
+            actuals=actuals,
+            since="2026-07-20T00:00:00Z",
+            until="2026-07-21T00:00:00Z",
+            actuals_target_column="churned",
+            actuals_record_id_column="customer_id",
+        )
+
+        self.assertEqual(run.id, "monitoring-1")
+        method, url, kwargs = session.requests[-1]
+        self.assertEqual((method, url), (
+            "POST", "http://localhost:8000/api/v1/serving/deployments/deployment-1/monitoring-runs",
+        ))
+        self.assertEqual(kwargs["json"]["actuals_dataset_id"], "actuals-v4")
+        self.assertEqual(kwargs["json"]["join"], {
+            "strategy": "auto", "actuals_record_id_column": "customer_id",
+        })
+
+    def test_online_monitoring_default_since_is_relative_to_explicit_until(self) -> None:
+        deployment = Deployment.from_api({
+            "id": "deployment-1", "name": "Churn", "slug": "churn",
+            "business_case_id": "bc-1", "status": "running",
+            "endpoint_url": "/predictions", "active_revision": {"id": "revision-1"},
+        })
+        actuals = Dataset.from_api(dataset_payload(id="actuals-v4"))
+        session = FakeSession([FakeResponse({
+            "id": "monitoring-1", "deployment_id": deployment.id, "status": "queued",
+            "since": "2026-07-20T12:00:00+00:00", "until": "2026-07-21T12:00:00+00:00",
+            "actuals_dataset_id": actuals.id, "report": {}, "error_message": "",
+        }, 202)])
+
+        MLAppClient(session=session).run_deployment_monitoring(
+            deployment, actuals=actuals, until="2026-07-21T12:00:00Z",
+        )
+
+        self.assertEqual(
+            session.requests[-1][2]["json"]["since"],
+            "2026-07-20T12:00:00+00:00",
+        )
+
+    def test_online_monitoring_can_run_without_actuals(self) -> None:
+        deployment = Deployment.from_api({
+            "id": "deployment-1", "name": "Churn", "slug": "churn",
+            "business_case_id": "bc-1", "status": "running",
+            "endpoint_url": "/predictions", "active_revision": {"id": "revision-1"},
+        })
+        session = FakeSession([FakeResponse({
+            "id": "monitoring-1", "deployment_id": deployment.id, "status": "queued",
+            "since": "2026-07-20T00:00:00+00:00", "until": "2026-07-21T00:00:00+00:00",
+            "actuals_dataset_id": "", "report": {}, "error_message": "",
+        }, 202)])
+
+        run = MLAppClient(session=session).run_deployment_monitoring(
+            deployment,
+            since="2026-07-20T00:00:00Z",
+            until="2026-07-21T00:00:00Z",
+            aggregation_granularity="hour",
+        )
+
+        self.assertEqual(run.actuals_dataset_id, "")
+        self.assertNotIn("actuals_dataset_id", session.requests[-1][2]["json"])
+        self.assertEqual(session.requests[-1][2]["json"]["aggregation_granularity"], "hour")
+
+    def test_monitoring_bucket_evaluations_preserve_repeated_bucket_parameters(self) -> None:
+        session = FakeSession([FakeResponse([{
+            "bucket_start": "2026-07-20T19:00:00+00:00",
+            "bucket_end": "2026-07-20T20:00:00+00:00",
+            "label": "2026-07-20 19:00–19:59",
+            "evaluation": {"status": "available"},
+        }])])
+
+        result = MLAppClient(session=session).get_online_monitoring_bucket_evaluations(
+            "monitoring-1",
+            ["2026-07-20T19:00:00+00:00", "2026-07-20T20:00:00+00:00"],
+        )
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(
+            session.requests[-1][2]["params"],
+            [
+                ("bucket_start", "2026-07-20T19:00:00+00:00"),
+                ("bucket_start", "2026-07-20T20:00:00+00:00"),
+            ],
+        )
+
+    def test_archive_monitoring_run_preserves_a_typed_archived_result(self) -> None:
+        response = {
+            "id": "monitoring-1", "deployment_id": "deployment-1", "status": "succeeded",
+            "since": "2026-07-20T00:00:00+00:00", "until": "2026-07-21T00:00:00+00:00",
+            "actuals_dataset_id": "", "aggregation_granularity": "day",
+            "archived_at": "2026-07-22T12:00:00+00:00", "report": {}, "error_message": "",
+        }
+        session = FakeSession([FakeResponse(response)])
+
+        archived = MLAppClient(session=session).archive_online_monitoring_run(
+            "monitoring-1", reason="Clean dashboard"
+        )
+
+        self.assertEqual(archived.archived_at, "2026-07-22T12:00:00+00:00")
+        self.assertEqual(session.requests[-1][2]["json"], {"reason": "Clean dashboard"})
+
     def test_deployment_model_options_exposes_api_contract(self) -> None:
         deployment = Deployment.from_api({
             "id": "deployment-1", "name": "Churn", "slug": "churn",
@@ -694,6 +811,48 @@ class MLAppClientTests(unittest.TestCase):
 
         self.assertEqual(options[0]["allowed_roles"], ["challenger", "shadow"])
         self.assertIn("/deployments/deployment-1/model-options", session.requests[-1][1])
+
+    def test_inference_history_summary_uses_bounded_endpoint(self) -> None:
+        deployment = Deployment.from_api({
+            "id": "deployment-1", "name": "Churn", "slug": "churn",
+            "business_case_id": "bc-1", "status": "running", "endpoint_url": "/predictions",
+            "active_revision": {"id": "revision-1"},
+        })
+        session = FakeSession([FakeResponse({"items": [], "next_cursor": None})])
+
+        page = MLAppClient(session=session).inference_history_summary(
+            deployment, limit=25, record_id="customer-1"
+        )
+
+        self.assertEqual(page["items"], [])
+        self.assertIn("/deployments/deployment-1/inference-log-summary", session.requests[-1][1])
+        self.assertEqual(
+            session.requests[-1][2]["params"],
+            {"limit": 25, "record_id": "customer-1"},
+        )
+
+    def test_catalog_summary_methods_request_bounded_contracts(self) -> None:
+        session = FakeSession([
+            FakeResponse([]),
+            FakeResponse([]),
+            FakeResponse([]),
+            FakeResponse({"id": "report-1", "evaluation": {"metrics": []}}),
+        ])
+        client = MLAppClient(session=session)
+
+        client.list_dataset_summaries()
+        client.list_model_summaries()
+        client.list_scoring_report_summaries(business_case_id="bc-1")
+        report = client.get_scoring_report("report-1")
+
+        self.assertEqual(session.requests[0][2]["params"], {"summary": True})
+        self.assertEqual(session.requests[1][2]["params"], {"summary": True})
+        self.assertEqual(
+            session.requests[2][2]["params"],
+            {"summary": True, "business_case_id": "bc-1"},
+        )
+        self.assertTrue(session.requests[3][1].endswith("/scoring-reports/report-1"))
+        self.assertEqual(report["id"], "report-1")
 
 
 if __name__ == "__main__":

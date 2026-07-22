@@ -269,11 +269,15 @@ class DatasetService:
             return self.repository.add_version(asset)
         return self.repository.add(asset)
 
-    def list_assets(self, principal: Principal) -> list[DataAsset]:
+    def list_assets(self, principal: Principal, *, summary: bool = False) -> list[DataAsset]:
         if not isinstance(self.repository, PostgresDatasetRepository):
-            return self.repository.list_for_owner(principal.user_id)
+            return (
+                self.repository.list_summaries(principal.user_id)
+                if summary
+                else self.repository.list_for_owner(principal.user_id)
+            )
         allowed = access_policy.accessible_dataset_ids(principal)
-        items = self.repository.list_all()
+        items = self.repository.list_summaries() if summary else self.repository.list_all()
         return items if allowed is None else [item for item in items if item.id in allowed]
 
     def get_asset(self, dataset_id: str, principal: Principal) -> DataAsset:

@@ -522,7 +522,7 @@ export type ScoreResponse = {
   model_id: string;
   served_role: DeploymentRole;
   fallback_used: boolean;
-  predictions: Array<{ record_id: string; prediction: unknown; outputs: Record<string, unknown> }>;
+  predictions: Array<{ prediction_id: string; record_id: string; prediction: unknown; outputs: Record<string, unknown> }>;
   warnings: string[];
 };
 
@@ -548,6 +548,9 @@ export type InferenceInputContract = {
 
 export type DeploymentModelOption = {
   model_id: string;
+  name: string;
+  version: string;
+  business_case_id: string;
   stage: string;
   contract_signature: string;
   compatible_with_active_champion: boolean;
@@ -576,8 +579,18 @@ export type InferenceRequest = {
   completed_at: string | null;
 };
 
+export type InferenceRequestSummary = Omit<
+  InferenceRequest,
+  "request_payload" | "response_payload"
+>;
+
 export type InferencePage = {
   items: InferenceRequest[];
+  next_cursor: string | null;
+};
+
+export type InferenceSummaryPage = {
+  items: InferenceRequestSummary[];
   next_cursor: string | null;
 };
 
@@ -593,6 +606,53 @@ export type ChallengerReplay = {
   failed_requests: number;
   error_message: string;
   created_at: string;
+};
+
+export type OnlineMonitoringRun = {
+  id: string;
+  deployment_id: string;
+  business_case_id: string;
+  owner_id: string;
+  requested_by: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  since: string;
+  until: string;
+  source_before: string;
+  actuals_dataset_id: string;
+  aggregation_granularity: "none" | "hour" | "day" | "week" | "month";
+  actuals_artifact_id: string;
+  join_strategy: "auto" | "prediction_id" | "request_record_id" | "record_id" | "not_applicable";
+  actuals_prediction_id_column: string;
+  actuals_request_id_column: string;
+  actuals_record_id_column: string;
+  actuals_target_column: string;
+  problem_type: string;
+  target_column: string;
+  time_basis: "scored_at";
+  processed_request_count: number;
+  processed_row_count: number;
+  matched_row_count: number;
+  missing_actuals_count: number;
+  unmatched_actuals_count: number;
+  snapshot_dataset_id: string;
+  joined_dataset_id: string;
+  report_artifact_id: string;
+  report: Record<string, unknown>;
+  warnings: string[];
+  error_message: string;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  archived_at: string | null;
+  archived_by: string;
+  archive_reason: string;
+};
+
+export type OnlineMonitoringBucketEvaluation = {
+  bucket_start: string;
+  bucket_end: string;
+  label: string;
+  evaluation: ModelEvaluationSnapshot;
 };
 
 export type BusinessCase = {
@@ -1024,6 +1084,7 @@ export const api = {
   changePassword: (payload: { current_password: string; new_password: string }) =>
     request<void>("/auth/change-password", { method: "POST", body: JSON.stringify(payload) }),
   listDatasets: () => request<DataAsset[]>("/datasets"),
+  listDatasetSummaries: () => request<DataAsset[]>("/datasets?summary=true"),
   listDatasetVersions: (logicalId: string) =>
     request<DataAsset[]>(`/datasets/${datasetRouteId(logicalId)}/versions`),
   listBusinessCases: () => request<BusinessCase[]>("/business-cases"),
@@ -1183,6 +1244,7 @@ export const api = {
       body: JSON.stringify(payload)
     }),
   listModels: () => request<ModelArtifact[]>("/models"),
+  listModelSummaries: () => request<ModelArtifact[]>("/models?summary=true"),
   promoteModel: (modelId: string, stage: "developed" | "staging" | "production" | "archived") =>
     request<ModelArtifact>(`/models/${encodeURIComponent(modelId)}/stage`, {
       method: "PATCH",
@@ -1202,8 +1264,16 @@ export const api = {
         ? `/scoring-reports?business_case_id=${encodeURIComponent(businessCaseId)}`
         : "/scoring-reports"
     ),
+  listScoringReportSummaries: (businessCaseId?: string) =>
+    request<ScoringReport[]>(
+      businessCaseId
+        ? `/scoring-reports?business_case_id=${encodeURIComponent(businessCaseId)}&summary=true`
+        : "/scoring-reports?summary=true"
+    ),
   listScoringReportVersions: (logicalId: string) =>
-    request<ScoringReport[]>(`/scoring-reports/${encodeURIComponent(logicalId)}/versions`),
+    request<ScoringReport[]>(`/scoring-reports/${encodeURIComponent(logicalId)}/versions?summary=true`),
+  getScoringReport: (reportId: string) =>
+    request<ScoringReport>(`/scoring-reports/${encodeURIComponent(reportId)}`),
   getScoringReportDataLineage: (reportId: string) =>
     request<DatasetLineageReference[]>(`/scoring-reports/${encodeURIComponent(reportId)}/data-lineage`),
   getArtifactDependencies: (referenceId: string, artifactType: string) =>
@@ -1261,6 +1331,12 @@ export const api = {
     if (recordId) params.set("record_id", recordId);
     return request<InferencePage>(`/serving/deployments/${encodeURIComponent(deploymentId)}/inference-log?${params}`);
   },
+  inferenceLogSummary: (deploymentId: string, limit = 50, cursor = "", recordId = "") => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (cursor) params.set("cursor", cursor);
+    if (recordId) params.set("record_id", recordId);
+    return request<InferenceSummaryPage>(`/serving/deployments/${encodeURIComponent(deploymentId)}/inference-log-summary?${params}`);
+  },
   inferenceDetail: (deploymentId: string, requestId: string) =>
     request<Record<string, unknown>>(`/serving/deployments/${encodeURIComponent(deploymentId)}/inference-log/${encodeURIComponent(requestId)}`),
   createChallengerReplay: (deploymentId: string, challengerModelId: string, maxRequests = 1000) =>
@@ -1270,6 +1346,48 @@ export const api = {
     }),
   listChallengerReplays: (deploymentId: string) =>
     request<ChallengerReplay[]>(`/serving/deployments/${encodeURIComponent(deploymentId)}/challenger-replays`),
+  createOnlineMonitoringRun: (
+    deploymentId: string,
+    payload: {
+      since: string;
+      until: string;
+      actuals_dataset_id?: string;
+      aggregation_granularity?: "none" | "hour" | "day" | "week" | "month";
+      actuals_target_column?: string;
+      join?: {
+        strategy?: "auto" | "prediction_id" | "request_record_id" | "record_id";
+        actuals_prediction_id_column?: string;
+        actuals_request_id_column?: string;
+        actuals_record_id_column?: string;
+      };
+    }
+  ) => request<OnlineMonitoringRun>(`/serving/deployments/${encodeURIComponent(deploymentId)}/monitoring-runs`, {
+    method: "POST",
+    body: JSON.stringify(payload)
+  }),
+  listDeploymentMonitoringRuns: (deploymentId: string, limit = 100, includeArchived = false) =>
+    request<OnlineMonitoringRun[]>(`/serving/deployments/${encodeURIComponent(deploymentId)}/monitoring-runs?limit=${limit}&include_archived=${includeArchived}`),
+  listOnlineMonitoringRuns: (limit = 200, includeArchived = false) =>
+    request<OnlineMonitoringRun[]>(`/serving/monitoring-runs?limit=${limit}&include_archived=${includeArchived}`),
+  getOnlineMonitoringRun: (runId: string) =>
+    request<OnlineMonitoringRun>(`/serving/monitoring-runs/${encodeURIComponent(runId)}`),
+  getOnlineMonitoringBucketEvaluations: (runId: string, bucketStarts: string[]) => {
+    const params = new URLSearchParams();
+    bucketStarts.forEach((value) => params.append("bucket_start", value));
+    return request<OnlineMonitoringBucketEvaluation[]>(
+      `/serving/monitoring-runs/${encodeURIComponent(runId)}/bucket-evaluations?${params}`
+    );
+  },
+  archiveOnlineMonitoringRun: (runId: string, reason = "Archived from monitoring history") =>
+    request<OnlineMonitoringRun>(`/serving/monitoring-runs/${encodeURIComponent(runId)}/archive`, {
+      method: "POST",
+      body: JSON.stringify({ reason })
+    }),
+  archiveDeploymentMonitoringHistory: (deploymentId: string, reason = "Archived from monitoring history") =>
+    request<{ archived_run_count: number }>(`/serving/deployments/${encodeURIComponent(deploymentId)}/monitoring-runs/archive`, {
+      method: "POST",
+      body: JSON.stringify({ reason })
+    }),
   createApiCredential: (name: string, expiresAt: string | null) =>
     request<Record<string, unknown>>("/auth/api-credentials", {
       method: "POST",

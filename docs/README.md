@@ -27,6 +27,7 @@ content describes the current contract unless marked otherwise.
 - [Batch Scoring](batch-scoring-stage-1.md) — immutable production predictions and inference bundle.
 - [Monitoring](monitoring-pipeline-stage-1.md) — target joining, metrics, report, and lineage.
 - [Online Model Serving](online-model-serving-stage-1.md) — versioned services, roles, secure predictions, fallback, replay, and Inference Log.
+- [Online Service Monitoring](online-service-monitoring-stage-1.md) — manual full-scope reports from Inference Log and later actuals.
 
 ## Historical audits
 

@@ -16,22 +16,24 @@ lineage_resolver = DatasetLineageResolver()
 @router.get("", response_model=list[ScoringReportRead])
 def list_scoring_reports(
     business_case_id: str | None = Query(default=None),
+    summary: bool = Query(default=False),
     principal: Principal = Depends(require_user),
 ) -> list[ScoringReportRead]:
     return [
         ScoringReportRead.model_validate(report)
-        for report in service.list_reports(principal, business_case_id)
+        for report in service.list_reports(principal, business_case_id, summary=summary)
     ]
 
 
 @router.get("/{logical_id}/versions", response_model=list[ScoringReportRead])
 def list_scoring_report_versions(
     logical_id: str,
+    summary: bool = Query(default=False),
     principal: Principal = Depends(require_user),
 ) -> list[ScoringReportRead]:
     return [
         ScoringReportRead.model_validate(report)
-        for report in service.list_versions(logical_id, principal)
+        for report in service.list_versions(logical_id, principal, summary=summary)
     ]
 
 

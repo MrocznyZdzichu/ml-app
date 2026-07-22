@@ -143,6 +143,17 @@ def test_full_runs_create_versioned_report_artifacts_with_lineage() -> None:
     assert ScoringReportRead.model_validate(reports[0]).evaluated_row_count == 102
     assert len(artifacts.list_artifacts("owner-1", ArtifactType.REPORT)) == 2
 
+    summaries = ScoringReportService(artifacts).list_reports(
+        Principal("owner-1", "owner@example.com", "Owner"),
+        summary=True,
+    )
+    assert summaries[0].evaluated_row_count == 102
+    assert summaries[0].evaluation == {
+        "problem_type": summaries[0].problem_type,
+        "data_scope": {"evaluated_row_count": 102},
+    }
+    assert reports[0].evaluation != summaries[0].evaluation
+
 
 def test_dry_run_never_registers_a_report_artifact() -> None:
     artifacts = InMemoryBusinessCaseRepository()

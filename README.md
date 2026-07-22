@@ -3,9 +3,10 @@
 ML App is a containerized data-science and machine-learning workbench. It covers
 file ingestion, metadata, full-dataset analysis, reusable Data Views, versioned
 Data/Feature Engineering pipelines, Training, AutoML, scoring, model registry,
-and monitoring. Serving, export, and some external-source integrations remain
-provisional; identity, Business Case sharing, groups and administration are
-durable platform capabilities.
+and monitoring. Online serving and manual online monitoring are functional in
+the local Docker Compose runtime; automated runtime orchestration, export, and
+external-source integrations remain provisional. Identity, Business Case
+sharing, groups and administration are durable platform capabilities.
 
 > **AI-developed project:** This application has been designed and implemented
 > with substantial AI assistance. Treat the codebase as an actively evolving
@@ -25,7 +26,9 @@ The current product slice focuses on a practical analyst workflow:
 - compose reusable interactive dashboards over full datasets and Data Views,
 - register immutable models and reports, run Test/Batch Scoring and Monitoring,
 - manage Business Case access, groups and exceptional loose-data grants,
-- exercise provisional deployment and export contracts.
+- create versioned model services, score through a private runtime, inspect the
+  durable Inference Log, and run manual online monitoring,
+- exercise the provisional export contract.
 
 The analytics paths described as full-dataset below execute against all rows.
 The explicitly identified preview and prototype paths have important limitations;
@@ -35,11 +38,12 @@ see [Current Implementation Boundaries](#current-implementation-boundaries).
 
 - `backend` - FastAPI API, domain modules, services, repositories, tests.
 - `frontend` - React/TypeScript UI.
-- `services/model-runtime` - template runtime for future model serving.
+- `services/model-runtime` - private joblib runtime used by online model serving.
 - `infra` - local infrastructure bootstrap assets.
 - `examples/data` - sample CSV datasets for manual testing.
 - `examples/API-usage` - numbered, idempotent notebooks covering the complete ML lifecycle.
-- `ml_app_client` - supported Python client for dataset upload and pipeline execution.
+- `ml_app_client` - supported Python client for data, pipeline, model, scoring,
+  serving, and monitoring workflows.
 - `docs` - architecture, development, and feature reference notes.
 
 The Python integration client can be installed from this repository with
@@ -273,24 +277,38 @@ and [`docs/automl-autofe-stage-1.md`](docs/automl-autofe-stage-1.md).
 Deleted datasets and views remain visible in the Data workspace deletion history
 but are excluded from Overview metrics, Recent assets, and Analysis selectors.
 
-### Model Registry, Sharing, and prototype Serving/Export
+### Model Registry, Sharing, Online Serving, and Export
 
 The Models workspace consumes real immutable artifacts produced by Training and
 AutoML pipeline runs, including versions, metrics and lineage. The legacy
-standalone training form and the Serving and Export paths remain provisional:
+standalone training form remains metadata-only, while the supported online path
+uses versioned services and the private model runtime:
 
 - the legacy standalone training form creates prototype metadata; real fitting,
   report generation and artifact registration run through Training/AutoML and
   Scoring pipeline steps,
-- deployment requests create in-memory metadata but do not start a runtime,
-- online scoring returns placeholder `0.0` predictions,
-- Business Case/group/direct-object grants and audit events are durable;
-  deployment, batch-score and export job metadata remains in-memory and is lost
-  when the API process restarts.
+- deployment services, immutable revisions, active model assignments, replay
+  jobs, Inference Log requests/items, and online monitoring runs are durable in
+  PostgreSQL,
+- champion, challenger, shadow, and fallback are deployment roles independent
+  from model lifecycle stage; role changes create a new immutable revision,
+- online scoring accepts 1–1,000 records, applies the pinned fitted transform,
+  calls the private runtime with the immutable model artifact, and persists the
+  full governed request and response before reporting success,
+- fallback is attempted once only for technical champion failure; shadow output
+  is retained without changing the response, and challengers use protected
+  scoring and bounded asynchronous replay,
+- manual online monitoring asynchronously materializes a full-scope Parquet
+  prediction snapshot and immutable report, optionally joining later actuals
+  for classification or regression effectiveness,
+- Business Case/group/direct-object grants and audit events are durable. Export
+  jobs and the legacy standalone analysis/training metadata paths remain
+  process-local prototypes.
 
-The optional `model-runtime` Compose service can load a joblib artifact and
-expose `/health` and `/score`, but it is not wired automatically to deployment
-records created in the main API.
+The Compose `model-runtime` service is private to the application network and
+loads the requested joblib artifact from the shared local repository. The
+platform does not yet provision a separate container or Kubernetes workload per
+deployment.
 
 ## Current Implementation Boundaries
 
@@ -312,6 +330,9 @@ records created in the main API.
 - Analytics scalability is currently single-node. There is no distributed query
   engine, persisted query cancellation, quota enforcement, or production job
   scheduler yet.
+- Online serving is functional through one private Compose runtime, but there is
+  no automatic per-service container provisioning, autoscaling, or Kubernetes
+  adapter. Model, prediction, and report files remain in the local repository.
 
 ## Example Data
 
@@ -379,17 +400,8 @@ Invoke-WebRequest -UseBasicParsing http://localhost:5173
 - MinIO for future object storage workflows,
 - FastAPI API,
 - Celery worker,
+- private model runtime,
 - Vite frontend.
-
-The model runtime template can be run with the `serving` profile once a model
-artifact is available:
-
-```powershell
-docker compose --profile serving up --build model-runtime
-```
-
-Its default host endpoint is `http://localhost:8010`; this standalone runtime is
-separate from the placeholder deployment records in the application UI.
 
 ## Documentation
 
@@ -402,6 +414,8 @@ separate from the placeholder deployment records in the application UI.
 - [AutoML + AutoFE current implementation](docs/automl-autofe-stage-1.md)
 - [Model Training workbench](docs/model-training-workbench.md)
 - [Model Training and Test Scoring](docs/model-training-scoring-stage-1.md)
+- [Online Model Serving](docs/online-model-serving-stage-1.md)
+- [Online Service Monitoring](docs/online-service-monitoring-stage-1.md)
 
 ## Git Notes
 

@@ -13,9 +13,10 @@ import re
 import time
 import warnings
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from getpass import getpass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol, Sequence
 from urllib.parse import quote
 
 import requests
@@ -188,6 +189,51 @@ class PredictionResult:
             fallback_used=bool(value.get("fallback_used")),
             predictions=tuple(value.get("predictions") or ()),
             warnings=tuple(str(item) for item in value.get("warnings") or ()),
+            raw=value,
+        )
+
+
+@dataclass(frozen=True)
+class OnlineMonitoringRun:
+    id: str
+    deployment_id: str
+    status: str
+    since: str
+    until: str
+    actuals_dataset_id: str
+    aggregation_granularity: str
+    archived_at: str | None
+    processed_request_count: int
+    processed_row_count: int
+    matched_row_count: int
+    missing_actuals_count: int
+    unmatched_actuals_count: int
+    report: Mapping[str, Any]
+    error_message: str
+    raw: Mapping[str, Any]
+
+    @property
+    def finished(self) -> bool:
+        return self.status in {"succeeded", "failed"}
+
+    @classmethod
+    def from_api(cls, value: Mapping[str, Any]) -> "OnlineMonitoringRun":
+        return cls(
+            id=str(value["id"]),
+            deployment_id=str(value["deployment_id"]),
+            status=str(value["status"]),
+            since=str(value["since"]),
+            until=str(value["until"]),
+            actuals_dataset_id=str(value.get("actuals_dataset_id") or ""),
+            aggregation_granularity=str(value.get("aggregation_granularity") or "none"),
+            archived_at=(str(value["archived_at"]) if value.get("archived_at") else None),
+            processed_request_count=int(value.get("processed_request_count") or 0),
+            processed_row_count=int(value.get("processed_row_count") or 0),
+            matched_row_count=int(value.get("matched_row_count") or 0),
+            missing_actuals_count=int(value.get("missing_actuals_count") or 0),
+            unmatched_actuals_count=int(value.get("unmatched_actuals_count") or 0),
+            report=dict(value.get("report") or {}),
+            error_message=str(value.get("error_message") or ""),
             raw=value,
         )
 
@@ -375,8 +421,12 @@ class MLAppClient:
         return Dataset.from_api(payload)
 
     def list_datasets(self) -> list[Mapping[str, Any]]:
-        """List bounded dataset metadata visible to the authenticated user."""
+        """List complete dataset metadata visible to the authenticated user."""
         return self._request("GET", "/datasets")
+
+    def list_dataset_summaries(self) -> list[Mapping[str, Any]]:
+        """List catalog metadata without large, non-presented metadata extensions."""
+        return self._request("GET", "/datasets", params={"summary": True})
 
     def dataset_by_name(
         self,
@@ -756,6 +806,21 @@ class MLAppClient:
             )
         return matches[0]
 
+    def list_scoring_report_summaries(
+        self,
+        *,
+        business_case_id: str | None = None,
+    ) -> list[Mapping[str, Any]]:
+        """List scoring report catalog fields without full evaluation payloads."""
+        params: dict[str, Any] = {"summary": True}
+        if business_case_id is not None:
+            params["business_case_id"] = business_case_id
+        return self._request("GET", "/scoring-reports", params=params)
+
+    def get_scoring_report(self, report_id: str) -> Mapping[str, Any]:
+        """Fetch one complete immutable scoring report."""
+        return self._request("GET", f"/scoring-reports/{report_id}")
+
     def run_pipeline(
         self,
         pipeline_id: str,
@@ -930,6 +995,10 @@ class MLAppClient:
     def list_models(self) -> list[Mapping[str, Any]]:
         """List model versions visible through the current Business Case grants."""
         return self._request("GET", "/models")
+
+    def list_model_summaries(self) -> list[Mapping[str, Any]]:
+        """List model registry/workflow fields without experiment-heavy payloads."""
+        return self._request("GET", "/models", params={"summary": True})
 
     def model_by_name(
         self,
@@ -1414,6 +1483,29 @@ class MLAppClient:
             "GET", f"/serving/deployments/{target.id}/inference-log/{request_id}"
         )
 
+    def inference_history_summary(
+        self,
+        deployment: str | Deployment,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+        record_id: str | None = None,
+    ) -> Mapping[str, Any]:
+        """Read a bounded history page without retained request/response payloads."""
+        if limit < 1 or limit > 200:
+            raise ValueError("History limit must be between 1 and 200")
+        target = self._deployment(deployment)
+        params: dict[str, Any] = {"limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        if record_id:
+            params["record_id"] = record_id
+        return self._request(
+            "GET",
+            f"/serving/deployments/{target.id}/inference-log-summary",
+            params=params,
+        )
+
     def replay_challenger(
         self,
         deployment: str | Deployment,
@@ -1439,6 +1531,205 @@ class MLAppClient:
     def list_challenger_replays(self, deployment: str | Deployment) -> list[Mapping[str, Any]]:
         target = self._deployment(deployment)
         return self._request("GET", f"/serving/deployments/{target.id}/challenger-replays")
+
+    def run_deployment_monitoring(
+        self,
+        deployment: str | Deployment,
+        *,
+        actuals: str | Dataset | None = None,
+        since: str | datetime | None = None,
+        until: str | datetime | None = None,
+        actuals_target_column: str | None = None,
+        actuals_prediction_id_column: str | None = None,
+        actuals_request_id_column: str | None = None,
+        actuals_record_id_column: str | None = None,
+        join_strategy: str = "auto",
+        aggregation_granularity: str = "none",
+    ) -> OnlineMonitoringRun:
+        """Queue a full-scope online report; actuals optionally add performance metrics."""
+        if join_strategy not in {"auto", "prediction_id", "request_record_id", "record_id"}:
+            raise ValueError(
+                "join_strategy must be auto, prediction_id, request_record_id or record_id"
+            )
+        if aggregation_granularity not in {"none", "hour", "day", "week", "month"}:
+            raise ValueError("aggregation_granularity must be none, hour, day, week or month")
+        target = self._deployment(deployment)
+        actuals_dataset = self._deployment_actuals(target, actuals) if actuals is not None else None
+        until_value = until or datetime.now(timezone.utc)
+        if since is None:
+            parsed_until = (
+                until_value
+                if isinstance(until_value, datetime)
+                else datetime.fromisoformat(until_value.replace("Z", "+00:00"))
+            )
+            if parsed_until.tzinfo is None:
+                raise ValueError("Monitoring datetimes must include a timezone")
+            since_value: str | datetime = parsed_until - timedelta(days=1)
+        else:
+            since_value = since
+        payload: dict[str, Any] = {
+            "since": self._datetime_value(since_value),
+            "until": self._datetime_value(until_value),
+            "aggregation_granularity": aggregation_granularity,
+            "join": {"strategy": join_strategy},
+        }
+        if actuals_dataset is not None:
+            payload["actuals_dataset_id"] = actuals_dataset.id
+        if actuals_target_column:
+            payload["actuals_target_column"] = actuals_target_column
+        if actuals_prediction_id_column:
+            payload["join"]["actuals_prediction_id_column"] = actuals_prediction_id_column
+        if actuals_request_id_column:
+            payload["join"]["actuals_request_id_column"] = actuals_request_id_column
+        if actuals_record_id_column:
+            payload["join"]["actuals_record_id_column"] = actuals_record_id_column
+        value = self._request(
+            "POST",
+            f"/serving/deployments/{target.id}/monitoring-runs",
+            json=payload,
+        )
+        return OnlineMonitoringRun.from_api(value)
+
+    def list_online_monitoring_runs(
+        self,
+        deployment: str | Deployment | None = None,
+        *,
+        limit: int = 100,
+        include_archived: bool = False,
+    ) -> list[OnlineMonitoringRun]:
+        """List bounded immutable report runs, optionally for one service."""
+        if limit < 1 or limit > 200:
+            raise ValueError("Monitoring run limit must be between 1 and 200")
+        path = "/serving/monitoring-runs"
+        if deployment is not None:
+            target = self._deployment(deployment)
+            path = f"/serving/deployments/{target.id}/monitoring-runs"
+        values = self._request(
+            "GET", path,
+            params={"limit": limit, "include_archived": include_archived},
+        )
+        return [OnlineMonitoringRun.from_api(item) for item in values]
+
+    def archive_online_monitoring_run(
+        self,
+        run: str | OnlineMonitoringRun,
+        *,
+        reason: str = "Archived from monitoring history",
+    ) -> OnlineMonitoringRun:
+        """Hide one finished run from default history without deleting its report or lineage."""
+        run_id = run.id if isinstance(run, OnlineMonitoringRun) else run
+        return OnlineMonitoringRun.from_api(self._request(
+            "POST", f"/serving/monitoring-runs/{run_id}/archive",
+            json={"reason": reason},
+        ))
+
+    def archive_deployment_monitoring_history(
+        self,
+        deployment: str | Deployment,
+        *,
+        reason: str = "Archived from monitoring history",
+    ) -> int:
+        """Archive every finished run for one service while preserving governed metadata."""
+        target = self._deployment(deployment)
+        value = self._request(
+            "POST", f"/serving/deployments/{target.id}/monitoring-runs/archive",
+            json={"reason": reason},
+        )
+        return int(value.get("archived_run_count") or 0)
+
+    def get_online_monitoring_run(self, run_id: str) -> OnlineMonitoringRun:
+        return OnlineMonitoringRun.from_api(
+            self._request("GET", f"/serving/monitoring-runs/{run_id}")
+        )
+
+    def get_online_monitoring_bucket_evaluations(
+        self,
+        run: str | OnlineMonitoringRun,
+        bucket_starts: Sequence[str],
+    ) -> list[Mapping[str, Any]]:
+        """Return bounded scoring diagnostics for up to eight selected time buckets."""
+        selected = list(dict.fromkeys(bucket_starts))
+        if len(selected) > 8:
+            raise ValueError("Select at most 8 monitoring buckets")
+        run_id = run.id if isinstance(run, OnlineMonitoringRun) else run
+        return list(self._request(
+            "GET",
+            f"/serving/monitoring-runs/{run_id}/bucket-evaluations",
+            params=[("bucket_start", value) for value in selected],
+        ))
+
+    def wait_for_online_monitoring_run(
+        self,
+        run: OnlineMonitoringRun,
+        *,
+        poll_interval: float = 2.0,
+        timeout: float | None = None,
+        on_update: Callable[[OnlineMonitoringRun], None] | None = None,
+    ) -> OnlineMonitoringRun:
+        """Poll an online monitoring run without downloading row-level snapshots."""
+        started = time.monotonic()
+        current = run
+        while not current.finished:
+            if timeout is not None and time.monotonic() - started >= timeout:
+                raise TimeoutError(
+                    f"Online monitoring run {run.id} did not finish within {timeout}s"
+                )
+            time.sleep(poll_interval)
+            current = self.get_online_monitoring_run(run.id)
+            if on_update is not None:
+                on_update(current)
+        if current.status != "succeeded":
+            raise ApiError(
+                f"Online monitoring run {current.id} failed: "
+                f"{current.error_message or 'no error detail returned'}"
+            )
+        return current
+
+    def _deployment_actuals(
+        self,
+        deployment: Deployment,
+        value: str | Dataset,
+    ) -> Dataset:
+        if isinstance(value, Dataset):
+            return value
+        visible = self.list_datasets()
+        by_id = {str(item.get("id")): item for item in visible}
+        if value in by_id:
+            return Dataset.from_api(by_id[value])
+        attachments = self.list_business_case_attachments(deployment.business_case_id)
+        candidates = [
+            by_id[str(item.get("data_asset_id"))]
+            for item in attachments
+            if item.get("role") == "monitoring_actuals"
+            and str(item.get("data_asset_id")) in by_id
+            and _exact_name_key(str(by_id[str(item.get("data_asset_id"))].get("name") or ""))
+            == _exact_name_key(value)
+        ]
+        if not candidates:
+            raise ResourceNotFoundError(
+                f"Actuals dataset {value!r} attached with role monitoring_actuals was not found"
+            )
+        logical_ids = {str(item.get("logical_id") or "") for item in candidates}
+        if len(logical_ids) != 1:
+            raise ResourceAmbiguousError(
+                f"Actuals dataset name {value!r} resolves to multiple dataset families"
+            )
+        family = [
+            item for item in visible
+            if str(item.get("logical_id") or "") == next(iter(logical_ids))
+        ]
+        return Dataset.from_api(max(family, key=lambda item: int(item.get("version_number") or 0)))
+
+    @staticmethod
+    def _datetime_value(value: str | datetime) -> str:
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                raise ValueError("Monitoring datetimes must include a timezone")
+            return value.isoformat()
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            raise ValueError("Monitoring datetimes must include a timezone")
+        return value
 
     def _deployment(self, value: str | Deployment) -> Deployment:
         if isinstance(value, Deployment):

@@ -208,7 +208,9 @@ class ModelEvaluationSnapshotBuilder:
             },
         }
         if len(labels) == 2 and score_contract.get("prediction_score_column"):
-            positive = score_contract.get("positive_class", labels[-1])
+            positive = score_contract.get("positive_class")
+            if positive is None:
+                positive = labels[-1]
             score = identifier(str(score_contract["prediction_score_column"]))
             binary = self._binary_score_report(
                 connection,

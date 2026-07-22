@@ -41,6 +41,8 @@ from app.modules.serving.schemas import (
     DeploymentRevisionCreate,
     DeploymentRevisionRead,
     InferencePage,
+    InferenceRequestSummaryRead,
+    InferenceSummaryPage,
     InferenceDetail,
     InferenceExecutionItem,
     InferenceRequestRead,
@@ -197,7 +199,13 @@ class ServingService:
         champion = self._model_for_inference(champion_assignment.model_id, principal)
         champion_signature = self._inference_contract_signature(champion)
         options = []
-        for model in self.models.list_models(principal):
+        candidate_loader = getattr(self.models, "list_serving_candidates", None)
+        candidates = (
+            candidate_loader(deployment.business_case_id, principal)
+            if callable(candidate_loader)
+            else self.models.list_models(principal)
+        )
+        for model in candidates:
             if (
                 model.business_case_id != deployment.business_case_id
                 or model.stage not in {ModelStage.STAGING, ModelStage.PRODUCTION}
@@ -214,6 +222,9 @@ class ServingService:
             signature = self._inference_contract_signature(model)
             options.append({
                 "model_id": model.id,
+                "name": model.name,
+                "version": model.version,
+                "business_case_id": model.business_case_id,
                 "stage": model.stage.value,
                 "contract_signature": signature,
                 "compatible_with_active_champion": signature == champion_signature,
@@ -484,6 +495,8 @@ class ServingService:
             request_payload={"instances": normalized},
             warnings=warnings,
             champion_model_id=assignments[DeploymentRole.CHAMPION].model_id,
+            requested_model_id=primary.model_id,
+            requested_role=primary_role.value,
         )
         try:
             self.repository.add_inference(inference)
@@ -585,11 +598,12 @@ class ServingService:
 
         predictions = [
             PredictionRead(
+                prediction_id=f"{inference.id}:{served.model_id}:{index}",
                 record_id=item["record_id"],
                 prediction=output.get("prediction"),
                 outputs={key: value for key, value in output.items() if key != "prediction"},
             )
-            for item, output in zip(normalized, primary_outputs, strict=True)
+            for index, (item, output) in enumerate(zip(normalized, primary_outputs, strict=True))
         ]
         if (
             not challenger_model_id
@@ -651,6 +665,25 @@ class ServingService:
             items=[InferenceRequestRead.model_validate(item) for item in page],
             next_cursor=next_cursor,
         )
+
+    def inference_history_summary(
+        self,
+        deployment_id: str,
+        principal: Principal,
+        *,
+        limit: int = 50,
+        cursor: str = "",
+        record_id: str = "",
+    ) -> InferenceSummaryPage:
+        deployment = self.get_deployment(deployment_id, principal)
+        parsed_cursor = self._decode_cursor(cursor) if cursor else None
+        rows = self.repository.list_inference_summaries(
+            deployment.id, limit + 1, parsed_cursor, record_id or None
+        )
+        has_more = len(rows) > limit
+        page = [InferenceRequestSummaryRead.model_validate(item) for item in rows[:limit]]
+        next_cursor = self._encode_cursor(page[-1]) if has_more and page else None
+        return InferenceSummaryPage(items=page, next_cursor=next_cursor)
 
     def inference_detail(
         self,
@@ -994,7 +1027,7 @@ class ServingService:
             )
 
     @staticmethod
-    def _encode_cursor(item: InferenceRequest) -> str:
+    def _encode_cursor(item: InferenceRequest | InferenceRequestSummaryRead) -> str:
         raw = f"{item.created_at.isoformat()}|{item.id}".encode("utf-8")
         return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 

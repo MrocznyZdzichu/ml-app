@@ -29,7 +29,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { ChangeEvent, FormEvent, KeyboardEvent } from "react";
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api, getAccessToken, setAccessToken, temporaryPipelineOutputId } from "./api/client";
 import type {
@@ -196,43 +196,81 @@ export default function App() {
   const [notice, setNotice] = useState("Workspace ready");
   const [isRefreshingWorkspace, setIsRefreshingWorkspace] = useState(false);
   const descriptiveProfileCache = useRef<Map<string, DescriptiveProfileCacheEntry>>(new Map());
+  const sectionRefreshHandlers = useRef<Partial<Record<TabId, () => Promise<void>>>>({});
 
   const activeConfig = useMemo(
     () => navItems.find((item) => item.id === activeTab) ?? navItems[0],
     [activeTab]
   );
 
-  async function refreshWorkspace() {
+  const refreshResources = useCallback(async (tab: TabId | "workspace") => {
     try {
-      const [businessCaseItems, datasetItems, pipelineItems, modelItems, reportItems, deploymentItems] = await Promise.all([
-        api.listBusinessCases(),
-        api.listDatasets(),
-        api.listPipelines(),
-        api.listModels(),
-        api.listScoringReports(),
-        api.listDeployments()
+      const includeBusinessCases = ["workspace", "overview", "business-cases", "data", "analysis", "pipelines", "jobs", "models", "scoring-reports", "share"].includes(tab);
+      const includeDatasets = ["workspace", "overview", "business-cases", "data", "analysis", "pipelines", "serving", "share"].includes(tab);
+      const includePipelines = ["workspace", "overview", "business-cases", "data", "analysis", "pipelines", "jobs", "models", "scoring-reports"].includes(tab);
+      const includeModels = ["workspace", "overview", "business-cases", "pipelines", "models", "serving"].includes(tab);
+      const includeReports = ["workspace", "business-cases", "scoring-reports"].includes(tab);
+      const includeDeployments = ["workspace", "overview", "business-cases", "serving"].includes(tab);
+      await Promise.all([
+        includeBusinessCases ? api.listBusinessCases().then(setBusinessCases) : Promise.resolve(),
+        includeDatasets ? api.listDatasetSummaries().then(setDatasets) : Promise.resolve(),
+        includePipelines ? api.listPipelines().then(setPipelines) : Promise.resolve(),
+        includeModels ? api.listModelSummaries().then(setModels) : Promise.resolve(),
+        includeReports ? api.listScoringReportSummaries().then(setScoringReports) : Promise.resolve(),
+        includeDeployments ? api.listDeployments().then(setDeployments) : Promise.resolve(),
       ]);
-      setBusinessCases(businessCaseItems);
-      setDatasets(datasetItems);
-      setPipelines(pipelineItems);
-      setModels(modelItems);
-      setScoringReports(reportItems);
-      setDeployments(deploymentItems);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "API request failed");
       throw error;
     }
-  }
+  }, []);
+
+  const refreshWorkspace = useCallback(
+    () => refreshResources("workspace"),
+    [refreshResources]
+  );
+
+  const refreshServingCatalog = useCallback(async () => {
+    await refreshResources("serving");
+  }, [refreshResources]);
+  const refreshJobsCatalog = useCallback(
+    () => refreshResources("jobs"),
+    [refreshResources]
+  );
+  const refreshShareCatalog = useCallback(
+    () => refreshResources("share"),
+    [refreshResources]
+  );
+
+  const registerSectionRefresh = useCallback((tab: TabId, handler: (() => Promise<void>) | null) => {
+    if (handler) sectionRefreshHandlers.current[tab] = handler;
+    else delete sectionRefreshHandlers.current[tab];
+  }, []);
+
+  const registerServingRefresh = useCallback(
+    (handler: (() => Promise<void>) | null) => registerSectionRefresh("serving", handler),
+    [registerSectionRefresh]
+  );
+  const registerJobsRefresh = useCallback(
+    (handler: (() => Promise<void>) | null) => registerSectionRefresh("jobs", handler),
+    [registerSectionRefresh]
+  );
+  const registerShareRefresh = useCallback(
+    (handler: (() => Promise<void>) | null) => registerSectionRefresh("share", handler),
+    [registerSectionRefresh]
+  );
 
   async function handleGlobalRefresh() {
     if (isRefreshingWorkspace) return;
     setIsRefreshingWorkspace(true);
-    setNotice("Refreshing workspace data…");
+    setNotice(`Refreshing ${activeConfig.label}…`);
     try {
-      await refreshWorkspace();
-      setNotice("Workspace data refreshed");
+      const registeredHandler = sectionRefreshHandlers.current[activeTab];
+      if (registeredHandler) await registeredHandler();
+      else await refreshResources(activeTab);
+      setNotice(`${activeConfig.label} refreshed`);
     } catch {
-      // refreshWorkspace already exposes the actionable API error in the notice bar.
+      // The section refresh exposes the actionable API error in the notice bar.
     } finally {
       setIsRefreshingWorkspace(false);
     }
@@ -379,7 +417,7 @@ export default function App() {
               onClick={() => void handleGlobalRefresh()}
               disabled={isRefreshingWorkspace}
               aria-label="Refresh current workspace data"
-              title="Reload Business Cases, datasets, pipelines, models, reports and services"
+              title={`Reload data used by ${activeConfig.label}`}
             >
               <RotateCcw className={isRefreshingWorkspace ? "run-spinner" : undefined} size={16} />
               {isRefreshingWorkspace ? "Refreshing…" : "Refresh"}
@@ -415,7 +453,7 @@ export default function App() {
             models={models}
             deployments={deployments}
             scoringReports={scoringReports}
-            onRefresh={refreshWorkspace}
+            onRefresh={() => refreshResources("business-cases")}
             onEditPipeline={openPipelineEditor}
             onOpenModels={openBusinessCaseModels}
             onOpenScoringReports={openBusinessCaseScoringReports}
@@ -430,7 +468,7 @@ export default function App() {
             datasets={datasets}
             pipelines={pipelines}
             onAnalyze={openDatasetAnalysis}
-            onRefresh={refreshWorkspace}
+            onRefresh={() => refreshResources("data")}
             setNotice={setNotice}
           />
         )}
@@ -443,7 +481,7 @@ export default function App() {
             initialDatasetId={analysisOpenRequest?.datasetId}
             initialTab={analysisOpenRequest ? "browse" : "roles"}
             onInitialDatasetConsumed={() => setAnalysisOpenRequest(null)}
-            onRefresh={refreshWorkspace}
+            onRefresh={() => refreshResources("analysis")}
             setNotice={setNotice}
           />
         )}
@@ -455,7 +493,7 @@ export default function App() {
             models={models}
             openRequest={pipelineOpenRequest}
             onOpenRequestConsumed={() => setPipelineOpenRequest(null)}
-            onRefresh={refreshWorkspace}
+            onRefresh={() => refreshResources("pipelines")}
             onExamineDataset={openDatasetAnalysis}
             setNotice={setNotice}
           />
@@ -464,6 +502,8 @@ export default function App() {
           <JobsPanel
             businessCases={businessCases}
             pipelines={pipelines}
+            onRefreshCatalog={refreshJobsCatalog}
+            onRegisterRefresh={registerJobsRefresh}
             setNotice={setNotice}
           />
         )}
@@ -475,7 +515,7 @@ export default function App() {
               pipelines={pipelines}
               initialBusinessCaseId={modelBusinessCaseFilter}
               onOpenDataset={openDatasetAnalysis}
-              onRefresh={refreshWorkspace}
+              onRefresh={() => refreshResources("models")}
               setNotice={setNotice}
             />
           </DeferredPanel>
@@ -495,9 +535,11 @@ export default function App() {
           <DeferredPanel>
             <ServingPanel
               deployments={deployments}
+              datasets={datasets}
               models={models}
               initialDeploymentId={servingDeploymentId}
-              onRefresh={refreshWorkspace}
+              onRefresh={refreshServingCatalog}
+              onRegisterRefresh={registerServingRefresh}
               setNotice={setNotice}
             />
           </DeferredPanel>
@@ -508,7 +550,8 @@ export default function App() {
               businessCases={businessCases}
               datasets={datasets}
               currentUser={currentUser}
-              onRefresh={refreshWorkspace}
+              onRefresh={refreshShareCatalog}
+              onRegisterRefresh={registerShareRefresh}
               setNotice={setNotice}
             />
           </DeferredPanel>
@@ -1528,7 +1571,7 @@ function BusinessCasesPanel({
               status: item.stage,
               actions: [
                 { label: "Versions", icon: "versions", onClick: () => bcModelNavigation.openHistory(item) },
-                { label: "View", icon: "view", onClick: () => bcModelNavigation.openDirect(item) },
+                { label: "View", icon: "view", onClick: () => void api.getModel(item.id).then(bcModelNavigation.openDirect) },
                 { label: "Dependencies", icon: "dependencies", onClick: () => setDependencyTarget({ referenceId: item.id, artifactType: "model_version", title: item.name }) }
               ]
             }))} />
@@ -1605,7 +1648,7 @@ function BusinessCasesPanel({
               status: "ready",
               actions: [
                 { label: "Versions", icon: "versions", onClick: () => bcReportNavigation.openHistory(item) },
-                { label: "View", icon: "view", onClick: () => bcReportNavigation.openDirect(item) },
+                { label: "View", icon: "view", onClick: () => void api.getScoringReport(item.id).then(bcReportNavigation.openDirect) },
                 { label: "Dependencies", icon: "dependencies", onClick: () => setDependencyTarget({ referenceId: item.id, artifactType: "report", title: item.name }) }
               ]
             }))} />
@@ -1660,7 +1703,10 @@ function BusinessCasesPanel({
             businessCaseName={businessCaseName(businessCases, bcModelNavigation.history.business_case_id)}
             pipelineName={pipelineName(pipelines, bcModelNavigation.history.pipeline_id)}
             onClose={bcModelNavigation.closeHistory}
-            onView={bcModelNavigation.openVersion}
+            onView={async (version) => {
+              const fullModel = await api.getModel(version.id);
+              bcModelNavigation.openVersion(fullModel);
+            }}
           />
         </DeferredPanel>
       )}
@@ -1669,7 +1715,10 @@ function BusinessCasesPanel({
           <ScoringReportHistoryDialog
             report={bcReportNavigation.history}
             onClose={bcReportNavigation.closeHistory}
-            onView={bcReportNavigation.openVersion}
+            onView={async (version) => {
+              const fullReport = await api.getScoringReport(version.id);
+              bcReportNavigation.openVersion(fullReport);
+            }}
           />
         </DeferredPanel>
       )}
@@ -1861,10 +1910,14 @@ function BusinessCasesPanel({
 function JobsPanel({
   businessCases,
   pipelines,
+  onRefreshCatalog,
+  onRegisterRefresh,
   setNotice
 }: {
   businessCases: BusinessCase[];
   pipelines: Pipeline[];
+  onRefreshCatalog: () => Promise<void>;
+  onRegisterRefresh: (handler: (() => Promise<void>) | null) => void;
   setNotice: (message: string) => void;
 }) {
   const [runs, setRuns] = useState<PipelineRun[]>([]);
@@ -1879,7 +1932,7 @@ function JobsPanel({
   const failedRuns = runs.filter((run) => run.status === "failed");
   const dryRuns = runs.filter((run) => run.is_dry_run);
 
-  async function loadRuns() {
+  const loadRuns = useCallback(async () => {
     setIsLoading(true);
     try {
       setRuns(await api.listPipelineRunHistory(300));
@@ -1888,17 +1941,26 @@ function JobsPanel({
     } finally {
       setIsLoading(false);
     }
-  }
+  }, [setNotice]);
+
+  const refreshAllJobs = useCallback(async () => {
+    await Promise.all([onRefreshCatalog(), loadRuns()]);
+  }, [loadRuns, onRefreshCatalog]);
+
+  useEffect(() => {
+    onRegisterRefresh(refreshAllJobs);
+    return () => onRegisterRefresh(null);
+  }, [onRegisterRefresh, refreshAllJobs]);
 
   useEffect(() => {
     void loadRuns();
-  }, []);
+  }, [loadRuns]);
 
   useEffect(() => {
     if (!runs.some((run) => run.status === "queued" || run.status === "running")) return;
     const interval = window.setInterval(() => void loadRuns(), 2500);
     return () => window.clearInterval(interval);
-  }, [runs]);
+  }, [loadRuns, runs]);
 
   const filteredRuns = useMemo(() => {
     const needle = search.trim().toLowerCase();

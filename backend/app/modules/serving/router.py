@@ -12,16 +12,23 @@ from app.modules.serving.schemas import (
     DeploymentRevisionRead,
     DeploymentStatusUpdate,
     InferencePage,
+    InferenceSummaryPage,
     InferenceDetail,
     InferenceInputContractRead,
     ModelServingUsageRead,
+    OnlineMonitoringArchiveRequest,
+    OnlineMonitoringBucketEvaluationRead,
+    OnlineMonitoringRunCreate,
+    OnlineMonitoringRunRead,
     ScoreRequest,
     ScoreResponse,
 )
 from app.modules.serving.service import ServingService
+from app.modules.serving.monitoring import OnlineMonitoringService
 
 router = APIRouter(prefix="/serving", tags=["serving"])
 service = ServingService()
+monitoring_service = OnlineMonitoringService(repository=service.repository, models=service.models)
 
 
 def _deployment_read(deployment) -> DeploymentRead:
@@ -202,6 +209,26 @@ def inference_log(
 
 
 @router.get(
+    "/deployments/{deployment_id}/inference-log-summary",
+    response_model=InferenceSummaryPage,
+)
+def inference_log_summary(
+    deployment_id: str,
+    principal: Principal = Depends(require_user),
+    limit: int = Query(default=50, ge=1, le=200),
+    cursor: str = Query(default=""),
+    record_id: str = Query(default="", max_length=512),
+) -> InferenceSummaryPage:
+    return service.inference_history_summary(
+        deployment_id,
+        principal,
+        limit=limit,
+        cursor=cursor,
+        record_id=record_id,
+    )
+
+
+@router.get(
     "/deployments/{deployment_id}/inference-log/{request_id}",
     response_model=InferenceDetail,
 )
@@ -235,3 +262,106 @@ def list_challenger_replays(
     principal: Principal = Depends(require_user),
 ) -> list[ChallengerReplayRead]:
     return [ChallengerReplayRead.model_validate(item) for item in service.list_replays(deployment_id, principal)]
+
+
+@router.post(
+    "/deployments/{deployment_id}/monitoring-runs",
+    response_model=OnlineMonitoringRunRead,
+    status_code=202,
+)
+def create_online_monitoring_run(
+    deployment_id: str,
+    payload: OnlineMonitoringRunCreate,
+    principal: Principal = Depends(require_user),
+) -> OnlineMonitoringRunRead:
+    return OnlineMonitoringRunRead.model_validate(
+        monitoring_service.create_run(deployment_id, payload, principal)
+    )
+
+
+@router.get(
+    "/deployments/{deployment_id}/monitoring-runs",
+    response_model=list[OnlineMonitoringRunRead],
+)
+def list_deployment_monitoring_runs(
+    deployment_id: str,
+    limit: int = Query(default=100, ge=1, le=200),
+    include_archived: bool = Query(default=False),
+    principal: Principal = Depends(require_user),
+) -> list[OnlineMonitoringRunRead]:
+    return [
+        OnlineMonitoringRunRead.model_validate(item)
+        for item in monitoring_service.list_runs(
+            principal, deployment_id=deployment_id, limit=limit,
+            include_archived=include_archived,
+        )
+    ]
+
+
+@router.get("/monitoring-runs", response_model=list[OnlineMonitoringRunRead])
+def list_online_monitoring_runs(
+    limit: int = Query(default=200, ge=1, le=200),
+    include_archived: bool = Query(default=False),
+    principal: Principal = Depends(require_user),
+) -> list[OnlineMonitoringRunRead]:
+    return [
+        OnlineMonitoringRunRead.model_validate(item)
+        for item in monitoring_service.list_runs(
+            principal, limit=limit, include_archived=include_archived
+        )
+    ]
+
+
+@router.post(
+    "/deployments/{deployment_id}/monitoring-runs/archive",
+    response_model=dict[str, int],
+)
+def archive_deployment_monitoring_history(
+    deployment_id: str,
+    payload: OnlineMonitoringArchiveRequest,
+    principal: Principal = Depends(require_user),
+) -> dict[str, int]:
+    return {
+        "archived_run_count": monitoring_service.archive_history(
+            deployment_id, payload.reason, principal
+        )
+    }
+
+
+@router.post(
+    "/monitoring-runs/{run_id}/archive",
+    response_model=OnlineMonitoringRunRead,
+)
+def archive_online_monitoring_run(
+    run_id: str,
+    payload: OnlineMonitoringArchiveRequest,
+    principal: Principal = Depends(require_user),
+) -> OnlineMonitoringRunRead:
+    return OnlineMonitoringRunRead.model_validate(
+        monitoring_service.archive_run(run_id, payload.reason, principal)
+    )
+
+
+@router.get("/monitoring-runs/{run_id}", response_model=OnlineMonitoringRunRead)
+def get_online_monitoring_run(
+    run_id: str,
+    principal: Principal = Depends(require_user),
+) -> OnlineMonitoringRunRead:
+    return OnlineMonitoringRunRead.model_validate(
+        monitoring_service.get_run(run_id, principal)
+    )
+
+
+@router.get(
+    "/monitoring-runs/{run_id}/bucket-evaluations",
+    response_model=list[OnlineMonitoringBucketEvaluationRead],
+)
+def get_online_monitoring_bucket_evaluations(
+    run_id: str,
+    bucket_start: list[str] = Query(default=[]),
+    principal: Principal = Depends(require_user),
+) -> list[OnlineMonitoringBucketEvaluationRead]:
+    return [
+        OnlineMonitoringBucketEvaluationRead.model_validate(item)
+        for item in monitoring_service.bucket_evaluations(run_id, bucket_start, principal)
+    ]

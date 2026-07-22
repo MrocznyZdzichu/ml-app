@@ -1,5 +1,6 @@
 import hashlib
 import json
+from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
@@ -109,8 +110,14 @@ class PipelineService:
             cases = [case for case in cases if case.id == business_case_id]
         pipelines = self.repository.list_pipelines_for_business_cases({case.id for case in cases})
         versions_by_pipeline: dict[str, list[PipelineVersion]] = {
-            pipeline.id: self.repository.list_versions(pipeline.id) for pipeline in pipelines
+            pipeline.id: [] for pipeline in pipelines
         }
+        pipeline_ids_by_owner: dict[str, list[str]] = defaultdict(list)
+        for pipeline in pipelines:
+            pipeline_ids_by_owner[pipeline.owner_id].append(pipeline.id)
+        for owner_id, pipeline_ids in pipeline_ids_by_owner.items():
+            for version in self.repository.list_versions_for_pipelines(owner_id, pipeline_ids):
+                versions_by_pipeline[version.pipeline_id].append(version)
         for pipeline in pipelines:
             self._apply_version_summary(pipeline, versions_by_pipeline[pipeline.id])
         return pipelines

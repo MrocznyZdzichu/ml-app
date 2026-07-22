@@ -1,4 +1,5 @@
 from collections import defaultdict
+from dataclasses import replace
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from fastapi import HTTPException, status
@@ -10,7 +11,7 @@ from app.modules.models.repository import InMemoryModelRepository, ModelReposito
 from app.modules.models.schemas import PromoteModelRequest, TrainingRequest
 from app.modules.business_cases.domain import Artifact, ArtifactType
 from app.modules.business_cases.repository import PostgresBusinessCaseRepository
-from app.modules.pipelines.domain import PipelineRun, PipelineVersion
+from app.modules.pipelines.domain import PipelineVersion
 from app.modules.pipelines.repository import PostgresPipelineRepository
 from app.modules.business_cases.service import BusinessCaseService
 from app.modules.sharing.domain import AuditEvent, BC_ROLE_RANK, BusinessCaseAccessRole
@@ -85,18 +86,18 @@ class ModelService:
             if case_ids is not None
             else [item for owner_id in case_owners for item in self.artifacts.list_artifacts(owner_id, ArtifactType.MODEL_VERSION)]
         )]
-        run_cache: dict[str, PipelineRun | None] = {}
+        run_references = self.pipelines.list_run_references({
+            model.pipeline_run_id
+            for model in pipeline_models
+            if not model.pipeline_id and model.pipeline_run_id
+        })
         for model in pipeline_models:
             if model.pipeline_id or not model.pipeline_run_id:
                 continue
-            if model.pipeline_run_id not in run_cache:
-                run_cache[model.pipeline_run_id] = self.pipelines.get_run(
-                    model.pipeline_run_id
-                )
-            run = run_cache[model.pipeline_run_id]
-            if run is not None and run.owner_id == model.owner_id:
-                model.pipeline_id = run.pipeline_id
-                model.lineage = {**model.lineage, "pipeline_id": run.pipeline_id}
+            run_reference = run_references.get(model.pipeline_run_id)
+            if run_reference is not None and run_reference[0] == model.owner_id:
+                model.pipeline_id = run_reference[1]
+                model.lineage = {**model.lineage, "pipeline_id": run_reference[1]}
 
         fitted_by_run_step: dict[tuple[str, str], Artifact] = {}
         if any(model.pipeline_run_id for model in pipeline_models):
@@ -131,12 +132,106 @@ class ModelService:
         self._assign_version_numbers(models)
         return sorted(models, key=lambda item: (item.created_at, item.id), reverse=True)
 
+    def list_model_summaries(self, principal: Principal) -> list[ModelArtifact]:
+        """List registry/workflow fields without metrics, trials or fitted-state payloads."""
+        if not isinstance(self.artifacts, PostgresBusinessCaseRepository):
+            return [
+                replace(model, metrics={}, model_parameters={})
+                for model in self.list_models(principal)
+            ]
+
+        cases = [
+            case for case in self.business_cases.list_business_cases(principal)
+            if case.access_role
+            and BC_ROLE_RANK[BusinessCaseAccessRole(case.access_role)]
+            >= BC_ROLE_RANK[BusinessCaseAccessRole.READER]
+        ]
+        case_ids = {case.id for case in cases}
+        models = [
+            self._artifact_model(artifact)
+            for artifact in self.artifacts.list_model_summary_artifacts_for_business_cases(case_ids)
+        ]
+
+        run_references = self.pipelines.list_run_references({
+            model.pipeline_run_id
+            for model in models
+            if not model.pipeline_id and model.pipeline_run_id
+        })
+        for model in models:
+            if model.pipeline_id or not model.pipeline_run_id:
+                continue
+            run_reference = run_references.get(model.pipeline_run_id)
+            if run_reference is not None and run_reference[0] == model.owner_id:
+                model.pipeline_id = run_reference[1]
+                model.lineage = {**model.lineage, "pipeline_id": run_reference[1]}
+
+        fitted_by_run_step: dict[tuple[str, str], Artifact] = {}
+        for artifact in self.artifacts.list_feature_transform_summary_artifacts_for_business_cases(case_ids):
+            lineage = dict(artifact.metadata.get("lineage") or {})
+            run_id = str(lineage.get("pipeline_run_id") or "")
+            step_id = str(lineage.get("pipeline_step_id") or "")
+            if run_id and step_id:
+                fitted_by_run_step.setdefault((run_id, step_id), artifact)
+
+        pipeline_ids = sorted({model.pipeline_id for model in models if model.pipeline_id})
+        pipeline_owners = {model.owner_id for model in models}
+        versions_by_id = {
+            version.id: version
+            for owner_id in pipeline_owners
+            for version in self.pipelines.list_versions_for_pipelines(owner_id, pipeline_ids)
+        }
+        for model in models:
+            self._enrich_batch_scoring_contract(model, fitted_by_run_step, versions_by_id)
+            model.logical_id = model.logical_id or self._logical_model_id(model)
+            model.metrics = {}
+            model.model_parameters = {}
+
+        known = {item.id for item in models}
+        legacy = [
+            replace(item, metrics={}, model_parameters={}) for item in (
+                self.repository.list_all_models()
+                if principal.is_administrator
+                else self.repository.list_models(principal.user_id)
+            )
+            if item.id not in known
+        ]
+        models.extend(legacy)
+        self._assign_version_numbers(models)
+        return sorted(models, key=lambda item: (item.created_at, item.id), reverse=True)
+
     def get_model(self, model_id: str, principal: Principal) -> ModelArtifact:
         return self._get_model(model_id, principal, include_display_version=True)
 
     def get_model_for_inference(self, model_id: str, principal: Principal) -> ModelArtifact:
         """Resolve one immutable inference bundle without registry presentation work."""
         return self._get_model(model_id, principal, include_display_version=False)
+
+    def list_serving_candidates(
+        self, business_case_id: str, principal: Principal
+    ) -> list[ModelArtifact]:
+        """Resolve only deployable models from one BC, enriching their inference bundle on demand."""
+        access_policy.require_business_case(
+            principal, business_case_id, BusinessCaseAccessRole.READER
+        )
+        summaries = [
+            self._artifact_model(artifact)
+            for artifact in self.artifacts.list_model_summary_artifacts_for_business_cases(
+                {business_case_id}
+            )
+        ]
+        self._assign_version_numbers(summaries)
+        deployable = [
+            item for item in summaries
+            if item.stage in {ModelStage.STAGING, ModelStage.PRODUCTION}
+        ]
+        candidates: list[ModelArtifact] = []
+        for summary in deployable:
+            model = self.get_model_for_inference(summary.id, principal)
+            model.version = summary.version
+            model.version_number = summary.version_number
+            model.logical_id = summary.logical_id
+            candidates.append(model)
+        return candidates
 
     def _get_model(
         self,
