@@ -6,7 +6,8 @@ or make promotion, rollback, routing or other operational decisions.
 
 ## Contract
 
-A run selects one deployment and a closed scoring-time window (`since`, `until`).
+A run selects one deployment and a half-open scoring-time window
+`[since, until)`.
 The worker freezes the selection at run creation, processes the full matching
 scope and reports request and row counts. It never silently replaces that scope
 with a sample. The scoring timestamp is the current time basis; event time,
@@ -17,6 +18,20 @@ The optional `aggregation_granularity` is `none`, `hour`, `day`, `week` or
 in DuckDB and returns one bounded row per calendar bucket, including empty
 buckets. Every row includes its calendar boundaries and the effective observed
 subrange when the requested window starts or ends inside that bucket.
+When actuals are available, `time_aggregation.performance_series` additionally
+contains classification or regression metric points calculated over every
+matched row in each bucket. These are grouped full-bucket computations, not
+samples. The UI presents numeric values as a bucket-by-metric table. Users can
+select up to eight bucket rows and compare their curve, distribution or residual
+diagnostics as separate chart series; the full-window view retains the complete
+scoring-report diagnostics.
+
+The visualization keeps operational charts in separate **Traffic**, **Latency**,
+and **Failures / fallbacks** tabs. A **Classification** or **Regression** tab is
+shown only when actuals were joined. That quality tab switches between the
+complete window and the selected aggregation granularity. Bucket boundaries are
+stored and requested in UTC; the browser renders their labels in its local time
+zone without changing bucket identity.
 
 Without actuals, the report covers service health, traffic, latency, errors,
 fallback use, input statistics and prediction distributions. Its
@@ -70,6 +85,7 @@ Content-Type: application/json
   "since": "2026-07-01T00:00:00Z",
   "until": "2026-07-08T00:00:00Z",
   "actuals_dataset_id": "dataset-version-id",
+  "aggregation_granularity": "hour",
   "actuals_target_column": "outcome",
   "join": {"strategy": "auto", "actuals_record_id_column": "customer_id"}
 }
@@ -81,6 +97,19 @@ List one deployment's history at
 `GET /api/v1/serving/deployments/{deployment_id}/monitoring-runs`; the global
 bounded list used by the comparative dashboard is
 `GET /api/v1/serving/monitoring-runs`.
+
+Chart diagnostics for explicitly selected aggregation buckets are available at:
+
+```http
+GET /api/v1/serving/monitoring-runs/{run_id}/bucket-evaluations?bucket_start=2026-07-01T00%3A00%3A00%2B00%3A00
+```
+
+Repeat `bucket_start` for up to eight buckets from the immutable report. Each
+result uses every matched row in that bucket and is calculated from the
+immutable joined Parquet dataset preserved by the successful run. Only bounded
+chart payloads are returned, never row-level joined data. The endpoint requires
+a successful run with joined actuals and accepts only bucket starts recorded in
+that report.
 
 Finished runs can be logically archived with
 `POST /api/v1/serving/monitoring-runs/{run_id}/archive`. Archive every finished
@@ -109,10 +138,15 @@ run = client.run_deployment_monitoring(
     actuals="estates_actuals",
     since="2026-07-01T00:00:00Z",
     until="2026-07-08T00:00:00Z",
+    aggregation_granularity="hour",
     actuals_target_column="sale_price",
     actuals_record_id_column="estate_id",
 )
 report = client.wait_for_online_monitoring_run(run)
+bucket_charts = client.get_online_monitoring_bucket_evaluations(
+    report,
+    ["2026-07-01T00:00:00+00:00", "2026-07-01T01:00:00+00:00"],
+)
 print(report.report["performance"])
 
 client.archive_online_monitoring_run(operational, reason="Dashboard cleanup")

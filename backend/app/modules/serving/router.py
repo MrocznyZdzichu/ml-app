@@ -17,6 +17,7 @@ from app.modules.serving.schemas import (
     InferenceInputContractRead,
     ModelServingUsageRead,
     OnlineMonitoringArchiveRequest,
+    OnlineMonitoringBucketEvaluationRead,
     OnlineMonitoringRunCreate,
     OnlineMonitoringRunRead,
     ScoreRequest,
@@ -349,3 +350,18 @@ def get_online_monitoring_run(
     return OnlineMonitoringRunRead.model_validate(
         monitoring_service.get_run(run_id, principal)
     )
+
+
+@router.get(
+    "/monitoring-runs/{run_id}/bucket-evaluations",
+    response_model=list[OnlineMonitoringBucketEvaluationRead],
+)
+def get_online_monitoring_bucket_evaluations(
+    run_id: str,
+    bucket_start: list[str] = Query(default=[]),
+    principal: Principal = Depends(require_user),
+) -> list[OnlineMonitoringBucketEvaluationRead]:
+    return [
+        OnlineMonitoringBucketEvaluationRead.model_validate(item)
+        for item in monitoring_service.bucket_evaluations(run_id, bucket_start, principal)
+    ]

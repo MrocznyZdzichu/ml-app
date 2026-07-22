@@ -216,6 +216,90 @@ class OnlineMonitoringService:
             raise HTTPException(status_code=404, detail="Online monitoring run not found")
         return run
 
+    def bucket_evaluations(
+        self,
+        run_id: str,
+        bucket_starts: list[str],
+        principal: Principal,
+    ) -> list[dict[str, Any]]:
+        """Build bounded scoring diagnostics only for explicitly selected buckets."""
+        run = self.get_run(run_id, principal)
+        if run.status != MonitoringRunStatus.SUCCEEDED:
+            raise HTTPException(status_code=409, detail="Monitoring run has not succeeded")
+        if not run.actuals_dataset_id or not run.joined_dataset_id:
+            raise HTTPException(status_code=409, detail="Bucket performance requires joined actuals")
+        requested = list(dict.fromkeys(bucket_starts))
+        if not requested:
+            return []
+        if len(requested) > 8:
+            raise HTTPException(status_code=422, detail="Select at most 8 monitoring buckets")
+        aggregation = dict(run.report.get("time_aggregation") or {})
+        available = {
+            str(item.get("bucket_start")): item
+            for item in aggregation.get("buckets") or []
+            if isinstance(item, dict) and item.get("bucket_start")
+        }
+        unknown = [value for value in requested if value not in available]
+        if unknown:
+            raise HTTPException(status_code=422, detail="Selected monitoring bucket is not part of this report")
+        asset = self.dataset_repository.get(run.joined_dataset_id)
+        if asset is None or not asset.location_uri.startswith("file://"):
+            raise HTTPException(status_code=409, detail="Joined monitoring dataset is unavailable")
+        path = Path(asset.location_uri.removeprefix("file://")).resolve()
+        if not path.is_relative_to(self.repository_root) or not path.is_file():
+            raise HTTPException(status_code=409, detail="Joined monitoring dataset file is unavailable")
+
+        connection = configured_duckdb_connection(path.parent / ".monitoring-visualization-duckdb")
+        relation = f"read_parquet({sql_literal(str(path))})"
+        full_window = dict((run.report.get("performance") or {}).get("service") or {})
+        positive_class = full_window.get("positive_class")
+        builder = ModelEvaluationSnapshotBuilder()
+        results: list[dict[str, Any]] = []
+        try:
+            for bucket_start in requested:
+                bucket = available[bucket_start]
+                observed_since = str(bucket.get("observed_since") or bucket.get("bucket_start"))
+                observed_until = str(bucket.get("observed_until") or bucket.get("bucket_end"))
+                target = (
+                    "try_cast(monitoring_actual AS DOUBLE)"
+                    if run.problem_type == "regression"
+                    else "cast(monitoring_actual AS VARCHAR)"
+                )
+                prediction = (
+                    "try_cast(prediction_value AS DOUBLE)"
+                    if run.problem_type == "regression"
+                    else "cast(prediction_value AS VARCHAR)"
+                )
+                scoped_relation = (
+                    f"SELECT *, {target} AS monitoring_target, {prediction} AS monitoring_prediction "
+                    f"FROM {relation} WHERE served AND execution_status = 'succeeded' "
+                    f"AND scored_at >= CAST({sql_literal(observed_since)} AS TIMESTAMPTZ) "
+                    f"AND scored_at < CAST({sql_literal(observed_until)} AS TIMESTAMPTZ)"
+                )
+                evaluation = builder.build(
+                    connection,
+                    scoped_relation,
+                    problem_type="regression" if run.problem_type == "regression" else "classification",
+                    target_column="monitoring_target",
+                    prediction_column="monitoring_prediction",
+                    score_contract={
+                        "prediction_score_column": (
+                            None if run.problem_type == "regression" else "prediction_score"
+                        ),
+                        "probability_available": run.problem_type != "regression",
+                        "positive_class": positive_class,
+                    },
+                )
+                results.append({
+                    "bucket_start": bucket_start,
+                    "bucket_end": str(bucket.get("bucket_end") or ""),
+                    "label": str(bucket.get("label") or bucket_start),
+                    "evaluation": evaluation,
+                })
+        finally:
+            connection.close()
+        return results
+
     def archive_run(
         self, run_id: str, reason: str, principal: Principal
     ) -> OnlineMonitoringRun:
@@ -423,6 +507,13 @@ class OnlineMonitoringService:
             time_aggregation = self._time_aggregation(
                 connection, snapshot_relation, run
             )
+            if actuals is not None and run.aggregation_granularity != "none":
+                time_aggregation["performance_series"] = self._performance_time_series(
+                    connection,
+                    joined_relation,
+                    run,
+                    evaluation["service"],
+                )
         finally:
             connection.close()
             snapshot_csv.unlink(missing_ok=True)
@@ -479,7 +570,7 @@ class OnlineMonitoringService:
         if actuals is None:
             warnings.insert(0, "Actuals were not provided; performance and effectiveness metrics were not evaluated")
         report = {
-            "contract_version": "1.1",
+            "contract_version": "1.2",
             "report_type": "online_service_monitoring_report",
             "evaluation_scope": "performance" if actuals is not None else "operational",
             "name": f"{deployment.name} online monitoring",
@@ -931,6 +1022,238 @@ class OnlineMonitoringService:
         return {
             "scope": "full", "kind": "classification", "count": total,
             "distribution": distribution, "warnings": warnings,
+        }
+
+    @staticmethod
+    def _performance_time_series(
+        connection: Any,
+        joined_relation: str,
+        run: OnlineMonitoringRun,
+        full_window_evaluation: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Calculate bounded metric series with one grouped scan per metric family."""
+        granularity = run.aggregation_granularity
+        if granularity not in {"hour", "day", "week", "month"}:
+            return {"problem_type": run.problem_type, "metrics": [], "warnings": []}
+        bucket = f"date_trunc('{granularity}', scored_at AT TIME ZONE 'UTC')"
+        target = (
+            "try_cast(monitoring_actual AS DOUBLE)"
+            if run.problem_type == "regression"
+            else "cast(monitoring_actual AS VARCHAR)"
+        )
+        prediction = (
+            "try_cast(prediction_value AS DOUBLE)"
+            if run.problem_type == "regression"
+            else "cast(prediction_value AS VARCHAR)"
+        )
+        base_where = (
+            "served AND execution_status = 'succeeded' "
+            "AND monitoring_actual IS NOT NULL AND prediction_value IS NOT NULL"
+        )
+        definitions: dict[str, tuple[str, str, str]]
+        values_by_metric: dict[str, list[dict[str, Any]]] = {}
+
+        if run.problem_type == "regression":
+            rows = connection.execute(
+                f"""
+                WITH base AS (
+                    SELECT {bucket} AS bucket_start,
+                           {target} AS actual,
+                           {prediction} AS predicted
+                    FROM {joined_relation}
+                    WHERE {base_where}
+                      AND {target} IS NOT NULL AND {prediction} IS NOT NULL
+                ), centered AS (
+                    SELECT *, avg(actual) OVER (PARTITION BY bucket_start) AS actual_mean,
+                           predicted - actual AS residual
+                    FROM base
+                )
+                SELECT bucket_start, count(*) AS evaluated_row_count,
+                       avg(abs(residual)) AS mae,
+                       sqrt(avg(residual * residual)) AS rmse,
+                       1 - sum(residual * residual)
+                           / nullif(sum(power(actual - actual_mean, 2)), 0) AS r2,
+                       avg(residual) AS mean_residual,
+                       avg(abs(residual / nullif(actual, 0))) FILTER (WHERE actual != 0) AS mape
+                FROM centered GROUP BY bucket_start ORDER BY bucket_start
+                """
+            ).fetchall()
+            definitions = {
+                "mae": ("MAE", "number", "lower"),
+                "rmse": ("RMSE", "number", "lower"),
+                "r2": ("R²", "number", "higher"),
+                "mean_residual": ("Mean residual", "number", "target_zero"),
+                "mape": ("MAPE", "ratio", "lower"),
+            }
+            for metric_index, metric_id in enumerate(definitions, start=2):
+                values_by_metric[metric_id] = [
+                    {
+                        "bucket_start": row[0].isoformat(),
+                        "evaluated_row_count": int(row[1]),
+                        "value": float(row[metric_index]) if row[metric_index] is not None else None,
+                    }
+                    for row in rows
+                ]
+        else:
+            rows = connection.execute(
+                f"""
+                WITH base AS (
+                    SELECT {bucket} AS bucket_start,
+                           {target} AS actual,
+                           {prediction} AS predicted
+                    FROM {joined_relation}
+                    WHERE {base_where}
+                ), labels AS (
+                    SELECT bucket_start, actual AS label FROM base
+                    UNION SELECT bucket_start, predicted AS label FROM base
+                ), actuals AS (
+                    SELECT bucket_start, actual AS label, count(*) AS support
+                    FROM base GROUP BY bucket_start, actual
+                ), predictions AS (
+                    SELECT bucket_start, predicted AS label, count(*) AS predicted_count
+                    FROM base GROUP BY bucket_start, predicted
+                ), correct AS (
+                    SELECT bucket_start, actual AS label, count(*) AS true_positive
+                    FROM base WHERE actual = predicted GROUP BY bucket_start, actual
+                ), class_stats AS (
+                    SELECT labels.bucket_start, labels.label,
+                           coalesce(support, 0)::DOUBLE AS support,
+                           coalesce(predicted_count, 0)::DOUBLE AS predicted_count,
+                           coalesce(true_positive, 0)::DOUBLE AS true_positive
+                    FROM labels
+                    LEFT JOIN actuals USING (bucket_start, label)
+                    LEFT JOIN predictions USING (bucket_start, label)
+                    LEFT JOIN correct USING (bucket_start, label)
+                ), class_metrics AS (
+                    SELECT *,
+                           coalesce(true_positive / nullif(predicted_count, 0), 0) AS precision,
+                           coalesce(true_positive / nullif(support, 0), 0) AS recall
+                    FROM class_stats
+                ), with_f1 AS (
+                    SELECT *, coalesce(2 * precision * recall / nullif(precision + recall, 0), 0) AS f1
+                    FROM class_metrics
+                )
+                SELECT bucket_start, sum(support)::BIGINT AS evaluated_row_count,
+                       sum(true_positive) / nullif(sum(support), 0) AS accuracy,
+                       avg(recall) AS balanced_accuracy,
+                       avg(precision) AS precision_macro,
+                       avg(recall) AS recall_macro,
+                       avg(f1) AS f1_macro,
+                       sum(f1 * support) / nullif(sum(support), 0) AS f1_weighted
+                FROM with_f1 GROUP BY bucket_start ORDER BY bucket_start
+                """
+            ).fetchall()
+            definitions = {
+                "accuracy": ("Accuracy", "ratio", "higher"),
+                "balanced_accuracy": ("Balanced accuracy", "ratio", "higher"),
+                "precision_macro": ("Macro precision", "ratio", "higher"),
+                "recall_macro": ("Macro recall", "ratio", "higher"),
+                "f1_macro": ("Macro F1", "ratio", "higher"),
+                "f1_weighted": ("Weighted F1", "ratio", "higher"),
+            }
+            for metric_index, metric_id in enumerate(definitions, start=2):
+                values_by_metric[metric_id] = [
+                    {
+                        "bucket_start": row[0].isoformat(),
+                        "evaluated_row_count": int(row[1]),
+                        "value": float(row[metric_index]) if row[metric_index] is not None else None,
+                    }
+                    for row in rows
+                ]
+
+            positive_class = full_window_evaluation.get("positive_class")
+            if positive_class is not None:
+                positive = sql_literal(str(positive_class))
+                score_rows = connection.execute(
+                    f"""
+                    WITH base AS (
+                        SELECT {bucket} AS bucket_start,
+                               try_cast(prediction_score AS DOUBLE) AS score,
+                               CASE WHEN {target} = {positive} THEN 1 ELSE 0 END AS positive
+                        FROM {joined_relation}
+                        WHERE {base_where} AND prediction_score IS NOT NULL
+                    ), score_groups AS (
+                        SELECT bucket_start, score,
+                               sum(positive)::DOUBLE AS positives,
+                               sum(1 - positive)::DOUBLE AS negatives
+                        FROM base WHERE score IS NOT NULL GROUP BY bucket_start, score
+                    ), ascending AS (
+                        SELECT *, coalesce(sum(negatives) OVER (
+                            PARTITION BY bucket_start ORDER BY score ASC
+                            ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                        ), 0) AS negatives_before
+                        FROM score_groups
+                    ), descending AS (
+                        SELECT *,
+                               sum(positives) OVER (PARTITION BY bucket_start ORDER BY score DESC) AS cumulative_positives,
+                               sum(negatives) OVER (PARTITION BY bucket_start ORDER BY score DESC) AS cumulative_negatives
+                        FROM score_groups
+                    ), totals AS (
+                        SELECT bucket_start, sum(positives) AS positive_total,
+                               sum(negatives) AS negative_total
+                        FROM score_groups GROUP BY bucket_start
+                    ), ranking AS (
+                        SELECT a.bucket_start,
+                               sum(a.positives * (a.negatives_before + 0.5 * a.negatives))
+                                   / nullif(t.positive_total * t.negative_total, 0) AS roc_auc,
+                               sum(d.positives / nullif(t.positive_total, 0)
+                                   * d.cumulative_positives
+                                   / nullif(d.cumulative_positives + d.cumulative_negatives, 0)) AS average_precision
+                        FROM ascending a
+                        JOIN descending d USING (bucket_start, score, positives, negatives)
+                        JOIN totals t USING (bucket_start)
+                        GROUP BY a.bucket_start, t.positive_total, t.negative_total
+                    ), losses AS (
+                        SELECT bucket_start,
+                               avg(power(greatest(0.0, least(1.0, score)) - positive, 2)) AS brier_score,
+                               avg(-(positive * ln(greatest(1e-15, least(1 - 1e-15, score)))
+                                   + (1 - positive) * ln(greatest(1e-15, least(1 - 1e-15, 1 - score))))) AS log_loss
+                        FROM base WHERE score IS NOT NULL GROUP BY bucket_start
+                    )
+                    SELECT ranking.bucket_start, roc_auc, average_precision, brier_score, log_loss
+                    FROM ranking JOIN losses USING (bucket_start) ORDER BY ranking.bucket_start
+                    """
+                ).fetchall()
+                score_definitions = {
+                    "roc_auc": ("ROC AUC", "ratio", "higher"),
+                    "average_precision": ("Average precision", "ratio", "higher"),
+                    "brier_score": ("Brier score", "number", "lower"),
+                    "log_loss": ("Log loss", "number", "lower"),
+                }
+                definitions.update(score_definitions)
+                for metric_index, metric_id in enumerate(score_definitions, start=1):
+                    values_by_metric[metric_id] = [
+                        {
+                            "bucket_start": row[0].isoformat(),
+                            "evaluated_row_count": next(
+                                (
+                                    point["evaluated_row_count"]
+                                    for point in values_by_metric["accuracy"]
+                                    if point["bucket_start"] == row[0].isoformat()
+                                ),
+                                0,
+                            ),
+                            "value": float(row[metric_index]) if row[metric_index] is not None else None,
+                        }
+                        for row in score_rows
+                    ]
+
+        return {
+            "scope": "full_per_bucket",
+            "problem_type": run.problem_type,
+            "metrics": [
+                {
+                    "id": metric_id,
+                    "label": label,
+                    "unit": unit,
+                    "direction": direction,
+                    "points": values_by_metric.get(metric_id, []),
+                }
+                for metric_id, (label, unit, direction) in definitions.items()
+            ],
+            "warnings": [
+                "Every point is calculated over all matched rows in its UTC calendar bucket; no sampling is used."
+            ],
         }
 
     @staticmethod

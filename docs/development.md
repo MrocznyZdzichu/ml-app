@@ -189,7 +189,7 @@ gaps that affect local development:
 - XLSX, database, object-storage, and remote query-engine adapters are missing.
 - Long-running analytics need stronger cancellation, quotas, and persisted
   resource accounting.
-- Serving metadata is not connected to an automatic Docker/Kubernetes deployment
-  adapter.
+- Online serving uses one private shared Compose runtime; automatic per-service
+  Docker/Kubernetes provisioning, isolation, and autoscaling are not implemented.
 - The frontend has a production TypeScript build but no broad component-test and
   lint baseline yet.

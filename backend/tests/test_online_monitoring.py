@@ -73,6 +73,67 @@ def test_hourly_aggregation_returns_one_row_per_calendar_hour_including_empty_ho
     assert result["buckets"][2]["failed_request_count"] == 1
 
 
+def test_classification_performance_series_uses_all_rows_in_each_bucket() -> None:
+    connection = duckdb.connect(":memory:")
+    connection.execute(
+        "CREATE TABLE joined(scored_at TIMESTAMPTZ, served BOOLEAN, "
+        "execution_status VARCHAR, monitoring_actual VARCHAR, prediction_value VARCHAR, "
+        "prediction_score DOUBLE)"
+    )
+    connection.execute(
+        "INSERT INTO joined VALUES "
+        "('2026-07-01T00:10:00Z', true, 'succeeded', '0', '0', 0.1), "
+        "('2026-07-01T00:20:00Z', true, 'succeeded', '1', '1', 0.9), "
+        "('2026-07-01T01:10:00Z', true, 'succeeded', '0', '1', 0.9), "
+        "('2026-07-01T01:20:00Z', true, 'succeeded', '1', '0', 0.1)"
+    )
+
+    result = service_without_external_repositories()._performance_time_series(
+        connection,
+        "joined",
+        monitoring_run(
+            problem_type="binary_classification",
+            aggregation_granularity="hour",
+        ),
+        {"positive_class": "1"},
+    )
+    connection.close()
+
+    metrics = {item["id"]: item["points"] for item in result["metrics"]}
+    assert [point["evaluated_row_count"] for point in metrics["accuracy"]] == [2, 2]
+    assert [point["value"] for point in metrics["accuracy"]] == pytest.approx([1.0, 0.0])
+    assert [point["value"] for point in metrics["roc_auc"]] == pytest.approx([1.0, 0.0])
+    assert [point["value"] for point in metrics["average_precision"]] == pytest.approx([1.0, 0.5])
+
+
+def test_regression_performance_series_preserves_negative_and_positive_metrics() -> None:
+    connection = duckdb.connect(":memory:")
+    connection.execute(
+        "CREATE TABLE joined(scored_at TIMESTAMPTZ, served BOOLEAN, "
+        "execution_status VARCHAR, monitoring_actual DOUBLE, prediction_value VARCHAR)"
+    )
+    connection.execute(
+        "INSERT INTO joined VALUES "
+        "('2026-07-01T00:10:00Z', true, 'succeeded', 1.0, '1.0'), "
+        "('2026-07-01T00:20:00Z', true, 'succeeded', 2.0, '2.0'), "
+        "('2026-07-01T01:10:00Z', true, 'succeeded', 1.0, '2.0'), "
+        "('2026-07-01T01:20:00Z', true, 'succeeded', 2.0, '3.0')"
+    )
+
+    result = service_without_external_repositories()._performance_time_series(
+        connection,
+        "joined",
+        monitoring_run(problem_type="regression", aggregation_granularity="hour"),
+        {},
+    )
+    connection.close()
+
+    metrics = {item["id"]: item["points"] for item in result["metrics"]}
+    assert [point["value"] for point in metrics["mae"]] == pytest.approx([0.0, 1.0])
+    assert [point["value"] for point in metrics["rmse"]] == pytest.approx([0.0, 1.0])
+    assert [point["value"] for point in metrics["mean_residual"]] == pytest.approx([0.0, 1.0])
+
+
 def test_auto_join_prefers_prediction_id_and_returns_actual_for_served_record() -> None:
     connection = duckdb.connect(":memory:")
     connection.execute(
@@ -126,6 +187,57 @@ def test_snapshot_csv_contract_is_valid_for_an_empty_full_scope(tmp_path) -> Non
     assert connection.execute(
         f"SELECT count(*) FROM ({service._csv_relation(path)})"
     ).fetchone()[0] == 0
+
+
+def test_bucket_evaluations_build_full_bucket_chart_diagnostics_on_demand(tmp_path) -> None:
+    joined_path = tmp_path / "joined.parquet"
+    connection = duckdb.connect(":memory:")
+    connection.execute(
+        "CREATE TABLE joined(scored_at TIMESTAMPTZ, served BOOLEAN, "
+        "execution_status VARCHAR, monitoring_actual VARCHAR, prediction_value VARCHAR, "
+        "prediction_score DOUBLE)"
+    )
+    connection.execute(
+        "INSERT INTO joined VALUES "
+        "('2026-07-01T00:10:00Z', true, 'succeeded', '0', '0', 0.1), "
+        "('2026-07-01T00:20:00Z', true, 'succeeded', '1', '1', 0.9), "
+        "('2026-07-01T01:10:00Z', true, 'succeeded', '0', '1', 0.7)"
+    )
+    connection.execute(f"COPY joined TO '{joined_path.as_posix()}' (FORMAT PARQUET)")
+    connection.close()
+    bucket_start = "2026-07-01T00:00:00+00:00"
+    run = monitoring_run(
+        status=MonitoringRunStatus.SUCCEEDED,
+        joined_dataset_id="joined-1",
+        problem_type="binary_classification",
+        report={
+            "time_aggregation": {
+                "buckets": [{
+                    "bucket_start": bucket_start,
+                    "bucket_end": "2026-07-01T01:00:00+00:00",
+                    "observed_since": "2026-07-01T00:00:00+00:00",
+                    "observed_until": "2026-07-01T01:00:00+00:00",
+                    "label": "2026-07-01 00:00–00:59",
+                }]
+            },
+            "performance": {"service": {"positive_class": "1"}},
+        },
+    )
+    service = service_without_external_repositories()
+    service.get_run = lambda run_id, principal: run
+    service.dataset_repository = SimpleNamespace(
+        get=lambda dataset_id: SimpleNamespace(location_uri=f"file://{joined_path}")
+    )
+    service.repository_root = tmp_path.resolve()
+
+    result = service.bucket_evaluations(run.id, [bucket_start], SimpleNamespace())
+
+    assert len(result) == 1
+    assert result[0]["label"] == "2026-07-01 00:00–00:59"
+    assert result[0]["evaluation"]["data_scope"]["evaluated_row_count"] == 2
+    metrics = {item["id"]: item["value"] for item in result[0]["evaluation"]["metrics"]}
+    assert metrics["accuracy"] == pytest.approx(1.0)
+    assert metrics["roc_auc"] == pytest.approx(1.0)
 
 
 def test_per_model_effectiveness_keeps_revision_role_and_bundle_dimensions() -> None:

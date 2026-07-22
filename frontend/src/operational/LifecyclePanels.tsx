@@ -15,7 +15,9 @@ import type {
   InferenceRequestSummary,
   InferenceInputContract,
   ModelArtifact,
+  ModelEvaluationSnapshot,
   ModelServingUsage,
+  OnlineMonitoringBucketEvaluation,
   OnlineMonitoringRun,
   Pipeline,
   ScoreResponse
@@ -23,6 +25,7 @@ import type {
 import { AssetList } from "../components/AssetList";
 import { ArtifactFilters, pipelineMatches } from "../components/ArtifactFilters";
 import { DialogNavigationActions, useVersionedResourceNavigation } from "../components/dialogNavigation";
+import { ModelPerformanceReport, ModelPerformanceSeriesReport } from "../pipelines/PipelineRunDialogs";
 import { DatasetLineageList } from "./DatasetLineageList";
 
 type NoticeSetter = (message: string) => void;
@@ -1204,6 +1207,7 @@ function monitoringHasActuals(run: OnlineMonitoringRun) {
 type MonitoringBucket = {
   label: string;
   bucket_start: string;
+  bucket_end: string;
   request_count: number;
   failed_request_count: number;
   fallback_request_count: number;
@@ -1211,28 +1215,141 @@ type MonitoringBucket = {
   served_prediction_count: number;
 };
 
+function monitoringBucketDisplayLabel(bucketStart: string, bucketEnd: string, fallback: string) {
+  const start = new Date(bucketStart);
+  const end = new Date(bucketEnd);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return fallback;
+  const date = new Intl.DateTimeFormat(undefined, {
+    year: "numeric", month: "2-digit", day: "2-digit",
+  }).format(start);
+  const time = new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  });
+  return `${date} ${time.format(start)}–${time.format(end)}`;
+}
+
 function monitoringBuckets(run: OnlineMonitoringRun): MonitoringBucket[] {
   const aggregation = run.report.time_aggregation as Record<string, unknown> | undefined;
   if (!Array.isArray(aggregation?.buckets)) return [];
-  return (aggregation.buckets as Array<Record<string, unknown>>).map((bucket) => ({
-    label: String(bucket.label ?? ""),
-    bucket_start: String(bucket.bucket_start ?? ""),
-    request_count: Number(bucket.request_count ?? 0),
-    failed_request_count: Number(bucket.failed_request_count ?? 0),
-    fallback_request_count: Number(bucket.fallback_request_count ?? 0),
-    p95_latency_ms: bucket.p95_latency_ms == null ? null : Number(bucket.p95_latency_ms),
-    served_prediction_count: Number(bucket.served_prediction_count ?? 0)
-  }));
+  return (aggregation.buckets as Array<Record<string, unknown>>).map((bucket) => {
+    const bucketStart = String(bucket.bucket_start ?? "");
+    const bucketEnd = String(bucket.bucket_end ?? "");
+    return {
+      label: monitoringBucketDisplayLabel(bucketStart, bucketEnd, String(bucket.label ?? "")),
+      bucket_start: bucketStart,
+      bucket_end: bucketEnd,
+      request_count: Number(bucket.request_count ?? 0),
+      failed_request_count: Number(bucket.failed_request_count ?? 0),
+      fallback_request_count: Number(bucket.fallback_request_count ?? 0),
+      p95_latency_ms: bucket.p95_latency_ms == null ? null : Number(bucket.p95_latency_ms),
+      served_prediction_count: Number(bucket.served_prediction_count ?? 0),
+    };
+  });
+}
+
+type MonitoringPerformanceSeries = {
+  id: string;
+  label: string;
+  unit: string;
+  direction: string;
+  points: Array<{ bucket_start: string; evaluated_row_count: number; value: number | null }>;
+};
+
+function monitoringPerformanceSeries(run: OnlineMonitoringRun): MonitoringPerformanceSeries[] {
+  const aggregation = objectValue(run.report.time_aggregation);
+  const performanceSeries = objectValue(aggregation.performance_series);
+  return Array.isArray(performanceSeries.metrics)
+    ? performanceSeries.metrics as MonitoringPerformanceSeries[]
+    : [];
+}
+
+function monitoringBucketKey(value: string) {
+  return value.replace(/(?:Z|\+00:00)$/, "");
+}
+
+function formatMonitoringMetric(value: number | null, unit: string) {
+  if (value == null) return "—";
+  return unit === "ratio"
+    ? `${(value * 100).toFixed(1)}%`
+    : value.toLocaleString(undefined, { maximumFractionDigits: 4 });
 }
 
 function MonitoringVisualizationModal({ run, onClose }: { run: OnlineMonitoringRun; onClose: () => void }) {
   const buckets = monitoringBuckets(run);
   const [selectedIndex, setSelectedIndex] = useState(Math.max(0, buckets.length - 1));
+  const hasActuals = monitoringHasActuals(run);
+  const performance = objectValue(run.report.performance);
+  const servicePerformance = objectValue(performance.service);
+  const rawFullWindowPerformance = hasActuals && servicePerformance.kind === "model_performance"
+    ? servicePerformance as ModelEvaluationSnapshot
+    : null;
+  const hasInvalidLegacyScoreContract = Boolean(
+    rawFullWindowPerformance
+    && rawFullWindowPerformance.positive_class == null
+    && rawFullWindowPerformance.metrics.some((metric) => metric.id === "roc_auc")
+  );
+  const invalidScoreMetricIds = new Set(["roc_auc", "average_precision", "brier_score", "log_loss"]);
+  const fullWindowPerformance = rawFullWindowPerformance && hasInvalidLegacyScoreContract
+    ? {
+        ...rawFullWindowPerformance,
+        metrics: rawFullWindowPerformance.metrics.filter((metric) => !invalidScoreMetricIds.has(metric.id)),
+        curves: {},
+        distributions: {},
+        warnings: [
+          "Score-based charts were omitted because this legacy report did not record a positive class. Run monitoring again to calculate them correctly.",
+          ...rawFullWindowPerformance.warnings,
+        ],
+      }
+    : rawFullWindowPerformance;
+  const performanceSeries = monitoringPerformanceSeries(run);
+  const evaluatedRowsByBucket = new Map(
+    (performanceSeries[0]?.points ?? []).map((point) => [
+      monitoringBucketKey(point.bucket_start),
+      point.evaluated_row_count,
+    ])
+  );
+  const initiallySelectedQualityBuckets = buckets
+    .filter((bucket) => (evaluatedRowsByBucket.get(monitoringBucketKey(bucket.bucket_start)) ?? 0) > 0)
+    .slice(-2)
+    .map((bucket) => bucket.bucket_start);
+  const qualityTab = run.problem_type === "regression" ? "regression" : "classification";
+  type MonitoringVisualTab = "traffic" | "latency" | "reliability" | "classification" | "regression";
+  const [qualityMode, setQualityMode] = useState<"full" | "aggregated">("full");
+  const [activeTab, setActiveTab] = useState<MonitoringVisualTab>("traffic");
+  const [selectedQualityBuckets, setSelectedQualityBuckets] = useState<string[]>(initiallySelectedQualityBuckets);
+  const [bucketEvaluations, setBucketEvaluations] = useState<OnlineMonitoringBucketEvaluation[]>([]);
+  const [bucketEvaluationLoading, setBucketEvaluationLoading] = useState(false);
+  const [bucketEvaluationError, setBucketEvaluationError] = useState("");
   useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => event.key === "Escape" && onClose();
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [onClose]);
+  useEffect(() => {
+    if (qualityMode !== "aggregated" || selectedQualityBuckets.length === 0) {
+      setBucketEvaluations([]);
+      setBucketEvaluationError("");
+      setBucketEvaluationLoading(false);
+      return;
+    }
+    let active = true;
+    setBucketEvaluationLoading(true);
+    setBucketEvaluationError("");
+    api.getOnlineMonitoringBucketEvaluations(run.id, selectedQualityBuckets)
+      .then((items) => {
+        if (active) setBucketEvaluations(items);
+      })
+      .catch((error) => {
+        if (active) {
+          setBucketEvaluations([]);
+          setBucketEvaluationError(error instanceof Error ? error.message : "Could not load selected period charts");
+        }
+      })
+      .finally(() => {
+        if (active) setBucketEvaluationLoading(false);
+      });
+    return () => { active = false; };
+  }, [qualityMode, run.id, selectedQualityBuckets]);
   const selected = buckets[selectedIndex] ?? buckets[0];
   const aggregation = run.report.time_aggregation as Record<string, unknown> | undefined;
   const chartWidth = 1040;
@@ -1255,12 +1372,14 @@ function MonitoringVisualizationModal({ run, onClose }: { run: OnlineMonitoringR
     valueLabel: (value: number) => string,
   ) {
     const values = series.flatMap((item) => item.values.filter((value): value is number => value != null));
-    const max = Math.max(1, ...values);
+    const min = Math.min(0, ...values);
+    const max = Math.max(min === 0 ? 1 : 0, ...values);
+    const span = max - min || 1;
     const top = 28;
     const bottom = 166;
-    const yAt = (value: number) => bottom - (value / max) * (bottom - top);
+    const yAt = (value: number) => bottom - ((value - min) / span) * (bottom - top);
     return <div className="serving-monitoring-chart"><div className="serving-monitoring-chart-title"><strong>{title}</strong><span>{series.map((item) => <span key={item.label} className={item.className}><i />{item.label}</span>)}</span></div><svg viewBox={`0 0 ${chartWidth} 210`} role="img" aria-label={`${title} over ${buckets.length} ${String(aggregation?.granularity ?? "time")} buckets`} onMouseMove={pickFromPointer}>
-      {[0, 0.5, 1].map((ratio) => <g key={ratio}><line className="monitoring-chart-grid" x1={plotLeft} x2={plotRight} y1={bottom - ratio * (bottom - top)} y2={bottom - ratio * (bottom - top)} /><text className="monitoring-chart-axis" x={plotLeft - 10} y={bottom - ratio * (bottom - top) + 4} textAnchor="end">{valueLabel(max * ratio)}</text></g>)}
+      {[0, 0.5, 1].map((ratio) => <g key={ratio}><line className="monitoring-chart-grid" x1={plotLeft} x2={plotRight} y1={bottom - ratio * (bottom - top)} y2={bottom - ratio * (bottom - top)} /><text className="monitoring-chart-axis" x={plotLeft - 10} y={bottom - ratio * (bottom - top) + 4} textAnchor="end">{valueLabel(min + span * ratio)}</text></g>)}
       {axisLabels.map((index) => <text key={index} className="monitoring-chart-axis" x={xAt(index)} y={194} textAnchor={index === 0 ? "start" : index === buckets.length - 1 ? "end" : "middle"}>{buckets[index]?.label ?? ""}</text>)}
       {series.map((item) => {
         let drawing = false;
@@ -1280,15 +1399,70 @@ function MonitoringVisualizationModal({ run, onClose }: { run: OnlineMonitoringR
     </svg></div>;
   }
 
-  if (!selected) return null;
-  return <div className="modal-backdrop serving-monitoring-visual-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className="modal-dialog serving-monitoring-visual-dialog" role="dialog" aria-modal="true" aria-labelledby="monitoring-visual-title"><div className="modal-header"><div><span className="builder-kicker">Interactive time series · scored_at · UTC</span><h2 id="monitoring-visual-title">Monitoring report visualization</h2><p>{formatDate(run.since)} — {formatDate(run.until)} · {buckets.length} {String(aggregation?.granularity ?? "time")} buckets</p></div><button className="icon-button" type="button" onClick={onClose} aria-label="Close monitoring visualization"><X size={18} /></button></div><div className="serving-monitoring-visual-content">
-    <div className="serving-monitoring-selected-period"><strong>{selected.label}</strong><span>{selected.request_count} requests</span><span>{selected.served_prediction_count} served</span><span>{selected.failed_request_count} failed</span><span>{selected.fallback_request_count} fallback</span><span>{selected.p95_latency_ms == null ? "No latency" : `${Math.round(selected.p95_latency_ms)} ms p95`}</span></div>
-    {lineChart("Traffic", [{ label: "Requests", values: buckets.map((item) => item.request_count), className: "series-requests" }, { label: "Served predictions", values: buckets.map((item) => item.served_prediction_count), className: "series-served" }], (value) => Math.round(value).toString())}
-    <div className="serving-monitoring-chart-pair">
-      {lineChart("Reliability events", [{ label: "Failed", values: buckets.map((item) => item.failed_request_count), className: "series-failed" }, { label: "Fallback", values: buckets.map((item) => item.fallback_request_count), className: "series-fallback" }], (value) => Math.round(value).toString())}
-      {lineChart("P95 latency", [{ label: "P95 latency", values: buckets.map((item) => item.p95_latency_ms), className: "series-latency" }], (value) => `${Math.round(value)} ms`)}
+  const tabs: Array<{ id: MonitoringVisualTab; label: string }> = [
+    { id: "traffic", label: "Traffic" },
+    { id: "latency", label: "Latency" },
+    { id: "reliability", label: "Failures / fallbacks" },
+  ];
+  if (hasActuals) tabs.push({
+    id: qualityTab,
+    label: qualityTab === "regression" ? "Regression" : "Classification",
+  });
+  const isQualityTab = activeTab === "classification" || activeTab === "regression";
+  const formatCountAxis = (value: number) => value.toLocaleString(undefined, {
+    maximumFractionDigits: value > 0 && value < 10 ? 1 : 0,
+  });
+  const metricValue = (metric: MonitoringPerformanceSeries, bucketStart: string) => metric.points.find(
+    (point) => monitoringBucketKey(point.bucket_start) === monitoringBucketKey(bucketStart)
+  )?.value ?? null;
+  const evaluatedRows = (bucketStart: string) => evaluatedRowsByBucket.get(monitoringBucketKey(bucketStart)) ?? 0;
+  const toggleQualityBucket = (bucketStart: string) => {
+    setSelectedQualityBuckets((current) => current.includes(bucketStart)
+      ? current.filter((item) => item !== bucketStart)
+      : current.length < 8 ? [...current, bucketStart] : current);
+  };
+
+  return <div className="modal-backdrop serving-monitoring-visual-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><div className="modal-dialog serving-monitoring-visual-dialog" role="dialog" aria-modal="true" aria-labelledby="monitoring-visual-title"><div className="modal-header"><div><span className="builder-kicker">Full-scope monitoring · scored_at · local time</span><h2 id="monitoring-visual-title">Monitoring report visualization</h2><p>{formatDate(run.since)} — {formatDate(run.until)} · {buckets.length} {String(aggregation?.granularity ?? "time")} buckets</p></div><button className="icon-button" type="button" onClick={onClose} aria-label="Close monitoring visualization"><X size={18} /></button></div><div className="serving-monitoring-visual-content">
+    <div className="serving-monitoring-visual-tabs" role="tablist" aria-label="Monitoring chart category">
+      {tabs.map((tab) => <button key={tab.id} type="button" role="tab" aria-selected={activeTab === tab.id} aria-controls={`monitoring-panel-${tab.id}`} id={`monitoring-tab-${tab.id}`} onClick={() => setActiveTab(tab.id)}>{tab.label}</button>)}
     </div>
-    <label className="serving-monitoring-period-slider"><span>Selected period <strong>{selected.label}</strong></span><input type="range" min={0} max={Math.max(0, buckets.length - 1)} value={selectedIndex} onChange={(event) => setSelectedIndex(Number(event.target.value))} aria-label="Select monitoring period" /></label>
+    <section className="serving-monitoring-visual-panel" role="tabpanel" id={`monitoring-panel-${activeTab}`} aria-labelledby={`monitoring-tab-${activeTab}`}>
+      {!isQualityTab && selected && <div className="serving-monitoring-selected-period"><strong>{selected.label}</strong>{activeTab === "traffic" && <><span>{selected.request_count} requests</span><span>{selected.served_prediction_count} served</span></>}{activeTab === "latency" && <span>{selected.p95_latency_ms == null ? "No latency data" : `${Math.round(selected.p95_latency_ms)} ms p95`}</span>}{activeTab === "reliability" && <><span>{selected.failed_request_count} failed</span><span>{selected.fallback_request_count} fallback</span></>}</div>}
+      {activeTab === "traffic" && <div className="serving-monitoring-traffic-charts">{lineChart("Requests", [{ label: "Requests", values: buckets.map((item) => item.request_count), className: "series-requests" }], formatCountAxis)}{lineChart("Served predictions", [{ label: "Served predictions", values: buckets.map((item) => item.served_prediction_count), className: "series-served" }], formatCountAxis)}</div>}
+      {activeTab === "latency" && lineChart("P95 request latency", [{ label: "P95 latency", values: buckets.map((item) => item.p95_latency_ms), className: "series-latency" }], (value) => `${Math.round(value)} ms`)}
+      {activeTab === "reliability" && lineChart("Failed requests and fallback use", [{ label: "Failed", values: buckets.map((item) => item.failed_request_count), className: "series-failed" }, { label: "Fallback", values: buckets.map((item) => item.fallback_request_count), className: "series-fallback" }], formatCountAxis)}
+      {isQualityTab && <div className="serving-monitoring-quality-view">
+        <div className="serving-monitoring-view-switch" role="group" aria-label="Model quality scope">
+          <button type="button" aria-pressed={qualityMode === "full"} onClick={() => setQualityMode("full")}>Full window</button>
+          <button type="button" aria-pressed={qualityMode === "aggregated"} disabled={!performanceSeries.length} onClick={() => setQualityMode("aggregated")}>Per {String(aggregation?.granularity ?? "time bucket")}</button>
+        </div>
+        {qualityMode === "full" && fullWindowPerformance && <ModelPerformanceReport report={fullWindowPerformance} />}
+        {qualityMode === "aggregated" && performanceSeries.length > 0 && <>
+          <div className="serving-monitoring-metrics-table-wrap">
+            <table className="serving-monitoring-metrics-table">
+              <thead><tr><th>Period</th><th className="numeric">Evaluated rows</th>{performanceSeries.map((metric) => <th className="numeric" key={metric.id}>{metric.label}</th>)}</tr></thead>
+              <tbody>{buckets.map((bucket) => <tr key={bucket.bucket_start}><th scope="row">{bucket.label}</th><td className="numeric">{evaluatedRows(bucket.bucket_start).toLocaleString()}</td>{performanceSeries.map((metric) => <td className="numeric" key={metric.id}>{formatMonitoringMetric(metricValue(metric, bucket.bucket_start), metric.unit)}</td>)}</tr>)}</tbody>
+            </table>
+          </div>
+          <section className="serving-monitoring-series-selector" aria-labelledby="monitoring-series-heading">
+            <div><strong id="monitoring-series-heading">Chart series</strong><span>Select up to 8 periods to compare full-bucket chart statistics.</span></div>
+            <div className="serving-monitoring-series-options">{buckets.map((bucket, index) => {
+              const checked = selectedQualityBuckets.includes(bucket.bucket_start);
+              const hasRows = evaluatedRows(bucket.bucket_start) > 0;
+              const disabled = !hasRows || (!checked && selectedQualityBuckets.length >= 8);
+              const inputId = `monitoring-series-${run.id}-${index}`;
+              return <label key={bucket.bucket_start} htmlFor={inputId}><input id={inputId} type="checkbox" checked={checked} disabled={disabled} onChange={() => toggleQualityBucket(bucket.bucket_start)} /><span>{bucket.label}</span><small>{hasRows ? `${evaluatedRows(bucket.bucket_start).toLocaleString()} rows` : "No evaluated rows"}</small></label>;
+            })}</div>
+          </section>
+          {bucketEvaluationLoading && <div className="serving-monitoring-series-status">Calculating chart series for the selected full buckets…</div>}
+          {bucketEvaluationError && <div className="serving-inline-warning">{bucketEvaluationError}</div>}
+          {!bucketEvaluationLoading && !bucketEvaluationError && selectedQualityBuckets.length === 0 && <div className="serving-monitoring-series-status">Select at least one period to show chart statistics.</div>}
+          {!bucketEvaluationLoading && !bucketEvaluationError && bucketEvaluations.length > 0 && <ModelPerformanceSeriesReport series={bucketEvaluations.map((item) => ({ label: monitoringBucketDisplayLabel(item.bucket_start, item.bucket_end, item.label), evaluation: item.evaluation }))} />}
+        </>}
+        {qualityMode === "aggregated" && !performanceSeries.length && <div className="serving-inline-warning">Aggregated performance series are unavailable in this immutable report. Run monitoring again after this update to calculate them.</div>}
+      </div>}
+    </section>
+    {selected && !isQualityTab && <label className="serving-monitoring-period-slider"><span>Selected period <strong>{selected.label}</strong></span><input type="range" min={0} max={Math.max(0, buckets.length - 1)} value={selectedIndex} onChange={(event) => setSelectedIndex(Number(event.target.value))} aria-label="Select monitoring period" /></label>}
   </div></div></div>;
 }
 
@@ -2063,7 +2237,7 @@ export function ServingPanel({
             const modelsReport = Array.isArray(performance?.models) ? performance.models as Array<Record<string, unknown>> : [];
             const aggregation = run.report.time_aggregation as Record<string, unknown> | undefined;
             const buckets = Array.isArray(aggregation?.buckets) ? aggregation.buckets as Array<Record<string, unknown>> : [];
-            return <article key={run.id} className="serving-monitoring-run"><div className="serving-monitoring-run-head"><span><strong>{formatDate(run.since)} — {formatDate(run.until)}</strong><small>run {shortId(run.id)} · scored_at · {run.processed_request_count} requests</small></span><span className="serving-monitoring-run-actions"><span className={`status-pill ${run.status}`}>{run.status}</span>{["succeeded", "failed"].includes(run.status) && <button className="secondary-button compact-button" type="button" onClick={() => void archiveMonitoringRun(run.id)}><Archive size={13} /> Archive</button>}</span></div>{run.status === "failed" ? <div className="error-banner">{run.error_message}</div> : run.status !== "succeeded" ? <div className="serving-response-progress"><span className="serving-score-spinner" aria-hidden="true" /><strong>Processing retained inference history</strong><small>Full-scope snapshot and bounded aggregates run asynchronously.</small></div> : <><div className="serving-monitoring-kpis"><span><strong>{Number(scope?.processed_request_count ?? run.processed_request_count)}</strong><small>requests</small></span><span><strong>{Number(health?.record_count ?? 0)}</strong><small>records</small></span><span><strong>{Number(health?.failed_request_count ?? 0)}</strong><small>failed requests</small></span><span><strong>{Number(health?.fallback_request_count ?? 0)}</strong><small>fallback requests</small></span><span><strong>{health?.p95_latency_ms == null ? "—" : `${Math.round(Number(health.p95_latency_ms))} ms`}</strong><small>p95 latency</small></span><span><strong>{Number(scope?.served_prediction_count ?? 0)}</strong><small>served predictions</small></span>{hasActuals && <span><strong>{Math.round(Number(scope?.actuals_coverage ?? 0) * 100)}%</strong><small>actuals coverage</small></span>}{metrics.slice(0, 4).map((metric) => <span key={metric.id}><strong>{metric.value == null ? "—" : Number(metric.value).toFixed(3)}</strong><small>{metric.label}</small></span>)}</div>{buckets.length > 0 && <div className="serving-monitoring-buckets"><div className="serving-monitoring-bucket-toolbar"><strong>{String(aggregation?.granularity)} aggregation · scored_at · UTC</strong><button className="secondary-button compact-button" type="button" onClick={() => setMonitoringVisualizationRunId(run.id)}><BarChart3 size={14} /> Visualize</button></div><div className="serving-monitoring-bucket-table"><div className="serving-monitoring-bucket-head"><span>Period</span><span>Requests</span><span>Failed</span><span>Fallback</span><span>P95 latency</span><span>Served</span></div>{buckets.map((bucket) => <div key={String(bucket.bucket_start)}><span>{String(bucket.label)}</span><span>{Number(bucket.request_count ?? 0)}</span><span>{Number(bucket.failed_request_count ?? 0)}</span><span>{Number(bucket.fallback_request_count ?? 0)}</span><span>{bucket.p95_latency_ms == null ? "—" : `${Math.round(Number(bucket.p95_latency_ms))} ms`}</span><span>{Number(bucket.served_prediction_count ?? 0)}</span></div>)}</div></div>}{!hasActuals && <div className="serving-inline-warning">Performance not evaluated · actuals not provided. Operational, input and prediction monitoring cover the full selected window.</div>}{hasActuals && <div className="serving-monitoring-models"><strong>Model and role results</strong>{modelsReport.map((item) => {
+            return <article key={run.id} className="serving-monitoring-run"><div className="serving-monitoring-run-head"><span><strong>{formatDate(run.since)} — {formatDate(run.until)}</strong><small>run {shortId(run.id)} · scored_at · {run.processed_request_count} requests</small></span><span className="serving-monitoring-run-actions"><span className={`status-pill ${run.status}`}>{run.status}</span>{run.status === "succeeded" && <button className="secondary-button compact-button" type="button" onClick={() => setMonitoringVisualizationRunId(run.id)}><BarChart3 size={14} /> Visualize</button>}{["succeeded", "failed"].includes(run.status) && <button className="secondary-button compact-button" type="button" onClick={() => void archiveMonitoringRun(run.id)}><Archive size={13} /> Archive</button>}</span></div>{run.status === "failed" ? <div className="error-banner">{run.error_message}</div> : run.status !== "succeeded" ? <div className="serving-response-progress"><span className="serving-score-spinner" aria-hidden="true" /><strong>Processing retained inference history</strong><small>Full-scope snapshot and bounded aggregates run asynchronously.</small></div> : <><div className="serving-monitoring-kpis"><span><strong>{Number(scope?.processed_request_count ?? run.processed_request_count)}</strong><small>requests</small></span><span><strong>{Number(health?.record_count ?? 0)}</strong><small>records</small></span><span><strong>{Number(health?.failed_request_count ?? 0)}</strong><small>failed requests</small></span><span><strong>{Number(health?.fallback_request_count ?? 0)}</strong><small>fallback requests</small></span><span><strong>{health?.p95_latency_ms == null ? "—" : `${Math.round(Number(health.p95_latency_ms))} ms`}</strong><small>p95 latency</small></span><span><strong>{Number(scope?.served_prediction_count ?? 0)}</strong><small>served predictions</small></span>{hasActuals && <span><strong>{Math.round(Number(scope?.actuals_coverage ?? 0) * 100)}%</strong><small>actuals coverage</small></span>}{metrics.slice(0, 4).map((metric) => <span key={metric.id}><strong>{metric.value == null ? "—" : Number(metric.value).toFixed(3)}</strong><small>{metric.label}</small></span>)}</div>{buckets.length > 0 && <div className="serving-monitoring-buckets"><div className="serving-monitoring-bucket-toolbar"><strong>{String(aggregation?.granularity)} aggregation · scored_at · UTC</strong></div><div className="serving-monitoring-bucket-table"><div className="serving-monitoring-bucket-head"><span>Period</span><span>Requests</span><span>Failed</span><span>Fallback</span><span>P95 latency</span><span>Served</span></div>{buckets.map((bucket) => <div key={String(bucket.bucket_start)}><span>{String(bucket.label)}</span><span>{Number(bucket.request_count ?? 0)}</span><span>{Number(bucket.failed_request_count ?? 0)}</span><span>{Number(bucket.fallback_request_count ?? 0)}</span><span>{bucket.p95_latency_ms == null ? "—" : `${Math.round(Number(bucket.p95_latency_ms))} ms`}</span><span>{Number(bucket.served_prediction_count ?? 0)}</span></div>)}</div></div>}{!hasActuals && <div className="serving-inline-warning">Performance not evaluated · actuals not provided. Operational, input and prediction monitoring cover the full selected window.</div>}{hasActuals && <div className="serving-monitoring-models"><strong>Model and role results</strong>{modelsReport.map((item) => {
               const evaluation = item.evaluation as Record<string, unknown> | undefined;
               const modelMetrics = Array.isArray(evaluation?.metrics) ? evaluation.metrics as Array<{ id: string; label: string; value: number | null }> : [];
               return <span key={`${item.deployment_revision_id}:${item.model_id}:${item.role}`}><code>{shortId(String(item.model_id))}</code><small>{String(item.role)} · revision {shortId(String(item.deployment_revision_id))} · {Number(item.scored_row_count ?? 0)} rows</small>{modelMetrics[0] && <strong>{modelMetrics[0].label}: {modelMetrics[0].value == null ? "—" : Number(modelMetrics[0].value).toFixed(3)}</strong>}</span>;

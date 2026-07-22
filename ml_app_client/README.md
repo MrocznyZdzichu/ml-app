@@ -1,9 +1,10 @@
 # ML App Python client
 
 `ml_app_client` is the supported, deliberately small integration interface for
-dataset ingestion and pipeline execution. It streams CSV/Parquet uploads from
-disk, resolves human-readable Business Case, dataset and pipeline names, starts
-published pipeline versions, and polls bounded run metadata.
+dataset ingestion, pipeline execution, model lifecycle, scoring, online serving,
+and monitoring. It streams CSV/Parquet uploads from disk, resolves human-readable
+Business Case, dataset, pipeline, model, and service names, starts asynchronous
+workflows, and polls bounded run metadata.
 
 ```python
 from ml_app_client import MLAppClient
@@ -120,11 +121,19 @@ monitoring = client.run_deployment_monitoring(
     actuals="estates_actuals",
     since="2026-07-01T00:00:00Z",
     until="2026-07-08T00:00:00Z",
+    aggregation_granularity="hour",
     actuals_target_column="sale_price",
     actuals_record_id_column="estate_id",
 )
 completed_monitoring = client.wait_for_online_monitoring_run(monitoring)
 print(completed_monitoring.report["performance"])
+
+# Numeric metrics are stored for every full UTC bucket. Fetch bounded chart
+# diagnostics for only the periods that should be compared (maximum eight).
+bucket_charts = client.get_online_monitoring_bucket_evaluations(
+    completed_monitoring,
+    ["2026-07-01T19:00:00+00:00", "2026-07-01T20:00:00+00:00"],
+)
 
 # Retire a trial service without destroying its governed history.
 client.set_deployment_status(

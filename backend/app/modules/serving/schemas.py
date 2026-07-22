@@ -354,6 +354,13 @@ class OnlineMonitoringRunRead(BaseModel):
     archive_reason: str
 
 
+class OnlineMonitoringBucketEvaluationRead(BaseModel):
+    bucket_start: str
+    bucket_end: str
+    label: str
+    evaluation: dict[str, Any]
+
+
 class OnlineMonitoringArchiveRequest(BaseModel):
     reason: str = Field(default="Archived from monitoring history", min_length=1, max_length=2000)
 

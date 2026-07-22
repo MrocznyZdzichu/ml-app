@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from getpass import getpass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol, Sequence
 from urllib.parse import quote
 
 import requests
@@ -1641,6 +1641,22 @@ class MLAppClient:
         return OnlineMonitoringRun.from_api(
             self._request("GET", f"/serving/monitoring-runs/{run_id}")
         )
+
+    def get_online_monitoring_bucket_evaluations(
+        self,
+        run: str | OnlineMonitoringRun,
+        bucket_starts: Sequence[str],
+    ) -> list[Mapping[str, Any]]:
+        """Return bounded scoring diagnostics for up to eight selected time buckets."""
+        selected = list(dict.fromkeys(bucket_starts))
+        if len(selected) > 8:
+            raise ValueError("Select at most 8 monitoring buckets")
+        run_id = run.id if isinstance(run, OnlineMonitoringRun) else run
+        return list(self._request(
+            "GET",
+            f"/serving/monitoring-runs/{run_id}/bucket-evaluations",
+            params=[("bucket_start", value) for value in selected],
+        ))
 
     def wait_for_online_monitoring_run(
         self,

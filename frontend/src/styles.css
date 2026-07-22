@@ -11392,9 +11392,237 @@ textarea {
 .serving-monitoring-visual-content {
   display: grid;
   gap: 1rem;
+  align-content: start;
   min-height: 0;
   overflow: auto;
   padding: 18px;
+}
+
+.serving-monitoring-view-switch {
+  display: inline-flex;
+  justify-self: start;
+  padding: 0.2rem;
+  border: 1px solid var(--border-color);
+  border-radius: 0.7rem;
+  background: var(--surface-subtle, rgba(255, 255, 255, 0.02));
+}
+
+.serving-monitoring-view-switch button {
+  appearance: none;
+  padding: 0.55rem 0.8rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: var(--muted-color);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 650;
+}
+
+.serving-monitoring-view-switch button[aria-pressed="true"] {
+  background: var(--viz-series-1, Highlight);
+  color: var(--surface-color, Canvas);
+}
+
+.serving-monitoring-view-switch button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.serving-monitoring-view-switch button:focus-visible {
+  outline: 2px solid var(--viz-series-1, Highlight);
+  outline-offset: 2px;
+}
+
+.serving-monitoring-visual-tabs {
+  display: flex;
+  gap: 0.35rem;
+  overflow-x: auto;
+  padding-bottom: 1px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.serving-monitoring-visual-tabs button {
+  appearance: none;
+  flex: 0 0 auto;
+  padding: 0.65rem 0.85rem;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted-color);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 650;
+}
+
+.serving-monitoring-visual-tabs button:hover {
+  color: inherit;
+}
+
+.serving-monitoring-visual-tabs button[aria-selected="true"] {
+  border-bottom-color: var(--viz-series-1, Highlight);
+  color: inherit;
+}
+
+.serving-monitoring-visual-tabs button:focus-visible {
+  outline: 2px solid var(--viz-series-1, Highlight);
+  outline-offset: -2px;
+}
+
+.serving-monitoring-visual-panel,
+.serving-monitoring-traffic-charts,
+.serving-monitoring-quality-view {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.serving-monitoring-metrics-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.serving-monitoring-metrics-table {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.serving-monitoring-metrics-table th,
+.serving-monitoring-metrics-table td {
+  padding: 0.65rem 0.75rem;
+  border-bottom: 1px solid var(--border-color);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.serving-monitoring-metrics-table thead th {
+  color: var(--muted-color);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.serving-monitoring-metrics-table tbody th {
+  font-weight: 650;
+}
+
+.serving-monitoring-metrics-table .numeric {
+  text-align: right;
+}
+
+.serving-monitoring-series-selector {
+  display: grid;
+  gap: 0.75rem;
+  padding-top: 0.25rem;
+}
+
+.serving-monitoring-series-selector > div:first-child {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.serving-monitoring-series-selector > div:first-child span,
+.serving-monitoring-series-status {
+  color: var(--muted-color);
+}
+
+.serving-monitoring-series-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 0.45rem 1rem;
+}
+
+.serving-monitoring-series-options label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.serving-monitoring-series-options label:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.serving-monitoring-series-options input {
+  accent-color: var(--viz-series-1, Highlight);
+}
+
+.serving-monitoring-series-options span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.serving-monitoring-series-options small {
+  color: var(--muted-color);
+  font-variant-numeric: tabular-nums;
+}
+
+.evaluation-comparison-legend {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem 1rem;
+  flex-wrap: wrap;
+}
+
+.evaluation-comparison-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: inherit;
+}
+
+.evaluation-comparison-legend i {
+  width: 1.4rem;
+  height: 0;
+  border-top: 3px solid currentColor;
+}
+
+.evaluation-line-chart .comparison-line,
+.evaluation-histogram-chart .comparison-line {
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.5;
+}
+
+.evaluation-line-chart .comparison-point {
+  fill: currentColor;
+  fill-opacity: 0.5;
+}
+
+.comparison-series-0 { color: var(--viz-series-1, LinkText); }
+.comparison-series-1 { color: var(--viz-series-2, Highlight); }
+.comparison-series-2 { color: var(--viz-series-3, MarkText); }
+.comparison-series-3 { color: var(--viz-series-4, GrayText); }
+.comparison-series-4 { color: var(--viz-series-5, LinkText); }
+.comparison-series-5 { color: var(--viz-series-6, Highlight); }
+.comparison-series-6 { color: var(--viz-series-3, MarkText); }
+.comparison-series-7 { color: var(--viz-series-4, GrayText); }
+
+.evaluation-line-chart .comparison-series-4.comparison-line,
+.evaluation-line-chart .comparison-series-5.comparison-line,
+.evaluation-line-chart .comparison-series-6.comparison-line,
+.evaluation-line-chart .comparison-series-7.comparison-line,
+.evaluation-histogram-chart .comparison-series-4.comparison-line,
+.evaluation-histogram-chart .comparison-series-5.comparison-line,
+.evaluation-histogram-chart .comparison-series-6.comparison-line,
+.evaluation-histogram-chart .comparison-series-7.comparison-line {
+  stroke-dasharray: 8 5;
+}
+
+.evaluation-comparison-legend .comparison-series-4 i,
+.evaluation-comparison-legend .comparison-series-5 i,
+.evaluation-comparison-legend .comparison-series-6 i,
+.evaluation-comparison-legend .comparison-series-7 i {
+  border-top-style: dashed;
 }
 
 .serving-monitoring-selected-period {
@@ -11410,12 +11638,6 @@ textarea {
 .serving-monitoring-selected-period span {
   color: var(--muted-color);
   font-variant-numeric: tabular-nums;
-}
-
-.serving-monitoring-chart-pair {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1rem;
 }
 
 .serving-monitoring-chart {
@@ -11509,6 +11731,10 @@ textarea {
   color: var(--viz-series-5, LinkText);
 }
 
+.series-performance {
+  color: var(--viz-series-1, LinkText);
+}
+
 .serving-monitoring-period-slider {
   display: grid;
   gap: 0.45rem;
@@ -11565,7 +11791,7 @@ textarea {
 @media (max-width: 980px) {
   .serving-monitoring-layout,
   .serving-monitoring-window,
-  .serving-monitoring-chart-pair {
+  .serving-monitoring-performance-series {
     grid-template-columns: 1fr;
   }
 }

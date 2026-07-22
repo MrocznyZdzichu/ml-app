@@ -648,6 +648,13 @@ export type OnlineMonitoringRun = {
   archive_reason: string;
 };
 
+export type OnlineMonitoringBucketEvaluation = {
+  bucket_start: string;
+  bucket_end: string;
+  label: string;
+  evaluation: ModelEvaluationSnapshot;
+};
+
 export type BusinessCase = {
   id: string;
   owner_id: string;
@@ -1364,6 +1371,13 @@ export const api = {
     request<OnlineMonitoringRun[]>(`/serving/monitoring-runs?limit=${limit}&include_archived=${includeArchived}`),
   getOnlineMonitoringRun: (runId: string) =>
     request<OnlineMonitoringRun>(`/serving/monitoring-runs/${encodeURIComponent(runId)}`),
+  getOnlineMonitoringBucketEvaluations: (runId: string, bucketStarts: string[]) => {
+    const params = new URLSearchParams();
+    bucketStarts.forEach((value) => params.append("bucket_start", value));
+    return request<OnlineMonitoringBucketEvaluation[]>(
+      `/serving/monitoring-runs/${encodeURIComponent(runId)}/bucket-evaluations?${params}`
+    );
+  },
   archiveOnlineMonitoringRun: (runId: string, reason = "Archived from monitoring history") =>
     request<OnlineMonitoringRun>(`/serving/monitoring-runs/${encodeURIComponent(runId)}/archive`, {
       method: "POST",

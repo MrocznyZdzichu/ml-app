@@ -757,6 +757,28 @@ class MLAppClientTests(unittest.TestCase):
         self.assertNotIn("actuals_dataset_id", session.requests[-1][2]["json"])
         self.assertEqual(session.requests[-1][2]["json"]["aggregation_granularity"], "hour")
 
+    def test_monitoring_bucket_evaluations_preserve_repeated_bucket_parameters(self) -> None:
+        session = FakeSession([FakeResponse([{
+            "bucket_start": "2026-07-20T19:00:00+00:00",
+            "bucket_end": "2026-07-20T20:00:00+00:00",
+            "label": "2026-07-20 19:00–19:59",
+            "evaluation": {"status": "available"},
+        }])])
+
+        result = MLAppClient(session=session).get_online_monitoring_bucket_evaluations(
+            "monitoring-1",
+            ["2026-07-20T19:00:00+00:00", "2026-07-20T20:00:00+00:00"],
+        )
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(
+            session.requests[-1][2]["params"],
+            [
+                ("bucket_start", "2026-07-20T19:00:00+00:00"),
+                ("bucket_start", "2026-07-20T20:00:00+00:00"),
+            ],
+        )
+
     def test_archive_monitoring_run_preserves_a_typed_archived_result(self) -> None:
         response = {
             "id": "monitoring-1", "deployment_id": "deployment-1", "status": "succeeded",

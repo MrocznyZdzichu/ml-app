@@ -395,6 +395,13 @@ zmianą funkcji zawsze je zweryfikuj.
   raport, nie zmieniając wcześniejszego wyniku. Target, typ problemu, kontrakt
   score i baseline wywnioskuj z Business Case oraz lineage modelu, pozwalając na
   jawne nadpisanie tylko tam, gdzie jest ono semantycznie bezpieczne.
+- Agregacje czasowe monitoringu używają półotwartych kalendarzowych bucketów UTC
+  i liczą metryki na wszystkich dopasowanych rekordach bucketu. Metryki skalarne
+  zapisuj jako ograniczone serie w raporcie. Diagnostyki wykresowe per bucket
+  obliczaj w backendzie z niemutowalnego joined Parquet wyłącznie dla jawnie
+  wybranych okresów (obecnie najwyżej ośmiu), zwracając ograniczony payload bez
+  danych rekordowych. Lokalna strefa czasu w UI zmienia tylko etykietę, nigdy
+  tożsamość bucketu ani semantykę kontraktu UTC.
 - Dashboard monitoringu jest wielousługowym read modelem nad ograniczonymi
   agregatami runów. Pozwala wybrać checkboxami widoczne usługi i porównywać ich
   wyniki dla jawnego zakresu; pokazuje zakres, oś czasu, liczebność i actuals

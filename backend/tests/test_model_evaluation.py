@@ -44,6 +44,35 @@ def test_binary_evaluation_snapshot_uses_full_data_and_bounded_curves() -> None:
     assert report["monitoring"]["baseline_eligible"] is True
 
 
+def test_binary_evaluation_infers_positive_class_when_contract_value_is_null() -> None:
+    connection = duckdb.connect()
+    connection.execute(
+        "CREATE TABLE predictions AS SELECT * FROM (VALUES "
+        "(0, 0, 0.05), (0, 0, 0.20), (0, 1, 0.60), "
+        "(1, 0, 0.40), (1, 1, 0.80), (1, 1, 0.95)) "
+        "AS values(actual, prediction, probability)"
+    )
+
+    report = ModelEvaluationSnapshotBuilder().build(
+        connection,
+        "SELECT * FROM predictions",
+        problem_type="binary_classification",
+        target_column="actual",
+        prediction_column="prediction",
+        score_contract={
+            "prediction_score_column": "probability",
+            "positive_class": None,
+            "probability_available": True,
+        },
+    )
+    connection.close()
+
+    metrics = {item["id"]: item["value"] for item in report["metrics"]}
+    assert report["positive_class"] == 1
+    assert metrics["roc_auc"] == pytest.approx(8 / 9)
+    assert metrics["average_precision"] == pytest.approx(0.9166666667)
+
+
 def test_regression_evaluation_snapshot_reports_residual_diagnostics() -> None:
     connection = duckdb.connect()
     connection.execute(
