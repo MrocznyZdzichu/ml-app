@@ -35,6 +35,7 @@ pnpm-debug.log*
 /data/
 /artifacts/
 /models/
+/workspace/
 /examples/API-usage/scoring-results/
 /examples/API-usage/monitoring-results/
 sandbox.ipynb

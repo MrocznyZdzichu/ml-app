@@ -1,4 +1,4 @@
-import { Activity, Archive, ArrowLeft, Brain, Copy, Eye, GitBranch, History, KeyRound, Play, Plus, Rocket, Search, Settings2, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
+import { Activity, Archive, ArrowLeft, Brain, Copy, Eye, GitBranch, History, KeyRound, Play, Plus, Rocket, RotateCcw, Search, Settings2, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../api/client";
@@ -1219,6 +1219,7 @@ export function ServingPanel({
   const [replays, setReplays] = useState<ChallengerReplay[]>([]);
   const [revisions, setRevisions] = useState<DeploymentRevision[]>([]);
   const [historyError, setHistoryError] = useState("");
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [roleByModel, setRoleByModel] = useState<Record<string, DeploymentRole | "">>({});
   const [revisionReason, setRevisionReason] = useState("");
   const [lifecycleReason, setLifecycleReason] = useState("");
@@ -1231,6 +1232,29 @@ export function ServingPanel({
     && ["staging", "production"].includes(item.stage)
   );
   const productionModels = models.filter((item) => item.stage === "production" && item.business_case_id);
+
+  async function refreshServingActivity(deployment: Deployment) {
+    if (historyLoading) return;
+    setHistoryLoading(true);
+    setHistoryError("");
+    try {
+      const [page, replayItems, revisionItems, options] = await Promise.all([
+        api.inferenceLog(deployment.id, 50),
+        api.listChallengerReplays(deployment.id),
+        api.listDeploymentRevisions(deployment.id),
+        api.deploymentModelOptions(deployment.id)
+      ]);
+      setHistory(page.items);
+      setReplays(replayItems);
+      setRevisions(revisionItems);
+      setModelOptions(options);
+      setNotice("Serving activity refreshed");
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : "Could not refresh serving activity");
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
 
   useEffect(() => {
     if (initialDeploymentId && deployments.some((item) => item.id === initialDeploymentId)) {
@@ -1674,7 +1698,7 @@ export function ServingPanel({
       </div>}
 
       {activeTab === "traffic" && <div className="serving-tab-content">
-        <div className="serving-section-header"><div><span className="builder-kicker">Full payload retention</span><h3>Inference log</h3><p>Every accepted request and model execution is retained for audit and future monitoring.</p></div>{challengers.length > 0 && <button className="secondary-button" type="button" onClick={() => { setScoreTarget(challengers[0].model_id); setModal("replay"); }}><History size={16} /> Replay challenger</button>}</div>
+        <div className="serving-section-header"><div><span className="builder-kicker">Full payload retention</span><h3>Inference log</h3><p>Every accepted request and model execution is retained for audit and future monitoring.</p></div><div className="catalog-toolbar-actions"><button className="secondary-button" type="button" onClick={() => void refreshServingActivity(selectedDeployment)} disabled={historyLoading}><RotateCcw className={historyLoading ? "run-spinner" : undefined} size={16} /> {historyLoading ? "Refreshing…" : "Refresh"}</button>{challengers.length > 0 && <button className="secondary-button" type="button" onClick={() => { setScoreTarget(challengers[0].model_id); setModal("replay"); }}><History size={16} /> Replay challenger</button>}</div></div>
         {historyError && <div className="error-banner">{historyError}</div>}
         <div className="panel inference-log-list serving-traffic-list">{history.map((item) => <article key={item.id}><span><strong>{item.status}</strong><small>{formatDate(item.created_at)} · {item.record_count} records</small></span><span><code>{shortId(item.served_model_id || item.champion_model_id)}</code><small>{item.served_role || "champion"}{item.fallback_used ? " · fallback used" : ""}</small></span><span><strong>{item.latency_ms ?? "—"} ms</strong><small>{item.warnings[0] ?? item.error_message}</small></span><button className="secondary-button compact-button" type="button" onClick={() => api.inferenceDetail(selectedDeployment.id, item.id).then((detail) => { setInferenceDetail(detail); setModal("inference"); })}><Eye size={14} /> Details</button></article>)}{!history.length && !historyError && <div className="serving-list-empty"><History size={24} /><strong>No requests recorded yet</strong><span>Use Test endpoint or call the REST API to generate the first auditable request.</span></div>}</div>
         {replays.length > 0 && <div className="serving-replay-section"><h3>Challenger replays</h3><div className="panel inference-log-list">{replays.slice(0, 10).map((item) => <article key={item.id}><span><strong>{item.status}</strong><small>{formatDate(item.created_at)}</small></span><span><code>{shortId(item.challenger_model_id)}</code><small>revision {shortId(item.deployment_revision_id)}</small></span><span><strong>{item.processed_records} records</strong><small>{item.failed_requests} failed request(s)</small></span></article>)}</div></div>}

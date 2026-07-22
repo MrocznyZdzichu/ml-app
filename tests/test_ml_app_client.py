@@ -14,6 +14,7 @@ from ml_app_client import (
     MLAppClient,
     PipelineRun,
     ResourceAmbiguousError,
+    ResourceNotFoundError,
 )
 
 
@@ -67,6 +68,16 @@ def run_payload(status: str = "queued", **overrides: Any) -> dict[str, Any]:
 
 
 class MLAppClientTests(unittest.TestCase):
+    def test_me_returns_authenticated_profile(self) -> None:
+        session = FakeSession([FakeResponse({
+            "user_id": "user-1", "login_name": "alice", "roles": ["user"],
+        })])
+
+        profile = MLAppClient(session=session).me()
+
+        self.assertEqual(profile["user_id"], "user-1")
+        self.assertIn("/auth/me", session.requests[-1][1])
+
     def test_connect_prompts_for_normal_user_without_persisting_password(self) -> None:
         session = FakeSession([FakeResponse({"access_token": "user-token"})])
 
@@ -182,6 +193,48 @@ class MLAppClientTests(unittest.TestCase):
         self.assertEqual(result.version_number, 2)
         self.assertEqual(session.requests[-1][2]["data"]["logical_id"], "dataset-family")
 
+    def test_ensure_dataset_reuses_newest_attached_family_version(self) -> None:
+        session = FakeSession([
+            FakeResponse([{"id": "bc-1", "name": "Example"}]),
+            FakeResponse([{"data_asset_id": "dataset-v1"}]),
+            FakeResponse([
+                dataset_payload(id="dataset-v1", version_number=1),
+                dataset_payload(id="dataset-v3", version_number=3),
+            ]),
+        ])
+
+        dataset, created = MLAppClient(session=session).ensure_dataset(
+            "unused.csv",
+            business_case_name="Example",
+            dataset_name="sales",
+            role="training",
+        )
+
+        self.assertEqual(dataset.id, "dataset-v3")
+        self.assertFalse(created)
+        self.assertEqual([item[0] for item in session.requests], ["GET", "GET", "GET"])
+
+    def test_ensure_pipeline_reuses_latest_published_version(self) -> None:
+        session = FakeSession([
+            FakeResponse([{"id": "bc-1", "name": "Example"}]),
+            FakeResponse([{"id": "pipeline-1", "name": "Train", "status": "published"}]),
+            FakeResponse([
+                {"id": "v1", "status": "published", "version_number": 1},
+                {"id": "v2", "status": "published", "version_number": 2},
+            ]),
+        ])
+
+        pipeline, version, created = MLAppClient(session=session).ensure_pipeline(
+            business_case_name="Example",
+            name="Train",
+            pipeline_type="automl",
+            definition={"contract_version": "2.0"},
+        )
+
+        self.assertEqual(pipeline["id"], "pipeline-1")
+        self.assertEqual(version["id"], "v2")
+        self.assertFalse(created)
+
     def test_run_by_name_uses_latest_published_version(self) -> None:
         session = FakeSession([
             FakeResponse([{"id": "bc-1", "name": "Sales"}]),
@@ -198,6 +251,84 @@ class MLAppClientTests(unittest.TestCase):
         )
         self.assertEqual(run.pipeline_version_id, "version-2")
         self.assertEqual(session.requests[-1][2]["json"]["pipeline_version_id"], "version-2")
+
+    def test_ensure_pipeline_run_reuses_matching_success(self) -> None:
+        existing = run_payload(
+            "succeeded",
+            runtime_parameters={"client_operation_key": "example01-training-v1"},
+            is_dry_run=False,
+        )
+        session = FakeSession([
+            FakeResponse([{"id": "bc-1", "name": "Example"}]),
+            FakeResponse([{"id": "pipeline-1", "name": "Train"}]),
+            FakeResponse([{"id": "version-2", "status": "published", "version_number": 2}]),
+            FakeResponse([existing]),
+        ])
+
+        run, created = MLAppClient(session=session).ensure_pipeline_run_by_name(
+            business_case_name="Example",
+            pipeline_name="Train",
+            operation_key="example01-training-v1",
+        )
+
+        self.assertEqual(run.status, "succeeded")
+        self.assertFalse(created)
+        self.assertEqual([item[0] for item in session.requests], ["GET", "GET", "GET", "GET"])
+
+    def test_pipeline_run_by_operation_key_reports_preceding_notebook(self) -> None:
+        session = FakeSession([
+            FakeResponse([{"id": "bc-1", "name": "Example"}]),
+            FakeResponse([{"id": "pipeline-1", "name": "Train"}]),
+            FakeResponse([]),
+        ])
+
+        with self.assertRaisesRegex(ResourceNotFoundError, "preceding example notebook"):
+            MLAppClient(session=session).pipeline_run_by_operation_key(
+                business_case_name="Example",
+                pipeline_name="Train",
+                operation_key="example01-training-v1",
+            )
+
+    def test_model_for_pipeline_run_resolves_provenance(self) -> None:
+        session = FakeSession([FakeResponse([
+            {"id": "model-1", "pipeline_run_id": "run-1"},
+            {"id": "model-2", "pipeline_run_id": "run-2"},
+        ])])
+
+        model = MLAppClient(session=session).model_for_pipeline_run("run-2")
+
+        self.assertEqual(model["id"], "model-2")
+
+    def test_model_by_name_scopes_to_business_case_and_selects_latest_version(self) -> None:
+        session = FakeSession([
+            FakeResponse([{"id": "bc-1", "name": "Sales"}]),
+            FakeResponse([
+                {"id": "other-v9", "business_case_id": "bc-2", "name": "Churn", "logical_id": "other", "version": "v9", "version_number": 9},
+                {"id": "model-v1", "business_case_id": "bc-1", "name": "Churn", "logical_id": "churn", "version": "v1", "version_number": 1},
+                {"id": "model-v2", "business_case_id": "bc-1", "name": "Churn", "logical_id": "churn", "version": "v2", "version_number": 2},
+            ]),
+        ])
+
+        model = MLAppClient(session=session).model_by_name(
+            business_case_name="Sales", model_name="Churn"
+        )
+
+        self.assertEqual(model["id"], "model-v2")
+
+    def test_model_by_name_accepts_explicit_numeric_version(self) -> None:
+        session = FakeSession([
+            FakeResponse([{"id": "bc-1", "name": "Sales"}]),
+            FakeResponse([
+                {"id": "model-v1", "business_case_id": "bc-1", "name": "Churn", "logical_id": "churn", "version": "v1", "version_number": 1},
+                {"id": "model-v2", "business_case_id": "bc-1", "name": "Churn", "logical_id": "churn", "version": "v2", "version_number": 2},
+            ]),
+        ])
+
+        model = MLAppClient(session=session).model_by_name(
+            business_case_name="Sales", model_name="Churn", version=1
+        )
+
+        self.assertEqual(model["id"], "model-v1")
 
     def test_duplicate_business_case_name_is_rejected(self) -> None:
         session = FakeSession([FakeResponse([
@@ -318,6 +449,25 @@ class MLAppClientTests(unittest.TestCase):
         )
         self.assertEqual(deployment.slug, "estates-service")
         self.assertEqual(session.requests[-1][2]["json"]["model_id"], "production-v3")
+
+    def test_ensure_deployment_reuses_matching_champion(self) -> None:
+        deployment = {
+            "id": "deployment-1", "name": "Example Service", "slug": "example-service",
+            "business_case_id": "bc-1", "status": "running", "endpoint_url": "/predictions",
+            "active_revision": {
+                "id": "revision-1",
+                "assignments": [{"model_id": "model-1", "role": "champion"}],
+            },
+        }
+        session = FakeSession([FakeResponse([deployment])])
+
+        result, created = MLAppClient(session=session).ensure_deployment(
+            name="Example Service",
+            model_id="model-1",
+        )
+
+        self.assertEqual(result.id, "deployment-1")
+        self.assertFalse(created)
 
     def test_promote_model_resolves_friendly_name_and_explicit_version(self) -> None:
         session = FakeSession([

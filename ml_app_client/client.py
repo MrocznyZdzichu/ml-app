@@ -314,6 +314,10 @@ class MLAppClient:
             raise AuthenticationError("Login response did not contain an access token")
         self._session.headers["Authorization"] = f"Bearer {token}"
 
+    def me(self) -> Mapping[str, Any]:
+        """Return the authenticated user's stable profile and platform roles."""
+        return self._request("GET", "/auth/me")
+
     def create_api_credential(
         self,
         name: str,
@@ -373,6 +377,80 @@ class MLAppClient:
     def list_datasets(self) -> list[Mapping[str, Any]]:
         """List bounded dataset metadata visible to the authenticated user."""
         return self._request("GET", "/datasets")
+
+    def dataset_by_name(
+        self,
+        *,
+        business_case_name: str,
+        dataset_name: str,
+    ) -> Dataset:
+        """Resolve the newest version of one dataset family attached to a BC."""
+        business_case = self._business_case_by_name(business_case_name)
+        attachments = self.list_business_case_attachments(str(business_case["id"]))
+        datasets = self.list_datasets()
+        by_id = {str(item["id"]): item for item in datasets}
+        attached_matches = [
+            by_id[str(attachment["data_asset_id"])]
+            for attachment in attachments
+            if str(attachment.get("data_asset_id") or "") in by_id
+            and by_id[str(attachment["data_asset_id"])].get("name") == dataset_name
+        ]
+        if not attached_matches:
+            raise ResourceNotFoundError(
+                f"Dataset attached to Business Case named {dataset_name!r} was not found"
+            )
+        logical_ids = {str(item["logical_id"]) for item in attached_matches}
+        if len(logical_ids) != 1:
+            raise ResourceAmbiguousError(
+                f"Dataset attached to Business Case name {dataset_name!r} is ambiguous "
+                f"({len(logical_ids)} families)"
+            )
+        logical_id = next(iter(logical_ids))
+        family = [item for item in datasets if str(item.get("logical_id")) == logical_id]
+        newest = max(family, key=lambda item: int(item.get("version_number") or 0))
+        return Dataset.from_api(newest)
+
+    def ensure_dataset(
+        self,
+        file_path: str | Path,
+        *,
+        business_case_name: str,
+        dataset_name: str,
+        role: str,
+        description: str = "",
+        tags: tuple[str, ...] | list[str] = (),
+        context_note: str = "",
+        primary_key_column: str = "",
+        target_column: str = "",
+    ) -> tuple[Dataset, bool]:
+        """Reuse an attached dataset family or upload and attach its first version.
+
+        This operation is intentionally conservative: a matching attached family is
+        reused and never receives an implicit new immutable version.
+        """
+        try:
+            return self.dataset_by_name(
+                business_case_name=business_case_name,
+                dataset_name=dataset_name,
+            ), False
+        except ResourceNotFoundError:
+            pass
+        business_case = self._business_case_by_name(business_case_name)
+        dataset = self.upload_dataset(
+            file_path,
+            name=dataset_name,
+            description=description,
+            tags=tags,
+        )
+        self.attach_dataset(
+            str(business_case["id"]),
+            dataset.id,
+            role=role,
+            context_note=context_note,
+            primary_key_column=primary_key_column,
+            target_column=target_column,
+        )
+        return dataset, True
 
     def upload_dataset_version(
         self,
@@ -486,6 +564,37 @@ class MLAppClient:
             "GET", "/pipelines", params={"business_case_id": business_case_id}
         )
 
+    def pipeline_by_name(
+        self,
+        *,
+        business_case_name: str,
+        pipeline_name: str,
+    ) -> Mapping[str, Any]:
+        """Resolve one pipeline by its Business Case and user-facing name."""
+        business_case = self._business_case_by_name(business_case_name)
+        return _one_named(
+            self.list_pipelines(str(business_case["id"])),
+            pipeline_name,
+            "Pipeline in Business Case",
+        )
+
+    def list_pipeline_versions(self, pipeline_id: str) -> list[Mapping[str, Any]]:
+        return self._request("GET", f"/pipelines/{pipeline_id}/versions")
+
+    def latest_published_pipeline_version(
+        self, pipeline_id: str
+    ) -> Mapping[str, Any]:
+        """Return the newest immutable published version of a pipeline."""
+        published = [
+            item for item in self.list_pipeline_versions(pipeline_id)
+            if item.get("status") == "published"
+        ]
+        if not published:
+            raise ResourceNotFoundError(
+                f"Pipeline {pipeline_id!r} has no published version"
+            )
+        return max(published, key=lambda item: int(item["version_number"]))
+
     def create_pipeline(
         self,
         *,
@@ -509,6 +618,45 @@ class MLAppClient:
         return self._request(
             "POST", f"/pipelines/{pipeline_id}/versions/draft/publish"
         )
+
+    def ensure_pipeline(
+        self,
+        *,
+        business_case_name: str,
+        name: str,
+        definition: Mapping[str, Any],
+        pipeline_type: str = "custom",
+        description: str = "",
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any], bool]:
+        """Reuse a published named pipeline or create and publish it once."""
+        business_case = self._business_case_by_name(business_case_name)
+        pipelines = self.list_pipelines(str(business_case["id"]))
+        matches = [item for item in pipelines if item.get("name") == name]
+        if len(matches) > 1:
+            raise ResourceAmbiguousError(
+                f"Pipeline in Business Case name {name!r} is ambiguous ({len(matches)} matches)"
+            )
+        if matches:
+            pipeline = matches[0]
+            if str(pipeline.get("status") or "draft") not in {"draft", "published"}:
+                raise ConflictError(
+                    f"Pipeline {name!r} exists with status {pipeline.get('status')!r}; "
+                    "use a new versioned example name"
+                )
+            try:
+                version = self.latest_published_pipeline_version(str(pipeline["id"]))
+            except ResourceNotFoundError:
+                version = self.publish_pipeline_draft(str(pipeline["id"]))
+            return pipeline, version, False
+        pipeline = self.create_pipeline(
+            business_case_id=str(business_case["id"]),
+            name=name,
+            definition=definition,
+            pipeline_type=pipeline_type,
+            description=description,
+        )
+        version = self.publish_pipeline_draft(str(pipeline["id"]))
+        return pipeline, version, True
 
     def preview_dataset(self, dataset_id: str, *, limit: int = 20) -> Mapping[str, Any]:
         """Return a bounded dataset preview suitable for interactive inspection."""
@@ -667,6 +815,90 @@ class MLAppClient:
             step_id=step_id,
         )
 
+    def list_pipeline_runs(self, pipeline_id: str) -> list[PipelineRun]:
+        """List bounded run metadata for one readable pipeline."""
+        return [
+            PipelineRun.from_api(item)
+            for item in self._request("GET", f"/pipelines/{pipeline_id}/runs")
+        ]
+
+    def pipeline_run_by_operation_key(
+        self,
+        *,
+        business_case_name: str,
+        pipeline_name: str,
+        operation_key: str,
+        status: str = "succeeded",
+    ) -> PipelineRun:
+        """Resolve a prior named client operation, normally a successful run."""
+        pipeline = self.pipeline_by_name(
+            business_case_name=business_case_name,
+            pipeline_name=pipeline_name,
+        )
+        matches = [
+            run for run in self.list_pipeline_runs(str(pipeline["id"]))
+            if (run.raw.get("runtime_parameters") or {}).get("client_operation_key")
+            == operation_key
+            and run.status == status
+            and not bool(run.raw.get("is_dry_run"))
+        ]
+        if not matches:
+            raise ResourceNotFoundError(
+                f"Pipeline {pipeline_name!r} has no {status!r} run for operation "
+                f"{operation_key!r}; run the preceding example notebook first"
+            )
+        return matches[0]
+
+    def ensure_pipeline_run_by_name(
+        self,
+        *,
+        business_case_name: str,
+        pipeline_name: str,
+        operation_key: str,
+        runtime_parameters: Mapping[str, Any] | None = None,
+        input_versions: Mapping[str, str] | None = None,
+        model_versions: Mapping[str, str] | None = None,
+    ) -> tuple[PipelineRun, bool]:
+        """Reuse a matching successful/active run or start the operation once.
+
+        ``operation_key`` is stored in run metadata. It makes sequential notebook
+        reruns convergent while retaining failed attempts for audit and diagnosis.
+        """
+        normalized_key = operation_key.strip()
+        if not normalized_key:
+            raise ValueError("operation_key is required")
+        pipeline = self.pipeline_by_name(
+            business_case_name=business_case_name,
+            pipeline_name=pipeline_name,
+        )
+        version = self.latest_published_pipeline_version(str(pipeline["id"]))
+        matches = [
+            run for run in self.list_pipeline_runs(str(pipeline["id"]))
+            if run.pipeline_version_id == str(version["id"])
+            and (run.raw.get("runtime_parameters") or {}).get("client_operation_key")
+            == normalized_key
+            and not bool(run.raw.get("is_dry_run"))
+        ]
+        succeeded = [run for run in matches if run.status == "succeeded"]
+        if succeeded:
+            return succeeded[0], False
+        active = [run for run in matches if not run.finished]
+        if active:
+            return active[0], False
+        parameters = dict(runtime_parameters or {})
+        existing_key = parameters.get("client_operation_key")
+        if existing_key not in {None, normalized_key}:
+            raise ValueError("runtime_parameters.client_operation_key conflicts with operation_key")
+        parameters["client_operation_key"] = normalized_key
+        run = self.run_pipeline(
+            str(pipeline["id"]),
+            pipeline_version_id=str(version["id"]),
+            runtime_parameters=parameters,
+            input_versions=input_versions,
+            model_versions=model_versions,
+        )
+        return run, True
+
     def get_pipeline_run(self, pipeline_id: str, run_id: str) -> PipelineRun:
         return PipelineRun.from_api(
             self._request("GET", f"/pipelines/{pipeline_id}/runs/{run_id}")
@@ -698,6 +930,71 @@ class MLAppClient:
     def list_models(self) -> list[Mapping[str, Any]]:
         """List model versions visible through the current Business Case grants."""
         return self._request("GET", "/models")
+
+    def model_by_name(
+        self,
+        *,
+        business_case_name: str,
+        model_name: str,
+        version: str | int | None = None,
+    ) -> Mapping[str, Any]:
+        """Resolve an immutable model version by its user-facing coordinates.
+
+        The newest visible version is returned when ``version`` is omitted. Pass
+        ``version="v3"`` or ``version=3`` when a workflow must pin an older
+        version explicitly.
+        """
+        business_case = self.business_case_by_name(business_case_name)
+        candidates = [
+            item for item in self.list_models()
+            if str(item.get("business_case_id") or "") == str(business_case["id"])
+        ]
+        matches = _named_candidates(candidates, model_name)
+        if version is not None:
+            normalized_version = str(version).strip().casefold()
+            if normalized_version.isdigit():
+                normalized_version = f"v{normalized_version}"
+            matches = [
+                item for item in matches
+                if str(item.get("version") or "").casefold() == normalized_version
+                or str(item.get("version_number") or "") == str(version)
+            ]
+        if not matches:
+            suffix = "" if version is None else f" version {version!r}"
+            raise ResourceNotFoundError(
+                f"Model {model_name!r}{suffix} was not found in Business Case "
+                f"{business_case_name!r}"
+            )
+        logical_ids = {
+            str(item.get("logical_id") or item.get("id") or "") for item in matches
+        }
+        if len(logical_ids) > 1:
+            choices = ", ".join(
+                f"{item.get('name')} {item.get('version')} ({item.get('id')})"
+                for item in matches[:8]
+            )
+            raise ResourceAmbiguousError(
+                f"Model {model_name!r} is ambiguous in Business Case "
+                f"{business_case_name!r}; candidates: {choices}"
+            )
+        return max(matches, key=lambda item: int(item.get("version_number") or 0))
+
+    def model_for_pipeline_run(self, run: str | PipelineRun) -> Mapping[str, Any]:
+        """Resolve the single immutable model artifact created by a pipeline run."""
+        run_id = run.id if isinstance(run, PipelineRun) else run
+        matches = [
+            item for item in self.list_models()
+            if str(item.get("pipeline_run_id") or "") == run_id
+        ]
+        if not matches:
+            raise ResourceNotFoundError(
+                f"Pipeline run {run_id!r} did not create a visible model artifact"
+            )
+        if len(matches) > 1:
+            raise ResourceAmbiguousError(
+                f"Pipeline run {run_id!r} created {len(matches)} model artifacts"
+            )
+        return matches[0]
 
     def list_model_versions(self, logical_model_id: str) -> list[Mapping[str, Any]]:
         """List the complete version history of one logical model family."""
@@ -880,6 +1177,23 @@ class MLAppClient:
         params = {"include_archived": "true"} if include_archived else None
         return [Deployment.from_api(item) for item in self._request("GET", "/serving/deployments", params=params)]
 
+    def deployment_by_name(
+        self,
+        name: str,
+        *,
+        include_archived: bool = False,
+    ) -> Deployment:
+        """Resolve one model service by its exact user-facing name."""
+        matches = [
+            item for item in self.list_deployments(include_archived=include_archived)
+            if item.name == name
+        ]
+        if not matches:
+            raise ResourceNotFoundError(f"Deployment named {name!r} was not found")
+        if len(matches) > 1:
+            raise ResourceAmbiguousError(f"Deployment name {name!r} is ambiguous")
+        return matches[0]
+
     def list_model_serving_usage(self, logical_model_id: str) -> list[ModelServingUsage]:
         """List active service assignments for every version in a model family."""
         path = f"/serving/model-families/{quote(logical_model_id, safe='')}/usage"
@@ -901,6 +1215,44 @@ class MLAppClient:
             "retention_days": retention_days,
         })
         return Deployment.from_api(payload)
+
+    def ensure_deployment(
+        self,
+        *,
+        name: str,
+        model_id: str,
+        retention_days: int = 365,
+    ) -> tuple[Deployment, bool]:
+        """Reuse a matching active service or create it with the model as champion."""
+        try:
+            deployment = self.deployment_by_name(name, include_archived=True)
+        except ResourceNotFoundError:
+            return self.create_deployment(
+                name=name,
+                model_id=model_id,
+                retention_days=retention_days,
+            ), True
+        if deployment.status == "archived":
+            raise ConflictError(
+                f"Deployment {name!r} is archived and its governed history keeps the name reserved"
+            )
+        assignments = deployment.active_revision.get("assignments") or []
+        champions = [
+            item for item in assignments
+            if isinstance(item, Mapping) and item.get("role") == "champion"
+        ]
+        if len(champions) != 1 or str(champions[0].get("model_id")) != model_id:
+            raise ConflictError(
+                f"Deployment {name!r} already exists with a different champion; "
+                "create an explicit immutable revision instead"
+            )
+        if deployment.status == "stopped":
+            deployment = self.set_deployment_status(
+                deployment,
+                status="running",
+                reason="Resume idempotent example service",
+            )
+        return deployment, False
 
     def revise_deployment(
         self,

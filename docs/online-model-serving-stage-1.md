@@ -131,5 +131,7 @@ Machine credentials authenticate existing accounts. Existing group and Business
 Case grants remain the only authorization source. Raw credentials are returned
 once; only their SHA-256 hashes are stored.
 
-See `examples/API-usage/online_model_serving_via_client.ipynb` for the supported
-Python workflow.
+See `examples/API-usage/Example01_10_create_model_service.ipynb`,
+`Example01_11_score_with_client.ipynb`, and
+`Example01_12_score_with_rest_api.ipynb` for the supported creation and scoring
+workflow.

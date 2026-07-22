@@ -125,6 +125,11 @@ print(credential["token"])  # shown only in this response
 
 ## Estates demo bootstrap
 
+For the complete lifecycle with explicit, user-chosen resource names, start with
+`examples/API-usage/Example01_01_setup_business_case.ipynb` and continue in
+filename order through training, batch scoring, monitoring and online serving.
+The series is idempotent and uses only public client/REST operations.
+
 Run the portable bootstrap after starting a new installation:
 
 ```powershell

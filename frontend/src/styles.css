@@ -187,6 +187,12 @@ select[multiple] {
   flex-wrap: wrap;
 }
 
+.topbar-actions {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+}
+
 .eyebrow {
   color: #647383;
   font-size: 12px;

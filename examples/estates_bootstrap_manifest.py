@@ -61,8 +61,17 @@ FEATURE_COLUMNS = [
 ]
 
 
-def build_automl_definition(training_logical_id: str) -> dict[str, Any]:
-    """Build the executable AutoFEML draft using the target installation's dataset ID."""
+def build_automl_definition(
+    training_logical_id: str,
+    *,
+    asset_name_prefix: str = "Estates Sell Prices - AutoFEML",
+    model_name: str | None = None,
+    cv_folds: int = 5,
+    max_trials: int = 24,
+    timeout_seconds: int = 900,
+    definition_parameters: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build an executable AutoFEML draft without installation-specific UUIDs."""
     selected_columns = [*FEATURE_COLUMNS, "sale_price_pln", "property_id"]
     casts = {
         "property_id": "VARCHAR",
@@ -140,7 +149,7 @@ def build_automl_definition(training_logical_id: str) -> dict[str, Any]:
                         "input": {"node_id": "cast_training_columns", "port_id": "out"},
                         "materialization": "dataset",
                         "write_mode": "replace",
-                        "dataset_name": "Estates Sell Prices - AutoFEML - Input",
+                        "dataset_name": f"{asset_name_prefix} - Input",
                         "business_case_role": "source",
                         "data_contract": {
                             "columns": data_contract,
@@ -180,19 +189,19 @@ def build_automl_definition(training_logical_id: str) -> dict[str, Any]:
                         {
                             "output_id": "training_features",
                             "input_id": "training",
-                            "dataset_name": "Estates Sell Prices - AutoFEML - Train",
+                            "dataset_name": f"{asset_name_prefix} - Train",
                             "business_case_role": "training",
                         },
                         {
                             "output_id": "validation_features",
                             "input_id": "validation",
-                            "dataset_name": "Estates Sell Prices - AutoFEML - Validate",
+                            "dataset_name": f"{asset_name_prefix} - Validate",
                             "business_case_role": "validation",
                         },
                         {
                             "output_id": "test_features",
                             "input_id": "test",
-                            "dataset_name": "Estates Sell Prices - AutoFEML - Test",
+                            "dataset_name": f"{asset_name_prefix} - Test",
                             "business_case_role": "test",
                         },
                     ],
@@ -207,7 +216,7 @@ def build_automl_definition(training_logical_id: str) -> dict[str, Any]:
                         "cross_validation": {
                             "enabled": True,
                             "strategy": "kfold",
-                            "folds": 5,
+                            "folds": cv_folds,
                             "shuffle": True,
                             "seed": 42,
                         },
@@ -228,7 +237,7 @@ def build_automl_definition(training_logical_id: str) -> dict[str, Any]:
                 "additional_output_port_ids": ["metrics", "test"],
                 "config": {"definition": {
                     "contract_version": "1.0",
-                    "model_name": "Estates Sell Prices - AutoFEML - Model",
+                    "model_name": model_name or f"{asset_name_prefix} - Model",
                     "problem_type": "regression",
                     "target_column": "sale_price_pln",
                     "feature_columns": FEATURE_COLUMNS,
@@ -246,9 +255,9 @@ def build_automl_definition(training_logical_id: str) -> dict[str, Any]:
                         "mode": "automl",
                         "primary_metric": "neg_mean_absolute_error",
                         "validation_strategy": "cross_validation",
-                        "cv_folds": 5,
-                        "max_trials": 24,
-                        "timeout_seconds": 900,
+                        "cv_folds": cv_folds,
+                        "max_trials": max_trials,
+                        "timeout_seconds": timeout_seconds,
                         "candidate_algorithms": [
                             "ridge_regression", "elastic_net_regression",
                             "random_forest_regressor", "extra_trees_regressor",
@@ -290,8 +299,8 @@ def build_automl_definition(training_logical_id: str) -> dict[str, Any]:
                     "row_id_column": "property_id",
                     "target_column": "sale_price_pln",
                     "prediction_column": "prediction",
-                    "dataset_name": "Estates Sell Prices - AutoFEML - Test Scoring Results",
-                    "report_name": "Estates Sell Prices - AutoFEML - Test Scoring Report",
+                    "dataset_name": f"{asset_name_prefix} - Test Scoring Results",
+                    "report_name": f"{asset_name_prefix} - Test Scoring Report",
                     "batch_size": 10_000,
                 }},
             },
@@ -300,7 +309,11 @@ def build_automl_definition(training_logical_id: str) -> dict[str, Any]:
             "output_id": "result",
             "source": {"step_id": "scoring_1", "port_id": "predictions"},
         }],
-        "parameters": {"template": "automl", "bootstrap_manifest_version": "1.0"},
+        "parameters": {
+            "template": "automl",
+            "bootstrap_manifest_version": "1.0",
+            **(definition_parameters or {}),
+        },
     }
 
 

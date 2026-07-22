@@ -194,6 +194,7 @@ export default function App() {
   const [scoringReports, setScoringReports] = useState<ScoringReport[]>([]);
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [notice, setNotice] = useState("Workspace ready");
+  const [isRefreshingWorkspace, setIsRefreshingWorkspace] = useState(false);
   const descriptiveProfileCache = useRef<Map<string, DescriptiveProfileCacheEntry>>(new Map());
 
   const activeConfig = useMemo(
@@ -219,6 +220,21 @@ export default function App() {
       setDeployments(deploymentItems);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "API request failed");
+      throw error;
+    }
+  }
+
+  async function handleGlobalRefresh() {
+    if (isRefreshingWorkspace) return;
+    setIsRefreshingWorkspace(true);
+    setNotice("Refreshing workspace data…");
+    try {
+      await refreshWorkspace();
+      setNotice("Workspace data refreshed");
+    } catch {
+      // refreshWorkspace already exposes the actionable API error in the notice bar.
+    } finally {
+      setIsRefreshingWorkspace(false);
     }
   }
 
@@ -250,7 +266,7 @@ export default function App() {
 
   useEffect(() => {
     if (authStatus === "authenticated") {
-      void refreshWorkspace();
+      void refreshWorkspace().catch(() => undefined);
     }
   }, [authStatus]);
 
@@ -352,9 +368,22 @@ export default function App() {
               {activeConfig.label}
             </h1>
           </div>
-          <div className={`status-pill ${apiStatus}`}>
-            {apiStatus === "online" ? <CheckCircle2 size={16} /> : <Activity size={16} />}
-            <span>API {apiStatus}</span>
+          <div className="topbar-actions">
+            <div className={`status-pill ${apiStatus}`}>
+              {apiStatus === "online" ? <CheckCircle2 size={16} /> : <Activity size={16} />}
+              <span>API {apiStatus}</span>
+            </div>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => void handleGlobalRefresh()}
+              disabled={isRefreshingWorkspace}
+              aria-label="Refresh current workspace data"
+              title="Reload Business Cases, datasets, pipelines, models, reports and services"
+            >
+              <RotateCcw className={isRefreshingWorkspace ? "run-spinner" : undefined} size={16} />
+              {isRefreshingWorkspace ? "Refreshing…" : "Refresh"}
+            </button>
           </div>
           <div className="user-menu">
             <div>
@@ -542,6 +571,7 @@ function BusinessCasesPanel({
   const [mappingTargetColumn, setMappingTargetColumn] = useState("");
   const [attachments, setAttachments] = useState<BusinessCaseDataAttachment[]>([]);
   const [businessCaseSearch, setBusinessCaseSearch] = useState("");
+  const [isRefreshingWorkspace, setIsRefreshingWorkspace] = useState(false);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isMappingFormOpen, setIsMappingFormOpen] = useState(false);
   const [editingAttachmentId, setEditingAttachmentId] = useState("");
@@ -972,6 +1002,19 @@ function BusinessCasesPanel({
     ? Boolean(bcRunSubmittingSessions[bcRunDialog.sessionId])
     : false;
 
+  async function handleWorkspaceRefresh() {
+    setIsRefreshingWorkspace(true);
+    setNotice("Refreshing workspace data…");
+    try {
+      await onRefresh();
+      setNotice("Workspace data refreshed");
+    } catch {
+      // refreshWorkspace already exposes the actionable API error in the notice bar.
+    } finally {
+      setIsRefreshingWorkspace(false);
+    }
+  }
+
   return (
     <section className="business-case-screen">
       <div className="panel business-case-catalog">
@@ -980,10 +1023,23 @@ function BusinessCasesPanel({
             <h2>Business cases</h2>
             <p>{filteredBusinessCases.length} of {businessCases.length} cases shown</p>
           </div>
-          <button className="primary-button" type="button" onClick={() => setIsCreateOpen(true)}>
-            <Plus size={16} />
-            Create BC
-          </button>
+          <div className="catalog-toolbar-actions">
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => void handleWorkspaceRefresh()}
+              disabled={isRefreshingWorkspace}
+              aria-label="Refresh workspace data"
+              title="Reload Business Cases and related workspace resources"
+            >
+              <RotateCcw className={isRefreshingWorkspace ? "run-spinner" : undefined} size={16} />
+              {isRefreshingWorkspace ? "Refreshing…" : "Refresh"}
+            </button>
+            <button className="primary-button" type="button" onClick={() => setIsCreateOpen(true)}>
+              <Plus size={16} />
+              Create BC
+            </button>
+          </div>
         </div>
 
         <label className="search-field">
