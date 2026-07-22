@@ -20,6 +20,7 @@ EXPECTED = [
     "Example01_10_create_model_service.ipynb",
     "Example01_11_score_with_client.ipynb",
     "Example01_12_score_with_rest_api.ipynb",
+    "Example01_master.ipynb",
 ]
 
 
@@ -52,6 +53,29 @@ class ApiUsageNotebookTests(unittest.TestCase):
                 if cell["cell_type"] == "markdown"
             )
             self.assertIn("frontend", markdown.lower())
+
+    def test_master_notebook_covers_the_complete_test_user_lifecycle(self) -> None:
+        payload = json.loads((NOTEBOOKS / "Example01_master.ipynb").read_text(encoding="utf-8"))
+        source = "\n".join("".join(cell["source"]) for cell in payload["cells"])
+
+        for operation in (
+            "client.me()",
+            "client.create_business_case(",
+            "client.upload_dataset(",
+            "client.attach_dataset(",
+            "build_training_definition(",
+            "client.run_pipeline_by_name(",
+            "build_batch_scoring_definition(",
+            "build_monitoring_definition(",
+            "client.promote_model(",
+            "client.create_deployment(",
+            "client.predict(",
+            "rest_session.post(",
+            "client.inference_history(",
+        ):
+            self.assertIn(operation, source)
+        self.assertIn("ML_APP_EXAMPLE01_INSTANCE", source)
+        self.assertIn('report["evaluated_row_count"] != 100_000', source)
 
     def test_dataset_notebook_teaches_discovery_upload_and_attachment_explicitly(self) -> None:
         payload = json.loads((NOTEBOOKS / EXPECTED[1]).read_text(encoding="utf-8"))

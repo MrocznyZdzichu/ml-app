@@ -1,5 +1,12 @@
 # Example 01 — complete ML lifecycle
 
+For a single, end-to-end view, use `Example01_master.ipynb`. It contains the
+same lifecycle in one kernel session, adds account and local-data preflight,
+asks once for a globally unique example-instance label, and finishes by
+verifying both online requests in the durable Inference Log. This is the most
+convenient starting point for a newly created test user.
+
+The numbered notebooks below expose the same path as smaller, focused tasks.
 Run the notebooks in filename order. The series starts from an empty installation
 and demonstrates the same public REST contract through `ml_app_client`, ending
 with one equivalent direct REST request.
@@ -44,6 +51,14 @@ training and scoring runs.
 Set `ML_APP_API_URL` when the API is not available at
 `http://localhost:8000/api/v1`. Set `ML_APP_ACCESS_TOKEN` for non-interactive
 authentication; otherwise the notebooks prompt for credentials.
+
+The master notebook additionally accepts `ML_APP_EXAMPLE01_INSTANCE`. Its value
+must identify one scenario run on the installation because Business Case and
+model-service names are globally unique. Reuse the label to resume an idempotent
+run; choose a new label for a clean run or a different test account. A normal,
+active account with the base `user` role is sufficient because it owns the
+Business Case it creates. The complete stack must be running, including the
+worker and model runtime.
 
 The notebooks are generated deterministically by
 `python examples/build_api_usage_notebooks.py`.
