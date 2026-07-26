@@ -23,6 +23,8 @@ from app.modules.datasets.schemas import (
     TimeSeriesAnalysisRequest,
 )
 from app.modules.datasets.service import DatasetService
+from app.modules.datasets.domain import DataAssetStatus, SourceType
+from app.shared.pagination import OffsetPage
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 service = DatasetService()
@@ -70,6 +72,30 @@ def list_dataset_versions(
     ]
 
 
+@router.get(
+    "/{logical_id}/versions/page",
+    response_model=OffsetPage[DataAssetRead],
+)
+def page_dataset_versions(
+    logical_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[DataAssetRead]:
+    items, total = service.page_versions(
+        logical_id,
+        principal,
+        limit=limit,
+        offset=offset,
+    )
+    return OffsetPage[DataAssetRead].build(
+        [DataAssetRead.model_validate(asset) for asset in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.post("/views", response_model=DataAssetRead, status_code=201)
 def create_data_view(
     payload: DataViewCreate,
@@ -87,6 +113,49 @@ def list_datasets(
         DataAssetRead.model_validate(asset)
         for asset in service.list_assets(principal, summary=summary)
     ]
+
+
+@router.get("/page", response_model=OffsetPage[DataAssetRead])
+def page_datasets(
+    limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    search: str = Query(default="", max_length=200),
+    status_filter: DataAssetStatus | None = Query(default=None, alias="status"),
+    source_type: SourceType | None = Query(default=None),
+    asset_kind: str = Query(default="", pattern="^(|dataset|view)$"),
+    include_deleted: bool = Query(default=True),
+    families: bool = Query(default=False),
+    business_case_id: str = Query(default="", max_length=64),
+    pipeline_id: str = Query(default="", max_length=64),
+    pipeline_type: str = Query(default="", max_length=64),
+    uploaded_only: bool = Query(default=False),
+    owned_only: bool = Query(default=False),
+    summary: bool = Query(default=True),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[DataAssetRead]:
+    items, total = service.page_assets(
+        principal,
+        limit=limit,
+        offset=offset,
+        summary=summary,
+        search=search,
+        status_filter=status_filter.value if status_filter else "",
+        source_type=source_type.value if source_type else "",
+        asset_kind=asset_kind,
+        include_deleted=include_deleted,
+        families=families,
+        business_case_id=business_case_id,
+        pipeline_id=pipeline_id,
+        pipeline_type=pipeline_type,
+        uploaded_only=uploaded_only,
+        owned_only=owned_only,
+    )
+    return OffsetPage[DataAssetRead].build(
+        [DataAssetRead.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/{dataset_id}/preview", response_model=DataAssetPreviewRead)

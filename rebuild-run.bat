@@ -53,6 +53,13 @@ if errorlevel 1 (
 
 echo.
 echo Restarting rebuilt application containers...
+docker compose up -d postgres redis minio
+if errorlevel 1 (
+    echo.
+    echo Infrastructure start failed.
+    exit /b 1
+)
+
 docker compose up -d --no-deps model-runtime
 if errorlevel 1 (
     echo.

@@ -871,6 +871,15 @@ def test_pipeline_dry_run_executes_through_worker_on_full_uploaded_csv(
     assert run["output_manifest"][0]["data_scope"] == "full"
     assert run["output_manifest"][0]["row_count"] == 2
     assert run["output_manifest"][0]["preview"]["returned_count"] == 2
+    compact_status = client.get(
+        f"/api/v1/pipelines/{pipeline_id}/runs/{run_id}/status",
+        headers=headers,
+    )
+    assert compact_status.status_code == 200
+    assert compact_status.json()["status"] == "succeeded"
+    assert compact_status.json()["processed_row_count"] == 3
+    assert "events" not in compact_status.json()
+    assert "output_manifest" not in compact_status.json()
     output_id = run["output_manifest"][0]["output_id"]
     paged_preview = client.get(
         f"/api/v1/pipelines/{pipeline_id}/runs/{run_id}/preview",

@@ -21,7 +21,7 @@ from app.modules.business_cases.schemas import (
     BusinessCaseDataAttachmentUpdate,
     BusinessCaseOwnershipTransfer,
 )
-from app.modules.sharing.domain import BusinessCaseAccessRole, ResourceAccessRole, ResourceKind
+from app.modules.sharing.domain import BC_ROLE_RANK, BusinessCaseAccessRole, ResourceAccessRole, ResourceKind
 from app.modules.sharing.policy import access_policy
 from app.modules.auth.repository import PostgresUserRepository
 from app.modules.sharing.domain import AuditEvent
@@ -62,20 +62,55 @@ class BusinessCaseService:
             raise self._name_conflict(name) from exc
 
     def list_business_cases(self, principal: Principal) -> list[BusinessCase]:
-        allowed = access_policy.accessible_business_case_ids(principal)
-        items = self.repository.list_all_business_cases() if allowed is None else [
-            item for item in self.repository.list_all_business_cases() if item.id in allowed
-        ]
+        roles = access_policy.accessible_business_case_roles(principal)
+        items = (
+            self.repository.list_all_business_cases()
+            if roles is None
+            else self.repository.list_business_cases_by_ids(set(roles))
+        )
         for item in items:
-            role = access_policy.business_case_role(principal, item.id)
+            role = BusinessCaseAccessRole.OWNER if roles is None else roles.get(item.id)
             item.access_role = role.value if role else ""
         return items
 
-    def get_business_case(self, business_case_id: str, principal: Principal) -> BusinessCase:
+    def page_business_cases(
+        self,
+        principal: Principal,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+        manageable_only: bool = False,
+    ) -> tuple[list[BusinessCase], int]:
+        roles = access_policy.accessible_business_case_roles(principal)
+        if manageable_only and roles is not None:
+            roles = {
+                business_case_id: role
+                for business_case_id, role in roles.items()
+                if BC_ROLE_RANK[role] >= BC_ROLE_RANK[BusinessCaseAccessRole.MANAGER]
+            }
+        items, total = self.repository.page_business_cases(
+            None if roles is None else set(roles),
+            limit=limit,
+            offset=offset,
+            search=search,
+        )
+        for item in items:
+            role = BusinessCaseAccessRole.OWNER if roles is None else roles.get(item.id)
+            item.access_role = role.value if role else ""
+        return items, total
+
+    def get_business_case(
+        self,
+        business_case_id: str,
+        principal: Principal,
+        *,
+        minimum: BusinessCaseAccessRole = BusinessCaseAccessRole.REPORT_VIEWER,
+    ) -> BusinessCase:
         business_case = self.repository.get_business_case(business_case_id)
         if not business_case:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Business case not found")
-        role = access_policy.require_business_case(principal, business_case_id)
+        role = access_policy.require_business_case(principal, business_case_id, minimum)
         business_case.access_role = role.value
         return business_case
 
@@ -85,8 +120,12 @@ class BusinessCaseService:
         payload: BusinessCaseUpdate,
         principal: Principal,
     ) -> BusinessCase:
-        business_case = self.get_business_case(business_case_id, principal)
-        role = access_policy.require_business_case(principal, business_case_id, BusinessCaseAccessRole.CONTRIBUTOR)
+        business_case = self.get_business_case(
+            business_case_id,
+            principal,
+            minimum=BusinessCaseAccessRole.CONTRIBUTOR,
+        )
+        role = BusinessCaseAccessRole(business_case.access_role)
         if (
             payload.status.value == "archived" or business_case.status.value == "archived"
         ) and role != BusinessCaseAccessRole.OWNER:
@@ -110,11 +149,7 @@ class BusinessCaseService:
             raise self._name_conflict(name) from exc
 
     def _require_unique_name(self, name: str, *, exclude_id: str = "") -> None:
-        normalized = name.casefold()
-        if any(
-            item.id != exclude_id and item.name.strip().casefold() == normalized
-            for item in self.repository.list_all_business_cases()
-        ):
+        if self.repository.business_case_name_exists(name, exclude_id=exclude_id):
             raise self._name_conflict(name)
 
     @staticmethod
@@ -130,8 +165,11 @@ class BusinessCaseService:
         payload: BusinessCaseOwnershipTransfer,
         principal: Principal,
     ) -> BusinessCase:
-        business_case = self.get_business_case(business_case_id, principal)
-        access_policy.require_business_case(principal, business_case_id, BusinessCaseAccessRole.OWNER)
+        business_case = self.get_business_case(
+            business_case_id,
+            principal,
+            minimum=BusinessCaseAccessRole.OWNER,
+        )
         new_owner = PostgresUserRepository().get(payload.new_owner_id)
         if new_owner is None or not new_owner.is_active:
             raise HTTPException(status_code=404, detail="New owner not found or inactive")
@@ -156,8 +194,11 @@ class BusinessCaseService:
         payload: BusinessCaseDataAttachmentCreate,
         principal: Principal,
     ) -> BusinessCaseDataAttachment:
-        business_case = self.get_business_case(business_case_id, principal)
-        access_policy.require_business_case(principal, business_case_id, BusinessCaseAccessRole.CONTRIBUTOR)
+        business_case = self.get_business_case(
+            business_case_id,
+            principal,
+            minimum=BusinessCaseAccessRole.CONTRIBUTOR,
+        )
         # Contributors may attach data they can at least read; administrators bypass this centrally.
         from app.modules.datasets.repository import PostgresDatasetRepository
         asset = PostgresDatasetRepository().get(payload.data_asset_id)
@@ -202,9 +243,43 @@ class BusinessCaseService:
         business_case_id: str,
         principal: Principal,
     ) -> list[BusinessCaseDataAttachment]:
-        business_case = self.get_business_case(business_case_id, principal)
-        access_policy.require_business_case(principal, business_case_id, BusinessCaseAccessRole.READER)
+        business_case = self.get_business_case(
+            business_case_id,
+            principal,
+            minimum=BusinessCaseAccessRole.READER,
+        )
         return self.repository.list_data_attachments(business_case.id)
+
+    def page_data_attachments(
+        self,
+        business_case_id: str,
+        principal: Principal,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+        role: str = "",
+        pipeline_id: str = "",
+        pipeline_type: str = "",
+        uploaded_only: bool = False,
+        deleted_only: bool = False,
+    ) -> tuple[list[BusinessCaseDataAttachment], int]:
+        business_case = self.get_business_case(
+            business_case_id,
+            principal,
+            minimum=BusinessCaseAccessRole.READER,
+        )
+        return self.repository.page_data_attachments(
+            business_case.id,
+            limit=limit,
+            offset=offset,
+            search=search,
+            role=role,
+            pipeline_id=pipeline_id,
+            pipeline_type=pipeline_type,
+            uploaded_only=uploaded_only,
+            deleted_only=deleted_only,
+        )
 
     def update_data_attachment(
         self,
@@ -213,8 +288,11 @@ class BusinessCaseService:
         payload: BusinessCaseDataAttachmentUpdate,
         principal: Principal,
     ) -> BusinessCaseDataAttachment:
-        business_case = self.get_business_case(business_case_id, principal)
-        access_policy.require_business_case(principal, business_case_id, BusinessCaseAccessRole.CONTRIBUTOR)
+        business_case = self.get_business_case(
+            business_case_id,
+            principal,
+            minimum=BusinessCaseAccessRole.CONTRIBUTOR,
+        )
         attachment = self._get_owned_data_attachment(business_case.id, attachment_id, principal)
         attachment.role = payload.role
         attachment.context_note = payload.context_note
@@ -228,8 +306,11 @@ class BusinessCaseService:
         attachment_id: str,
         principal: Principal,
     ) -> None:
-        business_case = self.get_business_case(business_case_id, principal)
-        access_policy.require_business_case(principal, business_case_id, BusinessCaseAccessRole.CONTRIBUTOR)
+        business_case = self.get_business_case(
+            business_case_id,
+            principal,
+            minimum=BusinessCaseAccessRole.CONTRIBUTOR,
+        )
         self._get_owned_data_attachment(business_case.id, attachment_id, principal)
         self.repository.delete_data_attachment(attachment_id)
 

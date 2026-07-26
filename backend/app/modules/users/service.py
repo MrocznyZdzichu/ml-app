@@ -28,6 +28,25 @@ class UserAdministrationService:
         self.require_admin(principal)
         return self.users.list_all()
 
+    def page_users(
+        self,
+        principal: Principal,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+        is_active: bool | None = None,
+        is_technical: bool | None = None,
+    ) -> tuple[list[UserAccount], int]:
+        self.require_admin(principal)
+        return self.users.page_all(
+            limit=limit,
+            offset=offset,
+            search=search,
+            is_active=is_active,
+            is_technical=is_technical,
+        )
+
     def update_user(self, user_id: str, payload: AdminUserUpdate, principal: Principal) -> UserAccount:
         self.require_admin(principal)
         user = self.users.get(user_id)

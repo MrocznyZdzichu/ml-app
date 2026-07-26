@@ -2,6 +2,7 @@ import { ArrowRight, ChevronDown, ChevronUp, Code2, Database, Plus, SlidersHoriz
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api/client";
+import { PagedCatalogSelect } from "../components/PagedCatalogSelect";
 import type { BusinessCaseDataAttachment, DataAsset, DatasetColumn } from "../api/client";
 import type {
   PipelineDefinition,
@@ -63,6 +64,7 @@ export function PipelineBuilder({
   definition,
   datasets,
   dataAttachments,
+  businessCaseId,
   outputNameSuggestion = "result",
   onChange,
   disabled = false
@@ -70,19 +72,30 @@ export function PipelineBuilder({
   definition: PipelineDefinition;
   datasets: DataAsset[];
   dataAttachments: BusinessCaseDataAttachment[];
+  businessCaseId?: string;
   outputNameSuggestion?: string;
   onChange: (definition: PipelineDefinition) => void;
   disabled?: boolean;
 }) {
   const [selectedNodeId, setSelectedNodeId] = useState<string>("");
   const [schemaCache, setSchemaCache] = useState<Record<string, DatasetColumn[]>>({});
+  const [datasetSnapshots, setDatasetSnapshots] = useState<Record<string, DataAsset>>({});
+  const catalogDatasets = useMemo(
+    () => [
+      ...datasets,
+      ...Object.values(datasetSnapshots).filter(
+        (snapshot) => !datasets.some((dataset) => dataset.id === snapshot.id)
+      )
+    ],
+    [datasetSnapshots, datasets]
+  );
   const attachmentByDataset = useMemo(
     () => new Map(dataAttachments.map((attachment) => [attachment.data_asset_id, attachment])),
     [dataAttachments]
   );
   const activeDatasets = useMemo(
     () =>
-      datasets
+      catalogDatasets
         .filter((dataset) => dataset.status !== "deleted" && ["csv", "parquet"].includes(dataset.format))
         .sort((left, right) => {
           const roleRank = (datasetId: string) => {
@@ -101,11 +114,11 @@ export function PipelineBuilder({
           };
           return roleRank(left.id) - roleRank(right.id) || left.name.localeCompare(right.name);
         }),
-    [attachmentByDataset, datasets]
+    [attachmentByDataset, catalogDatasets]
   );
   useEffect(() => {
     const missing = definition.inputs
-      .map((input) => datasets.find((dataset) => dataset.id === input.dataset_id))
+      .map((input) => catalogDatasets.find((dataset) => dataset.id === input.dataset_id))
       .filter((dataset): dataset is DataAsset =>
         Boolean(dataset)
         && !schemaCache[dataset!.id]
@@ -116,11 +129,11 @@ export function PipelineBuilder({
         .then((preview) => setSchemaCache((current) => ({ ...current, [dataset.id]: preview.columns })))
         .catch(() => setSchemaCache((current) => ({ ...current, [dataset.id]: [] })));
     }
-  }, [datasets, definition.inputs, schemaCache]);
+  }, [catalogDatasets, definition.inputs, schemaCache]);
   useEffect(() => {
     let changed = false;
     const steps = definition.steps.map((step) => {
-      const columns = inferPipelineStepInputColumns(definition, datasets, schemaCache, step)
+      const columns = inferPipelineStepInputColumns(definition, catalogDatasets, schemaCache, step)
         .map((column) => column.name);
       const serialized = JSON.stringify(step.config);
       if (
@@ -135,18 +148,18 @@ export function PipelineBuilder({
       return step;
     });
     if (changed) onChange({ ...definition, steps });
-  }, [datasets, definition, onChange, schemaCache]);
+  }, [catalogDatasets, definition, onChange, schemaCache]);
   const allColumns = useMemo(
     () =>
       Array.from(
         new Set(
           definition.inputs.flatMap((input) => {
-            const dataset = datasets.find((item) => item.id === input.dataset_id);
+            const dataset = catalogDatasets.find((item) => item.id === input.dataset_id);
             return columnsForDataset(dataset, schemaCache).map((column) => column.name);
           })
         )
       ),
-    [datasets, definition.inputs, schemaCache]
+    [catalogDatasets, definition.inputs, schemaCache]
   );
 
   function update(next: Partial<PipelineDefinition>) {
@@ -186,7 +199,7 @@ export function PipelineBuilder({
     const stepId = nextStableId("step", new Set(definition.steps.map((step) => step.step_id)));
     const source = available[available.length - 1].reference;
     const secondSource = available.length > 1 ? available[available.length - 2].reference : source;
-    const upstreamColumns = inferPipelineNodeColumns(definition, datasets, schemaCache, source.node_id)
+    const upstreamColumns = inferPipelineNodeColumns(definition, catalogDatasets, schemaCache, source.node_id)
       .map((column) => column.name);
     const step: PipelineStepDefinition = {
       step_id: stepId,
@@ -212,7 +225,7 @@ export function PipelineBuilder({
     const first = step.inputs[0]?.source ?? sources.at(-1)?.reference;
     if (!first) return;
     const second = step.inputs[1]?.source ?? sources.at(-2)?.reference ?? first;
-    const upstreamColumns = inferPipelineNodeColumns(definition, datasets, schemaCache, first.node_id)
+    const upstreamColumns = inferPipelineNodeColumns(definition, catalogDatasets, schemaCache, first.node_id)
       .map((column) => column.name);
     updateStep(index, {
       ...step,
@@ -254,8 +267,8 @@ export function PipelineBuilder({
   const outputSources = availableSources(definition);
   const selectedOutput = definition.outputs[0]?.input;
   const outputColumns = useMemo(
-    () => inferPipelineOutputColumns(definition, datasets, schemaCache),
-    [datasets, definition, schemaCache]
+    () => inferPipelineOutputColumns(definition, catalogDatasets, schemaCache),
+    [catalogDatasets, definition, schemaCache]
   );
   useEffect(() => {
     const output = definition.outputs[0];
@@ -294,7 +307,7 @@ export function PipelineBuilder({
         <div className="de-flow">
           <div className="de-source-stack">
             {definition.inputs.map((input) => {
-              const dataset = datasets.find((item) => item.id === input.dataset_id);
+              const dataset = catalogDatasets.find((item) => item.id === input.dataset_id);
               return (
                 <button className={selectedNodeId === input.input_id ? "de-node source selected" : "de-node source"} type="button" key={input.input_id} onClick={() => setSelectedNodeId(input.input_id)}>
                   <Database size={19} /><span><small>SOURCE {attachmentByDataset.get(input.dataset_id)?.role ? `· ${attachmentByDataset.get(input.dataset_id)?.role}` : ""}</small><strong>{dataset?.name ?? input.input_id}</strong><em>{dataset?.row_count ?? "?"} rows</em></span>
@@ -335,17 +348,45 @@ export function PipelineBuilder({
         <div><span className="builder-kicker">Inspector</span><h3>Node settings</h3></div>
         {selectedInputIndex >= 0 && (() => {
           const input = definition.inputs[selectedInputIndex];
-          const dataset = datasets.find((item) => item.id === input.dataset_id);
+          const dataset = catalogDatasets.find((item) => item.id === input.dataset_id);
           const referenced = isNodeReferenced(definition, input.input_id);
           return (
             <div className="inspector-form">
-              <label>Dataset<select value={input.dataset_id} onChange={(event) => updateInput(selectedInputIndex, { dataset_id: event.target.value })} disabled={disabled}>
-                <option value="">Choose dataset</option>
-                {activeDatasets.map((item) => {
-                  const role = attachmentByDataset.get(item.id)?.role;
-                  return <option key={item.id} value={item.id}>{role ? `★ ${role} · ` : ""}{item.name} · {item.row_count ?? "?"} rows</option>;
-                })}
-              </select></label>
+              <label>
+                Dataset
+                <PagedCatalogSelect<DataAsset>
+                  value={input.dataset_id}
+                  selectedItem={dataset}
+                  disabled={disabled}
+                  loadPage={async (query) => {
+                    const page = await api.pageDatasets({
+                      ...query,
+                      business_case_id: businessCaseId,
+                      asset_kind: "dataset",
+                      families: true
+                    });
+                    return {
+                      ...page,
+                      items: page.items
+                        .filter(isUsablePipelineDataset)
+                        .map((item) => ({ ...item, id: item.logical_id || item.id }))
+                    };
+                  }}
+                  getId={(item) => item.id}
+                  getLabel={(item) => {
+                    const role = attachmentByDataset.get(item.id)?.role;
+                    return `${role ? `★ ${role} · ` : ""}${item.name} · ${item.row_count ?? "?"} rows`;
+                  }}
+                  emptyLabel="Choose dataset"
+                  searchPlaceholder="Search datasets"
+                  onChange={(value, item) => {
+                    if (item) {
+                      setDatasetSnapshots((current) => ({ ...current, [item.id]: item }));
+                    }
+                    updateInput(selectedInputIndex, { dataset_id: value });
+                  }}
+                />
+              </label>
               <label>Version policy<select
                 value={input.version_policy ?? "latest"}
                 onChange={(event) => updateInput(selectedInputIndex, {
@@ -371,14 +412,14 @@ export function PipelineBuilder({
             step={definition.steps[selectedStepIndex]}
             index={selectedStepIndex}
             sourceOptions={availableSources(definition, selectedStepIndex)}
-            availableColumns={inferPipelineStepInputColumns(definition, datasets, schemaCache, definition.steps[selectedStepIndex], columnRoles)}
+            availableColumns={inferPipelineStepInputColumns(definition, catalogDatasets, schemaCache, definition.steps[selectedStepIndex], columnRoles)}
             inputColumns={definition.steps[selectedStepIndex].inputs.map((input) =>
-              inferPipelineNodeColumns(definition, datasets, schemaCache, input.source.node_id, new Set<string>(), columnRoles)
+              inferPipelineNodeColumns(definition, catalogDatasets, schemaCache, input.source.node_id, new Set<string>(), columnRoles)
             )}
             sourceDatasetIds={datasetIdsForStepInputs(
               definition,
               definition.steps[selectedStepIndex]
-            ).map((datasetId) => physicalDatasetId(datasets, datasetId))}
+            ).map((datasetId) => physicalDatasetId(catalogDatasets, datasetId))}
             disabled={disabled}
             onChange={(nextStep) => updateStep(selectedStepIndex, nextStep)}
             onTypeChange={(type) => changeStepType(selectedStepIndex, type)}
@@ -1208,6 +1249,10 @@ function physicalDatasetId(datasets: DataAsset[], datasetId: string) {
   return datasets
     .filter((dataset) => dataset.logical_id === datasetId)
     .sort((left, right) => right.version_number - left.version_number)[0]?.id ?? datasetId;
+}
+
+function isUsablePipelineDataset(dataset: DataAsset) {
+  return dataset.status !== "deleted" && ["csv", "parquet"].includes(dataset.format);
 }
 
 function columnRoles(dataset: DataAsset | undefined): Record<string, string> {

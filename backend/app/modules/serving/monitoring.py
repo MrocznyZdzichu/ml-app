@@ -210,6 +210,32 @@ class OnlineMonitoringService:
             if self._can_view_report(principal, run.business_case_id)
         ]
 
+    def page_runs(
+        self,
+        principal: Principal,
+        *,
+        deployment_id: str | None = None,
+        limit: int,
+        offset: int,
+        include_archived: bool = False,
+    ) -> tuple[list[OnlineMonitoringRun], int]:
+        accessible_business_case_ids: set[str] | None = None
+        if deployment_id:
+            deployment = self._deployment(
+                deployment_id, principal, BusinessCaseAccessRole.REPORT_VIEWER
+            )
+            deployment_id = deployment.id
+        else:
+            roles = access_policy.accessible_business_case_roles(principal)
+            accessible_business_case_ids = None if roles is None else set(roles)
+        return self.repository.page_monitoring_runs(
+            deployment_id,
+            accessible_business_case_ids=accessible_business_case_ids,
+            limit=limit,
+            offset=offset,
+            include_archived=include_archived,
+        )
+
     def get_run(self, run_id: str, principal: Principal) -> OnlineMonitoringRun:
         run = self.repository.get_monitoring_run(run_id)
         if run is None or not self._can_view_report(principal, run.business_case_id):

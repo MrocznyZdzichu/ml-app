@@ -33,6 +33,8 @@ content describes the current contract unless marked otherwise.
 
 - [Repository refactoring audit](refactoring-audit.md)
 - [Repository refactoring audit — 2026-07](refactoring-audit-2026-07.md)
+- [Performance audit — 2026-07](performance-audit-2026-07.md)
+- [UI scalability audit — 2026-07](ui-scalability-audit-2026-07.md)
 
 Audit files are dated snapshots. Use them to understand why a refactor was
 made, not as the source of truth for current product capabilities.

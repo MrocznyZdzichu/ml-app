@@ -29,33 +29,60 @@ class DatasetLineageResolver:
         max_nodes: int = 200,
     ) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
+        result_ids: set[str] = set()
         visited: set[str] = {root.id}
-        stack: list[tuple[Artifact, int, str]] = [(root, 0, "")]
-        while stack and len(visited) <= max_nodes:
-            current, depth, inherited_role = stack.pop()
-            if depth >= max_depth:
-                continue
-            lineage = dict(current.metadata.get("lineage") or {})
-            bindings = self._bindings(lineage)
-            for binding in bindings:
-                role = self._role(str(binding.get("input_port_id") or ""), inherited_role)
-                for artifact_id in binding.get("artifact_ids") or []:
-                    artifact = self.artifacts.get_artifact(str(artifact_id))
-                    if artifact is None or artifact.owner_id != root.owner_id:
-                        continue
-                    if artifact.type in {
-                        ArtifactType.DATASET,
-                        ArtifactType.DATA_VIEW,
-                        ArtifactType.PREDICTION_DATASET,
-                    }:
-                        item = self._dataset_item(artifact, role, depth + 1)
-                        if item and not any(
-                            existing["artifact_id"] == artifact.id for existing in result
-                        ):
-                            result.append(item)
-                    if artifact.id not in visited:
-                        visited.add(artifact.id)
-                        stack.append((artifact, depth + 1, role))
+        frontier: list[tuple[Artifact, int, str]] = [(root, 0, "")]
+        while frontier and len(visited) < max_nodes:
+            references: list[tuple[str, int, str]] = []
+            for current, depth, inherited_role in frontier:
+                if depth >= max_depth:
+                    continue
+                lineage = dict(current.metadata.get("lineage") or {})
+                for binding in self._bindings(lineage):
+                    role = self._role(
+                        str(binding.get("input_port_id") or ""),
+                        inherited_role,
+                    )
+                    references.extend(
+                        (str(artifact_id), depth + 1, role)
+                        for artifact_id in binding.get("artifact_ids") or []
+                    )
+            artifact_ids = {
+                artifact_id
+                for artifact_id, _, _ in references
+                if artifact_id not in visited
+            }
+            artifacts = self.artifacts.get_artifacts(artifact_ids)
+            dataset_artifacts = {
+                artifact.reference_id: artifact
+                for artifact in artifacts.values()
+                if artifact.owner_id == root.owner_id
+                and artifact.type in {
+                    ArtifactType.DATASET,
+                    ArtifactType.DATA_VIEW,
+                    ArtifactType.PREDICTION_DATASET,
+                }
+            }
+            datasets = self.datasets.get_many(set(dataset_artifacts))
+            next_frontier: list[tuple[Artifact, int, str]] = []
+            for artifact_id, depth, role in references:
+                artifact = artifacts.get(artifact_id)
+                if artifact is None or artifact.owner_id != root.owner_id:
+                    continue
+                if artifact.reference_id in datasets and artifact.id not in result_ids:
+                    item = self._dataset_item(
+                        artifact,
+                        role,
+                        depth,
+                        dataset=datasets[artifact.reference_id],
+                    )
+                    if item:
+                        result.append(item)
+                        result_ids.add(artifact.id)
+                if artifact.id not in visited and len(visited) < max_nodes:
+                    visited.add(artifact.id)
+                    next_frontier.append((artifact, depth, role))
+            frontier = next_frontier
         return sorted(
             result,
             key=lambda item: (
@@ -80,8 +107,10 @@ class DatasetLineageResolver:
         artifact: Artifact,
         inherited_role: str,
         depth: int,
+        *,
+        dataset=None,
     ) -> dict[str, Any] | None:
-        dataset = self.datasets.get(artifact.reference_id)
+        dataset = dataset or self.datasets.get(artifact.reference_id)
         if dataset is None or dataset.owner_id != artifact.owner_id:
             return None
         pipeline_output = dict(dataset.metadata.get("pipeline_output") or {})
@@ -162,6 +191,7 @@ class ArtifactDependencyResolver:
         artifact_type: str | None = None,
     ) -> list[dict[str, Any]]:
         artifacts = self.artifacts.list_artifacts(owner_id)
+        artifacts_by_id = {artifact.id: artifact for artifact in artifacts}
         roots = [
             artifact for artifact in artifacts
             if artifact.reference_id == reference_id
@@ -185,13 +215,14 @@ class ArtifactDependencyResolver:
         root_ids = {artifact.id for artifact in roots}
         edges: list[dict[str, Any]] = []
         seen: set[tuple[str, str, str, str]] = set()
+        roots_by_id = {artifact.id: artifact for artifact in roots}
 
         for root in roots:
             lineage = dict(root.metadata.get("lineage") or {})
             for binding in DatasetLineageResolver._bindings(lineage):
                 role = self._role(str(binding.get("input_port_id") or ""))
                 for artifact_id in binding.get("artifact_ids") or []:
-                    source = next((item for item in artifacts if item.id == str(artifact_id)), None)
+                    source = artifacts_by_id.get(str(artifact_id))
                     if source:
                         self._append(edges, seen, "upstream", role, source, root)
             self._append_execution_edges(edges, seen, root, lineage)
@@ -200,14 +231,37 @@ class ArtifactDependencyResolver:
             if candidate.id in root_ids:
                 continue
             lineage = dict(candidate.metadata.get("lineage") or {})
+            matched_root_ids: set[str] = set()
             for binding in DatasetLineageResolver._bindings(lineage):
                 role = self._role(str(binding.get("input_port_id") or ""))
-                if root_ids.intersection(str(item) for item in binding.get("artifact_ids") or []):
-                    for root in roots:
-                        self._append(edges, seen, "downstream", role, root, candidate)
-            if root.reference_id in set(str(item) for item in lineage.get("input_artifact_ids") or []):
-                for root in roots:
-                    self._append(edges, seen, "downstream", "input", root, candidate)
+                binding_ids = {
+                    str(item) for item in binding.get("artifact_ids") or []
+                }
+                for root_id in root_ids.intersection(binding_ids):
+                    matched_root_ids.add(root_id)
+                    self._append(
+                        edges,
+                        seen,
+                        "downstream",
+                        role,
+                        roots_by_id[root_id],
+                        candidate,
+                    )
+            # Some older artifacts contain both port-aware lineage and an
+            # aggregate flat list. Preserve dependencies present only in the
+            # latter without creating false edges to unrelated roots.
+            flat_root_ids = root_ids.intersection(
+                str(item) for item in lineage.get("input_artifact_ids") or []
+            )
+            for root_id in flat_root_ids - matched_root_ids:
+                self._append(
+                    edges,
+                    seen,
+                    "downstream",
+                    "input",
+                    roots_by_id[root_id],
+                    candidate,
+                )
         return edges
 
     @staticmethod

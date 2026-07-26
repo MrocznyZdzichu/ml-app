@@ -1,6 +1,5 @@
 import hashlib
 import json
-from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
@@ -44,7 +43,7 @@ from app.modules.pipelines.workflow import (
     validate_workflow_definition,
     workflow_validation_errors,
 )
-from app.modules.sharing.domain import BC_ROLE_RANK, BusinessCaseAccessRole, ResourceAccessRole, ResourceKind
+from app.modules.sharing.domain import BusinessCaseAccessRole, ResourceAccessRole, ResourceKind
 from app.modules.sharing.policy import access_policy
 
 
@@ -67,8 +66,11 @@ class PipelineService:
         self.artifacts = artifacts or PostgresBusinessCaseRepository()
 
     def create_pipeline(self, payload: PipelineCreate, principal: Principal) -> Pipeline:
-        business_case = self.business_cases.get_business_case(payload.business_case_id, principal)
-        access_policy.require_business_case(principal, business_case.id, BusinessCaseAccessRole.CONTRIBUTOR)
+        business_case = self.business_cases.get_business_case(
+            payload.business_case_id,
+            principal,
+            minimum=BusinessCaseAccessRole.CONTRIBUTOR,
+        )
         now = datetime.now(timezone.utc)
         pipeline = Pipeline(
             id=str(uuid4()),
@@ -103,42 +105,108 @@ class PipelineService:
         return pipeline
 
     def list_pipelines(self, principal: Principal, business_case_id: str | None = None) -> list[Pipeline]:
-        cases = self.business_cases.list_business_cases(principal)
-        cases = [case for case in cases if case.access_role and BC_ROLE_RANK[BusinessCaseAccessRole(case.access_role)] >= BC_ROLE_RANK[BusinessCaseAccessRole.READER]]
         if business_case_id:
             access_policy.require_business_case(principal, business_case_id, BusinessCaseAccessRole.READER)
-            cases = [case for case in cases if case.id == business_case_id]
-        pipelines = self.repository.list_pipelines_for_business_cases({case.id for case in cases})
-        versions_by_pipeline: dict[str, list[PipelineVersion]] = {
-            pipeline.id: [] for pipeline in pipelines
-        }
-        pipeline_ids_by_owner: dict[str, list[str]] = defaultdict(list)
+            business_case_ids: set[str] | None = {business_case_id}
+        else:
+            business_case_ids = access_policy.accessible_business_case_ids(
+                principal,
+                BusinessCaseAccessRole.READER,
+            )
+        pipelines = self.repository.list_pipelines_for_business_cases(business_case_ids)
+        summaries = self.repository.version_catalog_summaries(
+            {pipeline.id for pipeline in pipelines}
+        )
         for pipeline in pipelines:
-            pipeline_ids_by_owner[pipeline.owner_id].append(pipeline.id)
-        for owner_id, pipeline_ids in pipeline_ids_by_owner.items():
-            for version in self.repository.list_versions_for_pipelines(owner_id, pipeline_ids):
-                versions_by_pipeline[version.pipeline_id].append(version)
-        for pipeline in pipelines:
-            self._apply_version_summary(pipeline, versions_by_pipeline[pipeline.id])
+            self._apply_catalog_summary(pipeline, summaries.get(pipeline.id))
         return pipelines
+
+    def page_pipelines(
+        self,
+        principal: Principal,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+        business_case_id: str | None = None,
+        pipeline_type: str = "",
+        pipeline_template: str = "",
+        pipeline_status: str = "",
+        include_deprecated: bool = True,
+    ) -> tuple[list[Pipeline], int]:
+        if business_case_id:
+            access_policy.require_business_case(
+                principal,
+                business_case_id,
+                BusinessCaseAccessRole.READER,
+            )
+            business_case_ids: set[str] | None = {business_case_id}
+        else:
+            business_case_ids = access_policy.accessible_business_case_ids(
+                principal,
+                BusinessCaseAccessRole.READER,
+            )
+        pipelines, total = self.repository.page_pipelines_for_business_cases(
+            business_case_ids,
+            limit=limit,
+            offset=offset,
+            search=search,
+            pipeline_type=pipeline_type,
+            pipeline_template=pipeline_template,
+            pipeline_status=pipeline_status,
+            include_deprecated=include_deprecated,
+        )
+        summaries = self.repository.version_catalog_summaries(
+            {pipeline.id for pipeline in pipelines}
+        )
+        for pipeline in pipelines:
+            self._apply_catalog_summary(pipeline, summaries.get(pipeline.id))
+        return pipelines, total
 
     def get_pipeline(self, pipeline_id: str, principal: Principal) -> Pipeline:
         pipeline = self._get_owned_pipeline(pipeline_id, principal)
-        self._apply_version_summary(
+        self._apply_catalog_summary(
             pipeline,
-            self.repository.list_versions(pipeline.id),
+            self.repository.version_catalog_summaries({pipeline.id}).get(pipeline.id),
         )
         return pipeline
 
-    def _get_owned_pipeline(self, pipeline_id: str, principal: Principal) -> Pipeline:
+    def _get_owned_pipeline(
+        self,
+        pipeline_id: str,
+        principal: Principal,
+        *,
+        minimum: BusinessCaseAccessRole = BusinessCaseAccessRole.READER,
+    ) -> Pipeline:
         pipeline = self.repository.get_pipeline(pipeline_id)
         if not pipeline:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pipeline not found")
-        access_policy.require_business_case(principal, pipeline.business_case_id, BusinessCaseAccessRole.READER)
+        access_policy.require_business_case(principal, pipeline.business_case_id, minimum)
         return pipeline
 
-    def _require_pipeline_contributor(self, pipeline: Pipeline, principal: Principal) -> None:
-        access_policy.require_business_case(principal, pipeline.business_case_id, BusinessCaseAccessRole.CONTRIBUTOR)
+    def _visible_pipeline_ids(self, principal: Principal) -> set[str]:
+        business_case_ids = access_policy.accessible_business_case_ids(
+            principal,
+            BusinessCaseAccessRole.READER,
+        )
+        return self.repository.list_pipeline_ids_for_business_cases(business_case_ids)
+
+    def _apply_catalog_summary(
+        self,
+        pipeline: Pipeline,
+        summary: dict[str, Any] | None,
+    ) -> None:
+        values = summary or {}
+        pipeline.latest_published_version_number = values.get(
+            "latest_published_version_number"
+        )
+        pipeline.published_version_count = int(
+            values.get("published_version_count") or 0
+        )
+        pipeline.draft_version_number = values.get("draft_version_number")
+        pipeline.template = self._definition_template(
+            dict(values.get("definition") or {})
+        )
 
     def _apply_version_summary(
         self,
@@ -188,8 +256,15 @@ class PipelineService:
         payload: PipelineUpdate,
         principal: Principal,
     ) -> Pipeline:
-        pipeline = self.get_pipeline(pipeline_id, principal)
-        self._require_pipeline_contributor(pipeline, principal)
+        pipeline = self._get_owned_pipeline(
+            pipeline_id,
+            principal,
+            minimum=BusinessCaseAccessRole.CONTRIBUTOR,
+        )
+        self._apply_catalog_summary(
+            pipeline,
+            self.repository.version_catalog_summaries({pipeline.id}).get(pipeline.id),
+        )
         self._require_active_pipeline(pipeline)
         pipeline.name = payload.name
         if payload.description is not None:
@@ -206,8 +281,11 @@ class PipelineService:
         payload: PipelineCopy,
         principal: Principal,
     ) -> Pipeline:
-        source = self._get_owned_pipeline(pipeline_id, principal)
-        self._require_pipeline_contributor(source, principal)
+        source = self._get_owned_pipeline(
+            pipeline_id,
+            principal,
+            minimum=BusinessCaseAccessRole.CONTRIBUTOR,
+        )
         versions = self.repository.list_versions(source.id)
         draft = next(
             (item for item in reversed(versions) if item.status == PipelineVersionStatus.DRAFT),
@@ -254,8 +332,11 @@ class PipelineService:
         return copied
 
     def delete_pipeline(self, pipeline_id: str, principal: Principal) -> str:
-        pipeline = self._get_owned_pipeline(pipeline_id, principal)
-        self._require_pipeline_contributor(pipeline, principal)
+        pipeline = self._get_owned_pipeline(
+            pipeline_id,
+            principal,
+            minimum=BusinessCaseAccessRole.CONTRIBUTOR,
+        )
         if self.repository.delete_pipeline_without_runs(pipeline.id):
             return "deleted"
         pipeline.status = PipelineStatus.DEPRECATED
@@ -268,14 +349,34 @@ class PipelineService:
         pipeline = self._get_owned_pipeline(pipeline_id, principal)
         return self.repository.list_versions(pipeline.id)
 
+    def page_versions(
+        self,
+        pipeline_id: str,
+        principal: Principal,
+        *,
+        limit: int,
+        offset: int,
+        version_status: str = "",
+    ) -> tuple[list[PipelineVersion], int]:
+        pipeline = self._get_owned_pipeline(pipeline_id, principal)
+        return self.repository.page_versions(
+            pipeline.id,
+            limit=limit,
+            offset=offset,
+            status=version_status,
+        )
+
     def update_draft_version(
         self,
         pipeline_id: str,
         payload: PipelineVersionUpdate,
         principal: Principal,
     ) -> PipelineVersion:
-        pipeline = self._get_owned_pipeline(pipeline_id, principal)
-        self._require_pipeline_contributor(pipeline, principal)
+        pipeline = self._get_owned_pipeline(
+            pipeline_id,
+            principal,
+            minimum=BusinessCaseAccessRole.CONTRIBUTOR,
+        )
         self._require_active_pipeline(pipeline)
         version = self.repository.get_draft_version(pipeline.id)
         if not version:
@@ -291,8 +392,11 @@ class PipelineService:
         return self.repository.update_version(version)
 
     def publish_draft_version(self, pipeline_id: str, principal: Principal) -> PipelineVersion:
-        pipeline = self._get_owned_pipeline(pipeline_id, principal)
-        self._require_pipeline_contributor(pipeline, principal)
+        pipeline = self._get_owned_pipeline(
+            pipeline_id,
+            principal,
+            minimum=BusinessCaseAccessRole.CONTRIBUTOR,
+        )
         self._require_active_pipeline(pipeline)
         version = self.repository.get_draft_version(pipeline.id)
         if not version:
@@ -318,16 +422,18 @@ class PipelineService:
         return self.repository.update_version(version)
 
     def create_next_draft_version(self, pipeline_id: str, principal: Principal) -> PipelineVersion:
-        pipeline = self._get_owned_pipeline(pipeline_id, principal)
-        self._require_pipeline_contributor(pipeline, principal)
+        pipeline = self._get_owned_pipeline(
+            pipeline_id,
+            principal,
+            minimum=BusinessCaseAccessRole.CONTRIBUTOR,
+        )
         self._require_active_pipeline(pipeline)
         if self.repository.get_draft_version(pipeline.id):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Pipeline already has a draft version",
             )
-        versions = self.repository.list_versions(pipeline.id)
-        latest = versions[-1] if versions else None
+        latest = self.repository.get_latest_version(pipeline.id)
         next_number = (latest.version_number + 1) if latest else 1
         definition = latest.definition if latest else empty_workflow_definition()
         version = PipelineVersion(
@@ -348,8 +454,11 @@ class PipelineService:
         return self.repository.add_version(version)
 
     def create_run(self, pipeline_id: str, payload: PipelineRunCreate, principal: Principal) -> PipelineRun:
-        pipeline = self._get_owned_pipeline(pipeline_id, principal)
-        self._require_pipeline_contributor(pipeline, principal)
+        pipeline = self._get_owned_pipeline(
+            pipeline_id,
+            principal,
+            minimum=BusinessCaseAccessRole.CONTRIBUTOR,
+        )
         self._require_active_pipeline(pipeline)
         version = self._resolve_run_version(pipeline, payload.pipeline_version_id)
         if version.status == PipelineVersionStatus.DRAFT and not payload.is_dry_run:
@@ -433,6 +542,34 @@ class PipelineService:
                 principal,
             )
         }
+        attached_assets = self.datasets.get_many(attached_asset_ids)
+        attached_logical_ids = {
+            asset.logical_id for asset in attached_assets.values()
+        }
+        uses_postgres_catalog = isinstance(self.datasets, PostgresDatasetRepository)
+        accessible_asset_ids = (
+            access_policy.accessible_dataset_ids(principal)
+            if uses_postgres_catalog
+            else None
+        )
+
+        def is_visible(asset: Any) -> bool:
+            if uses_postgres_catalog:
+                return (
+                    accessible_asset_ids is None
+                    or asset.id in accessible_asset_ids
+                )
+            return access_policy.resource_role(
+                principal,
+                (
+                    ResourceKind.DATA_VIEW
+                    if asset.source_type.value == "view"
+                    else ResourceKind.DATASET
+                ),
+                asset.id,
+                asset.owner_id,
+            ) is not None
+
         for step in workflow.steps:
             definition = step.config.get("definition")
             if not isinstance(definition, dict):
@@ -452,12 +589,7 @@ class PipelineService:
                 if (
                     policy != "pinned"
                     and existing_version is not None
-                    and access_policy.resource_role(
-                        principal,
-                        ResourceKind.DATA_VIEW if existing_version.source_type.value == "view" else ResourceKind.DATASET,
-                        existing_version.id,
-                        existing_version.owner_id,
-                    ) is not None
+                    and is_visible(existing_version)
                 ):
                     logical_id = existing_version.logical_id
                 input_id = str(raw_input.get("input_id") or "")
@@ -488,20 +620,7 @@ class PipelineService:
                                 "input_key": binding_key,
                             },
                         )
-                    access_policy.require_resource(
-                        principal,
-                        ResourceKind.DATA_VIEW if asset.source_type.value == "view" else ResourceKind.DATASET,
-                        asset.id,
-                        asset.owner_id,
-                        ResourceAccessRole.READER,
-                    )
                     if policy == "select_at_run_any":
-                        attached_logical_ids = {
-                            item.logical_id
-                            for item_id in attached_asset_ids
-                            for item in [self.datasets.get(item_id)]
-                            if item is not None
-                        }
                         if asset.id not in attached_asset_ids and asset.logical_id not in attached_logical_ids:
                             raise HTTPException(
                                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -527,25 +646,13 @@ class PipelineService:
                                 "input_key": binding_key,
                             },
                         )
-                    access_policy.require_resource(
-                        principal,
-                        ResourceKind.DATA_VIEW if asset.source_type.value == "view" else ResourceKind.DATASET,
-                        asset.id,
-                        asset.owner_id,
-                        ResourceAccessRole.READER,
-                    )
                     logical_id = asset.logical_id
                 elif policy == "latest":
                     candidates = [
-                        item for item in self.datasets.list_all()
-                        if item.logical_id == logical_id
-                        and item.status != DataAssetStatus.DELETED
-                        and access_policy.resource_role(
-                            principal,
-                            ResourceKind.DATA_VIEW if item.source_type.value == "view" else ResourceKind.DATASET,
-                            item.id,
-                            item.owner_id,
-                        ) is not None
+                        item
+                        for item in self.datasets.list_by_logical_id(logical_id)
+                        if item.status != DataAssetStatus.DELETED
+                        and is_visible(item)
                     ]
                     asset = max(candidates, key=lambda item: item.version_number, default=None)
                     if asset is None:
@@ -561,6 +668,17 @@ class PipelineService:
                         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                         detail={"message": f"Unsupported dataset version policy '{policy}'"},
                     )
+                access_policy.require_resource(
+                    principal,
+                    (
+                        ResourceKind.DATA_VIEW
+                        if asset.source_type.value == "view"
+                        else ResourceKind.DATASET
+                    ),
+                    asset.id,
+                    asset.owner_id,
+                    ResourceAccessRole.READER,
+                )
                 resolved[binding_key] = {
                     "input_id": input_id,
                     "step_id": step.step_id,
@@ -580,24 +698,32 @@ class PipelineService:
         business_case_id: str,
     ) -> dict[str, dict[str, Any]]:
         """Resolve an immutable model and its matching inference FE bundle."""
-        artifact_owner_id = (
-            self.business_cases.get_business_case(business_case_id, principal).owner_id
-            if isinstance(self.artifacts, PostgresBusinessCaseRepository)
-            else principal.user_id
+        model_artifacts = self.artifacts.list_artifacts_for_business_cases(
+            {business_case_id},
+            ArtifactType.MODEL_VERSION,
         )
-        model_artifacts = [
-            artifact
-            for artifact in self.artifacts.list_artifacts(artifact_owner_id, ArtifactType.MODEL_VERSION)
-            if artifact.business_case_id == business_case_id
-        ]
         by_id = {artifact.id: artifact for artifact in model_artifacts}
-        fitted_artifacts = [
-            artifact
-            for artifact in self.artifacts.list_artifacts(
-                artifact_owner_id, ArtifactType.FEATURE_TRANSFORM
+        fitted_artifacts = self.artifacts.list_artifacts_for_business_cases(
+            {business_case_id},
+            ArtifactType.FEATURE_TRANSFORM,
+        )
+        model_families: dict[str, list[Any]] = {}
+        for artifact in model_artifacts:
+            logical_id = str(
+                artifact.metadata.get("logical_model_id") or artifact.id
             )
-            if artifact.business_case_id == business_case_id
-        ]
+            model_families.setdefault(logical_id, []).append(artifact)
+        for family in model_families.values():
+            family.sort(key=lambda artifact: (artifact.created_at, artifact.id))
+        fitted_by_run_step: dict[tuple[str, str], list[Any]] = {}
+        for artifact in fitted_artifacts:
+            lineage = dict(artifact.metadata.get("lineage") or {})
+            key = (
+                str(lineage.get("pipeline_run_id") or ""),
+                str(lineage.get("pipeline_step_id") or ""),
+            )
+            fitted_by_run_step.setdefault(key, []).append(artifact)
+
         resolved: dict[str, dict[str, Any]] = {}
         for step in workflow.steps:
             if step.type != "scoring":
@@ -612,10 +738,7 @@ class PipelineService:
                     detail={"message": f"Step '{step.step_id}' references an unavailable model artifact"},
                 )
             logical_id = str(configured.metadata.get("logical_model_id") or configured.id)
-            family = [
-                artifact for artifact in model_artifacts
-                if str(artifact.metadata.get("logical_model_id") or artifact.id) == logical_id
-            ]
+            family = model_families.get(logical_id, [])
             selected_id = requested_versions.get(step.step_id)
             selected = by_id.get(selected_id) if selected_id else max(
                 family, key=lambda artifact: (artifact.created_at, artifact.id)
@@ -625,12 +748,12 @@ class PipelineService:
                     status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail={"message": f"Selected model version is not available for step '{step.step_id}'"},
                 )
-            version_number = sorted(family, key=lambda artifact: (artifact.created_at, artifact.id)).index(selected) + 1
+            version_number = family.index(selected) + 1
             bundle = self._resolve_model_inference_bundle(
                 workflow,
                 step.step_id,
                 selected,
-                fitted_artifacts,
+                fitted_by_run_step,
             )
             resolved[step.step_id] = {
                 "model_artifact_id": selected.id,
@@ -647,7 +770,7 @@ class PipelineService:
         workflow: WorkflowDefinition,
         scoring_step_id: str,
         model_artifact: Any,
-        fitted_artifacts: list[Any],
+        fitted_by_run_step: dict[tuple[str, str], list[Any]],
     ) -> dict[str, Any]:
         """Pin the recipe and fitted state produced by the selected model run."""
         scoring_step = next(step for step in workflow.steps if step.step_id == scoring_step_id)
@@ -690,13 +813,7 @@ class PipelineService:
             fitted_step_id = self._upstream_feature_step_id(version.definition, model_step_id)
             feature_definition = self._feature_definition(version.definition, fitted_step_id)
 
-        matches = [
-            artifact for artifact in fitted_artifacts
-            if str(dict(artifact.metadata.get("lineage") or {}).get("pipeline_run_id") or "")
-            == training_run_id
-            and str(dict(artifact.metadata.get("lineage") or {}).get("pipeline_step_id") or "")
-            == fitted_step_id
-        ]
+        matches = fitted_by_run_step.get((training_run_id, fitted_step_id), [])
         if len(matches) != 1 or not feature_definition:
             raise self._incomplete_inference_bundle(scoring_step_id, model_artifact.id)
         fitted = matches[0]
@@ -810,12 +927,46 @@ class PipelineService:
                     },
                 )
 
-    def get_run(self, pipeline_id: str, run_id: str, principal: Principal) -> PipelineRun:
-        pipeline = self._get_owned_pipeline(pipeline_id, principal)
+    def get_run(
+        self,
+        pipeline_id: str,
+        run_id: str,
+        principal: Principal,
+        *,
+        minimum: BusinessCaseAccessRole = BusinessCaseAccessRole.READER,
+    ) -> PipelineRun:
         run = self.repository.get_run(run_id)
-        if not run or run.pipeline_id != pipeline.id or run.owner_id != pipeline.owner_id:
+        if not run or run.pipeline_id != pipeline_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pipeline run not found")
+        access_policy.require_business_case(principal, run.business_case_id, minimum)
         return self._repair_finished_active_run(run)
+
+    def get_run_status(
+        self,
+        pipeline_id: str,
+        run_id: str,
+        principal: Principal,
+    ) -> PipelineRun:
+        """Return polling fields without loading the run's growing JSON payloads."""
+        summary = self.repository.get_run_summary(run_id)
+        if not summary or summary.pipeline_id != pipeline_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Pipeline run not found",
+            )
+        access_policy.require_business_case(
+            principal,
+            summary.business_case_id,
+            BusinessCaseAccessRole.READER,
+        )
+        if (
+            summary.status in {PipelineRunStatus.QUEUED, PipelineRunStatus.RUNNING}
+            and summary.finished_at is not None
+        ):
+            full_run = self.repository.get_run(summary.id)
+            if full_run is not None:
+                return self._repair_finished_active_run(full_run)
+        return summary
 
     def get_run_details(self, pipeline_id: str, run_id: str, principal: Principal) -> dict[str, Any]:
         run = self.get_run(pipeline_id, run_id, principal)
@@ -825,8 +976,9 @@ class PipelineService:
         resolved = run.runtime_parameters.get("resolved_input_versions", {})
         resolved_inputs = list(resolved.values()) if isinstance(resolved, dict) else []
         lineage: list[dict[str, Any]] = []
+        artifacts = self.artifacts.get_artifacts(set(run.output_artifact_ids))
         for artifact_id in run.output_artifact_ids:
-            artifact = self.artifacts.get_artifact(artifact_id)
+            artifact = artifacts.get(artifact_id)
             if artifact is None or artifact.business_case_id != run.business_case_id:
                 continue
             lineage.append(
@@ -853,8 +1005,12 @@ class PipelineService:
         }
 
     def cancel_run(self, pipeline_id: str, run_id: str, principal: Principal) -> PipelineRun:
-        run = self.get_run(pipeline_id, run_id, principal)
-        access_policy.require_business_case(principal, run.business_case_id, BusinessCaseAccessRole.CONTRIBUTOR)
+        run = self.get_run(
+            pipeline_id,
+            run_id,
+            principal,
+            minimum=BusinessCaseAccessRole.CONTRIBUTOR,
+        )
         if run.status not in {PipelineRunStatus.QUEUED, PipelineRunStatus.RUNNING}:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -877,8 +1033,12 @@ class PipelineService:
         return self.repository.update_run(run)
 
     def retry_run(self, pipeline_id: str, run_id: str, principal: Principal) -> PipelineRun:
-        previous = self.get_run(pipeline_id, run_id, principal)
-        access_policy.require_business_case(principal, previous.business_case_id, BusinessCaseAccessRole.CONTRIBUTOR)
+        previous = self.get_run(
+            pipeline_id,
+            run_id,
+            principal,
+            minimum=BusinessCaseAccessRole.CONTRIBUTOR,
+        )
         if previous.status not in {PipelineRunStatus.FAILED, PipelineRunStatus.CANCELLED}:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -929,12 +1089,11 @@ class PipelineService:
             pipeline_id = pipeline.id
             runs = self.repository.list_runs(pipeline_id, pipeline.owner_id, limit=limit, offset=offset)
         else:
-            pipelines = self.list_pipelines(principal)
-            runs = [
-                run for pipeline in pipelines
-                for run in self.repository.list_runs(pipeline.id, pipeline.owner_id, limit=limit, offset=0)
-            ]
-            runs = sorted(runs, key=lambda item: item.created_at, reverse=True)[offset:offset + limit]
+            runs = self.repository.list_runs_for_pipelines(
+                self._visible_pipeline_ids(principal),
+                limit=limit,
+                offset=offset,
+            )
         return [self._repair_finished_active_run(run) for run in runs]
 
     def list_run_summaries(
@@ -946,15 +1105,48 @@ class PipelineService:
     ) -> list[PipelineRun]:
         # The history grid needs metadata only. Trial events and output manifests
         # can be several megabytes and are fetched lazily with run details.
-        pipelines = self.list_pipelines(principal)
-        pipeline_ids = {pipeline.id for pipeline in pipelines}
-        owners = {pipeline.owner_id for pipeline in pipelines}
-        summaries = [
-            summary for owner_id in owners
-            for summary in self.repository.list_run_summaries(owner_id, limit=limit, offset=0)
-            if summary.pipeline_id in pipeline_ids
-        ]
-        summaries = sorted(summaries, key=lambda item: item.created_at, reverse=True)[offset:offset + limit]
+        summaries = self.repository.list_run_summaries_for_pipelines(
+            self._visible_pipeline_ids(principal),
+            limit=limit,
+            offset=offset,
+        )
+        return self._reconcile_run_summaries(summaries)
+
+    def page_run_summaries(
+        self,
+        principal: Principal,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+        run_status: str = "",
+        pipeline_id: str = "",
+        pipeline_version_id: str = "",
+        business_case_id: str = "",
+        trigger_type: str = "",
+        dry_run: bool | None = None,
+    ) -> tuple[list[PipelineRun], int]:
+        visible_pipeline_ids = self._visible_pipeline_ids(principal)
+        if pipeline_id and pipeline_id not in visible_pipeline_ids:
+            return [], 0
+        summaries, total = self.repository.page_run_summaries_for_pipelines(
+            visible_pipeline_ids,
+            limit=limit,
+            offset=offset,
+            search=search,
+            run_status=run_status,
+            pipeline_id=pipeline_id,
+            pipeline_version_id=pipeline_version_id,
+            business_case_id=business_case_id,
+            trigger_type=trigger_type,
+            dry_run=dry_run,
+        )
+        return self._reconcile_run_summaries(summaries), total
+
+    def _reconcile_run_summaries(
+        self,
+        summaries: list[PipelineRun],
+    ) -> list[PipelineRun]:
         reconciled: list[PipelineRun] = []
         for summary in summaries:
             if (
@@ -1038,15 +1230,14 @@ class PipelineService:
             )
 
     def _resolve_run_version(self, pipeline: Pipeline, version_id: str | None) -> PipelineVersion:
-        versions = self.repository.list_versions(pipeline.id)
         if version_id:
             version = self.repository.get_version(version_id)
             if not version or version.pipeline_id != pipeline.id:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Pipeline version not found")
             return version
-        published = [item for item in versions if item.status == PipelineVersionStatus.PUBLISHED]
+        published = self.repository.get_latest_published_version(pipeline.id)
         if published:
-            return published[-1]
+            return published
         draft = self.repository.get_draft_version(pipeline.id)
         if draft:
             return draft

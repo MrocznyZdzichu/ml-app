@@ -13,6 +13,7 @@ from app.modules.business_cases.schemas import (
 from app.modules.business_cases.service import BusinessCaseService
 from app.modules.business_cases.lineage import ArtifactDependencyResolver
 from app.modules.sharing.domain import BC_ROLE_RANK, BusinessCaseAccessRole
+from app.shared.pagination import OffsetPage
 
 router = APIRouter(prefix="/business-cases", tags=["business-cases"])
 service = BusinessCaseService()
@@ -61,6 +62,29 @@ def list_business_cases(principal: Principal = Depends(require_user)) -> list[Bu
     return [BusinessCaseRead.model_validate(item) for item in service.list_business_cases(principal)]
 
 
+@router.get("/page", response_model=OffsetPage[BusinessCaseRead])
+def page_business_cases(
+    limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    search: str = Query(default="", max_length=200),
+    manageable_only: bool = Query(default=False),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[BusinessCaseRead]:
+    items, total = service.page_business_cases(
+        principal,
+        limit=limit,
+        offset=offset,
+        search=search,
+        manageable_only=manageable_only,
+    )
+    return OffsetPage[BusinessCaseRead].build(
+        [BusinessCaseRead.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.get("/{business_case_id}", response_model=BusinessCaseRead)
 def get_business_case(
     business_case_id: str,
@@ -107,6 +131,42 @@ def list_data_attachments(
         BusinessCaseDataAttachmentRead.model_validate(item)
         for item in service.list_data_attachments(business_case_id, principal)
     ]
+
+
+@router.get(
+    "/{business_case_id}/data-attachments/page",
+    response_model=OffsetPage[BusinessCaseDataAttachmentRead],
+)
+def page_data_attachments(
+    business_case_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    search: str = Query(default="", max_length=200),
+    role: str = Query(default="", max_length=40),
+    pipeline_id: str = Query(default="", max_length=64),
+    pipeline_type: str = Query(default="", max_length=64),
+    uploaded_only: bool = Query(default=False),
+    deleted_only: bool = Query(default=False),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[BusinessCaseDataAttachmentRead]:
+    items, total = service.page_data_attachments(
+        business_case_id,
+        principal,
+        limit=limit,
+        offset=offset,
+        search=search,
+        role=role,
+        pipeline_id=pipeline_id,
+        pipeline_type=pipeline_type,
+        uploaded_only=uploaded_only,
+        deleted_only=deleted_only,
+    )
+    return OffsetPage[BusinessCaseDataAttachmentRead].build(
+        [BusinessCaseDataAttachmentRead.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.patch("/{business_case_id}/data-attachments/{attachment_id}", response_model=BusinessCaseDataAttachmentRead)

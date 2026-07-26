@@ -5,6 +5,8 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { api } from "../api/client";
 import { ArtifactDependenciesDialog } from "../operational/ArtifactDependenciesDialog";
 import { DialogNavigationActions } from "../components/dialogNavigation";
+import { PaginationControls } from "../components/PaginationControls";
+import { PagedCatalogSelect } from "../components/PagedCatalogSelect";
 import type {
   BusinessCase,
   ModelArtifact,
@@ -39,25 +41,28 @@ export function PipelineVersionHistoryDialog({
   onClose: () => void;
 }) {
   const [versions, setVersions] = useState<PipelineVersion[]>([]);
+  const [versionTotal, setVersionTotal] = useState(0);
+  const [versionOffset, setVersionOffset] = useState(0);
   const [selectedVersion, setSelectedVersion] = useState<PipelineVersion | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
     let active = true;
-    api.listPipelineVersions(pipeline.id)
-      .then((items) => {
+    api.pagePipelineVersions(pipeline.id, {
+      limit: 20,
+      offset: versionOffset,
+      status: "published"
+    })
+      .then((page) => {
         if (!active) return;
-        setVersions(
-          items
-            .filter((item) => item.status === "published")
-            .sort((left, right) => right.version_number - left.version_number)
-        );
+        setVersions(page.items);
+        setVersionTotal(page.total);
       })
       .catch((requestError) => active && setError(
         requestError instanceof Error ? requestError.message : "Could not load pipeline versions"
       ));
     return () => { active = false; };
-  }, [pipeline.id]);
+  }, [pipeline.id, versionOffset]);
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -80,7 +85,7 @@ export function PipelineVersionHistoryDialog({
                 <div>
                   <strong>
                     Version {version.version_number}
-                    {index === 0 && <i className="pipeline-status published">latest</i>}
+                    {versionOffset === 0 && index === 0 && <i className="pipeline-status published">latest</i>}
                   </strong>
                   <span>{version.published_at ? formatDateTime(version.published_at) : "publication date unavailable"}</span>
                   <small>definition hash {version.definition_hash.slice(0, 12)}</small>
@@ -91,6 +96,13 @@ export function PipelineVersionHistoryDialog({
               </article>
             ))}
           </div>
+          <PaginationControls
+            total={versionTotal}
+            limit={20}
+            offset={versionOffset}
+            onOffsetChange={setVersionOffset}
+            label="published pipeline versions"
+          />
         </div>
         {selectedVersion && (
           <PipelineDefinitionDialog
@@ -179,7 +191,7 @@ export function PipelineRunHistoryDialog({
   includeDryRuns = true,
   initialPipelineId = "all",
   title = "Pipeline runs",
-  description = "Latest 200 runs across your available pipelines.",
+  description = "Searchable execution history across your available pipelines.",
   onClose,
   onDetails,
   onExamineDataset
@@ -196,7 +208,12 @@ export function PipelineRunHistoryDialog({
   onExamineDataset: (datasetId: string) => void;
 }) {
   const [historyRuns, setHistoryRuns] = useState<PipelineRun[]>([]);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyOffset, setHistoryOffset] = useState(0);
   const [pipelineFilter, setPipelineFilter] = useState(initialPipelineId);
+  const [pipelineSnapshot, setPipelineSnapshot] = useState<Pipeline | undefined>(
+    pipelines.find((pipeline) => pipeline.id === initialPipelineId)
+  );
   const [statusFilter, setStatusFilter] = useState("all");
   const [reloadKey, setReloadKey] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -208,9 +225,18 @@ export function PipelineRunHistoryDialog({
     let active = true;
     setLoading(true);
     setError("");
-    api.listPipelineRunHistory(200)
-      .then((items) => {
-        if (active) setHistoryRuns(items);
+    api.pagePipelineRunHistory({
+      limit: 20,
+      offset: historyOffset,
+      pipeline_id: pipelineFilter === "all" ? "" : pipelineFilter,
+      status: statusFilter === "all" ? "" : statusFilter,
+      ...(!includeDryRuns ? { dry_run: false } : {})
+    })
+      .then((page) => {
+        if (active) {
+          setHistoryRuns(page.items);
+          setHistoryTotal(page.total);
+        }
       })
       .catch((requestError) => {
         if (active) {
@@ -223,16 +249,15 @@ export function PipelineRunHistoryDialog({
     return () => {
       active = false;
     };
-  }, [refreshKey, reloadKey]);
+  }, [historyOffset, includeDryRuns, pipelineFilter, refreshKey, reloadKey, statusFilter]);
 
-  const allowedPipelineIds = new Set(pipelines.map((pipeline) => pipeline.id));
-  const visibleRuns = historyRuns.filter((run) =>
-    allowedPipelineIds.has(run.pipeline_id)
-    && (includeDryRuns || !run.is_dry_run)
-    && (pipelineFilter === "all" || run.pipeline_id === pipelineFilter)
-    && (statusFilter === "all" || run.status === statusFilter)
+  useEffect(() => setHistoryOffset(0), [includeDryRuns, pipelineFilter, statusFilter]);
+
+  const visibleRuns = historyRuns;
+  const pipelineById = new Map(
+    [...pipelines, ...(pipelineSnapshot ? [pipelineSnapshot] : [])]
+      .map((pipeline) => [pipeline.id, pipeline])
   );
-  const pipelineById = new Map(pipelines.map((pipeline) => [pipeline.id, pipeline]));
 
   return (
     <div
@@ -269,12 +294,19 @@ export function PipelineRunHistoryDialog({
         <div className="run-history-filters">
           <label>
             Pipeline
-            <select value={pipelineFilter} onChange={(event) => setPipelineFilter(event.target.value)}>
-              <option value="all">All pipelines</option>
-              {pipelines.map((pipeline) => (
-                <option key={pipeline.id} value={pipeline.id}>{pipeline.name}</option>
-              ))}
-            </select>
+            <PagedCatalogSelect<Pipeline>
+              value={pipelineFilter === "all" ? "" : pipelineFilter}
+              selectedItem={pipelines.find((pipeline) => pipeline.id === pipelineFilter)}
+              onChange={(value, item) => {
+                setPipelineFilter(value || "all");
+                setPipelineSnapshot(item);
+              }}
+              loadPage={api.pagePipelines}
+              getId={(pipeline) => pipeline.id}
+              getLabel={(pipeline) => pipeline.name}
+              emptyLabel="All pipelines"
+              searchPlaceholder="Search pipelines"
+            />
           </label>
           <label>
             Status
@@ -285,7 +317,7 @@ export function PipelineRunHistoryDialog({
               ))}
             </select>
           </label>
-          <span>{visibleRuns.length} shown</span>
+          <span>{historyTotal} matching runs</span>
         </div>
         {error && <div className="error-banner">{error}</div>}
         {loading ? (
@@ -357,6 +389,14 @@ export function PipelineRunHistoryDialog({
             )}
           </div>
         )}
+        <PaginationControls
+          total={historyTotal}
+          limit={20}
+          offset={historyOffset}
+          onOffsetChange={setHistoryOffset}
+          disabled={loading}
+          label="pipeline runs"
+        />
         {artifactsRun && (
           <GeneratedArtifactsDialog
             run={artifactsRun}
@@ -421,13 +461,9 @@ function GeneratedArtifactsDialog({
     setError("");
     try {
       if (artifactType === "model_version") {
-        const model = (await api.listModels()).find((item) => item.id === artifactId);
-        if (!model) throw new Error("The registered model could not be found");
-        setSelectedModel(model);
+        setSelectedModel(await api.getModel(artifactId));
       } else if (artifactType === "report") {
-        const report = (await api.listScoringReports(run.business_case_id)).find((item) => item.id === artifactId);
-        if (!report) throw new Error("The registered scoring report could not be found");
-        setSelectedReport(report);
+        setSelectedReport(await api.getScoringReport(artifactId));
       }
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "Could not open artifact");

@@ -17,6 +17,30 @@ export function getAccessToken() {
   return accessToken;
 }
 
+export type OffsetPage<T> = {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+  has_next: boolean;
+};
+
+export type PageQuery = {
+  limit?: number;
+  offset?: number;
+  search?: string;
+};
+
+function withQuery(path: string, values: Record<string, string | number | boolean | null | undefined>) {
+  const params = new URLSearchParams();
+  Object.entries(values).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") {
+      params.set(key, String(value));
+    }
+  });
+  return params.size ? `${path}?${params}` : path;
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);
   if (!(options.body instanceof FormData)) {
@@ -746,6 +770,13 @@ export type BusinessCaseDataAttachment = {
   target_column: string;
   created_by: string;
   created_at: string;
+  data_asset_name?: string;
+  data_asset_status?: string;
+  data_asset_source_type?: string;
+  data_asset_logical_id?: string;
+  data_asset_version_number?: number;
+  data_asset_pipeline_id?: string;
+  data_asset_pipeline_template?: string;
 };
 
 export type Pipeline = {
@@ -1003,6 +1034,26 @@ export type PipelineStepRun = {
   finished_at: string | null;
 };
 
+export type PipelineRunStatus = Pick<
+  PipelineRun,
+  | "id"
+  | "pipeline_id"
+  | "pipeline_version_id"
+  | "business_case_id"
+  | "status"
+  | "trigger_type"
+  | "is_dry_run"
+  | "requested_step_id"
+  | "input_row_count"
+  | "processed_row_count"
+  | "output_row_count"
+  | "rejected_row_count"
+  | "error_message"
+  | "created_at"
+  | "started_at"
+  | "finished_at"
+>;
+
 export type PipelineRunEvent = {
   timestamp: string;
   level: "info" | "warning" | "error" | string;
@@ -1085,9 +1136,31 @@ export const api = {
     request<void>("/auth/change-password", { method: "POST", body: JSON.stringify(payload) }),
   listDatasets: () => request<DataAsset[]>("/datasets"),
   listDatasetSummaries: () => request<DataAsset[]>("/datasets?summary=true"),
+  getDataset: (datasetId: string) =>
+    request<DataAsset>(`/datasets/${encodeURIComponent(datasetId)}`),
+  pageDatasets: (query: PageQuery & {
+    status?: string;
+    source_type?: string;
+    asset_kind?: "dataset" | "view";
+    include_deleted?: boolean;
+    families?: boolean;
+    business_case_id?: string;
+    pipeline_id?: string;
+    pipeline_type?: string;
+    uploaded_only?: boolean;
+    owned_only?: boolean;
+    summary?: boolean;
+  } = {}) =>
+    request<OffsetPage<DataAsset>>(withQuery("/datasets/page", { summary: true, ...query })),
   listDatasetVersions: (logicalId: string) =>
     request<DataAsset[]>(`/datasets/${datasetRouteId(logicalId)}/versions`),
+  pageDatasetVersions: (logicalId: string, query: PageQuery = {}) =>
+    request<OffsetPage<DataAsset>>(
+      withQuery(`/datasets/${datasetRouteId(logicalId)}/versions/page`, query)
+    ),
   listBusinessCases: () => request<BusinessCase[]>("/business-cases"),
+  pageBusinessCases: (query: PageQuery & { manageable_only?: boolean } = {}) =>
+    request<OffsetPage<BusinessCase>>(withQuery("/business-cases/page", query)),
   createBusinessCase: (payload: Record<string, unknown>) =>
     request<BusinessCase>("/business-cases", {
       method: "POST",
@@ -1109,6 +1182,18 @@ export const api = {
     }),
   listBusinessCaseDataAttachments: (businessCaseId: string) =>
     request<BusinessCaseDataAttachment[]>(`/business-cases/${businessCaseId}/data-attachments`),
+  pageBusinessCaseDataAttachments: (
+    businessCaseId: string,
+    query: PageQuery & {
+      role?: string;
+      pipeline_id?: string;
+      pipeline_type?: string;
+      uploaded_only?: boolean;
+      deleted_only?: boolean;
+    } = {}
+  ) => request<OffsetPage<BusinessCaseDataAttachment>>(
+    withQuery(`/business-cases/${encodeURIComponent(businessCaseId)}/data-attachments/page`, query)
+  ),
   updateBusinessCaseDataAttachment: (businessCaseId: string, attachmentId: string, payload: Record<string, unknown>) =>
     request<BusinessCaseDataAttachment>(`/business-cases/${businessCaseId}/data-attachments/${attachmentId}`, {
       method: "PATCH",
@@ -1120,6 +1205,17 @@ export const api = {
     }),
   listPipelines: (businessCaseId?: string) =>
     request<Pipeline[]>(businessCaseId ? `/pipelines?business_case_id=${encodeURIComponent(businessCaseId)}` : "/pipelines"),
+  pagePipelines: (
+    query: PageQuery & {
+      business_case_id?: string;
+      pipeline_type?: string;
+      pipeline_template?: string;
+      status?: string;
+      include_deprecated?: boolean;
+    } = {}
+  ) => request<OffsetPage<Pipeline>>(withQuery("/pipelines/page", query)),
+  getPipeline: (pipelineId: string) =>
+    request<Pipeline>(`/pipelines/${encodeURIComponent(pipelineId)}`),
   getModelTrainingCatalog: <T = unknown>() =>
     request<T>("/pipelines/model-training/catalog"),
   createPipeline: (payload: Record<string, unknown>) =>
@@ -1143,6 +1239,12 @@ export const api = {
     }),
   listPipelineVersions: (pipelineId: string) =>
     request<PipelineVersion[]>(`/pipelines/${pipelineId}/versions`),
+  pagePipelineVersions: (
+    pipelineId: string,
+    query: PageQuery & { status?: "draft" | "published" | "" } = {}
+  ) => request<OffsetPage<PipelineVersion>>(
+    withQuery(`/pipelines/${encodeURIComponent(pipelineId)}/versions/page`, query)
+  ),
   updateDraftPipelineVersion: (pipelineId: string, definition: Record<string, unknown>) =>
     request<PipelineVersion>(`/pipelines/${pipelineId}/versions/draft`, {
       method: "PATCH",
@@ -1161,12 +1263,26 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload)
     }),
-  listPipelineRuns: (pipelineId: string) =>
-    request<PipelineRun[]>(`/pipelines/${pipelineId}/runs`),
+  listPipelineRuns: (pipelineId: string, limit = 200, offset = 0) =>
+    request<PipelineRun[]>(
+      `/pipelines/${encodeURIComponent(pipelineId)}/runs?limit=${limit}&offset=${offset}`
+    ),
   listPipelineRunHistory: (limit = 200) =>
     request<PipelineRun[]>(`/pipelines/runs/history?limit=${limit}`),
+  pagePipelineRunHistory: (
+    query: PageQuery & {
+      status?: string;
+      pipeline_id?: string;
+      pipeline_version_id?: string;
+      business_case_id?: string;
+      trigger_type?: string;
+      dry_run?: boolean;
+    } = {}
+  ) => request<OffsetPage<PipelineRun>>(withQuery("/pipelines/runs/history/page", query)),
   getPipelineRun: (pipelineId: string, runId: string) =>
     request<PipelineRun>(`/pipelines/${pipelineId}/runs/${runId}`),
+  getPipelineRunStatus: (pipelineId: string, runId: string) =>
+    request<PipelineRunStatus>(`/pipelines/${pipelineId}/runs/${runId}/status`),
   getPipelineRunDetails: (pipelineId: string, runId: string) =>
     request<PipelineRunDetails>(`/pipelines/${pipelineId}/runs/${runId}/details`),
   cancelPipelineRun: (pipelineId: string, runId: string) =>
@@ -1245,6 +1361,16 @@ export const api = {
     }),
   listModels: () => request<ModelArtifact[]>("/models"),
   listModelSummaries: () => request<ModelArtifact[]>("/models?summary=true"),
+  pageModels: (
+    query: PageQuery & {
+      business_case_id?: string;
+      stage?: string;
+      pipeline_id?: string;
+      pipeline_type?: string;
+    } = {}
+  ) => request<OffsetPage<{ latest: ModelArtifact; version_count: number }>>(
+    withQuery("/models/page", query)
+  ),
   promoteModel: (modelId: string, stage: "developed" | "staging" | "production" | "archived") =>
     request<ModelArtifact>(`/models/${encodeURIComponent(modelId)}/stage`, {
       method: "PATCH",
@@ -1252,8 +1378,16 @@ export const api = {
     }),
   listModelVersions: (logicalId: string) =>
     request<ModelArtifact[]>(`/models/${encodeURIComponent(logicalId)}/versions`),
+  pageModelVersions: (logicalId: string, query: PageQuery = {}) =>
+    request<OffsetPage<ModelArtifact>>(
+      withQuery(`/models/${encodeURIComponent(logicalId)}/versions/page`, query)
+    ),
   listModelServingUsage: (logicalId: string) =>
     request<ModelServingUsage[]>(`/serving/model-families/${encodeURIComponent(logicalId)}/usage`),
+  pageModelServingUsage: (modelId: string, query: PageQuery = {}) =>
+    request<OffsetPage<ModelServingUsage>>(
+      withQuery(`/serving/models/${encodeURIComponent(modelId)}/usage/page`, query)
+    ),
   getModel: (modelId: string) =>
     request<ModelArtifact>(`/models/${encodeURIComponent(modelId)}`),
   getModelDataLineage: (modelId: string) =>
@@ -1270,8 +1404,27 @@ export const api = {
         ? `/scoring-reports?business_case_id=${encodeURIComponent(businessCaseId)}&summary=true`
         : "/scoring-reports?summary=true"
     ),
+  pageScoringReports: (
+    query: PageQuery & {
+      business_case_id?: string;
+      problem_type?: string;
+      pipeline_id?: string;
+      pipeline_type?: string;
+      sort_by?: "report" | "business_case" | "pipeline" | "problem" | "created" | "scope";
+      sort_direction?: "asc" | "desc";
+    } = {}
+  ) => request<OffsetPage<{ latest: ScoringReport; version_count: number }>>(
+    withQuery("/scoring-reports/page", query)
+  ),
   listScoringReportVersions: (logicalId: string) =>
     request<ScoringReport[]>(`/scoring-reports/${encodeURIComponent(logicalId)}/versions?summary=true`),
+  pageScoringReportVersions: (logicalId: string, query: PageQuery = {}) =>
+    request<OffsetPage<ScoringReport>>(
+      withQuery(`/scoring-reports/${encodeURIComponent(logicalId)}/versions/page`, {
+        summary: true,
+        ...query
+      })
+    ),
   getScoringReport: (reportId: string) =>
     request<ScoringReport>(`/scoring-reports/${encodeURIComponent(reportId)}`),
   getScoringReportDataLineage: (reportId: string) =>
@@ -1286,8 +1439,21 @@ export const api = {
       body: JSON.stringify(payload)
     }),
   listDeployments: (includeArchived = false) => request<Deployment[]>(`/serving/deployments${includeArchived ? "?include_archived=true" : ""}`),
+  pageDeployments: (
+    query: PageQuery & {
+      status?: string;
+      business_case_id?: string;
+      include_archived?: boolean;
+    } = {}
+  ) => request<OffsetPage<Deployment>>(withQuery("/serving/deployments/page", query)),
+  getDeployment: (deploymentId: string) =>
+    request<Deployment>(`/serving/deployments/${encodeURIComponent(deploymentId)}`),
   listDeploymentRevisions: (deploymentId: string) =>
     request<DeploymentRevision[]>(`/serving/deployments/${encodeURIComponent(deploymentId)}/revisions`),
+  pageDeploymentRevisions: (deploymentId: string, query: PageQuery = {}) =>
+    request<OffsetPage<DeploymentRevision>>(
+      withQuery(`/serving/deployments/${encodeURIComponent(deploymentId)}/revisions/page`, query)
+    ),
   createDeploymentRevision: (deploymentId: string, assignments: Array<{ model_id: string; role: DeploymentRole }>, reason: string) =>
     request<DeploymentRevision>(`/serving/deployments/${encodeURIComponent(deploymentId)}/revisions`, {
       method: "POST",
@@ -1325,6 +1491,21 @@ export const api = {
   },
   deploymentModelOptions: (deploymentId: string) =>
     request<DeploymentModelOption[]>(`/serving/deployments/${encodeURIComponent(deploymentId)}/model-options`),
+  pageDeploymentModelOptions: (
+    deploymentId: string,
+    query: PageQuery = {},
+    modelIds: string[] = []
+  ) => {
+    const params = new URLSearchParams();
+    Object.entries(query).forEach(([key, value]) => {
+      if (value !== undefined && value !== "") params.set(key, String(value));
+    });
+    modelIds.forEach((modelId) => params.append("model_id", modelId));
+    const suffix = params.size ? `?${params.toString()}` : "";
+    return request<OffsetPage<DeploymentModelOption>>(
+      `/serving/deployments/${encodeURIComponent(deploymentId)}/model-options/page${suffix}`
+    );
+  },
   inferenceLog: (deploymentId: string, limit = 50, cursor = "", recordId = "") => {
     const params = new URLSearchParams({ limit: String(limit) });
     if (cursor) params.set("cursor", cursor);
@@ -1346,6 +1527,10 @@ export const api = {
     }),
   listChallengerReplays: (deploymentId: string) =>
     request<ChallengerReplay[]>(`/serving/deployments/${encodeURIComponent(deploymentId)}/challenger-replays`),
+  pageChallengerReplays: (deploymentId: string, query: PageQuery = {}) =>
+    request<OffsetPage<ChallengerReplay>>(
+      withQuery(`/serving/deployments/${encodeURIComponent(deploymentId)}/challenger-replays/page`, query)
+    ),
   createOnlineMonitoringRun: (
     deploymentId: string,
     payload: {
@@ -1367,8 +1552,19 @@ export const api = {
   }),
   listDeploymentMonitoringRuns: (deploymentId: string, limit = 100, includeArchived = false) =>
     request<OnlineMonitoringRun[]>(`/serving/deployments/${encodeURIComponent(deploymentId)}/monitoring-runs?limit=${limit}&include_archived=${includeArchived}`),
+  pageDeploymentMonitoringRuns: (
+    deploymentId: string,
+    query: PageQuery & { include_archived?: boolean } = {}
+  ) => request<OffsetPage<OnlineMonitoringRun>>(
+    withQuery(`/serving/deployments/${encodeURIComponent(deploymentId)}/monitoring-runs/page`, query)
+  ),
   listOnlineMonitoringRuns: (limit = 200, includeArchived = false) =>
     request<OnlineMonitoringRun[]>(`/serving/monitoring-runs?limit=${limit}&include_archived=${includeArchived}`),
+  pageOnlineMonitoringRuns: (
+    query: PageQuery & { include_archived?: boolean } = {}
+  ) => request<OffsetPage<OnlineMonitoringRun>>(
+    withQuery("/serving/monitoring-runs/page", query)
+  ),
   getOnlineMonitoringRun: (runId: string) =>
     request<OnlineMonitoringRun>(`/serving/monitoring-runs/${encodeURIComponent(runId)}`),
   getOnlineMonitoringBucketEvaluations: (runId: string, bucketStarts: string[]) => {
@@ -1394,12 +1590,19 @@ export const api = {
       body: JSON.stringify({ name, expires_at: expiresAt })
     }),
   listDirectoryUsers: () => request<DirectoryUser[]>("/sharing/directory/users"),
+  pageDirectoryUsers: (query: PageQuery = {}) =>
+    request<OffsetPage<DirectoryUser>>(withQuery("/sharing/directory/users/page", query)),
   listAdminUsers: () => request<DirectoryUser[]>("/users"),
+  pageAdminUsers: (
+    query: PageQuery & { is_active?: boolean; is_technical?: boolean } = {}
+  ) => request<OffsetPage<DirectoryUser>>(withQuery("/users/page", query)),
   updateAdminUser: (userId: string, payload: { roles: string[]; is_active: boolean }) =>
     request<DirectoryUser>(`/users/${encodeURIComponent(userId)}`, { method: "PATCH", body: JSON.stringify(payload) }),
   resetUserPassword: (userId: string, newPassword: string) =>
     request<void>(`/users/${encodeURIComponent(userId)}/reset-password`, { method: "POST", body: JSON.stringify({ new_password: newPassword }) }),
   listGroups: () => request<AccessGroup[]>("/sharing/groups"),
+  pageGroups: (query: PageQuery & { is_active?: boolean } = {}) =>
+    request<OffsetPage<AccessGroup>>(withQuery("/sharing/groups/page", query)),
   createGroup: (payload: { name: string; description: string }) =>
     request<AccessGroup>("/sharing/groups", { method: "POST", body: JSON.stringify(payload) }),
   updateGroup: (groupId: string, payload: { name: string; description: string; is_active: boolean }) =>
@@ -1408,18 +1611,33 @@ export const api = {
     request<void>(`/sharing/groups/${encodeURIComponent(groupId)}`, { method: "DELETE" }),
   listGroupMembers: (groupId: string) =>
     request<GroupMembership[]>(`/sharing/groups/${encodeURIComponent(groupId)}/members`),
+  pageGroupMembers: (groupId: string, query: PageQuery = {}) =>
+    request<OffsetPage<GroupMembership>>(
+      withQuery(`/sharing/groups/${encodeURIComponent(groupId)}/members/page`, query)
+    ),
   upsertGroupMember: (groupId: string, payload: { user_id: string; membership_role: "member" | "manager" }) =>
     request<GroupMembership>(`/sharing/groups/${encodeURIComponent(groupId)}/members`, { method: "PUT", body: JSON.stringify(payload) }),
   removeGroupMember: (groupId: string, userId: string) =>
     request<void>(`/sharing/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(userId)}`, { method: "DELETE" }),
   listBusinessCaseGrants: (businessCaseId: string) =>
     request<BusinessCaseGrant[]>(`/sharing/business-cases/${encodeURIComponent(businessCaseId)}/grants`),
+  pageBusinessCaseGrants: (businessCaseId: string, query: PageQuery = {}) =>
+    request<OffsetPage<BusinessCaseGrant>>(
+      withQuery(`/sharing/business-cases/${encodeURIComponent(businessCaseId)}/grants/page`, query)
+    ),
   grantBusinessCase: (businessCaseId: string, payload: Record<string, unknown>) =>
     request<BusinessCaseGrant>(`/sharing/business-cases/${encodeURIComponent(businessCaseId)}/grants`, { method: "PUT", body: JSON.stringify(payload) }),
   revokeBusinessCaseGrant: (businessCaseId: string, grantId: string) =>
     request<void>(`/sharing/business-cases/${encodeURIComponent(businessCaseId)}/grants/${encodeURIComponent(grantId)}`, { method: "DELETE" }),
   listResourceGrants: (kind: string, resourceId: string) =>
     request<ResourceGrant[]>(`/sharing/resources/${encodeURIComponent(kind)}/${encodeURIComponent(resourceId)}/grants`),
+  pageResourceGrants: (kind: string, resourceId: string, query: PageQuery = {}) =>
+    request<OffsetPage<ResourceGrant>>(
+      withQuery(
+        `/sharing/resources/${encodeURIComponent(kind)}/${encodeURIComponent(resourceId)}/grants/page`,
+        query
+      )
+    ),
   grantResource: (payload: Record<string, unknown>) =>
     request<ResourceGrant>("/sharing/resources/grants", { method: "PUT", body: JSON.stringify(payload) }),
   revokeResourceGrant: (grantId: string) =>

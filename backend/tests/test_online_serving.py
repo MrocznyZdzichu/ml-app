@@ -20,6 +20,7 @@ class MemoryServingRepository:
         self.revisions = {}
         self.inferences = {}
         self.items = []
+        self.prune_calls = 0
 
     def add_deployment(self, deployment, revision):
         self.deployments[deployment.id] = deployment
@@ -33,10 +34,25 @@ class MemoryServingRepository:
     def list_all_deployments(self):
         return list(self.deployments.values())
 
+    def list_deployments(self, business_case_ids, *, include_archived=False):
+        return [
+            item for item in self.deployments.values()
+            if (business_case_ids is None or item.business_case_id in business_case_ids)
+            and (include_archived or item.status != DeploymentStatus.ARCHIVED)
+        ]
+
     def get_deployment(self, value):
         return next((item for item in self.deployments.values() if value in {item.id, item.slug}), None)
 
     def add_revision(self, revision, deployment):
+        revision.version_number = max(
+            (
+                item.version_number
+                for item in self.revisions.values()
+                if item.deployment_id == deployment.id
+            ),
+            default=0,
+        ) + 1
         self.revisions[revision.id] = revision
         self.deployments[deployment.id] = deployment
         return revision
@@ -80,17 +96,22 @@ class MemoryServingRepository:
         return [item for item in self.items if item["request_id"] == request_id]
 
     def prune_expired(self, deployment_id, cutoff):
+        self.prune_calls += 1
         return 0
 
     def active_assignments_for_model(self, model_id):
+        return self.active_assignments_for_models({model_id})
+
+    def active_assignments_for_models(self, model_ids):
         result = []
         for deployment in self.deployments.values():
             if deployment.status in {DeploymentStatus.STOPPED, DeploymentStatus.ARCHIVED}:
                 continue
             revision = self.revisions.get(deployment.active_revision_id)
             for assignment in revision.assignments if revision else []:
-                if assignment.model_id == model_id:
+                if assignment.model_id in model_ids:
                     result.append({
+                        "model_id": assignment.model_id,
                         "deployment_id": deployment.id,
                         "deployment_name": deployment.name,
                         "deployment_slug": deployment.slug,
@@ -313,6 +334,7 @@ def test_versioned_roles_fallback_and_inference_history(principal) -> None:
     assert repository.inferences[result.request_id].requested_model_id == champion.id
     assert repository.inferences[result.request_id].requested_role == DeploymentRole.CHAMPION
     assert {item["role"] for item in repository.items} == {"champion", "fallback", "shadow"}
+    assert repository.prune_calls == 0
     assert next(item for item in repository.items if item["role"] == "champion")["status"] == "failed"
     assert service.score(deployment.id, [ScoreRecord(features={"value": 42})], principal, idempotency_key="one").request_id == result.request_id
     with pytest.raises(Exception) as idempotency_error:

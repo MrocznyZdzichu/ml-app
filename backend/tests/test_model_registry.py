@@ -144,7 +144,7 @@ def test_pipeline_runs_are_presented_as_versions_of_one_logical_model() -> None:
         "run-1": ("owner-1", "pipeline-1"),
         "run-2": ("owner-1", "pipeline-1"),
     }
-    pipelines.list_versions_for_pipelines.return_value = []
+    pipelines.list_versions_by_ids.return_value = []
     service = ModelService(
         repository=InMemoryModelRepository(),
         artifacts=artifacts,
@@ -159,7 +159,7 @@ def test_pipeline_runs_are_presented_as_versions_of_one_logical_model() -> None:
         ("model-2", "v2", 2),
         ("model-1", "v1", 1),
     ]
-    assert pipelines.list_versions_for_pipelines.call_count == 1
+    pipelines.list_versions_by_ids.assert_called_once_with(set())
     assert artifacts.list_artifacts.call_count == 2
     assert [model.id for model in service.list_versions(models[0].logical_id, principal)] == [
         "model-1",

@@ -2,6 +2,7 @@ import { Activity, Braces, Brain, Calculator, DatabaseZap, Plus, Sparkles, Trash
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../api/client";
+import { PagedCatalogSelect } from "../components/PagedCatalogSelect";
 import type {
   BusinessCase,
   BusinessCaseDataAttachment,
@@ -76,12 +77,10 @@ export function WorkflowEditor({
   const [schemaCache, setSchemaCache] = useState<Record<string, DatasetColumn[]>>({});
   const [isInferenceDialogOpen, setIsInferenceDialogOpen] = useState(false);
   const [sourcePipelineId, setSourcePipelineId] = useState("");
-  const [sourceVersions, setSourceVersions] = useState<PipelineVersion[]>([]);
   const [sourceVersionId, setSourceVersionId] = useState("");
   const [sourceModelId, setSourceModelId] = useState("");
   const [isMonitoringInferenceOpen, setIsMonitoringInferenceOpen] = useState(false);
   const [monitoringPipelineId, setMonitoringPipelineId] = useState("");
-  const [monitoringVersions, setMonitoringVersions] = useState<PipelineVersion[]>([]);
   const [monitoringVersionId, setMonitoringVersionId] = useState("");
   const [monitoringRuns, setMonitoringRuns] = useState<PipelineRun[]>([]);
   const [monitoringRunId, setMonitoringRunId] = useState("");
@@ -166,15 +165,6 @@ export function WorkflowEditor({
       version.business_case_id === businessCase?.id
       && Boolean(dataEngineeringStepFromVersion(version))
   );
-  const availableSourceVersions = sourceVersions.filter(
-    (version) =>
-      version.status === "published"
-      && scoringModels.some(
-        (model) =>
-          model.pipeline_id === sourcePipelineId
-          && model.pipeline_version_id === version.id
-      )
-  );
   const versionModels = scoringModels.filter(
     (model) =>
       model.pipeline_id === sourcePipelineId
@@ -185,19 +175,7 @@ export function WorkflowEditor({
       pipeline.business_case_id === businessCase?.id
       && pipeline.type === "batch_scoring"
   );
-  const availableMonitoringVersions = monitoringVersions.filter(
-    (version) => version.status === "published"
-  );
-  const availableMonitoringRuns = monitoringRuns.filter(
-    (run) =>
-      run.status === "succeeded"
-      && !run.is_dry_run
-      && run.pipeline_version_id === monitoringVersionId
-      && run.output_manifest.some(
-        (output) => output.artifact_type === "prediction_dataset" && output.dataset_id
-      )
-  );
-  const selectedMonitoringRun = availableMonitoringRuns.find(
+  const selectedMonitoringRun = monitoringRuns.find(
     (run) => run.id === monitoringRunId
   );
   const monitoringPredictionOutputs = selectedMonitoringRun?.output_manifest.filter(
@@ -519,33 +497,16 @@ export function WorkflowEditor({
     setSourceModelId("");
   }
 
-  async function selectSourcePipeline(pipelineId: string) {
+  function selectSourcePipeline(pipelineId: string) {
     setSourcePipelineId(pipelineId);
     setSourceVersionId("");
     setSourceModelId("");
-    try {
-      setSourceVersions(
-        pipelineId
-          ? await api.listPipelineVersions(pipelineId)
-          : []
-      );
-    } catch {
-      setSourceVersions([]);
-    }
   }
 
-  async function selectDataEngineeringSourcePipeline(pipelineId: string) {
+  function selectDataEngineeringSourcePipeline(pipelineId: string) {
     setDataEngineeringSourcePipelineId(pipelineId);
     setDataEngineeringSourceVersionId("");
-    try {
-      setDataEngineeringSourceVersions(
-        pipelineId
-          ? await api.listPipelineVersions(pipelineId)
-          : []
-      );
-    } catch {
-      setDataEngineeringSourceVersions([]);
-    }
+    setDataEngineeringSourceVersions([]);
   }
 
   function inferDataEngineering() {
@@ -587,24 +548,12 @@ export function WorkflowEditor({
     setIsDataEngineeringInferenceOpen(false);
   }
 
-  async function selectMonitoringPipeline(pipelineId: string) {
+  function selectMonitoringPipeline(pipelineId: string) {
     setMonitoringPipelineId(pipelineId);
     setMonitoringVersionId("");
     setMonitoringRunId("");
     setMonitoringDatasetId("");
-    try {
-      const [versionItems, runItems] = pipelineId
-        ? await Promise.all([
-            api.listPipelineVersions(pipelineId),
-            api.listPipelineRuns(pipelineId)
-          ])
-        : [[], []];
-      setMonitoringVersions(versionItems);
-      setMonitoringRuns(runItems);
-    } catch {
-      setMonitoringVersions([]);
-      setMonitoringRuns([]);
-    }
+    setMonitoringRuns([]);
   }
 
   function configureMonitoringFromRun() {
@@ -895,6 +844,7 @@ export function WorkflowEditor({
                   definition={step.config.definition}
                   datasets={datasets}
                   dataAttachments={dataAttachments}
+                  businessCaseId={businessCase?.id}
                   outputNameSuggestion={outputNameSuggestion}
                   disabled={disabled}
                   onChange={(nextDefinition) => updateStep(index, {
@@ -906,6 +856,7 @@ export function WorkflowEditor({
                   definition={step.config.definition}
                   datasets={datasets}
                   dataAttachments={dataAttachments}
+                  businessCaseId={businessCase?.id}
                   upstreamDefinition={previousDataEngineeringDefinition(definition.steps, index)}
                   hasUpstream={step.inputs.length > 0}
                   fittedStateLocked={pipelineType === "batch_scoring"}
@@ -949,13 +900,13 @@ export function WorkflowEditor({
       {isInferenceDialogOpen && (
         <BatchInferenceDialog
           pipelines={sourcePipelines}
-          versions={availableSourceVersions}
           models={versionModels}
+          businessCaseId={businessCase?.id ?? ""}
           sourcePipelineId={sourcePipelineId}
           sourceVersionId={sourceVersionId}
           sourceModelId={sourceModelId}
-          onPipelineChange={(pipelineId) => void selectSourcePipeline(pipelineId)}
-          onVersionChange={(versionId) => {
+          onPipelineChange={selectSourcePipeline}
+          onVersionChange={(versionId, version) => {
             setSourceVersionId(versionId);
             setSourceModelId("");
           }}
@@ -967,22 +918,24 @@ export function WorkflowEditor({
       {isMonitoringInferenceOpen && (
         <MonitoringInferenceDialog
           pipelines={monitoringSourcePipelines}
-          versions={availableMonitoringVersions}
-          runs={availableMonitoringRuns}
           outputs={monitoringPredictionOutputs}
+          businessCaseId={businessCase?.id ?? ""}
           pipelineId={monitoringPipelineId}
           versionId={monitoringVersionId}
           runId={monitoringRunId}
           datasetId={monitoringDatasetId}
-          onPipelineChange={(pipelineId) => void selectMonitoringPipeline(pipelineId)}
+          onPipelineChange={selectMonitoringPipeline}
           onVersionChange={(versionId) => {
             setMonitoringVersionId(versionId);
             setMonitoringRunId("");
             setMonitoringDatasetId("");
           }}
-          onRunChange={(runId) => {
+          onRunChange={async (runId) => {
             setMonitoringRunId(runId);
-            const run = monitoringRuns.find((item) => item.id === runId);
+            const run = runId && monitoringPipelineId
+              ? await api.getPipelineRun(monitoringPipelineId, runId)
+              : undefined;
+            setMonitoringRuns(run ? [run] : []);
             const output = run?.output_manifest.find(
               (item) => item.artifact_type === "prediction_dataset" && item.dataset_id
             );
@@ -996,11 +949,14 @@ export function WorkflowEditor({
       {isDataEngineeringInferenceOpen && (
         <DataEngineeringInferenceDialog
           pipelines={dataEngineeringSourcePipelines}
-          versions={availableDataEngineeringSourceVersions}
+          businessCaseId={businessCase?.id ?? ""}
           pipelineId={dataEngineeringSourcePipelineId}
           versionId={dataEngineeringSourceVersionId}
-          onPipelineChange={(pipelineId) => void selectDataEngineeringSourcePipeline(pipelineId)}
-          onVersionChange={setDataEngineeringSourceVersionId}
+          onPipelineChange={selectDataEngineeringSourcePipeline}
+          onVersionChange={(versionId, version) => {
+            setDataEngineeringSourceVersionId(versionId);
+            if (version) setDataEngineeringSourceVersions([version]);
+          }}
           onClose={() => setIsDataEngineeringInferenceOpen(false)}
           onApply={inferDataEngineering}
         />
@@ -1024,7 +980,7 @@ function recordValue(value: unknown): Record<string, unknown> {
 
 function DataEngineeringInferenceDialog({
   pipelines,
-  versions,
+  businessCaseId,
   pipelineId,
   versionId,
   onPipelineChange,
@@ -1033,11 +989,11 @@ function DataEngineeringInferenceDialog({
   onApply
 }: {
   pipelines: Pipeline[];
-  versions: PipelineVersion[];
+  businessCaseId: string;
   pipelineId: string;
   versionId: string;
   onPipelineChange: (pipelineId: string) => void;
-  onVersionChange: (versionId: string) => void;
+  onVersionChange: (versionId: string, version?: PipelineVersion) => void;
   onClose: () => void;
   onApply: () => void;
 }) {
@@ -1057,29 +1013,38 @@ function DataEngineeringInferenceDialog({
             aria-label="Close Data Engineering inference"><X size={17} /></button>
         </div>
         <label>Training pipeline
-          <select value={pipelineId} onChange={(event) => onPipelineChange(event.target.value)}>
-            <option value="">Choose pipeline…</option>
-            {pipelines.map((pipeline) => (
-              <option key={pipeline.id} value={pipeline.id}>{pipeline.name}</option>
-            ))}
-          </select>
-          {!pipelines.length && (
-            <small>No pipeline with purpose “training” exists in this Business Case.</small>
-          )}
+          <PagedCatalogSelect<Pipeline>
+            value={pipelineId}
+            selectedItem={pipelines.find((pipeline) => pipeline.id === pipelineId)}
+            loadPage={(query) => api.pagePipelines({
+              ...query,
+              business_case_id: businessCaseId,
+              pipeline_type: "training",
+              include_deprecated: false
+            })}
+            getId={(pipeline) => pipeline.id}
+            getLabel={(pipeline) => pipeline.name}
+            emptyLabel="Choose pipeline…"
+            searchPlaceholder="Search training pipelines"
+            onChange={onPipelineChange}
+          />
         </label>
         <label>Pipeline version
-          <select value={versionId} disabled={!pipelineId}
-            onChange={(event) => onVersionChange(event.target.value)}>
-            <option value="">Choose version…</option>
-            {versions.map((version) => (
-              <option key={version.id} value={version.id}>
-                v{version.version_number} · {version.status} · {version.definition_hash.slice(0, 10)}
-              </option>
-            ))}
-          </select>
-          {pipelineId && !versions.length && (
-            <small>No version of this pipeline contains a Data Engineering step.</small>
-          )}
+          <PagedCatalogSelect<PipelineVersion>
+            value={versionId}
+            disabled={!pipelineId}
+            reloadKey={pipelineId}
+            searchable={false}
+            loadPage={(query) => pipelineId
+              ? api.pagePipelineVersions(pipelineId, query)
+              : Promise.resolve({ items: [], total: 0, limit: query.limit, offset: query.offset, has_next: false })}
+            getId={(version) => version.id}
+            getLabel={(version) => `v${version.version_number} · ${version.status} · ${version.definition_hash.slice(0, 10)}`}
+            emptyLabel="Choose version…"
+            searchPlaceholder="Pipeline versions"
+            onChange={onVersionChange}
+          />
+          <small>Only a version containing a Data Engineering step can be applied.</small>
         </label>
         <div className="form-warning">
           The current AutoML Data Engineering configuration will be replaced. Downstream step IDs and connections
@@ -1110,9 +1075,8 @@ function previousDataEngineeringDefinition(
 
 function MonitoringInferenceDialog({
   pipelines,
-  versions,
-  runs,
   outputs,
+  businessCaseId,
   pipelineId,
   versionId,
   runId,
@@ -1125,16 +1089,15 @@ function MonitoringInferenceDialog({
   onApply
 }: {
   pipelines: Pipeline[];
-  versions: PipelineVersion[];
-  runs: PipelineRun[];
   outputs: PipelineRun["output_manifest"];
+  businessCaseId: string;
   pipelineId: string;
   versionId: string;
   runId: string;
   datasetId: string;
   onPipelineChange: (pipelineId: string) => void;
   onVersionChange: (versionId: string) => void;
-  onRunChange: (runId: string) => void;
+  onRunChange: (runId: string) => Promise<void> | void;
   onDatasetChange: (datasetId: string) => void;
   onClose: () => void;
   onApply: () => void;
@@ -1155,37 +1118,59 @@ function MonitoringInferenceDialog({
             aria-label="Close monitoring inference"><X size={17} /></button>
         </div>
         <label>Batch scoring pipeline
-          <select value={pipelineId} onChange={(event) => onPipelineChange(event.target.value)}>
-            <option value="">Choose pipeline…</option>
-            {pipelines.map((pipeline) => (
-              <option key={pipeline.id} value={pipeline.id}>{pipeline.name}</option>
-            ))}
-          </select>
-          {!pipelines.length && (
-            <small>No Batch Scoring pipeline exists in this Business Case.</small>
-          )}
+          <PagedCatalogSelect<Pipeline>
+            value={pipelineId}
+            selectedItem={pipelines.find((pipeline) => pipeline.id === pipelineId)}
+            loadPage={(query) => api.pagePipelines({
+              ...query,
+              business_case_id: businessCaseId,
+              pipeline_type: "batch_scoring",
+              include_deprecated: false
+            })}
+            getId={(pipeline) => pipeline.id}
+            getLabel={(pipeline) => pipeline.name}
+            emptyLabel="Choose pipeline…"
+            searchPlaceholder="Search batch scoring pipelines"
+            onChange={onPipelineChange}
+          />
         </label>
         <label>Published pipeline version
-          <select value={versionId} disabled={!pipelineId}
-            onChange={(event) => onVersionChange(event.target.value)}>
-            <option value="">Choose version…</option>
-            {versions.map((version) => (
-              <option key={version.id} value={version.id}>
-                v{version.version_number} · {version.definition_hash.slice(0, 10)}
-              </option>
-            ))}
-          </select>
+          <PagedCatalogSelect<PipelineVersion>
+            value={versionId}
+            disabled={!pipelineId}
+            reloadKey={pipelineId}
+            searchable={false}
+            loadPage={(query) => pipelineId
+              ? api.pagePipelineVersions(pipelineId, { ...query, status: "published" })
+              : Promise.resolve({ items: [], total: 0, limit: query.limit, offset: query.offset, has_next: false })}
+            getId={(version) => version.id}
+            getLabel={(version) => `v${version.version_number} · ${version.definition_hash.slice(0, 10)}`}
+            emptyLabel="Choose version…"
+            searchPlaceholder="Pipeline versions"
+            onChange={onVersionChange}
+          />
         </label>
         <label>Successful scoring run
-          <select value={runId} disabled={!versionId}
-            onChange={(event) => onRunChange(event.target.value)}>
-            <option value="">Choose run…</option>
-            {runs.map((run) => (
-              <option key={run.id} value={run.id}>
-                {run.id.slice(0, 8)} · {run.output_row_count ?? "?"} rows · {run.finished_at ?? run.created_at}
-              </option>
-            ))}
-          </select>
+          <PagedCatalogSelect<PipelineRun>
+            value={runId}
+            disabled={!versionId}
+            reloadKey={versionId}
+            searchable={false}
+            loadPage={(query) => versionId
+              ? api.pagePipelineRunHistory({
+                  ...query,
+                  pipeline_id: pipelineId,
+                  pipeline_version_id: versionId,
+                  status: "succeeded",
+                  dry_run: false
+                })
+              : Promise.resolve({ items: [], total: 0, limit: query.limit, offset: query.offset, has_next: false })}
+            getId={(run) => run.id}
+            getLabel={(run) => `${run.id.slice(0, 8)} · ${run.output_row_count ?? "?"} rows · ${run.finished_at ?? run.created_at}`}
+            emptyLabel="Choose run…"
+            searchPlaceholder="Scoring runs"
+            onChange={(value) => void onRunChange(value)}
+          />
         </label>
         <label>Prediction artifact
           <select value={datasetId} disabled={!runId}
@@ -1215,8 +1200,8 @@ function MonitoringInferenceDialog({
 
 function BatchInferenceDialog({
   pipelines,
-  versions,
   models,
+  businessCaseId,
   sourcePipelineId,
   sourceVersionId,
   sourceModelId,
@@ -1227,13 +1212,13 @@ function BatchInferenceDialog({
   onApply
 }: {
   pipelines: Pipeline[];
-  versions: PipelineVersion[];
   models: ModelArtifact[];
+  businessCaseId: string;
   sourcePipelineId: string;
   sourceVersionId: string;
   sourceModelId: string;
   onPipelineChange: (pipelineId: string) => void;
-  onVersionChange: (versionId: string) => void;
+  onVersionChange: (versionId: string, version?: PipelineVersion) => void;
   onModelChange: (modelId: string) => void;
   onClose: () => void;
   onApply: () => void;
@@ -1258,30 +1243,37 @@ function BatchInferenceDialog({
             aria-label="Close inference source"><X size={17} /></button>
         </div>
         <label>Training pipeline
-          <select value={sourcePipelineId}
-            onChange={(event) => onPipelineChange(event.target.value)}>
-            <option value="">Choose pipeline…</option>
-            {pipelines.map((pipeline) => (
-              <option key={pipeline.id} value={pipeline.id}>{pipeline.name}</option>
-            ))}
-          </select>
-          {!pipelines.length && (
-            <small>No training pipeline in this Business Case has a persisted model and fitted FE state.</small>
-          )}
+          <PagedCatalogSelect<Pipeline>
+            value={sourcePipelineId}
+            selectedItem={pipelines.find((pipeline) => pipeline.id === sourcePipelineId)}
+            loadPage={(query) => api.pagePipelines({
+              ...query,
+              business_case_id: businessCaseId,
+              include_deprecated: false
+            })}
+            getId={(pipeline) => pipeline.id}
+            getLabel={(pipeline) => `${pipeline.name} · ${pipeline.type}`}
+            emptyLabel="Choose pipeline…"
+            searchPlaceholder="Search training pipelines"
+            onChange={onPipelineChange}
+          />
+          <small>Select a Training or AutoML pipeline with a persisted model and fitted FE state.</small>
         </label>
         <label>Published pipeline version
-          <select value={sourceVersionId} disabled={!sourcePipelineId}
-            onChange={(event) => onVersionChange(event.target.value)}>
-            <option value="">Choose version…</option>
-            {versions.map((version) => (
-              <option key={version.id} value={version.id}>
-                v{version.version_number} · {version.definition_hash.slice(0, 10)}
-              </option>
-            ))}
-          </select>
-          {sourcePipelineId && !versions.length && (
-            <small>No published version of this pipeline has a scoring-ready model result.</small>
-          )}
+          <PagedCatalogSelect<PipelineVersion>
+            value={sourceVersionId}
+            disabled={!sourcePipelineId}
+            reloadKey={sourcePipelineId}
+            searchable={false}
+            loadPage={(query) => sourcePipelineId
+              ? api.pagePipelineVersions(sourcePipelineId, { ...query, status: "published" })
+              : Promise.resolve({ items: [], total: 0, limit: query.limit, offset: query.offset, has_next: false })}
+            getId={(version) => version.id}
+            getLabel={(version) => `v${version.version_number} · ${version.definition_hash.slice(0, 10)}`}
+            emptyLabel="Choose version…"
+            searchPlaceholder="Pipeline versions"
+            onChange={onVersionChange}
+          />
         </label>
         <label>Concrete model result
           <select value={sourceModelId} disabled={!sourceVersionId}

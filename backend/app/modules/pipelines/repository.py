@@ -1,6 +1,6 @@
-from typing import Protocol
+from typing import Any, Protocol
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, Index, Integer, MetaData, String, Table, Text, select, text
+from sqlalchemy import JSON, Boolean, Column, DateTime, Index, Integer, MetaData, String, Table, Text, case, func, or_, select, text
 from sqlalchemy.engine import Engine
 
 from app.core.database import get_engine
@@ -122,7 +122,30 @@ class PipelineRepository(Protocol):
     def list_pipelines(self, owner_id: str, business_case_id: str | None = None) -> list[Pipeline]:
         ...
 
-    def list_pipelines_for_business_cases(self, business_case_ids: set[str]) -> list[Pipeline]:
+    def list_pipelines_for_business_cases(
+        self,
+        business_case_ids: set[str] | None,
+    ) -> list[Pipeline]:
+        ...
+
+    def page_pipelines_for_business_cases(
+        self,
+        business_case_ids: set[str] | None,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+        pipeline_type: str = "",
+        pipeline_template: str = "",
+        pipeline_status: str = "",
+        include_deprecated: bool = True,
+    ) -> tuple[list[Pipeline], int]:
+        ...
+
+    def list_pipeline_ids_for_business_cases(
+        self,
+        business_case_ids: set[str] | None,
+    ) -> set[str]:
         ...
 
     def get_pipeline(self, pipeline_id: str) -> Pipeline | None:
@@ -140,6 +163,16 @@ class PipelineRepository(Protocol):
     def list_versions(self, pipeline_id: str) -> list[PipelineVersion]:
         ...
 
+    def page_versions(
+        self,
+        pipeline_id: str,
+        *,
+        limit: int,
+        offset: int,
+        status: str = "",
+    ) -> tuple[list[PipelineVersion], int]:
+        ...
+
     def list_versions_for_pipelines(
         self,
         owner_id: str,
@@ -147,10 +180,34 @@ class PipelineRepository(Protocol):
     ) -> list[PipelineVersion]:
         ...
 
+    def list_versions_for_pipeline_ids(
+        self,
+        pipeline_ids: set[str],
+    ) -> list[PipelineVersion]:
+        ...
+
+    def list_versions_by_ids(
+        self,
+        version_ids: set[str],
+    ) -> list[PipelineVersion]:
+        ...
+
+    def version_catalog_summaries(
+        self,
+        pipeline_ids: set[str],
+    ) -> dict[str, dict[str, Any]]:
+        ...
+
     def get_version(self, version_id: str) -> PipelineVersion | None:
         ...
 
     def get_draft_version(self, pipeline_id: str) -> PipelineVersion | None:
+        ...
+
+    def get_latest_version(self, pipeline_id: str) -> PipelineVersion | None:
+        ...
+
+    def get_latest_published_version(self, pipeline_id: str) -> PipelineVersion | None:
         ...
 
     def update_version(self, version: PipelineVersion) -> PipelineVersion:
@@ -160,6 +217,10 @@ class PipelineRepository(Protocol):
         ...
 
     def get_run(self, run_id: str) -> PipelineRun | None:
+        ...
+
+    def get_run_summary(self, run_id: str) -> PipelineRun | None:
+        """Load run progress without events, parameters, or output manifests."""
         ...
 
     def list_run_references(self, run_ids: set[str]) -> dict[str, tuple[str, str]]:
@@ -182,6 +243,40 @@ class PipelineRepository(Protocol):
     def list_run_summaries(
         self,
         owner_id: str,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[PipelineRun]:
+        ...
+
+    def list_run_summaries_for_pipelines(
+        self,
+        pipeline_ids: set[str],
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[PipelineRun]:
+        ...
+
+    def page_run_summaries_for_pipelines(
+        self,
+        pipeline_ids: set[str],
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+        run_status: str = "",
+        pipeline_id: str = "",
+        pipeline_version_id: str = "",
+        business_case_id: str = "",
+        trigger_type: str = "",
+        dry_run: bool | None = None,
+    ) -> tuple[list[PipelineRun], int]:
+        ...
+
+    def list_runs_for_pipelines(
+        self,
+        pipeline_ids: set[str],
         *,
         limit: int = 200,
         offset: int = 0,
@@ -216,8 +311,53 @@ class InMemoryPipelineRepository:
             if item.owner_id == owner_id and (business_case_id is None or item.business_case_id == business_case_id)
         ]
 
-    def list_pipelines_for_business_cases(self, business_case_ids: set[str]) -> list[Pipeline]:
-        return [item for item in self._pipelines.values() if item.business_case_id in business_case_ids]
+    def list_pipelines_for_business_cases(
+        self,
+        business_case_ids: set[str] | None,
+    ) -> list[Pipeline]:
+        return [
+            item for item in self._pipelines.values()
+            if business_case_ids is None or item.business_case_id in business_case_ids
+        ]
+
+    def page_pipelines_for_business_cases(
+        self,
+        business_case_ids: set[str] | None,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+        pipeline_type: str = "",
+        pipeline_template: str = "",
+        pipeline_status: str = "",
+        include_deprecated: bool = True,
+    ) -> tuple[list[Pipeline], int]:
+        needle = search.strip().casefold()
+        items = [
+            item
+            for item in self._pipelines.values()
+            if (business_case_ids is None or item.business_case_id in business_case_ids)
+            and (not pipeline_type or item.type.value == pipeline_type)
+            and (not pipeline_template or item.template == pipeline_template)
+            and (not pipeline_status or item.status.value == pipeline_status)
+            and (include_deprecated or item.status.value != "deprecated")
+            and (
+                not needle
+                or needle in item.name.casefold()
+                or needle in item.description.casefold()
+            )
+        ]
+        items.sort(key=lambda item: item.updated_at, reverse=True)
+        return items[offset : offset + limit], len(items)
+
+    def list_pipeline_ids_for_business_cases(
+        self,
+        business_case_ids: set[str] | None,
+    ) -> set[str]:
+        return {
+            item.id for item in self._pipelines.values()
+            if business_case_ids is None or item.business_case_id in business_case_ids
+        }
 
     def get_pipeline(self, pipeline_id: str) -> Pipeline | None:
         return self._pipelines.get(pipeline_id)
@@ -245,6 +385,23 @@ class InMemoryPipelineRepository:
             key=lambda item: item.version_number,
         )
 
+    def page_versions(
+        self,
+        pipeline_id: str,
+        *,
+        limit: int,
+        offset: int,
+        status: str = "",
+    ) -> tuple[list[PipelineVersion], int]:
+        items = [
+            item
+            for item in self._versions.values()
+            if item.pipeline_id == pipeline_id
+            and (not status or item.status.value == status)
+        ]
+        items.sort(key=lambda item: item.version_number, reverse=True)
+        return items[offset : offset + limit], len(items)
+
     def list_versions_for_pipelines(
         self,
         owner_id: str,
@@ -258,6 +415,61 @@ class InMemoryPipelineRepository:
             key=lambda item: (item.pipeline_id, item.version_number),
         )
 
+    def list_versions_for_pipeline_ids(
+        self,
+        pipeline_ids: set[str],
+    ) -> list[PipelineVersion]:
+        return sorted(
+            [
+                item for item in self._versions.values()
+                if item.pipeline_id in pipeline_ids
+            ],
+            key=lambda item: (item.pipeline_id, item.version_number),
+        )
+
+    def list_versions_by_ids(
+        self,
+        version_ids: set[str],
+    ) -> list[PipelineVersion]:
+        return [
+            item for item in self._versions.values()
+            if item.id in version_ids
+        ]
+
+    def version_catalog_summaries(
+        self,
+        pipeline_ids: set[str],
+    ) -> dict[str, dict[str, Any]]:
+        summaries: dict[str, dict[str, Any]] = {}
+        for pipeline_id in pipeline_ids:
+            versions = self.list_versions(pipeline_id)
+            published = [
+                item for item in versions
+                if item.status == PipelineVersionStatus.PUBLISHED
+            ]
+            drafts = [
+                item for item in versions
+                if item.status == PipelineVersionStatus.DRAFT
+            ]
+            selected = (
+                max(published, key=lambda item: item.version_number)
+                if published
+                else max(drafts, key=lambda item: item.version_number, default=None)
+            )
+            summaries[pipeline_id] = {
+                "latest_published_version_number": (
+                    max(item.version_number for item in published)
+                    if published else None
+                ),
+                "published_version_count": len(published),
+                "draft_version_number": (
+                    max(item.version_number for item in drafts)
+                    if drafts else None
+                ),
+                "definition": selected.definition if selected else {},
+            }
+        return summaries
+
     def get_version(self, version_id: str) -> PipelineVersion | None:
         return self._versions.get(version_id)
 
@@ -266,6 +478,18 @@ class InMemoryPipelineRepository:
             if version.pipeline_id == pipeline_id and version.status == PipelineVersionStatus.DRAFT:
                 return version
         return None
+
+    def get_latest_version(self, pipeline_id: str) -> PipelineVersion | None:
+        versions = self.list_versions(pipeline_id)
+        return versions[-1] if versions else None
+
+    def get_latest_published_version(self, pipeline_id: str) -> PipelineVersion | None:
+        published = [
+            version
+            for version in self.list_versions(pipeline_id)
+            if version.status == PipelineVersionStatus.PUBLISHED
+        ]
+        return published[-1] if published else None
 
     def update_version(self, version: PipelineVersion) -> PipelineVersion:
         self._versions[version.id] = version
@@ -276,6 +500,9 @@ class InMemoryPipelineRepository:
         return run
 
     def get_run(self, run_id: str) -> PipelineRun | None:
+        return self._runs.get(run_id)
+
+    def get_run_summary(self, run_id: str) -> PipelineRun | None:
         return self._runs.get(run_id)
 
     def list_run_references(self, run_ids: set[str]) -> dict[str, tuple[str, str]]:
@@ -314,6 +541,82 @@ class InMemoryPipelineRepository:
     ) -> list[PipelineRun]:
         return self.list_runs(None, owner_id, limit=limit, offset=offset)
 
+    def list_run_summaries_for_pipelines(
+        self,
+        pipeline_ids: set[str],
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[PipelineRun]:
+        matching = [
+            item for item in self._runs.values()
+            if item.pipeline_id in pipeline_ids
+        ]
+        matching.sort(key=lambda item: item.created_at, reverse=True)
+        return matching[offset:offset + limit]
+
+    def page_run_summaries_for_pipelines(
+        self,
+        pipeline_ids: set[str],
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+        run_status: str = "",
+        pipeline_id: str = "",
+        pipeline_version_id: str = "",
+        business_case_id: str = "",
+        trigger_type: str = "",
+        dry_run: bool | None = None,
+    ) -> tuple[list[PipelineRun], int]:
+        needle = search.strip().casefold()
+        matching = [
+            item
+            for item in self._runs.values()
+            if item.pipeline_id in pipeline_ids
+            and (
+                not run_status
+                or item.status.value == run_status
+                or (
+                    run_status == "active"
+                    and item.status.value in {"queued", "running"}
+                )
+            )
+            and (not pipeline_id or item.pipeline_id == pipeline_id)
+            and (
+                not pipeline_version_id
+                or item.pipeline_version_id == pipeline_version_id
+            )
+            and (not business_case_id or item.business_case_id == business_case_id)
+            and (not trigger_type or item.trigger_type == trigger_type)
+            and (dry_run is None or item.is_dry_run == dry_run)
+            and (
+                not needle
+                or needle in item.id.casefold()
+                or needle in item.pipeline_id.casefold()
+                or needle in item.error_message.casefold()
+            )
+        ]
+        matching.sort(
+            key=lambda item: (item.created_at, item.id),
+            reverse=True,
+        )
+        return matching[offset : offset + limit], len(matching)
+
+    def list_runs_for_pipelines(
+        self,
+        pipeline_ids: set[str],
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[PipelineRun]:
+        matching = [
+            item for item in self._runs.values()
+            if item.pipeline_id in pipeline_ids
+        ]
+        matching.sort(key=lambda item: item.created_at, reverse=True)
+        return matching[offset:offset + limit]
+
     def add_step_run(self, step_run: PipelineStepRun) -> PipelineStepRun:
         self._step_runs[step_run.id] = step_run
         return step_run
@@ -349,17 +652,88 @@ class PostgresPipelineRepository:
         with self.engine.begin() as connection:
             return [self._pipeline_from_record(row._mapping) for row in connection.execute(statement)]
 
-    def list_pipelines_for_business_cases(self, business_case_ids: set[str]) -> list[Pipeline]:
+    def list_pipelines_for_business_cases(
+        self,
+        business_case_ids: set[str] | None,
+    ) -> list[Pipeline]:
         self._ensure_initialized()
-        if not business_case_ids:
+        if business_case_ids is not None and not business_case_ids:
             return []
-        statement = (
-            select(pipelines_table)
-            .where(pipelines_table.c.business_case_id.in_(business_case_ids))
-            .order_by(pipelines_table.c.updated_at.desc())
-        )
+        statement = select(pipelines_table)
+        if business_case_ids is not None:
+            statement = statement.where(
+                pipelines_table.c.business_case_id.in_(business_case_ids)
+            )
+        statement = statement.order_by(pipelines_table.c.updated_at.desc())
         with self.engine.begin() as connection:
             return [self._pipeline_from_record(row._mapping) for row in connection.execute(statement)]
+
+    def page_pipelines_for_business_cases(
+        self,
+        business_case_ids: set[str] | None,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+        pipeline_type: str = "",
+        pipeline_template: str = "",
+        pipeline_status: str = "",
+        include_deprecated: bool = True,
+    ) -> tuple[list[Pipeline], int]:
+        self._ensure_initialized()
+        if business_case_ids is not None and not business_case_ids:
+            return [], 0
+        filters = []
+        if business_case_ids is not None:
+            filters.append(pipelines_table.c.business_case_id.in_(business_case_ids))
+        if pipeline_type:
+            filters.append(pipelines_table.c.type == pipeline_type)
+        if pipeline_template:
+            filters.append(pipelines_table.c.template == pipeline_template)
+        if pipeline_status:
+            filters.append(pipelines_table.c.status == pipeline_status)
+        if not include_deprecated:
+            filters.append(pipelines_table.c.status != PipelineStatus.DEPRECATED.value)
+        needle = search.strip()
+        if needle:
+            pattern = f"%{needle}%"
+            filters.append(or_(
+                pipelines_table.c.name.ilike(pattern),
+                pipelines_table.c.description.ilike(pattern),
+            ))
+        page_statement = select(pipelines_table)
+        count_statement = select(func.count()).select_from(pipelines_table)
+        if filters:
+            page_statement = page_statement.where(*filters)
+            count_statement = count_statement.where(*filters)
+        page_statement = (
+            page_statement
+            .order_by(pipelines_table.c.updated_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        with self.engine.begin() as connection:
+            total = int(connection.execute(count_statement).scalar_one())
+            items = [
+                self._pipeline_from_record(row._mapping)
+                for row in connection.execute(page_statement)
+            ]
+        return items, total
+
+    def list_pipeline_ids_for_business_cases(
+        self,
+        business_case_ids: set[str] | None,
+    ) -> set[str]:
+        self._ensure_initialized()
+        if business_case_ids is not None and not business_case_ids:
+            return set()
+        statement = select(pipelines_table.c.id)
+        if business_case_ids is not None:
+            statement = statement.where(
+                pipelines_table.c.business_case_id.in_(business_case_ids)
+            )
+        with self.engine.begin() as connection:
+            return {str(row[0]) for row in connection.execute(statement)}
 
     def get_pipeline(self, pipeline_id: str) -> Pipeline | None:
         self._ensure_initialized()
@@ -415,6 +789,31 @@ class PostgresPipelineRepository:
         with self.engine.begin() as connection:
             return [self._version_from_record(row._mapping) for row in connection.execute(statement)]
 
+    def page_versions(
+        self,
+        pipeline_id: str,
+        *,
+        limit: int,
+        offset: int,
+        status: str = "",
+    ) -> tuple[list[PipelineVersion], int]:
+        self._ensure_initialized()
+        filters = [pipeline_versions_table.c.pipeline_id == pipeline_id]
+        if status:
+            filters.append(pipeline_versions_table.c.status == status)
+        with self.engine.begin() as connection:
+            total = int(connection.execute(
+                select(func.count()).select_from(pipeline_versions_table).where(*filters)
+            ).scalar_one())
+            rows = connection.execute(
+                select(pipeline_versions_table)
+                .where(*filters)
+                .order_by(pipeline_versions_table.c.version_number.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+            return [self._version_from_record(row._mapping) for row in rows], total
+
     def list_versions_for_pipelines(
         self,
         owner_id: str,
@@ -440,6 +839,107 @@ class PostgresPipelineRepository:
                 for row in connection.execute(statement)
             ]
 
+    def list_versions_for_pipeline_ids(
+        self,
+        pipeline_ids: set[str],
+    ) -> list[PipelineVersion]:
+        if not pipeline_ids:
+            return []
+        self._ensure_initialized()
+        statement = (
+            select(pipeline_versions_table)
+            .where(pipeline_versions_table.c.pipeline_id.in_(pipeline_ids))
+            .order_by(
+                pipeline_versions_table.c.pipeline_id.asc(),
+                pipeline_versions_table.c.version_number.asc(),
+            )
+        )
+        with self.engine.begin() as connection:
+            return [
+                self._version_from_record(row._mapping)
+                for row in connection.execute(statement)
+            ]
+
+    def list_versions_by_ids(
+        self,
+        version_ids: set[str],
+    ) -> list[PipelineVersion]:
+        if not version_ids:
+            return []
+        self._ensure_initialized()
+        statement = select(pipeline_versions_table).where(
+            pipeline_versions_table.c.id.in_(version_ids)
+        )
+        with self.engine.begin() as connection:
+            return [
+                self._version_from_record(row._mapping)
+                for row in connection.execute(statement)
+            ]
+
+    def version_catalog_summaries(
+        self,
+        pipeline_ids: set[str],
+    ) -> dict[str, dict[str, Any]]:
+        """Return counts and one representative definition per pipeline."""
+        if not pipeline_ids:
+            return {}
+        self._ensure_initialized()
+        published = PipelineVersionStatus.PUBLISHED.value
+        draft = PipelineVersionStatus.DRAFT.value
+        stats = (
+            select(
+                pipeline_versions_table.c.pipeline_id.label("pipeline_id"),
+                func.max(pipeline_versions_table.c.version_number)
+                .filter(pipeline_versions_table.c.status == published)
+                .label("latest_published_version_number"),
+                func.count()
+                .filter(pipeline_versions_table.c.status == published)
+                .label("published_version_count"),
+                func.max(pipeline_versions_table.c.version_number)
+                .filter(pipeline_versions_table.c.status == draft)
+                .label("draft_version_number"),
+            )
+            .where(pipeline_versions_table.c.pipeline_id.in_(pipeline_ids))
+            .group_by(pipeline_versions_table.c.pipeline_id)
+            .subquery("pipeline_version_catalog_stats")
+        )
+        selected = pipeline_versions_table.alias("selected_pipeline_version")
+        selected_definition = (
+            select(selected.c.definition)
+            .where(selected.c.pipeline_id == stats.c.pipeline_id)
+            .order_by(
+                case((selected.c.status == published, 0), else_=1),
+                selected.c.version_number.desc(),
+            )
+            .limit(1)
+            .scalar_subquery()
+        )
+        statement = select(
+            stats.c.pipeline_id,
+            stats.c.latest_published_version_number,
+            stats.c.published_version_count,
+            stats.c.draft_version_number,
+            selected_definition.label("definition"),
+        )
+        with self.engine.begin() as connection:
+            return {
+                str(row.pipeline_id): {
+                    "latest_published_version_number": (
+                        int(row.latest_published_version_number)
+                        if row.latest_published_version_number is not None
+                        else None
+                    ),
+                    "published_version_count": int(row.published_version_count or 0),
+                    "draft_version_number": (
+                        int(row.draft_version_number)
+                        if row.draft_version_number is not None
+                        else None
+                    ),
+                    "definition": dict(row.definition or {}),
+                }
+                for row in connection.execute(statement)
+            }
+
     def get_version(self, version_id: str) -> PipelineVersion | None:
         self._ensure_initialized()
         statement = select(pipeline_versions_table).where(pipeline_versions_table.c.id == version_id)
@@ -452,6 +952,34 @@ class PostgresPipelineRepository:
         statement = select(pipeline_versions_table).where(
             pipeline_versions_table.c.pipeline_id == pipeline_id,
             pipeline_versions_table.c.status == PipelineVersionStatus.DRAFT.value,
+        )
+        with self.engine.begin() as connection:
+            row = connection.execute(statement).first()
+        return self._version_from_record(row._mapping) if row else None
+
+    def get_latest_version(self, pipeline_id: str) -> PipelineVersion | None:
+        self._ensure_initialized()
+        statement = (
+            select(pipeline_versions_table)
+            .where(pipeline_versions_table.c.pipeline_id == pipeline_id)
+            .order_by(pipeline_versions_table.c.version_number.desc())
+            .limit(1)
+        )
+        with self.engine.begin() as connection:
+            row = connection.execute(statement).first()
+        return self._version_from_record(row._mapping) if row else None
+
+    def get_latest_published_version(self, pipeline_id: str) -> PipelineVersion | None:
+        self._ensure_initialized()
+        statement = (
+            select(pipeline_versions_table)
+            .where(
+                pipeline_versions_table.c.pipeline_id == pipeline_id,
+                pipeline_versions_table.c.status
+                == PipelineVersionStatus.PUBLISHED.value,
+            )
+            .order_by(pipeline_versions_table.c.version_number.desc())
+            .limit(1)
         )
         with self.engine.begin() as connection:
             row = connection.execute(statement).first()
@@ -477,6 +1005,15 @@ class PostgresPipelineRepository:
     def get_run(self, run_id: str) -> PipelineRun | None:
         self._ensure_initialized()
         statement = select(pipeline_runs_table).where(pipeline_runs_table.c.id == run_id)
+        with self.engine.begin() as connection:
+            row = connection.execute(statement).first()
+        return self._run_from_record(row._mapping) if row else None
+
+    def get_run_summary(self, run_id: str) -> PipelineRun | None:
+        self._ensure_initialized()
+        statement = select(*self._run_summary_columns()).where(
+            pipeline_runs_table.c.id == run_id
+        )
         with self.engine.begin() as connection:
             row = connection.execute(statement).first()
         return self._run_from_record(row._mapping) if row else None
@@ -536,7 +1073,114 @@ class PostgresPipelineRepository:
         offset: int = 0,
     ) -> list[PipelineRun]:
         self._ensure_initialized()
-        columns = [
+        statement = (
+            select(*self._run_summary_columns())
+            .where(pipeline_runs_table.c.owner_id == owner_id)
+            .order_by(pipeline_runs_table.c.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        with self.engine.begin() as connection:
+            return [
+                self._run_from_record(row._mapping)
+                for row in connection.execute(statement)
+            ]
+
+    def list_run_summaries_for_pipelines(
+        self,
+        pipeline_ids: set[str],
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[PipelineRun]:
+        if not pipeline_ids:
+            return []
+        self._ensure_initialized()
+        statement = (
+            select(*self._run_summary_columns())
+            .where(pipeline_runs_table.c.pipeline_id.in_(pipeline_ids))
+            .order_by(pipeline_runs_table.c.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        with self.engine.begin() as connection:
+            return [
+                self._run_from_record(row._mapping)
+                for row in connection.execute(statement)
+            ]
+
+    def page_run_summaries_for_pipelines(
+        self,
+        pipeline_ids: set[str],
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+        run_status: str = "",
+        pipeline_id: str = "",
+        pipeline_version_id: str = "",
+        business_case_id: str = "",
+        trigger_type: str = "",
+        dry_run: bool | None = None,
+    ) -> tuple[list[PipelineRun], int]:
+        if not pipeline_ids:
+            return [], 0
+        self._ensure_initialized()
+        filters = [pipeline_runs_table.c.pipeline_id.in_(pipeline_ids)]
+        if run_status == "active":
+            filters.append(
+                pipeline_runs_table.c.status.in_(("queued", "running"))
+            )
+        elif run_status:
+            filters.append(pipeline_runs_table.c.status == run_status)
+        if pipeline_id:
+            filters.append(pipeline_runs_table.c.pipeline_id == pipeline_id)
+        if pipeline_version_id:
+            filters.append(
+                pipeline_runs_table.c.pipeline_version_id == pipeline_version_id
+            )
+        if business_case_id:
+            filters.append(
+                pipeline_runs_table.c.business_case_id == business_case_id
+            )
+        if trigger_type:
+            filters.append(pipeline_runs_table.c.trigger_type == trigger_type)
+        if dry_run is not None:
+            filters.append(pipeline_runs_table.c.is_dry_run == dry_run)
+        needle = search.strip()
+        if needle:
+            pattern = f"%{needle}%"
+            filters.append(or_(
+                pipeline_runs_table.c.id.ilike(pattern),
+                pipeline_runs_table.c.pipeline_id.ilike(pattern),
+                pipeline_runs_table.c.error_message.ilike(pattern),
+            ))
+        count_statement = (
+            select(func.count())
+            .select_from(pipeline_runs_table)
+            .where(*filters)
+        )
+        page_statement = (
+            select(*self._run_summary_columns())
+            .where(*filters)
+            .order_by(
+                pipeline_runs_table.c.created_at.desc(),
+                pipeline_runs_table.c.id.desc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+        with self.engine.begin() as connection:
+            total = int(connection.execute(count_statement).scalar_one())
+            runs = [
+                self._run_from_record(row._mapping)
+                for row in connection.execute(page_statement)
+            ]
+        return runs, total
+
+    @staticmethod
+    def _run_summary_columns() -> list[Any]:
+        return [
             pipeline_runs_table.c.id,
             pipeline_runs_table.c.owner_id,
             pipeline_runs_table.c.pipeline_id,
@@ -556,9 +1200,20 @@ class PostgresPipelineRepository:
             pipeline_runs_table.c.started_at,
             pipeline_runs_table.c.finished_at,
         ]
+
+    def list_runs_for_pipelines(
+        self,
+        pipeline_ids: set[str],
+        *,
+        limit: int = 200,
+        offset: int = 0,
+    ) -> list[PipelineRun]:
+        if not pipeline_ids:
+            return []
+        self._ensure_initialized()
         statement = (
-            select(*columns)
-            .where(pipeline_runs_table.c.owner_id == owner_id)
+            select(pipeline_runs_table)
+            .where(pipeline_runs_table.c.pipeline_id.in_(pipeline_ids))
             .order_by(pipeline_runs_table.c.created_at.desc())
             .limit(limit)
             .offset(offset)

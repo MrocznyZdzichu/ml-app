@@ -19,6 +19,8 @@ from app.modules.pipelines.schemas import (
 )
 from app.modules.pipelines.service import PipelineService
 from app.modules.pipelines.modeling_catalog import training_catalog
+from app.modules.pipelines.domain import PipelineStatus
+from app.shared.pagination import OffsetPage
 
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
 service = PipelineService()
@@ -53,6 +55,37 @@ def list_pipelines(
         PipelineRead.model_validate(item)
         for item in service.list_pipelines(principal, business_case_id)
     ]
+
+
+@router.get("/page", response_model=OffsetPage[PipelineRead])
+def page_pipelines(
+    limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    search: str = Query(default="", max_length=200),
+    business_case_id: str | None = Query(default=None),
+    pipeline_type: str = Query(default="", max_length=64),
+    pipeline_template: str = Query(default="", max_length=64),
+    pipeline_status: PipelineStatus | None = Query(default=None, alias="status"),
+    include_deprecated: bool = Query(default=True),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[PipelineRead]:
+    items, total = service.page_pipelines(
+        principal,
+        limit=limit,
+        offset=offset,
+        search=search,
+        business_case_id=business_case_id,
+        pipeline_type=pipeline_type,
+        pipeline_template=pipeline_template,
+        pipeline_status=pipeline_status.value if pipeline_status else "",
+        include_deprecated=include_deprecated,
+    )
+    return OffsetPage[PipelineRead].build(
+        [PipelineRead.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/{pipeline_id}", response_model=PipelineRead)
@@ -95,6 +128,32 @@ def list_versions(
     principal: Principal = Depends(require_user),
 ) -> list[PipelineVersionRead]:
     return [PipelineVersionRead.model_validate(item) for item in service.list_versions(pipeline_id, principal)]
+
+
+@router.get(
+    "/{pipeline_id}/versions/page",
+    response_model=OffsetPage[PipelineVersionRead],
+)
+def page_versions(
+    pipeline_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    status: str = Query(default="", pattern="^(|draft|published)$"),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[PipelineVersionRead]:
+    items, total = service.page_versions(
+        pipeline_id,
+        principal,
+        limit=limit,
+        offset=offset,
+        version_status=status,
+    )
+    return OffsetPage[PipelineVersionRead].build(
+        [PipelineVersionRead.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.patch("/{pipeline_id}/versions/draft", response_model=PipelineVersionRead)
@@ -156,6 +215,39 @@ def list_run_history(
     ]
 
 
+@router.get("/runs/history/page", response_model=OffsetPage[PipelineRunSummaryRead])
+def page_run_history(
+    limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    search: str = Query(default="", max_length=200),
+    status: str = Query(default="", max_length=30),
+    pipeline_id: str = Query(default="", max_length=64),
+    pipeline_version_id: str = Query(default="", max_length=64),
+    business_case_id: str = Query(default="", max_length=64),
+    trigger_type: str = Query(default="", max_length=50),
+    dry_run: bool | None = Query(default=None),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[PipelineRunSummaryRead]:
+    runs, total = service.page_run_summaries(
+        principal,
+        limit=limit,
+        offset=offset,
+        search=search,
+        run_status=status,
+        pipeline_id=pipeline_id,
+        pipeline_version_id=pipeline_version_id,
+        business_case_id=business_case_id,
+        trigger_type=trigger_type,
+        dry_run=dry_run,
+    )
+    return OffsetPage[PipelineRunSummaryRead].build(
+        items=[PipelineRunSummaryRead.model_validate(item) for item in runs],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.get("/{pipeline_id}/runs/{run_id}", response_model=PipelineRunRead)
 def get_pipeline_run(
     pipeline_id: str,
@@ -163,6 +255,17 @@ def get_pipeline_run(
     principal: Principal = Depends(require_user),
 ) -> PipelineRunRead:
     return PipelineRunRead.model_validate(service.get_run(pipeline_id, run_id, principal))
+
+
+@router.get("/{pipeline_id}/runs/{run_id}/status", response_model=PipelineRunSummaryRead)
+def get_pipeline_run_status(
+    pipeline_id: str,
+    run_id: str,
+    principal: Principal = Depends(require_user),
+) -> PipelineRunSummaryRead:
+    return PipelineRunSummaryRead.model_validate(
+        service.get_run_status(pipeline_id, run_id, principal)
+    )
 
 
 @router.get("/{pipeline_id}/runs/{run_id}/details", response_model=PipelineRunDetailsRead)

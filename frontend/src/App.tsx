@@ -47,6 +47,8 @@ import type {
   UserProfile
 } from "./api/client";
 import { AssetList } from "./components/AssetList";
+import { PaginationControls } from "./components/PaginationControls";
+import { PagedCatalogSelect } from "./components/PagedCatalogSelect";
 import { useVersionedResourceNavigation } from "./components/dialogNavigation";
 import { ArtifactDependenciesDialog } from "./operational/ArtifactDependenciesDialog";
 import {
@@ -193,6 +195,14 @@ export default function App() {
   const [models, setModels] = useState<ModelArtifact[]>([]);
   const [scoringReports, setScoringReports] = useState<ScoringReport[]>([]);
   const [deployments, setDeployments] = useState<Deployment[]>([]);
+  const [catalogCounts, setCatalogCounts] = useState({
+    businessCases: 0,
+    datasets: 0,
+    dataViews: 0,
+    pipelines: 0,
+    models: 0,
+    deployments: 0
+  });
   const [notice, setNotice] = useState("Workspace ready");
   const [isRefreshingWorkspace, setIsRefreshingWorkspace] = useState(false);
   const descriptiveProfileCache = useRef<Map<string, DescriptiveProfileCacheEntry>>(new Map());
@@ -211,13 +221,51 @@ export default function App() {
       const includeModels = ["workspace", "overview", "business-cases", "pipelines", "models", "serving"].includes(tab);
       const includeReports = ["workspace", "business-cases", "scoring-reports"].includes(tab);
       const includeDeployments = ["workspace", "overview", "business-cases", "serving"].includes(tab);
+      const cacheLimit = 100;
       await Promise.all([
-        includeBusinessCases ? api.listBusinessCases().then(setBusinessCases) : Promise.resolve(),
-        includeDatasets ? api.listDatasetSummaries().then(setDatasets) : Promise.resolve(),
-        includePipelines ? api.listPipelines().then(setPipelines) : Promise.resolve(),
-        includeModels ? api.listModelSummaries().then(setModels) : Promise.resolve(),
-        includeReports ? api.listScoringReportSummaries().then(setScoringReports) : Promise.resolve(),
-        includeDeployments ? api.listDeployments().then(setDeployments) : Promise.resolve(),
+        includeBusinessCases
+          ? api.pageBusinessCases({ limit: cacheLimit }).then((page) => {
+              setBusinessCases(page.items);
+              setCatalogCounts((current) => ({ ...current, businessCases: page.total }));
+            })
+          : Promise.resolve(),
+        includeDatasets
+          ? Promise.all([
+              api.pageDatasets({ limit: cacheLimit }),
+              api.pageDatasets({ limit: 1, asset_kind: "dataset", include_deleted: false }),
+              api.pageDatasets({ limit: 1, asset_kind: "view", include_deleted: false })
+            ]).then(([page, datasetPage, viewPage]) => {
+              setDatasets(page.items);
+              setCatalogCounts((current) => ({
+                ...current,
+                datasets: datasetPage.total,
+                dataViews: viewPage.total
+              }));
+            })
+          : Promise.resolve(),
+        includePipelines
+          ? api.pagePipelines({ limit: cacheLimit }).then((page) => {
+              setPipelines(page.items);
+              setCatalogCounts((current) => ({ ...current, pipelines: page.total }));
+            })
+          : Promise.resolve(),
+        includeModels
+          ? api.pageModels({ limit: cacheLimit }).then((page) => {
+              setModels(page.items.map((family) => family.latest));
+              setCatalogCounts((current) => ({ ...current, models: page.total }));
+            })
+          : Promise.resolve(),
+        includeReports
+          ? api.pageScoringReports({ limit: cacheLimit }).then((page) => {
+              setScoringReports(page.items.map((family) => family.latest));
+            })
+          : Promise.resolve(),
+        includeDeployments
+          ? api.pageDeployments({ limit: cacheLimit }).then((page) => {
+              setDeployments(page.items);
+              setCatalogCounts((current) => ({ ...current, deployments: page.total }));
+            })
+          : Promise.resolve(),
       ]);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "API request failed");
@@ -327,6 +375,14 @@ export default function App() {
     setModels([]);
     setScoringReports([]);
     setDeployments([]);
+    setCatalogCounts({
+      businessCases: 0,
+      datasets: 0,
+      dataViews: 0,
+      pipelines: 0,
+      models: 0,
+      deployments: 0
+    });
     setAuthStatus("anonymous");
     setNotice("Signed out");
   }
@@ -443,6 +499,7 @@ export default function App() {
             pipelines={pipelines}
             models={models}
             deployments={deployments}
+            counts={catalogCounts}
           />
         )}
         {activeTab === "business-cases" && (
@@ -535,7 +592,6 @@ export default function App() {
           <DeferredPanel>
             <ServingPanel
               deployments={deployments}
-              datasets={datasets}
               models={models}
               initialDeploymentId={servingDeploymentId}
               onRefresh={refreshServingCatalog}
@@ -607,13 +663,27 @@ function BusinessCasesPanel({
   const [editBusinessGoal, setEditBusinessGoal] = useState("");
   const [editSuccessCriteria, setEditSuccessCriteria] = useState("");
   const [selectedBusinessCaseId, setSelectedBusinessCaseId] = useState("");
+  const [selectedBusinessCaseSnapshot, setSelectedBusinessCaseSnapshot] = useState<BusinessCase | undefined>();
   const [selectedDataAssetId, setSelectedDataAssetId] = useState("");
+  const [selectedDataAssetSnapshot, setSelectedDataAssetSnapshot] = useState<DataAsset | undefined>();
   const [selectedRole, setSelectedRole] = useState("training");
   const [contextNote, setContextNote] = useState("");
   const [primaryKeyColumn, setPrimaryKeyColumn] = useState("");
   const [mappingTargetColumn, setMappingTargetColumn] = useState("");
   const [attachments, setAttachments] = useState<BusinessCaseDataAttachment[]>([]);
+  const [attachmentTotal, setAttachmentTotal] = useState(0);
+  const [attachmentOffset, setAttachmentOffset] = useState(0);
+  const [attachmentSearch, setAttachmentSearch] = useState("");
+  const [deletedAttachments, setDeletedAttachments] = useState<BusinessCaseDataAttachment[]>([]);
+  const [deletedAttachmentTotal, setDeletedAttachmentTotal] = useState(0);
+  const [deletedAttachmentOffset, setDeletedAttachmentOffset] = useState(0);
+  const [attachmentRefreshKey, setAttachmentRefreshKey] = useState(0);
   const [businessCaseSearch, setBusinessCaseSearch] = useState("");
+  const [businessCasePage, setBusinessCasePage] = useState<BusinessCase[]>(businessCases);
+  const [businessCaseTotal, setBusinessCaseTotal] = useState(businessCases.length);
+  const [businessCaseOffset, setBusinessCaseOffset] = useState(0);
+  const [businessCasePageLoading, setBusinessCasePageLoading] = useState(false);
+  const [businessCasePageRefresh, setBusinessCasePageRefresh] = useState(0);
   const [isRefreshingWorkspace, setIsRefreshingWorkspace] = useState(false);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isMappingFormOpen, setIsMappingFormOpen] = useState(false);
@@ -647,9 +717,25 @@ function BusinessCasesPanel({
   const [bcReportPipelineFilter, setBcReportPipelineFilter] = useState("");
   const [bcPipelineTypeFilter, setBcPipelineTypeFilter] = useState("");
   const [bcPipelineStatusFilter, setBcPipelineStatusFilter] = useState("");
+  const [bcWorkspacePipelines, setBcWorkspacePipelines] = useState<Pipeline[]>([]);
+  const [bcWorkspacePipelineTotal, setBcWorkspacePipelineTotal] = useState(0);
+  const [bcWorkspacePipelineOffset, setBcWorkspacePipelineOffset] = useState(0);
+  const [bcWorkspaceModels, setBcWorkspaceModels] = useState<ModelArtifact[]>([]);
+  const [bcWorkspaceModelTotal, setBcWorkspaceModelTotal] = useState(0);
+  const [bcWorkspaceModelOffset, setBcWorkspaceModelOffset] = useState(0);
+  const [bcWorkspaceDeployments, setBcWorkspaceDeployments] = useState<Deployment[]>([]);
+  const [bcWorkspaceDeploymentTotal, setBcWorkspaceDeploymentTotal] = useState(0);
+  const [bcWorkspaceDeploymentOffset, setBcWorkspaceDeploymentOffset] = useState(0);
+  const [bcWorkspaceReports, setBcWorkspaceReports] = useState<ScoringReport[]>([]);
+  const [bcWorkspaceReportTotal, setBcWorkspaceReportTotal] = useState(0);
+  const [bcWorkspaceReportOffset, setBcWorkspaceReportOffset] = useState(0);
   const [dependencyTarget, setDependencyTarget] = useState<{ referenceId: string; artifactType: string; title: string } | null>(null);
 
-  const selectedBusinessCase = businessCases.find((item) => item.id === selectedBusinessCaseId);
+  const selectedBusinessCase = (
+    businessCasePage.find((item) => item.id === selectedBusinessCaseId)
+    ?? businessCases.find((item) => item.id === selectedBusinessCaseId)
+    ?? selectedBusinessCaseSnapshot
+  );
   const datasetById = useMemo(
     () => new Map(datasets.map((dataset) => [dataset.id, dataset])),
     [datasets]
@@ -671,26 +757,7 @@ function BusinessCasesPanel({
     if (!attachedVersion) return undefined;
     return latestDatasetByLogicalId.get(attachedVersion.logical_id) ?? attachedVersion;
   };
-  const activeAttachments = useMemo(
-    () => attachments.filter((attachment) => {
-      const attached = datasetById.get(attachment.data_asset_id);
-      const latest = attached
-        ? latestDatasetByLogicalId.get(attached.logical_id) ?? attached
-        : undefined;
-      return latest?.status !== "deleted";
-    }),
-    [attachments, datasetById, latestDatasetByLogicalId]
-  );
-  const deletedAttachments = useMemo(
-    () => attachments.filter((attachment) => {
-      const attached = datasetById.get(attachment.data_asset_id);
-      const latest = attached
-        ? latestDatasetByLogicalId.get(attached.logical_id) ?? attached
-        : undefined;
-      return latest?.status === "deleted";
-    }),
-    [attachments, datasetById, latestDatasetByLogicalId]
-  );
+  const activeAttachments = attachments;
   const selectedBusinessCasePipelines = useMemo(
     () => selectedBusinessCase
       ? pipelines.filter((pipeline) => pipeline.business_case_id === selectedBusinessCase.id)
@@ -698,110 +765,244 @@ function BusinessCasesPanel({
     [pipelines, selectedBusinessCase]
   );
   const businessCasePipelineTypes = useMemo(
-    () => [...new Set(selectedBusinessCasePipelines.map((pipeline) => pipeline.type))]
+    () => [...new Set([
+      "data_preparation",
+      "feature_engineering",
+      "training",
+      "automl",
+      "batch_scoring",
+      "monitoring",
+      "custom",
+      ...bcWorkspacePipelines.map((pipeline) => pipeline.type)
+    ])]
       .sort((left, right) => left.localeCompare(right)),
-    [selectedBusinessCasePipelines]
+    [bcWorkspacePipelines]
   );
   const businessCasePipelineStatuses = useMemo(
-    () => [...new Set(selectedBusinessCasePipelines.map((pipeline) => pipeline.status))]
+    () => [...new Set([
+      "draft",
+      "published",
+      "deprecated",
+      "archived",
+      ...bcWorkspacePipelines.map((pipeline) => pipeline.status)
+    ])]
       .sort((left, right) => left.localeCompare(right)),
-    [selectedBusinessCasePipelines]
+    [bcWorkspacePipelines]
   );
-  const visibleBusinessCasePipelines = useMemo(
-    () => selectedBusinessCasePipelines.filter((pipeline) =>
-      (!bcPipelineTypeFilter || pipeline.type === bcPipelineTypeFilter)
-      && (!bcPipelineStatusFilter || pipeline.status === bcPipelineStatusFilter)
-    ),
-    [bcPipelineStatusFilter, bcPipelineTypeFilter, selectedBusinessCasePipelines]
-  );
-  const selectedBusinessCaseModels = useMemo(
-    () => latestModelFamilies(
-      models.filter((model) => model.business_case_id === selectedBusinessCase?.id)
-    ),
-    [models, selectedBusinessCase]
-  );
-  const selectedBusinessCaseReports = useMemo(
-    () => latestReportFamilies(
-      scoringReports.filter((report) => report.business_case_id === selectedBusinessCase?.id)
-    ),
-    [scoringReports, selectedBusinessCase]
-  );
-  const selectedBusinessCaseDeployments = useMemo(
-    () => deployments.filter((deployment) => deployment.business_case_id === selectedBusinessCase?.id),
-    [deployments, selectedBusinessCase]
-  );
-  const visibleAttachments = useMemo(
-    () => activeAttachments.filter((attachment) => {
-      if (bcDataRoleFilter && attachment.role !== bcDataRoleFilter) return false;
-      const attached = datasetById.get(attachment.data_asset_id);
-      const dataset = attached
-        ? latestDatasetByLogicalId.get(attached.logical_id) ?? attached
-        : undefined;
-      if (bcUploadedOnly) return isUploadedDataset(dataset);
-      return pipelineMatches(
-        datasetPipelineId(dataset),
-        selectedBusinessCasePipelines,
-        bcDataPurposeFilter,
-        bcDataPipelineFilter
-      );
-    }),
-    [
-      activeAttachments,
-      bcDataPipelineFilter,
-      bcDataPurposeFilter,
-      bcDataRoleFilter,
-      bcUploadedOnly,
-      datasetById,
-      latestDatasetByLogicalId,
-      selectedBusinessCasePipelines
-    ]
-  );
-  const visibleBusinessCaseModels = useMemo(
-    () => selectedBusinessCaseModels.filter((model) =>
-      pipelineMatches(
-        model.pipeline_id,
-        selectedBusinessCasePipelines,
-        bcModelPurposeFilter,
-        bcModelPipelineFilter
-      )
-    ),
-    [
-      bcModelPipelineFilter,
-      bcModelPurposeFilter,
-      selectedBusinessCaseModels,
-      selectedBusinessCasePipelines
-    ]
-  );
-  const visibleBusinessCaseReports = useMemo(
-    () => selectedBusinessCaseReports.filter((report) =>
-      pipelineMatches(
-        report.pipeline_id,
-        selectedBusinessCasePipelines,
-        bcReportPurposeFilter,
-        bcReportPipelineFilter
-      )
-    ),
-    [
-      bcReportPipelineFilter,
-      bcReportPurposeFilter,
-      selectedBusinessCasePipelines,
-      selectedBusinessCaseReports
-    ]
-  );
-  const filteredBusinessCases = useMemo(() => {
-    const query = businessCaseSearch.trim().toLowerCase();
-    if (!query) {
-      return businessCases;
-    }
-    return businessCases.filter((item) => [
-      item.name,
-      item.description,
-      item.problem_type,
-      item.status,
-      item.primary_metric,
-      item.target_column
-    ].some((value) => String(value ?? "").toLowerCase().includes(query)));
-  }, [businessCases, businessCaseSearch]);
+  const visibleBusinessCasePipelines = bcWorkspacePipelines;
+  const selectedBusinessCaseModels = bcWorkspaceModels;
+  const selectedBusinessCaseReports = bcWorkspaceReports;
+  const selectedBusinessCaseDeployments = bcWorkspaceDeployments;
+  const visibleAttachments = activeAttachments;
+  const visibleBusinessCaseModels = selectedBusinessCaseModels;
+  const visibleBusinessCaseReports = selectedBusinessCaseReports;
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setBusinessCasePageLoading(true);
+      api.pageBusinessCases({
+        limit: 30,
+        offset: businessCaseOffset,
+        search: businessCaseSearch.trim()
+      })
+        .then((page) => {
+          setBusinessCasePage(page.items);
+          setBusinessCaseTotal(page.total);
+          if (page.total > 0 && page.offset >= page.total) {
+            setBusinessCaseOffset(Math.max(0, Math.floor((page.total - 1) / page.limit) * page.limit));
+          }
+        })
+        .catch((error) => setNotice(error instanceof Error ? error.message : "Could not load Business Cases"))
+        .finally(() => setBusinessCasePageLoading(false));
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [businessCaseOffset, businessCasePageRefresh, businessCaseSearch, setNotice]);
+
+  useEffect(() => {
+    setBusinessCaseOffset(0);
+  }, [businessCaseSearch]);
+
+  useEffect(() => {
+    const current = (
+      businessCasePage.find((item) => item.id === selectedBusinessCaseId)
+      ?? businessCases.find((item) => item.id === selectedBusinessCaseId)
+    );
+    if (current) setSelectedBusinessCaseSnapshot(current);
+  }, [businessCasePage, businessCases, selectedBusinessCaseId]);
+
+  useEffect(() => {
+    setBcWorkspacePipelineOffset(0);
+    setBcWorkspaceModelOffset(0);
+    setBcWorkspaceDeploymentOffset(0);
+    setBcWorkspaceReportOffset(0);
+  }, [selectedBusinessCaseId]);
+
+  useEffect(() => {
+    if (!selectedBusinessCase || activeWorkspace !== "pipelines") return;
+    api.pagePipelines({
+      limit: 20,
+      offset: bcWorkspacePipelineOffset,
+      business_case_id: selectedBusinessCase.id,
+      pipeline_type: bcPipelineTypeFilter,
+      status: bcPipelineStatusFilter,
+      include_deprecated: true
+    })
+      .then((page) => {
+        setBcWorkspacePipelines(page.items);
+        setBcWorkspacePipelineTotal(page.total);
+      })
+      .catch((error) => setNotice(error instanceof Error ? error.message : "Could not load Business Case pipelines"));
+  }, [
+    activeWorkspace,
+    bcPipelineStatusFilter,
+    bcPipelineTypeFilter,
+    bcWorkspacePipelineOffset,
+    pipelines,
+    selectedBusinessCase,
+    setNotice
+  ]);
+
+  useEffect(() => {
+    setBcWorkspacePipelineOffset(0);
+  }, [bcPipelineStatusFilter, bcPipelineTypeFilter]);
+
+  useEffect(() => {
+    if (!selectedBusinessCase || activeWorkspace !== "models") return;
+    api.pageModels({
+      limit: 20,
+      offset: bcWorkspaceModelOffset,
+      business_case_id: selectedBusinessCase.id,
+      pipeline_id: bcModelPipelineFilter,
+      pipeline_type: bcModelPurposeFilter
+    })
+      .then((page) => {
+        setBcWorkspaceModels(page.items.map((family) => family.latest));
+        setBcWorkspaceModelTotal(page.total);
+      })
+      .catch((error) => setNotice(error instanceof Error ? error.message : "Could not load Business Case models"));
+  }, [
+    activeWorkspace,
+    bcModelPipelineFilter,
+    bcModelPurposeFilter,
+    bcWorkspaceModelOffset,
+    models,
+    selectedBusinessCase,
+    setNotice
+  ]);
+
+  useEffect(() => {
+    setBcWorkspaceModelOffset(0);
+  }, [bcModelPipelineFilter, bcModelPurposeFilter]);
+
+  useEffect(() => {
+    if (!selectedBusinessCase || activeWorkspace !== "services") return;
+    api.pageDeployments({
+      limit: 12,
+      offset: bcWorkspaceDeploymentOffset,
+      business_case_id: selectedBusinessCase.id
+    })
+      .then((page) => {
+        setBcWorkspaceDeployments(page.items);
+        setBcWorkspaceDeploymentTotal(page.total);
+      })
+      .catch((error) => setNotice(error instanceof Error ? error.message : "Could not load Business Case services"));
+  }, [
+    activeWorkspace,
+    bcWorkspaceDeploymentOffset,
+    deployments,
+    selectedBusinessCase,
+    setNotice
+  ]);
+
+  useEffect(() => {
+    if (!selectedBusinessCase || activeWorkspace !== "reports") return;
+    api.pageScoringReports({
+      limit: 20,
+      offset: bcWorkspaceReportOffset,
+      business_case_id: selectedBusinessCase.id,
+      pipeline_id: bcReportPipelineFilter,
+      pipeline_type: bcReportPurposeFilter
+    })
+      .then((page) => {
+        setBcWorkspaceReports(page.items.map((family) => family.latest));
+        setBcWorkspaceReportTotal(page.total);
+      })
+      .catch((error) => setNotice(error instanceof Error ? error.message : "Could not load Business Case reports"));
+  }, [
+    activeWorkspace,
+    bcReportPipelineFilter,
+    bcReportPurposeFilter,
+    bcWorkspaceReportOffset,
+    scoringReports,
+    selectedBusinessCase,
+    setNotice
+  ]);
+
+  useEffect(() => {
+    setBcWorkspaceReportOffset(0);
+  }, [bcReportPipelineFilter, bcReportPurposeFilter]);
+
+  useEffect(() => {
+    setAttachmentOffset(0);
+  }, [
+    attachmentSearch,
+    bcDataPipelineFilter,
+    bcDataPurposeFilter,
+    bcDataRoleFilter,
+    bcUploadedOnly,
+    selectedBusinessCaseId
+  ]);
+
+  useEffect(() => {
+    if (!selectedBusinessCase || activeWorkspace !== "data") return;
+    const timer = window.setTimeout(() => {
+      api.pageBusinessCaseDataAttachments(selectedBusinessCase.id, {
+        limit: 20,
+        offset: attachmentOffset,
+        search: attachmentSearch.trim(),
+        role: bcDataRoleFilter,
+        pipeline_id: bcDataPipelineFilter,
+        pipeline_type: bcDataPurposeFilter,
+        uploaded_only: bcUploadedOnly
+      })
+        .then((page) => {
+          setAttachments(page.items);
+          setAttachmentTotal(page.total);
+        })
+        .catch((error) => setNotice(error instanceof Error ? error.message : "Could not load BC data attachments"));
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [
+    activeWorkspace,
+    attachmentOffset,
+    attachmentRefreshKey,
+    attachmentSearch,
+    bcDataPipelineFilter,
+    bcDataPurposeFilter,
+    bcDataRoleFilter,
+    bcUploadedOnly,
+    selectedBusinessCase,
+    setNotice
+  ]);
+
+  useEffect(() => {
+    if (!selectedBusinessCase || activeWorkspace !== "data") return;
+    api.pageBusinessCaseDataAttachments(selectedBusinessCase.id, {
+      limit: 20,
+      offset: deletedAttachmentOffset,
+      deleted_only: true
+    })
+      .then((page) => {
+        setDeletedAttachments(page.items);
+        setDeletedAttachmentTotal(page.total);
+      })
+      .catch((error) => setNotice(error instanceof Error ? error.message : "Could not load deleted BC data attachments"));
+  }, [
+    activeWorkspace,
+    attachmentRefreshKey,
+    deletedAttachmentOffset,
+    selectedBusinessCase,
+    setNotice
+  ]);
 
   useEffect(() => {
     setBcDataPurposeFilter("");
@@ -815,14 +1016,13 @@ function BusinessCasesPanel({
     setBcPipelineStatusFilter("");
     if (!selectedBusinessCase) {
       setAttachments([]);
+      setAttachmentTotal(0);
+      setDeletedAttachments([]);
+      setDeletedAttachmentTotal(0);
       return;
     }
     resetBusinessCaseEditForm(selectedBusinessCase);
     resetDataMappingForm();
-    api
-      .listBusinessCaseDataAttachments(selectedBusinessCase.id)
-      .then(setAttachments)
-      .catch((error) => setNotice(error instanceof Error ? error.message : "Could not load BC data attachments"));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedBusinessCase, setNotice]);
 
@@ -838,6 +1038,7 @@ function BusinessCasesPanel({
       success_criteria: successCriteria
     });
     setNotice(`Business case created: ${created.name}`);
+    setSelectedBusinessCaseSnapshot(created);
     setSelectedBusinessCaseId(created.id);
     setName("");
     setDescription("");
@@ -847,6 +1048,7 @@ function BusinessCasesPanel({
     setIsCreateOpen(false);
     setActiveWorkspace("details");
     await onRefresh();
+    setBusinessCasePageRefresh((value) => value + 1);
   }
 
   async function submitBusinessCaseUpdate(event: FormEvent) {
@@ -885,10 +1087,14 @@ function BusinessCasesPanel({
       });
       setNotice(`Updated mapping for ${attachedDataset(updated.data_asset_id)?.name ?? updated.data_asset_id}`);
       resetDataMappingForm();
-      setAttachments(await api.listBusinessCaseDataAttachments(selectedBusinessCase.id));
+      setAttachmentRefreshKey((value) => value + 1);
       return;
     }
-    const dataAsset = availableDataAssets.find((item) => item.id === selectedDataAssetId) ?? availableDataAssets[0];
+    const dataAsset = (
+      availableDataAssets.find((item) => item.id === selectedDataAssetId)
+      ?? selectedDataAssetSnapshot
+      ?? availableDataAssets[0]
+    );
     if (!dataAsset) {
       setNotice("Upload or create a dataset first");
       return;
@@ -908,7 +1114,7 @@ function BusinessCasesPanel({
     });
     setNotice(`Attached ${dataAsset.name} as ${selectedRole}`);
     resetDataMappingForm();
-    setAttachments(await api.listBusinessCaseDataAttachments(selectedBusinessCase.id));
+    setAttachmentRefreshKey((value) => value + 1);
   }
 
   function startAddingAttachment() {
@@ -918,6 +1124,7 @@ function BusinessCasesPanel({
 
   function startEditingAttachment(attachment: BusinessCaseDataAttachment) {
     setSelectedDataAssetId(attachment.data_asset_id);
+    setSelectedDataAssetSnapshot(attachedDataset(attachment.data_asset_id));
     setSelectedRole(attachment.role);
     setPrimaryKeyColumn(attachment.primary_key_column);
     setContextNote(attachment.context_note);
@@ -929,6 +1136,7 @@ function BusinessCasesPanel({
 
   function resetDataMappingForm() {
     setSelectedDataAssetId("");
+    setSelectedDataAssetSnapshot(undefined);
     setSelectedRole("training");
     setPrimaryKeyColumn("");
     setContextNote("");
@@ -953,7 +1161,11 @@ function BusinessCasesPanel({
     if (!selectedBusinessCase) {
       return;
     }
-    const label = attachedDataset(attachment.data_asset_id)?.name ?? attachment.data_asset_id;
+    const label = (
+      attachment.data_asset_name
+      || attachedDataset(attachment.data_asset_id)?.name
+      || attachment.data_asset_id
+    );
     const confirmed = window.confirm(`Delete mapping for ${label}? The dataset itself will not be deleted.`);
     if (!confirmed) {
       return;
@@ -963,13 +1175,17 @@ function BusinessCasesPanel({
       resetDataMappingForm();
     }
     setNotice(`Deleted mapping for ${label}`);
-    setAttachments(await api.listBusinessCaseDataAttachments(selectedBusinessCase.id));
+    setAttachmentRefreshKey((value) => value + 1);
   }
 
   async function openBcPipelineRun(pipeline: Pipeline) {
     try {
-      const versions = await api.listPipelineVersions(pipeline.id);
-      const published = versions.filter((item) => item.status === "published").at(-1);
+      const versionPage = await api.pagePipelineVersions(pipeline.id, {
+        limit: 1,
+        offset: 0,
+        status: "published"
+      });
+      const published = versionPage.items[0];
       if (!published) {
         setNotice("This pipeline has no published version");
         return;
@@ -1024,10 +1240,15 @@ function BusinessCasesPanel({
       setNotice(`Pipeline run ${shortId(run.id)} queued`);
       while (["queued", "running"].includes(run.status)) {
         await new Promise((resolve) => window.setTimeout(resolve, 750));
-        run = await api.getPipelineRun(dialog.pipeline.id, run.id);
+        const runStatus = await api.getPipelineRunStatus(dialog.pipeline.id, run.id);
+        run = { ...run, ...runStatus };
+        if (!["queued", "running"].includes(run.status)) {
+          run = await api.getPipelineRun(dialog.pipeline.id, run.id);
+        }
         setBcRunResults((current) => ({ ...current, [sessionId]: run }));
       }
       await onRefresh();
+      setBusinessCasePageRefresh((value) => value + 1);
       setNotice(
         run.status === "succeeded"
           ? `Pipeline run ${shortId(run.id)} completed`
@@ -1050,6 +1271,7 @@ function BusinessCasesPanel({
     setNotice("Refreshing workspace data…");
     try {
       await onRefresh();
+      setBusinessCasePageRefresh((value) => value + 1);
       setNotice("Workspace data refreshed");
     } catch {
       // refreshWorkspace already exposes the actionable API error in the notice bar.
@@ -1064,7 +1286,7 @@ function BusinessCasesPanel({
         <div className="catalog-toolbar">
           <div>
             <h2>Business cases</h2>
-            <p>{filteredBusinessCases.length} of {businessCases.length} cases shown</p>
+            <p>{businessCaseTotal} cases</p>
           </div>
           <div className="catalog-toolbar-actions">
             <button
@@ -1104,7 +1326,7 @@ function BusinessCasesPanel({
             <span>Status</span>
             <span>Actions</span>
           </div>
-          {filteredBusinessCases.map((item) => (
+          {businessCasePage.map((item) => (
             <div className={`bc-table-row${selectedBusinessCase?.id === item.id ? " selected" : ""}`} key={item.id}>
               <div>
                 <strong>{item.name}</strong>
@@ -1190,8 +1412,16 @@ function BusinessCasesPanel({
               </div>
             </div>
           ))}
-          {filteredBusinessCases.length === 0 && <div className="catalog-empty">No business cases match this search.</div>}
+          {!businessCasePageLoading && businessCasePage.length === 0 && <div className="catalog-empty">No business cases match this search.</div>}
         </div>
+        <PaginationControls
+          total={businessCaseTotal}
+          limit={30}
+          offset={businessCaseOffset}
+          onOffsetChange={setBusinessCaseOffset}
+          disabled={businessCasePageLoading}
+          label="business cases"
+        />
       </div>
 
       {selectedBusinessCase && activeWorkspace && (
@@ -1313,7 +1543,7 @@ function BusinessCasesPanel({
               <div className="panel-header bc-mapped-data-header">
                 <div>
                   <h2>Mapped data</h2>
-                  <p>{visibleAttachments.length} of {activeAttachments.length} active mappings shown</p>
+                  <p>{attachmentTotal} active mappings in this filtered catalog</p>
                 </div>
                 <button
                   className="primary-button"
@@ -1325,12 +1555,22 @@ function BusinessCasesPanel({
                   Add mapping
                 </button>
               </div>
+              <label className="search-field">
+                <Search size={16} />
+                <input
+                  aria-label="Search mapped data"
+                  placeholder="Search dataset, ID, role or context"
+                  value={attachmentSearch}
+                  onChange={(event) => setAttachmentSearch(event.target.value)}
+                />
+              </label>
               <ArtifactFilters
                 pipelines={selectedBusinessCasePipelines}
                 purpose={bcDataPurposeFilter}
                 pipelineId={bcDataPipelineFilter}
                 onPurposeChange={setBcDataPurposeFilter}
                 onPipelineChange={setBcDataPipelineFilter}
+                businessCaseId={selectedBusinessCase.id}
                 role={bcDataRoleFilter}
                 roleOptions={businessCaseDataRoleOptions}
                 onRoleChange={setBcDataRoleFilter}
@@ -1345,7 +1585,11 @@ function BusinessCasesPanel({
               />
               <div className="asset-list">
                 {visibleAttachments.map((item) => {
-                  const assetName = attachedDataset(item.data_asset_id)?.name ?? item.data_asset_id;
+                  const assetName = (
+                    item.data_asset_name
+                    || attachedDataset(item.data_asset_id)?.name
+                    || item.data_asset_id
+                  );
                   return (
                     <div className={`asset-row${editingAttachmentId === item.id ? " selected" : ""}`} key={item.id}>
                       <div>
@@ -1354,18 +1598,16 @@ function BusinessCasesPanel({
                       </div>
                       <div className="asset-actions">
                         <em>{item.role}</em>
-                        {attachedDataset(item.data_asset_id) && (
-                          <button className="secondary-button compact-button" type="button"
-                            onClick={() => setBcDatasetHistory(attachedDataset(item.data_asset_id)!)}>
-                            <History size={14} /> Versions
-                          </button>
-                        )}
-                        {attachedDataset(item.data_asset_id) && (
-                          <button className="secondary-button compact-button" type="button"
-                            onClick={() => setDependencyTarget({ referenceId: attachedDataset(item.data_asset_id)!.id, artifactType: "dataset", title: assetName })}>
-                            <GitBranch size={14} /> Dependencies
-                          </button>
-                        )}
+                        <button className="secondary-button compact-button" type="button"
+                          onClick={() => void api.getDataset(item.data_asset_id).then(async (dataset) => {
+                            setBcDatasetHistory(dataset);
+                          })}>
+                          <History size={14} /> Versions
+                        </button>
+                        <button className="secondary-button compact-button" type="button"
+                          onClick={() => setDependencyTarget({ referenceId: item.data_asset_id, artifactType: "dataset", title: assetName })}>
+                          <GitBranch size={14} /> Dependencies
+                        </button>
                         <button
                           className="secondary-button compact-button"
                           type="button"
@@ -1389,10 +1631,17 @@ function BusinessCasesPanel({
                 })}
                 {!visibleAttachments.length && (
                   <div className="empty-state">
-                    {activeAttachments.length ? "No mapped datasets match these filters." : "No data mapped to this business case yet"}
+                    {attachmentTotal ? "No mapped datasets match these filters." : "No data mapped to this business case yet"}
                   </div>
                 )}
               </div>
+              <PaginationControls
+                total={attachmentTotal}
+                limit={20}
+                offset={attachmentOffset}
+                onOffsetChange={setAttachmentOffset}
+                label="Business Case data mappings"
+              />
             </div>
 
             {isMappingFormOpen && (
@@ -1415,16 +1664,25 @@ function BusinessCasesPanel({
                 </div>
                 <label>
                   Dataset/Data View
-                  <select
+                  <PagedCatalogSelect
                     value={selectedDataAssetId}
-                    onChange={(event) => setSelectedDataAssetId(event.target.value)}
+                    onChange={(value, item) => {
+                      setSelectedDataAssetId(value);
+                      setSelectedDataAssetSnapshot(item);
+                    }}
+                    loadPage={(query) => api.pageDatasets({
+                      ...query,
+                      families: true,
+                      include_deleted: false,
+                      summary: true
+                    })}
+                    getId={(item) => item.id}
+                    getLabel={(item) => `${item.name} · v${item.version_number}`}
+                    selectedItem={selectedDataAssetSnapshot}
+                    emptyLabel="Choose dataset or Data View"
+                    searchPlaceholder="Search datasets and Data Views"
                     disabled={Boolean(editingAttachmentId)}
-                  >
-                    <option value="">First available</option>
-                    {availableDataAssets.map((item) => (
-                      <option key={item.id} value={item.id}>{item.name}</option>
-                    ))}
-                  </select>
+                  />
                 </label>
                 <label>
                   Role
@@ -1460,15 +1718,22 @@ function BusinessCasesPanel({
               </div>
             )}
 
-            {deletedAttachments.length > 0 && (
+            {deletedAttachmentTotal > 0 && (
               <details className="panel editor-details deleted-assets-panel">
-                <summary>Deleted BC mappings <span>{deletedAttachments.length}</span></summary>
+                <summary>Deleted BC mappings <span>{deletedAttachmentTotal}</span></summary>
                 <AssetList title="" assets={deletedAttachments.map((item) => ({
                   id: item.id,
-                  name: attachedDataset(item.data_asset_id)?.name ?? item.data_asset_id,
+                  name: item.data_asset_name || attachedDataset(item.data_asset_id)?.name || item.data_asset_id,
                   meta: `${item.data_asset_kind} / key: ${item.primary_key_column || "not set"} / ${item.context_note || "no note"}`,
                   status: item.role
                 }))} />
+                <PaginationControls
+                  total={deletedAttachmentTotal}
+                  limit={20}
+                  offset={deletedAttachmentOffset}
+                  onOffsetChange={setDeletedAttachmentOffset}
+                  label="deleted Business Case mappings"
+                />
               </details>
             )}
           </>
@@ -1477,7 +1742,7 @@ function BusinessCasesPanel({
         {selectedBusinessCase && activeWorkspace === "pipelines" && (
           <div className="panel">
             <div className="panel-header">
-              <div><h2>Mapped pipelines</h2><p>{visibleBusinessCasePipelines.length} of {selectedBusinessCasePipelines.length} workflows shown.</p></div>
+              <div><h2>Mapped pipelines</h2><p>{bcWorkspacePipelineTotal} workflows in this filtered catalog.</p></div>
               <button className="secondary-button compact-button" type="button"
                 onClick={() => setBcRunsPipelineId("all")}>
                 <History size={15} /> Runs
@@ -1511,7 +1776,7 @@ function BusinessCasesPanel({
                 </select>
               </label>
               <span className="pipeline-filter-summary">
-                {visibleBusinessCasePipelines.length} of {selectedBusinessCasePipelines.length} workflows
+                {bcWorkspacePipelineTotal} workflows
               </span>
             </div>
           <AssetList title="" assets={visibleBusinessCasePipelines.map((item) => ({
@@ -1548,12 +1813,19 @@ function BusinessCasesPanel({
               }
             ]
           }))} />
+          <PaginationControls
+            total={bcWorkspacePipelineTotal}
+            limit={20}
+            offset={bcWorkspacePipelineOffset}
+            onOffsetChange={setBcWorkspacePipelineOffset}
+            label="Business Case pipelines"
+          />
           </div>
         )}
         {selectedBusinessCase && activeWorkspace === "models" && (
           <div className="panel">
             <div className="panel-header">
-              <div><h2>Models</h2><p>{visibleBusinessCaseModels.length} of {selectedBusinessCaseModels.length} model families shown</p></div>
+              <div><h2>Models</h2><p>{bcWorkspaceModelTotal} model families in this filtered catalog</p></div>
               <button className="secondary-button compact-button" type="button"
                 onClick={() => onOpenModels(selectedBusinessCase.id)}>Open model registry</button>
             </div>
@@ -1563,6 +1835,7 @@ function BusinessCasesPanel({
               pipelineId={bcModelPipelineFilter}
               onPurposeChange={setBcModelPurposeFilter}
               onPipelineChange={setBcModelPipelineFilter}
+              businessCaseId={selectedBusinessCase.id}
             />
             <AssetList title="" assets={visibleBusinessCaseModels.map((item) => ({
               id: item.id,
@@ -1575,6 +1848,13 @@ function BusinessCasesPanel({
                 { label: "Dependencies", icon: "dependencies", onClick: () => setDependencyTarget({ referenceId: item.id, artifactType: "model_version", title: item.name }) }
               ]
             }))} />
+            <PaginationControls
+              total={bcWorkspaceModelTotal}
+              limit={20}
+              offset={bcWorkspaceModelOffset}
+              onOffsetChange={setBcWorkspaceModelOffset}
+              label="Business Case model families"
+            />
           </div>
         )}
         {selectedBusinessCase && activeWorkspace === "services" && (
@@ -1582,7 +1862,7 @@ function BusinessCasesPanel({
             <div className="panel-header">
               <div>
                 <h2>Model services</h2>
-                <p>{selectedBusinessCaseDeployments.length} stable {selectedBusinessCaseDeployments.length === 1 ? "endpoint" : "endpoints"} in this business case</p>
+                <p>{bcWorkspaceDeploymentTotal} stable {bcWorkspaceDeploymentTotal === 1 ? "endpoint" : "endpoints"} in this business case</p>
               </div>
             </div>
             {selectedBusinessCaseDeployments.length === 0 ? (
@@ -1625,12 +1905,19 @@ function BusinessCasesPanel({
                 })}
               </div>
             )}
+            <PaginationControls
+              total={bcWorkspaceDeploymentTotal}
+              limit={12}
+              offset={bcWorkspaceDeploymentOffset}
+              onOffsetChange={setBcWorkspaceDeploymentOffset}
+              label="Business Case model services"
+            />
           </div>
         )}
         {selectedBusinessCase && activeWorkspace === "reports" && (
           <div className="panel">
             <div className="panel-header">
-              <div><h2>Scoring reports</h2><p>{visibleBusinessCaseReports.length} of {selectedBusinessCaseReports.length} report families shown</p></div>
+              <div><h2>Scoring reports</h2><p>{bcWorkspaceReportTotal} report families in this filtered catalog</p></div>
               <button className="secondary-button compact-button" type="button"
                 onClick={() => onOpenScoringReports(selectedBusinessCase.id)}>Open report registry</button>
             </div>
@@ -1640,6 +1927,7 @@ function BusinessCasesPanel({
               pipelineId={bcReportPipelineFilter}
               onPurposeChange={setBcReportPurposeFilter}
               onPipelineChange={setBcReportPipelineFilter}
+              businessCaseId={selectedBusinessCase.id}
             />
             <AssetList title="" assets={visibleBusinessCaseReports.map((item) => ({
               id: item.id,
@@ -1652,6 +1940,13 @@ function BusinessCasesPanel({
                 { label: "Dependencies", icon: "dependencies", onClick: () => setDependencyTarget({ referenceId: item.id, artifactType: "report", title: item.name }) }
               ]
             }))} />
+            <PaginationControls
+              total={bcWorkspaceReportTotal}
+              limit={20}
+              offset={bcWorkspaceReportOffset}
+              onOffsetChange={setBcWorkspaceReportOffset}
+              label="Business Case report families"
+            />
           </div>
         )}
       </div>
@@ -1681,8 +1976,9 @@ function BusinessCasesPanel({
       {bcDatasetHistory && (
         <DatasetVersionHistoryDialog
           dataset={bcDatasetHistory}
-          versions={datasets.filter((item) => item.logical_id === bcDatasetHistory.logical_id)}
-          onClose={() => setBcDatasetHistory(null)}
+          onClose={() => {
+            setBcDatasetHistory(null);
+          }}
           onOpen={(datasetId) => {
             setBcDatasetHistory(null);
             onOpenDataset(datasetId);
@@ -1753,62 +2049,28 @@ function BusinessCasesPanel({
               <button className="icon-button" type="button"
                 onClick={() => setBcRunDialog(null)} aria-label="Close run dialog"><X size={17} /></button>
             </div>
-            {bcRunDialog.inputs.map((input) => {
-              const attachedLogicalIds = new Set(
-                activeAttachments
-                  .map((attachment) => attachedDataset(attachment.data_asset_id)?.logical_id)
-                  .filter(Boolean)
-              );
-              const inputVersions = datasets
-                .filter((dataset) =>
-                  dataset.status !== "deleted"
-                  && (
-                    input.policy === "select_at_run_any"
-                      ? attachedLogicalIds.has(dataset.logical_id)
-                      : input.policy === "pinned"
-                        ? dataset.id === input.datasetId
-                        : dataset.logical_id === input.logicalId
-                  )
-                )
-                .sort((left, right) => right.version_number - left.version_number);
-              return (
-                <label key={input.key}>{input.name}
-                  {requiresRuntimeDatasetSelection(input.policy) ? (
-                    <select value={bcRunSelections[input.key] ?? ""}
-                      onChange={(event) => setBcRunSelections((current) => ({
-                        ...current,
-                        [input.key]: event.target.value
-                      }))} required>
-                      <option value="">Select immutable version…</option>
-                      {inputVersions.map((version) => (
-                        <option key={version.id} value={version.id}>
-                          {input.policy === "select_at_run_any" ? `${version.name} · ` : ""}
-                          v{version.version_number} · {version.row_count ?? "?"} rows
-                        </option>
-                      ))}
-                    </select>
-                  ) : (
-                    <input readOnly value={inputVersions[0]
-                      ? `${input.policy === "pinned" ? "Pinned" : "Latest"} → v${inputVersions[0].version_number}`
-                      : "No active version"} />
-                  )}
-                </label>
-              );
-            })}
+            {bcRunDialog.inputs.map((input) => (
+              <PipelineRunDatasetInputSelector
+                key={input.key}
+                input={input}
+                businessCaseId={bcRunDialog.pipeline.business_case_id}
+                value={bcRunSelections[input.key] ?? ""}
+                onChange={(value) => setBcRunSelections((current) => ({
+                  ...current,
+                  [input.key]: value
+                }))}
+              />
+            ))}
             {bcRunDialog.models.map((model) => (
-              <label key={model.key}>Inference bundle — {model.name}
-                <select value={bcRunModelSelections[model.key] ?? ""}
-                  onChange={(event) => setBcRunModelSelections((current) => ({ ...current, [model.key]: event.target.value }))}>
-                  {model.versions.map((version, index) => (
-                    <option key={version.id} value={version.id}>
-                      {index === 0 ? "Latest — " : ""}v{version.version_number} · {version.algorithm}
-                    </option>
-                  ))}
-                </select>
-                <small>{inferenceBundleSummary(
-                  model.versions.find((version) => version.id === bcRunModelSelections[model.key])
-                )}</small>
-              </label>
+              <PipelineRunModelSelector
+                key={model.key}
+                model={model}
+                value={bcRunModelSelections[model.key] ?? ""}
+                onChange={(value) => setBcRunModelSelections((current) => ({
+                  ...current,
+                  [model.key]: value
+                }))}
+              />
             ))}
             {currentBcRunResult && (
               <div className={`catalog-run-monitor ${currentBcRunResult.status}`}>
@@ -1921,6 +2183,9 @@ function JobsPanel({
   setNotice: (message: string) => void;
 }) {
   const [runs, setRuns] = useState<PipelineRun[]>([]);
+  const [runTotal, setRunTotal] = useState(0);
+  const [runOffset, setRunOffset] = useState(0);
+  const [runSummary, setRunSummary] = useState({ active: 0, dryRuns: 0, failed: 0 });
   const [statusFilter, setStatusFilter] = useState("active");
   const [scopeFilter, setScopeFilter] = useState("");
   const [search, setSearch] = useState("");
@@ -1928,20 +2193,42 @@ function JobsPanel({
   const [busyRunId, setBusyRunId] = useState<string | null>(null);
   const [selectedRunDetails, setSelectedRunDetails] = useState<PipelineRun | null>(null);
 
-  const activeRuns = runs.filter((run) => run.status === "queued" || run.status === "running");
-  const failedRuns = runs.filter((run) => run.status === "failed");
-  const dryRuns = runs.filter((run) => run.is_dry_run);
-
   const loadRuns = useCallback(async () => {
     setIsLoading(true);
     try {
-      setRuns(await api.listPipelineRunHistory(300));
+      const baseQuery = {
+        limit: 30,
+        offset: runOffset,
+        search: search.trim(),
+        business_case_id: scopeFilter
+      };
+      const filterQuery = statusFilter === "dry-run"
+        ? { ...baseQuery, dry_run: true }
+        : statusFilter === "all"
+          ? baseQuery
+          : { ...baseQuery, status: statusFilter };
+      const [page, activePage, dryRunPage, failedPage] = await Promise.all([
+        api.pagePipelineRunHistory(filterQuery),
+        api.pagePipelineRunHistory({ limit: 1, status: "active" }),
+        api.pagePipelineRunHistory({ limit: 1, dry_run: true }),
+        api.pagePipelineRunHistory({ limit: 1, status: "failed" })
+      ]);
+      setRuns(page.items);
+      setRunTotal(page.total);
+      setRunSummary({
+        active: activePage.total,
+        dryRuns: dryRunPage.total,
+        failed: failedPage.total
+      });
+      if (page.total > 0 && page.offset >= page.total) {
+        setRunOffset(Math.max(0, Math.floor((page.total - 1) / page.limit) * page.limit));
+      }
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Could not load jobs");
     } finally {
       setIsLoading(false);
     }
-  }, [setNotice]);
+  }, [runOffset, scopeFilter, search, setNotice, statusFilter]);
 
   const refreshAllJobs = useCallback(async () => {
     await Promise.all([onRefreshCatalog(), loadRuns()]);
@@ -1953,34 +2240,19 @@ function JobsPanel({
   }, [onRegisterRefresh, refreshAllJobs]);
 
   useEffect(() => {
-    void loadRuns();
+    const timer = window.setTimeout(() => void loadRuns(), 250);
+    return () => window.clearTimeout(timer);
   }, [loadRuns]);
+
+  useEffect(() => {
+    setRunOffset(0);
+  }, [scopeFilter, search, statusFilter]);
 
   useEffect(() => {
     if (!runs.some((run) => run.status === "queued" || run.status === "running")) return;
     const interval = window.setInterval(() => void loadRuns(), 2500);
     return () => window.clearInterval(interval);
   }, [loadRuns, runs]);
-
-  const filteredRuns = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    return runs.filter((run) => {
-      const pipeline = pipelines.find((item) => item.id === run.pipeline_id);
-      const businessCase = businessCases.find((item) => item.id === run.business_case_id);
-      if (scopeFilter && run.business_case_id !== scopeFilter) return false;
-      if (statusFilter === "active" && run.status !== "queued" && run.status !== "running") return false;
-      if (statusFilter === "dry-run" && !run.is_dry_run) return false;
-      if (statusFilter !== "all" && statusFilter !== "active" && statusFilter !== "dry-run" && run.status !== statusFilter) return false;
-      if (!needle) return true;
-      return [
-        run.id,
-        run.status,
-        pipeline?.name,
-        businessCase?.name,
-        run.requested_step_id
-      ].some((value) => String(value ?? "").toLowerCase().includes(needle));
-    });
-  }, [businessCases, pipelines, runs, scopeFilter, search, statusFilter]);
 
   async function cancelRun(run: PipelineRun) {
     setBusyRunId(run.id);
@@ -2023,9 +2295,9 @@ function JobsPanel({
       </div>
 
       <div className="job-summary-grid">
-        <Metric icon={History} label="Active" value={activeRuns.length} tone="teal" />
-        <Metric icon={CheckCircle2} label="Dry-runs" value={dryRuns.length} tone="amber" />
-        <Metric icon={X} label="Failed" value={failedRuns.length} tone="rose" />
+        <Metric icon={History} label="Active" value={runSummary.active} tone="teal" />
+        <Metric icon={CheckCircle2} label="Dry-runs" value={runSummary.dryRuns} tone="amber" />
+        <Metric icon={X} label="Failed" value={runSummary.failed} tone="rose" />
       </div>
 
       <div className="job-filters">
@@ -2048,12 +2320,15 @@ function JobsPanel({
         </label>
         <label>
           Business Case
-          <select value={scopeFilter} onChange={(event) => setScopeFilter(event.target.value)}>
-            <option value="">All Business Cases</option>
-            {businessCases.map((item) => (
-              <option value={item.id} key={item.id}>{item.name}</option>
-            ))}
-          </select>
+          <PagedCatalogSelect
+            value={scopeFilter}
+            onChange={(value) => setScopeFilter(value)}
+            loadPage={api.pageBusinessCases}
+            getId={(item) => item.id}
+            getLabel={(item) => item.name}
+            emptyLabel="All Business Cases"
+            searchPlaceholder="Search Business Cases"
+          />
         </label>
       </div>
 
@@ -2068,7 +2343,7 @@ function JobsPanel({
           <span>Rows</span>
           <span>Actions</span>
         </div>
-        {filteredRuns.map((run) => {
+        {runs.map((run) => {
           const canCancel = run.status === "queued" || run.status === "running";
           const canRerun = run.status === "failed" || run.status === "cancelled";
           return (
@@ -2103,10 +2378,18 @@ function JobsPanel({
             </div>
           );
         })}
-        {!filteredRuns.length && (
+        {!runs.length && (
           <div className="empty-state">No jobs match the current filters.</div>
         )}
       </div>
+      <PaginationControls
+        total={runTotal}
+        limit={30}
+        offset={runOffset}
+        onOffsetChange={setRunOffset}
+        disabled={isLoading}
+        label="jobs"
+      />
 
       {selectedRunDetails && (
         <PipelineRunDetailsDialog
@@ -2143,6 +2426,7 @@ function PipelinesPanel({
   setNotice: (message: string) => void;
 }) {
   const [businessCaseId, setBusinessCaseId] = useState("");
+  const [createBusinessCase, setCreateBusinessCase] = useState<BusinessCase | undefined>();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [pipelineType, setPipelineType] = useState("custom");
@@ -2151,7 +2435,16 @@ function PipelinesPanel({
   const [isCreatingPipeline, setIsCreatingPipeline] = useState(false);
   const [catalogBusinessCaseFilter, setCatalogBusinessCaseFilter] = useState("");
   const [catalogPipelineTypeFilter, setCatalogPipelineTypeFilter] = useState("");
+  const [catalogPipelineSearch, setCatalogPipelineSearch] = useState("");
+  const [activePipelines, setActivePipelines] = useState<Pipeline[]>([]);
+  const [activePipelineTotal, setActivePipelineTotal] = useState(0);
+  const [activePipelineOffset, setActivePipelineOffset] = useState(0);
+  const [deprecatedPipelines, setDeprecatedPipelines] = useState<Pipeline[]>([]);
+  const [deprecatedPipelineTotal, setDeprecatedPipelineTotal] = useState(0);
+  const [deprecatedPipelineOffset, setDeprecatedPipelineOffset] = useState(0);
+  const [pipelineCatalogLoading, setPipelineCatalogLoading] = useState(false);
   const [selectedPipelineId, setSelectedPipelineId] = useState("");
+  const [selectedPipelineSnapshot, setSelectedPipelineSnapshot] = useState<Pipeline | undefined>();
   const [isCreatePipelineOpen, setIsCreatePipelineOpen] = useState(false);
   const [copyPipelineTarget, setCopyPipelineTarget] = useState<Pipeline | null>(null);
   const [copyPipelineName, setCopyPipelineName] = useState("");
@@ -2189,6 +2482,7 @@ function PipelinesPanel({
   const [definitionText, setDefinitionText] = useState(JSON.stringify(emptyWorkflowDefinition(), null, 2));
   const [draftValidationError, setDraftValidationError] = useState("");
   const [versions, setVersions] = useState<PipelineVersion[]>([]);
+  const [versionTotal, setVersionTotal] = useState(0);
   const [hydratedPipelineId, setHydratedPipelineId] = useState("");
   const [runs, setRuns] = useState<PipelineRun[]>([]);
   const [activeStepRuns, setActiveStepRuns] = useState<PipelineStepRun[]>([]);
@@ -2199,22 +2493,23 @@ function PipelinesPanel({
   const [versionHistoryPipeline, setVersionHistoryPipeline] = useState<Pipeline | null>(null);
   const [runHistoryRefreshKey, setRunHistoryRefreshKey] = useState(0);
   const [pipelineDataAttachments, setPipelineDataAttachments] = useState<BusinessCaseDataAttachment[]>([]);
-  const activePipelines = pipelines.filter((item) => item.status !== "deprecated");
-  const deprecatedPipelines = pipelines.filter((item) => item.status === "deprecated");
   const catalogPipelineTypes = useMemo(
-    () => [...new Set(pipelines.map((item) => item.type))].sort((left, right) => left.localeCompare(right)),
-    [pipelines]
+    () => ["automl", "batch_scoring", "custom", "data_preparation", "feature_engineering", "monitoring", "training"],
+    []
   );
-  const pipelineMatchesCatalogFilters = (item: Pipeline) =>
-    (!catalogBusinessCaseFilter || item.business_case_id === catalogBusinessCaseFilter)
-    && (!catalogPipelineTypeFilter || item.type === catalogPipelineTypeFilter);
-  const filteredActivePipelines = activePipelines.filter(pipelineMatchesCatalogFilters);
-  const filteredDeprecatedPipelines = deprecatedPipelines.filter(pipelineMatchesCatalogFilters);
-  const hasCatalogFilters = Boolean(catalogBusinessCaseFilter || catalogPipelineTypeFilter);
+  const filteredActivePipelines = activePipelines;
+  const filteredDeprecatedPipelines = deprecatedPipelines;
+  const hasCatalogFilters = Boolean(
+    catalogBusinessCaseFilter
+    || catalogPipelineTypeFilter
+    || catalogPipelineSearch
+  );
   // Do not fall back to another pipeline while a freshly created/copied item is
   // being added to the refreshed catalog. Rendering that fallback with the new
   // selected ID can persist the previous workflow under the new pipeline.
   const selectedPipeline = activePipelines.find((item) => item.id === selectedPipelineId)
+    ?? pipelines.find((item) => item.id === selectedPipelineId)
+    ?? selectedPipelineSnapshot
     ?? (!selectedPipelineId ? activePipelines[0] : undefined);
   const selectedPipelineIdValue = selectedPipeline?.id ?? "";
   const selectedBusinessCaseIdValue = selectedPipeline?.business_case_id ?? "";
@@ -2230,24 +2525,90 @@ function PipelinesPanel({
   }, [businessCaseId, businessCases]);
 
   useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setPipelineCatalogLoading(true);
+      const common = {
+        limit: 20,
+        search: catalogPipelineSearch.trim(),
+        business_case_id: catalogBusinessCaseFilter,
+        pipeline_type: catalogPipelineTypeFilter
+      };
+      Promise.all([
+        api.pagePipelines({
+          ...common,
+          offset: activePipelineOffset,
+          include_deprecated: false
+        }),
+        api.pagePipelines({
+          ...common,
+          offset: deprecatedPipelineOffset,
+          status: "deprecated"
+        })
+      ])
+        .then(([activePage, deprecatedPage]) => {
+          setActivePipelines(activePage.items);
+          setActivePipelineTotal(activePage.total);
+          setDeprecatedPipelines(deprecatedPage.items);
+          setDeprecatedPipelineTotal(deprecatedPage.total);
+        })
+        .catch((error) => setNotice(error instanceof Error ? error.message : "Could not load pipelines"))
+        .finally(() => setPipelineCatalogLoading(false));
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [
+    activePipelineOffset,
+    catalogBusinessCaseFilter,
+    catalogPipelineSearch,
+    catalogPipelineTypeFilter,
+    deprecatedPipelineOffset,
+    pipelines,
+    setNotice
+  ]);
+
+  useEffect(() => {
+    setActivePipelineOffset(0);
+    setDeprecatedPipelineOffset(0);
+  }, [catalogBusinessCaseFilter, catalogPipelineSearch, catalogPipelineTypeFilter]);
+
+  useEffect(() => {
     if (!selectedPipelineId && pipelines[0]) {
       setSelectedPipelineId(pipelines[0].id);
     }
   }, [pipelines, selectedPipelineId]);
 
   useEffect(() => {
+    const current = (
+      activePipelines.find((item) => item.id === selectedPipelineId)
+      ?? pipelines.find((item) => item.id === selectedPipelineId)
+    );
+    if (current) setSelectedPipelineSnapshot(current);
+  }, [activePipelines, pipelines, selectedPipelineId]);
+
+  useEffect(() => {
     if (!openRequest) return;
-    const requestedPipeline = pipelines.find((item) => item.id === openRequest.pipelineId);
-    if (!requestedPipeline) {
-      setNotice("The requested pipeline is no longer available");
-      onOpenRequestConsumed();
-      return;
-    }
-    setSelectedPipelineId(requestedPipeline.id);
-    setRunFeedback(null);
-    setIsPipelineEditorOpen(true);
-    onOpenRequestConsumed();
-  }, [openRequest, onOpenRequestConsumed, pipelines, setNotice]);
+    let active = true;
+    const cached = [...activePipelines, ...pipelines].find(
+      (item) => item.id === openRequest.pipelineId
+    );
+    (cached ? Promise.resolve(cached) : api.getPipeline(openRequest.pipelineId))
+      .then((requestedPipeline) => {
+        if (!active) return;
+        setActivePipelines((current) => current.some((item) => item.id === requestedPipeline.id)
+          ? current
+          : [requestedPipeline, ...current]);
+        setSelectedPipelineSnapshot(requestedPipeline);
+        setSelectedPipelineId(requestedPipeline.id);
+        setRunFeedback(null);
+        setIsPipelineEditorOpen(true);
+      })
+      .catch(() => {
+        if (active) setNotice("The requested pipeline is no longer available");
+      })
+      .finally(() => {
+        if (active) onOpenRequestConsumed();
+      });
+    return () => { active = false; };
+  }, [activePipelines, openRequest, onOpenRequestConsumed, pipelines, setNotice]);
 
   useEffect(() => {
     setPipelineNameDraft(selectedPipeline?.name ?? "");
@@ -2259,6 +2620,7 @@ function PipelinesPanel({
   useEffect(() => {
     setHydratedPipelineId("");
     setVersions([]);
+    setVersionTotal(0);
     setRuns([]);
     setActiveStepRuns([]);
     setPipelineDataAttachments([]);
@@ -2268,15 +2630,20 @@ function PipelinesPanel({
     }
     let active = true;
     Promise.all([
-      api.listPipelineVersions(selectedPipelineIdValue),
-      api.listPipelineRuns(selectedPipelineIdValue),
-      api.listBusinessCaseDataAttachments(selectedBusinessCaseIdValue)
+      api.pagePipelineVersions(selectedPipelineIdValue, { limit: 20, offset: 0 }),
+      api.listPipelineRuns(selectedPipelineIdValue, 8),
+      api.pageBusinessCaseDataAttachments(selectedBusinessCaseIdValue, {
+        limit: 100,
+        offset: 0
+      })
     ])
-      .then(([versionItems, runItems, attachmentItems]) => {
+      .then(([versionPage, runItems, attachmentPage]) => {
         if (!active) return;
+        const versionItems = [...versionPage.items].reverse();
         setVersions(versionItems);
+        setVersionTotal(versionPage.total);
         setRuns(runItems);
-        setPipelineDataAttachments(attachmentItems);
+        setPipelineDataAttachments(attachmentPage.items);
         const draftVersion = versionItems.find((item) => item.status === "draft");
         const selectedVersion = draftVersion ?? versionItems.at(-1);
         if (selectedVersion) {
@@ -2335,10 +2702,13 @@ function PipelinesPanel({
         type: pipelineType,
         definition: workflowTemplateDefinition(
           pipelineTemplate,
-          businessCases.find((item) => item.id === businessCaseId)?.target_column ?? ""
+          createBusinessCase?.target_column
+            ?? businessCases.find((item) => item.id === businessCaseId)?.target_column
+            ?? ""
         )
       });
       setNotice(`Pipeline created: ${created.name}`);
+      setSelectedPipelineSnapshot(created);
       setSelectedPipelineId(created.id);
       setIsCreatePipelineOpen(false);
       setIsPipelineEditorOpen(true);
@@ -2406,6 +2776,7 @@ function PipelinesPanel({
       setIsDefinitionDirty(false);
       setCopyPipelineTarget(null);
       setCopyPipelineName("");
+      setSelectedPipelineSnapshot(copied);
       setSelectedPipelineId(copied.id);
       await onRefresh();
       setIsPipelineEditorOpen(true);
@@ -2459,7 +2830,12 @@ function PipelinesPanel({
       setIsDefinitionDirty(false);
       setDraftValidationError("");
       if (showNotice) setNotice("Draft version saved");
-      setVersions(await api.listPipelineVersions(selectedPipeline.id));
+      const versionPage = await api.pagePipelineVersions(selectedPipeline.id, {
+        limit: 20,
+        offset: 0
+      });
+      setVersions([...versionPage.items].reverse());
+      setVersionTotal(versionPage.total);
       await onRefresh();
       return saved;
     } catch (error) {
@@ -2484,7 +2860,12 @@ function PipelinesPanel({
       await api.publishDraftPipelineVersion(selectedPipeline.id);
       setDraftValidationError("");
       setNotice("Draft version published");
-      setVersions(await api.listPipelineVersions(selectedPipeline.id));
+      const versionPage = await api.pagePipelineVersions(selectedPipeline.id, {
+        limit: 20,
+        offset: 0
+      });
+      setVersions([...versionPage.items].reverse());
+      setVersionTotal(versionPage.total);
       await onRefresh();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Draft publish validation failed";
@@ -2507,7 +2888,12 @@ function PipelinesPanel({
     setDefinitionText(JSON.stringify(normalized, null, 2));
     clearPipelineWorkingDraft(selectedPipeline.id);
     setIsDefinitionDirty(false);
-    setVersions(await api.listPipelineVersions(selectedPipeline.id));
+    const versionPage = await api.pagePipelineVersions(selectedPipeline.id, {
+      limit: 20,
+      offset: 0
+    });
+    setVersions([...versionPage.items].reverse());
+    setVersionTotal(versionPage.total);
     setNotice(`Draft v${draft.version_number} created`);
     await onRefresh();
   }
@@ -2554,10 +2940,14 @@ function PipelinesPanel({
       setRunFeedback({ status: "running", title: `${action} in progress`, detail: `Worker accepted ${target} run ${shortId(run.id)}.` });
       while (run.status === "queued" || run.status === "running") {
         await new Promise((resolve) => window.setTimeout(resolve, 750));
-        run = await api.getPipelineRun(selectedPipeline.id, run.id);
+        const runStatus = await api.getPipelineRunStatus(selectedPipeline.id, run.id);
+        run = { ...run, ...runStatus };
+        if (run.status !== "queued" && run.status !== "running") {
+          run = await api.getPipelineRun(selectedPipeline.id, run.id);
+        }
         setActiveRunMonitor(run);
       }
-      setRuns(await api.listPipelineRuns(selectedPipeline.id));
+      setRuns(await api.listPipelineRuns(selectedPipeline.id, 8));
       setActiveStepRuns(await api.listPipelineStepRuns(selectedPipeline.id, run.id));
       const scope = run.output_manifest[0]?.data_scope ?? "unknown";
       const counts = `${run.input_row_count ?? 0} input rows → ${run.output_row_count ?? 0} output rows`;
@@ -2588,8 +2978,12 @@ function PipelinesPanel({
 
   async function openCatalogRunDialog(pipeline: Pipeline) {
     try {
-      const versionItems = await api.listPipelineVersions(pipeline.id);
-      const published = versionItems.filter((item) => item.status === "published").at(-1);
+      const versionPage = await api.pagePipelineVersions(pipeline.id, {
+        limit: 1,
+        offset: 0,
+        status: "published"
+      });
+      const published = versionPage.items[0];
       if (!published) {
         setNotice("This pipeline has no published version");
         return;
@@ -2635,7 +3029,14 @@ function PipelinesPanel({
       setSelectedPipelineId(catalogRunDialog.pipeline.id);
       while (run.status === "queued" || run.status === "running") {
         await new Promise((resolve) => window.setTimeout(resolve, 750));
-        run = await api.getPipelineRun(catalogRunDialog.pipeline.id, run.id);
+        const runStatus = await api.getPipelineRunStatus(
+          catalogRunDialog.pipeline.id,
+          run.id,
+        );
+        run = { ...run, ...runStatus };
+        if (run.status !== "queued" && run.status !== "running") {
+          run = await api.getPipelineRun(catalogRunDialog.pipeline.id, run.id);
+        }
         setCatalogRunResult(run);
       }
       await onRefresh();
@@ -2787,16 +3188,26 @@ function PipelinesPanel({
             </div>
           </div>
           <div className="pipeline-catalog-filters" aria-label="Pipeline filters">
+            <label className="search-field">
+              <Search size={16} />
+              <input
+                aria-label="Search pipelines"
+                placeholder="Search name, description or type"
+                value={catalogPipelineSearch}
+                onChange={(event) => setCatalogPipelineSearch(event.target.value)}
+              />
+            </label>
             <label>
               <span><Filter size={14} /> Business case</span>
-              <select
-                aria-label="Filter pipelines by Business Case"
+              <PagedCatalogSelect
                 value={catalogBusinessCaseFilter}
-                onChange={(event) => setCatalogBusinessCaseFilter(event.target.value)}
-              >
-                <option value="">All business cases</option>
-                {businessCases.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-              </select>
+                onChange={(value) => setCatalogBusinessCaseFilter(value)}
+                loadPage={api.pageBusinessCases}
+                getId={(item) => item.id}
+                getLabel={(item) => item.name}
+                emptyLabel="All business cases"
+                searchPlaceholder="Search Business Cases"
+              />
             </label>
             <label>
               <span><Filter size={14} /> Pipeline type</span>
@@ -2812,7 +3223,7 @@ function PipelinesPanel({
               </select>
             </label>
             <span className="pipeline-filter-summary">
-              {filteredActivePipelines.length} of {activePipelines.length} active workflows
+              {activePipelineTotal} active workflows
             </span>
           </div>
           <div className="pipeline-table" role="table" aria-label="Pipelines">
@@ -2828,15 +3239,23 @@ function PipelinesPanel({
               </div>
             )}
           </div>
+          <PaginationControls
+            total={activePipelineTotal}
+            limit={20}
+            offset={activePipelineOffset}
+            onOffsetChange={setActivePipelineOffset}
+            disabled={pipelineCatalogLoading}
+            label="pipelines"
+          />
         </section>
-        {deprecatedPipelines.length > 0 && (
+        {deprecatedPipelineTotal > 0 && (
           <details className="panel deprecated-pipelines-panel">
             <summary>
               <span>
                 <strong>Deprecated pipelines</strong>
                 <small>Preserved for audit and lineage. They cannot be edited or run.</small>
               </span>
-              <i>{filteredDeprecatedPipelines.length}</i>
+              <i>{deprecatedPipelineTotal}</i>
             </summary>
             <div className="pipeline-table" role="table" aria-label="Deprecated pipelines">
               <div className="pipeline-table-row head" role="row">
@@ -2847,6 +3266,14 @@ function PipelinesPanel({
                 <div className="catalog-empty">No deprecated pipelines match the selected filters.</div>
               )}
             </div>
+            <PaginationControls
+              total={deprecatedPipelineTotal}
+              limit={20}
+              offset={deprecatedPipelineOffset}
+              onOffsetChange={setDeprecatedPipelineOffset}
+              disabled={pipelineCatalogLoading}
+              label="deprecated pipelines"
+            />
           </details>
         )}
         {isCreatePipelineOpen && (
@@ -2857,10 +3284,18 @@ function PipelinesPanel({
                 <button className="icon-button" type="button" onClick={() => setIsCreatePipelineOpen(false)} aria-label="Close"><X size={17} /></button>
               </div>
               <label>Business case
-                <select value={businessCaseId} onChange={(event) => setBusinessCaseId(event.target.value)} required>
-                  <option value="">Choose BC</option>
-                  {businessCases.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-                </select>
+                <PagedCatalogSelect
+                  value={businessCaseId}
+                  onChange={(value, item) => {
+                    setBusinessCaseId(value);
+                    setCreateBusinessCase(item);
+                  }}
+                  loadPage={api.pageBusinessCases}
+                  getId={(item) => item.id}
+                  getLabel={(item) => item.name}
+                  emptyLabel="Choose BC"
+                  searchPlaceholder="Search Business Cases"
+                />
               </label>
               <label>Name<input value={name} onChange={(event) => setName(event.target.value)} autoFocus required /></label>
               <label>Purpose
@@ -3015,73 +3450,28 @@ function PipelinesPanel({
                   </div>
                 </div>
               )}
-              {!catalogRunResult && catalogRunDialog.inputs.map((input) => {
-                const attachedLogicalIds = new Set(
-                  pipelineDataAttachments
-                    .map((attachment) =>
-                      datasets.find((dataset) => dataset.id === attachment.data_asset_id)?.logical_id
-                    )
-                    .filter(Boolean)
-                );
-                const versionsForInput = datasets
-                  .filter((dataset) =>
-                    dataset.status !== "deleted"
-                    && (
-                      input.policy === "select_at_run_any"
-                        ? attachedLogicalIds.has(dataset.logical_id)
-                        : input.policy === "pinned"
-                          ? dataset.id === input.datasetId
-                          : dataset.logical_id === input.logicalId
-                    )
-                  )
-                  .sort((left, right) => right.version_number - left.version_number);
-                const latest = versionsForInput[0];
-                return (
-                  <label key={input.key}>{input.name}
-                    {!requiresRuntimeDatasetSelection(input.policy) ? (
-                      <input value={latest
-                        ? `${input.policy === "pinned" ? "Pinned" : "Latest"} → v${latest.version_number}`
-                        : "No active version"} readOnly />
-                    ) : (
-                      <select
-                        value={catalogRunSelections[input.key] ?? ""}
-                        onChange={(event) => setCatalogRunSelections((current) => ({
-                          ...current,
-                          [input.key]: event.target.value
-                        }))}
-                        required
-                      >
-                        <option value="">Select version…</option>
-                        {versionsForInput.map((dataset) => (
-                          <option key={dataset.id} value={dataset.id}>
-                            {input.policy === "select_at_run_any" ? `${dataset.name} · ` : ""}
-                            v{dataset.version_number} · {dataset.row_count ?? "?"} rows · {formatDateTime(dataset.created_at)}
-                          </option>
-                        ))}
-                      </select>
-                    )}
-                    <small>{requiresRuntimeDatasetSelection(input.policy)
-                      ? "This run requires an explicit immutable version."
-                      : input.policy === "pinned"
-                        ? "This exact immutable version is pinned in the pipeline definition."
-                        : "Resolved and recorded when the run is created."}</small>
-                  </label>
-                );
-              })}
+              {!catalogRunResult && catalogRunDialog.inputs.map((input) => (
+                <PipelineRunDatasetInputSelector
+                  key={input.key}
+                  input={input}
+                  businessCaseId={catalogRunDialog.pipeline.business_case_id}
+                  value={catalogRunSelections[input.key] ?? ""}
+                  onChange={(value) => setCatalogRunSelections((current) => ({
+                    ...current,
+                    [input.key]: value
+                  }))}
+                />
+              ))}
               {!catalogRunResult && catalogRunDialog.models.map((model) => (
-                <label key={model.key}>Inference bundle — {model.name}
-                  <select value={catalogRunModelSelections[model.key] ?? ""}
-                    onChange={(event) => setCatalogRunModelSelections((current) => ({ ...current, [model.key]: event.target.value }))}>
-                    {model.versions.map((version, index) => (
-                      <option key={version.id} value={version.id}>
-                        {index === 0 ? "Latest — " : ""}v{version.version_number} · {version.algorithm}
-                      </option>
-                    ))}
-                  </select>
-                  <small>{inferenceBundleSummary(
-                    model.versions.find((version) => version.id === catalogRunModelSelections[model.key])
-                  )}</small>
-                </label>
+                <PipelineRunModelSelector
+                  key={model.key}
+                  model={model}
+                  value={catalogRunModelSelections[model.key] ?? ""}
+                  onChange={(value) => setCatalogRunModelSelections((current) => ({
+                    ...current,
+                    [model.key]: value
+                  }))}
+                />
               ))}
               {!catalogRunResult && !catalogRunDialog.inputs.length && <p>This pipeline has no external dataset inputs.</p>}
               {catalogRunResult && !["queued", "running"].includes(catalogRunResult.status) && (
@@ -3277,7 +3667,7 @@ function PipelinesPanel({
             setIsRunHistoryOpen(false);
           }}
           onChanged={async () => {
-            setRuns(await api.listPipelineRuns(selectedPipeline.id));
+            setRuns(await api.listPipelineRuns(selectedPipeline.id, 8));
             setRunHistoryRefreshKey((current) => current + 1);
           }}
         />
@@ -3309,13 +3699,22 @@ function PipelinesPanel({
 
       <div className="editor-lower-grid">
         <details className="panel editor-details">
-          <summary>Versions <span>{versions.length}</span></summary>
+          <summary>Recent versions <span>{versionTotal}</span></summary>
           <AssetList title="" assets={versions.map((item) => ({
             id: item.id,
             name: `v${item.version_number}`,
             meta: `hash ${item.definition_hash.slice(0, 12)} · ${item.published_at ? formatDateTime(item.published_at) : "not published"}`,
             status: item.status
           }))} />
+          {versionTotal > versions.length && selectedPipeline && (
+            <button
+              className="secondary-button compact-button"
+              type="button"
+              onClick={() => setVersionHistoryPipeline(selectedPipeline)}
+            >
+              <History size={14} /> Open paginated history
+            </button>
+          )}
         </details>
         <details className="panel editor-details" open>
           <summary>Recent runs <span>{runs.length}</span></summary>
@@ -3380,68 +3779,28 @@ function PipelinesPanel({
                 </div>
               </div>
             )}
-            {!catalogRunResult && catalogRunDialog.inputs.map((input) => {
-              const attachedLogicalIds = new Set(
-                pipelineDataAttachments
-                  .map((attachment) =>
-                    datasets.find((dataset) => dataset.id === attachment.data_asset_id)?.logical_id
-                  )
-                  .filter(Boolean)
-              );
-              const versionsForInput = datasets
-                .filter((dataset) =>
-                  dataset.status !== "deleted"
-                  && (
-                    input.policy === "select_at_run_any"
-                      ? attachedLogicalIds.has(dataset.logical_id)
-                      : input.policy === "pinned"
-                        ? dataset.id === input.datasetId
-                        : dataset.logical_id === input.logicalId
-                  )
-                )
-                .sort((left, right) => right.version_number - left.version_number);
-              const latest = versionsForInput[0];
-              return (
-                <label key={input.key}>{input.name}
-                  {!requiresRuntimeDatasetSelection(input.policy) ? (
-                    <input value={latest
-                      ? `${input.policy === "pinned" ? "Pinned" : "Latest"} → v${latest.version_number}`
-                      : "No active version"} readOnly />
-                  ) : (
-                    <select value={catalogRunSelections[input.key] ?? ""}
-                      onChange={(event) => setCatalogRunSelections((current) => ({ ...current, [input.key]: event.target.value }))}
-                      required>
-                      <option value="">Select version…</option>
-                      {versionsForInput.map((dataset) => (
-                        <option key={dataset.id} value={dataset.id}>
-                          {input.policy === "select_at_run_any" ? `${dataset.name} · ` : ""}
-                          v{dataset.version_number} · {dataset.row_count ?? "?"} rows · {formatDateTime(dataset.created_at)}
-                        </option>
-                      ))}
-                    </select>
-                  )}
-                  <small>{requiresRuntimeDatasetSelection(input.policy)
-                    ? "This run requires an explicit immutable version."
-                    : input.policy === "pinned"
-                      ? "This exact immutable version is pinned in the pipeline definition."
-                      : "Resolved and recorded when the run is created."}</small>
-                </label>
-              );
-            })}
+            {!catalogRunResult && catalogRunDialog.inputs.map((input) => (
+              <PipelineRunDatasetInputSelector
+                key={input.key}
+                input={input}
+                businessCaseId={catalogRunDialog.pipeline.business_case_id}
+                value={catalogRunSelections[input.key] ?? ""}
+                onChange={(value) => setCatalogRunSelections((current) => ({
+                  ...current,
+                  [input.key]: value
+                }))}
+              />
+            ))}
             {!catalogRunResult && catalogRunDialog.models.map((model) => (
-              <label key={model.key}>Inference bundle — {model.name}
-                <select value={catalogRunModelSelections[model.key] ?? ""}
-                  onChange={(event) => setCatalogRunModelSelections((current) => ({ ...current, [model.key]: event.target.value }))}>
-                  {model.versions.map((version, index) => (
-                    <option key={version.id} value={version.id}>
-                      {index === 0 ? "Latest — " : ""}v{version.version_number} · {version.algorithm}
-                    </option>
-                  ))}
-                </select>
-                <small>{inferenceBundleSummary(
-                  model.versions.find((version) => version.id === catalogRunModelSelections[model.key])
-                )}</small>
-              </label>
+              <PipelineRunModelSelector
+                key={model.key}
+                model={model}
+                value={catalogRunModelSelections[model.key] ?? ""}
+                onChange={(value) => setCatalogRunModelSelections((current) => ({
+                  ...current,
+                  [model.key]: value
+                }))}
+              />
             ))}
             {catalogRunResult && !["queued", "running"].includes(catalogRunResult.status) && (
               <div className="catalog-run-outputs">
@@ -3606,18 +3965,176 @@ function latestReportFamilies(reports: ScoringReport[]) {
   return [...latest.values()].sort((left, right) => right.created_at.localeCompare(left.created_at));
 }
 
+function PipelineRunModelSelector({
+  model,
+  value,
+  onChange
+}: {
+  model: PipelineRunModel;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const [snapshot, setSnapshot] = useState<ModelArtifact | undefined>(
+    model.versions.find((version) => version.id === value)
+  );
+  return (
+    <label>
+      Inference bundle — {model.name}
+      <PagedCatalogSelect<ModelArtifact>
+        value={value}
+        selectedItem={snapshot}
+        searchable={false}
+        loadPage={(query) => api.pageModelVersions(model.logicalId, query)}
+        getId={(version) => version.id}
+        getLabel={(version) => `v${version.version_number} · ${version.algorithm}${version.stage === "production" ? " · production" : ""}`}
+        emptyLabel="Select model version…"
+        searchPlaceholder="Model versions"
+        onPageLoaded={(page) => {
+          if (!value && page.offset === 0 && page.items.length) {
+            setSnapshot(page.items[0]);
+            onChange(page.items[0].id);
+          }
+        }}
+        onChange={(nextValue, version) => {
+          setSnapshot(version);
+          onChange(nextValue);
+        }}
+      />
+      <small>{snapshot
+        ? inferenceBundleSummary(snapshot)
+        : "The selected model version determines the complete immutable inference bundle."}</small>
+    </label>
+  );
+}
+
+function PipelineRunDatasetInputSelector({
+  input,
+  businessCaseId,
+  value,
+  onChange
+}: {
+  input: PipelineRunInput;
+  businessCaseId: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const [anyLogicalId, setAnyLogicalId] = useState("");
+  const [familySnapshot, setFamilySnapshot] = useState<DataAsset | undefined>();
+  const [versionSnapshot, setVersionSnapshot] = useState<DataAsset | undefined>();
+  const logicalId = input.policy === "select_at_run_any"
+    ? anyLogicalId
+    : input.logicalId;
+
+  if (!requiresRuntimeDatasetSelection(input.policy)) {
+    return (
+      <label>
+        {input.name}
+        <input
+          readOnly
+          value={input.policy === "pinned"
+            ? `Pinned immutable dataset · ${shortId(input.datasetId)}`
+            : "Latest active version · resolved when the run starts"}
+        />
+        <small>{input.policy === "pinned"
+          ? "This exact immutable version is pinned in the pipeline definition."
+          : "The resolved version is recorded when the run is created."}</small>
+      </label>
+    );
+  }
+
+  return (
+    <label>
+      {input.name}
+      {input.policy === "select_at_run_any" && (
+        <PagedCatalogSelect<DataAsset>
+          value={anyLogicalId}
+          selectedItem={familySnapshot}
+          loadPage={async (query) => {
+            const page = await api.pageDatasets({
+              ...query,
+              business_case_id: businessCaseId,
+              asset_kind: "dataset",
+              families: true
+            });
+            return {
+              ...page,
+              items: page.items.map((item) => ({
+                ...item,
+                id: item.logical_id || item.id
+              }))
+            };
+          }}
+          getId={(dataset) => dataset.id}
+          getLabel={(dataset) => `${dataset.name} · latest v${dataset.version_number}`}
+          emptyLabel="Select dataset family…"
+          searchPlaceholder="Search Business Case datasets"
+          onChange={(nextLogicalId, dataset) => {
+            setAnyLogicalId(nextLogicalId);
+            setFamilySnapshot(dataset);
+            setVersionSnapshot(undefined);
+            onChange("");
+          }}
+        />
+      )}
+      <PagedCatalogSelect<DataAsset>
+        value={value}
+        selectedItem={versionSnapshot}
+        reloadKey={logicalId}
+        disabled={!logicalId}
+        searchable={false}
+        loadPage={(query) => logicalId
+          ? api.pageDatasetVersions(logicalId, query)
+          : Promise.resolve({
+              items: [],
+              total: 0,
+              limit: query.limit,
+              offset: query.offset,
+              has_next: false
+            })}
+        getId={(dataset) => dataset.id}
+        getLabel={(dataset) => `v${dataset.version_number} · ${dataset.row_count ?? "?"} rows · ${formatDateTime(dataset.created_at)}`}
+        emptyLabel="Select immutable version…"
+        searchPlaceholder="Filter versions"
+        onChange={(nextValue, dataset) => {
+          setVersionSnapshot(dataset);
+          onChange(nextValue);
+        }}
+      />
+      <small>This run requires an explicit immutable version.</small>
+    </label>
+  );
+}
+
 function DatasetVersionHistoryDialog({
   dataset,
-  versions,
   onClose,
   onOpen
 }: {
   dataset: DataAsset;
-  versions: DataAsset[];
   onClose: () => void;
   onOpen: (datasetId: string) => void;
 }) {
-  const ordered = [...versions].sort((left, right) => right.version_number - left.version_number);
+  const [versions, setVersions] = useState<DataAsset[]>([]);
+  const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    api.pageDatasetVersions(dataset.logical_id, { limit: 20, offset })
+      .then((page) => {
+        if (!active) return;
+        setVersions(page.items);
+        setTotal(page.total);
+        setError("");
+      })
+      .catch((requestError) => active && setError(
+        requestError instanceof Error ? requestError.message : "Could not load dataset versions"
+      ))
+      .finally(() => active && setLoading(false));
+    return () => { active = false; };
+  }, [dataset.logical_id, offset]);
   return (
     <div className="modal-backdrop" role="presentation"
       onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -3625,16 +4142,17 @@ function DatasetVersionHistoryDialog({
         aria-label={`Versions of ${dataset.name}`}>
         <div className="modal-header">
           <div><span className="builder-kicker">Dataset family</span><h2>{dataset.name}</h2>
-            <p>{ordered.length} immutable versions</p></div>
+            <p>{total} immutable versions</p></div>
           <button className="icon-button" type="button" onClick={onClose}
             aria-label="Close dataset versions"><X size={17} /></button>
         </div>
+        {error && <div className="error-banner">{error}</div>}
         <div className="model-version-list">
-          {ordered.map((version, index) => (
+          {versions.map((version, index) => (
             <article key={version.id}>
               <div className="model-version-marker"><span>v{version.version_number}</span></div>
               <div><strong>v{version.version_number}
-                {index === 0 && <i className="pipeline-status published">latest</i>}</strong>
+                {offset === 0 && index === 0 && <i className="pipeline-status published">latest</i>}</strong>
                 <span>{formatDateTime(version.created_at)} · {version.row_count ?? "?"} rows</span>
                 <small>{version.format.toUpperCase()} · {version.version_stage}</small></div>
               <button className="secondary-button compact-button" type="button"
@@ -3643,7 +4161,16 @@ function DatasetVersionHistoryDialog({
               </button>
             </article>
           ))}
+          {!versions.length && loading && <div className="empty-state">Loading dataset versions…</div>}
         </div>
+        <PaginationControls
+          total={total}
+          limit={20}
+          offset={offset}
+          onOffsetChange={setOffset}
+          disabled={loading}
+          label="dataset versions"
+        />
       </div>
     </div>
   );
@@ -3673,56 +4200,88 @@ function DataPanel({
   const [isUploadingFile, setIsUploadingFile] = useState(false);
   const [uploadLogicalId, setUploadLogicalId] = useState("");
   const [businessCaseFilter, setBusinessCaseFilter] = useState("");
-  const [businessCaseAttachments, setBusinessCaseAttachments] = useState<BusinessCaseDataAttachment[]>([]);
-  const [isBusinessCaseFilterLoading, setIsBusinessCaseFilterLoading] = useState(false);
   const [purposeFilter, setPurposeFilter] = useState("");
   const [pipelineFilter, setPipelineFilter] = useState("");
   const [uploadedOnly, setUploadedOnly] = useState(false);
-  useEffect(() => {
-    setBusinessCaseAttachments([]);
-    if (!businessCaseFilter) {
-      setIsBusinessCaseFilterLoading(false);
-      return;
-    }
-    let active = true;
-    setIsBusinessCaseFilterLoading(true);
-    api.listBusinessCaseDataAttachments(businessCaseFilter)
-      .then((items) => {
-        if (active) setBusinessCaseAttachments(items);
-      })
-      .catch((error) => {
-        if (active) {
-          setNotice(error instanceof Error ? error.message : "Could not load Business Case datasets");
-        }
-      })
-      .finally(() => {
-        if (active) setIsBusinessCaseFilterLoading(false);
-      });
-    return () => { active = false; };
-  }, [businessCaseFilter, setNotice]);
-  const attachedLogicalIds = useMemo(() => {
-    const datasetById = new Map(datasets.map((dataset) => [dataset.id, dataset]));
-    return new Set(
-      businessCaseAttachments
-        .map((attachment) => datasetById.get(attachment.data_asset_id)?.logical_id)
-        .filter((value): value is string => Boolean(value))
-    );
-  }, [businessCaseAttachments, datasets]);
+  const [datasetSearch, setDatasetSearch] = useState("");
+  const [activeDatasets, setActiveDatasets] = useState<DataAsset[]>([]);
+  const [activeDatasetTotal, setActiveDatasetTotal] = useState(0);
+  const [activeDatasetOffset, setActiveDatasetOffset] = useState(0);
+  const [dataViews, setDataViews] = useState<DataAsset[]>([]);
+  const [dataViewTotal, setDataViewTotal] = useState(0);
+  const [dataViewOffset, setDataViewOffset] = useState(0);
+  const [deletedDatasets, setDeletedDatasets] = useState<DataAsset[]>([]);
+  const [deletedDatasetTotal, setDeletedDatasetTotal] = useState(0);
+  const [deletedDatasetOffset, setDeletedDatasetOffset] = useState(0);
+  const [isDatasetPageLoading, setIsDatasetPageLoading] = useState(false);
+  const [datasetRefreshKey, setDatasetRefreshKey] = useState(0);
   const filterPipelines = businessCaseFilter
     ? pipelines.filter((pipeline) => pipeline.business_case_id === businessCaseFilter)
     : pipelines;
-  const activeDatasets = datasets.filter((dataset) => {
-    if (dataset.status === "deleted" || isDataView(dataset)) return false;
-    if (businessCaseFilter && !attachedLogicalIds.has(dataset.logical_id)) return false;
-    if (uploadedOnly) return isUploadedDataset(dataset);
-    return pipelineMatches(datasetPipelineId(dataset), pipelines, purposeFilter, pipelineFilter);
-  });
-  const dataViews = datasets.filter((dataset) =>
-    dataset.status !== "deleted"
-    && isDataView(dataset)
-    && (!businessCaseFilter || attachedLogicalIds.has(dataset.logical_id))
-  );
-  const deletedDatasets = datasets.filter((dataset) => dataset.status === "deleted");
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setIsDatasetPageLoading(true);
+      const common = {
+        limit: 20,
+        search: datasetSearch.trim(),
+        business_case_id: businessCaseFilter,
+        families: true,
+        summary: true
+      };
+      Promise.all([
+        api.pageDatasets({
+          ...common,
+          offset: activeDatasetOffset,
+          asset_kind: "dataset",
+          include_deleted: false,
+          pipeline_id: pipelineFilter,
+          pipeline_type: purposeFilter,
+          uploaded_only: uploadedOnly
+        }),
+        api.pageDatasets({
+          ...common,
+          offset: dataViewOffset,
+          asset_kind: "view",
+          include_deleted: false
+        }),
+        api.pageDatasets({
+          ...common,
+          offset: deletedDatasetOffset,
+          families: false,
+          status: "deleted"
+        })
+      ])
+        .then(([datasetPage, viewPage, deletedPage]) => {
+          setActiveDatasets(datasetPage.items);
+          setActiveDatasetTotal(datasetPage.total);
+          setDataViews(viewPage.items);
+          setDataViewTotal(viewPage.total);
+          setDeletedDatasets(deletedPage.items);
+          setDeletedDatasetTotal(deletedPage.total);
+        })
+        .catch((error) => setNotice(error instanceof Error ? error.message : "Could not load dataset catalog"))
+        .finally(() => setIsDatasetPageLoading(false));
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [
+    activeDatasetOffset,
+    businessCaseFilter,
+    dataViewOffset,
+    datasetRefreshKey,
+    datasetSearch,
+    deletedDatasetOffset,
+    pipelineFilter,
+    purposeFilter,
+    setNotice,
+    uploadedOnly
+  ]);
+
+  useEffect(() => {
+    setActiveDatasetOffset(0);
+    setDataViewOffset(0);
+    setDeletedDatasetOffset(0);
+  }, [businessCaseFilter, datasetSearch, pipelineFilter, purposeFilter, uploadedOnly]);
 
   function selectDatasetFile(nextFile: File | null) {
     if (!nextFile) {
@@ -3770,6 +4329,7 @@ function DataPanel({
       setUploadLogicalId("");
       setFileInputKey((current) => current + 1);
       await onRefresh();
+      setDatasetRefreshKey((value) => value + 1);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Dataset upload failed");
     } finally {
@@ -3781,6 +4341,7 @@ function DataPanel({
     const deleted = await api.deleteDataset(dataset.id);
     setNotice(`Deleted ${deleted.name}`);
     await onRefresh();
+    setDatasetRefreshKey((value) => value + 1);
   }
 
   function addDatasetVersion(dataset: DataAsset) {
@@ -3900,26 +4461,27 @@ function DataPanel({
           <div>
             <h2>Dataset filters</h2>
             <p>
-              {isBusinessCaseFilterLoading
+              {isDatasetPageLoading
                 ? "Loading Business Case datasets…"
-                : `${datasetVersionGroups(activeDatasets).length} dataset families shown`}
+                : `${activeDatasetTotal} dataset families`}
             </p>
           </div>
           <div className="dataset-filter-controls">
             <label className="dataset-business-case-filter">
               <span><Filter size={14} /> Business case</span>
-              <select
-                aria-label="Filter datasets by Business Case"
+              <PagedCatalogSelect
                 value={businessCaseFilter}
-                onChange={(event) => {
-                  setBusinessCaseFilter(event.target.value);
+                onChange={(value) => {
+                  setBusinessCaseFilter(value);
                   setPurposeFilter("");
                   setPipelineFilter("");
                 }}
-              >
-                <option value="">All business cases</option>
-                {businessCases.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-              </select>
+                loadPage={api.pageBusinessCases}
+                getId={(item) => item.id}
+                getLabel={(item) => item.name}
+                emptyLabel="All business cases"
+                searchPlaceholder="Search Business Cases"
+              />
             </label>
             <ArtifactFilters
               pipelines={filterPipelines}
@@ -3927,6 +4489,7 @@ function DataPanel({
               pipelineId={pipelineFilter}
               onPurposeChange={setPurposeFilter}
               onPipelineChange={setPipelineFilter}
+              businessCaseId={businessCaseFilter}
               uploadedOnly={uploadedOnly}
               onUploadedOnlyChange={(value) => {
                 setUploadedOnly(value);
@@ -3937,12 +4500,30 @@ function DataPanel({
               }}
             />
           </div>
+          <label className="search-field">
+            <Search size={16} />
+            <input
+              aria-label="Search datasets"
+              placeholder="Search datasets and data views"
+              value={datasetSearch}
+              onChange={(event) => setDatasetSearch(event.target.value)}
+            />
+          </label>
         </div>
         <VersionedDatasetList
           datasets={activeDatasets}
           onAddVersion={addDatasetVersion}
           onAnalyze={onAnalyze}
           onDelete={deleteDataset}
+          setNotice={setNotice}
+        />
+        <PaginationControls
+          total={activeDatasetTotal}
+          limit={20}
+          offset={activeDatasetOffset}
+          onOffsetChange={setActiveDatasetOffset}
+          disabled={isDatasetPageLoading}
+          label="dataset families"
         />
         <AssetList
           title="Data views"
@@ -3955,9 +4536,17 @@ function DataPanel({
             onDelete: () => deleteDataset(item)
           }))}
         />
-        {deletedDatasets.length > 0 && (
+        <PaginationControls
+          total={dataViewTotal}
+          limit={20}
+          offset={dataViewOffset}
+          onOffsetChange={setDataViewOffset}
+          disabled={isDatasetPageLoading}
+          label="data views"
+        />
+        {deletedDatasetTotal > 0 && (
           <details className="panel editor-details deleted-assets-panel">
-            <summary>Deleted datasets <span>{deletedDatasets.length}</span></summary>
+            <summary>Deleted datasets <span>{deletedDatasetTotal}</span></summary>
             <AssetList
               title=""
               assets={deletedDatasets.map((item) => ({
@@ -3966,6 +4555,14 @@ function DataPanel({
                 meta: datasetMeta(item),
                 status: item.status
               }))}
+            />
+            <PaginationControls
+              total={deletedDatasetTotal}
+              limit={20}
+              offset={deletedDatasetOffset}
+              onOffsetChange={setDeletedDatasetOffset}
+              disabled={isDatasetPageLoading}
+              label="deleted datasets"
             />
           </details>
         )}
@@ -3989,27 +4586,69 @@ function VersionedDatasetList({
   datasets,
   onAddVersion,
   onAnalyze,
-  onDelete
+  onDelete,
+  setNotice
 }: {
   datasets: DataAsset[];
   onAddVersion: (dataset: DataAsset) => void;
   onAnalyze: (datasetId: string) => void;
   onDelete: (dataset: DataAsset) => void;
+  setNotice: (message: string) => void;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [historyByLogicalId, setHistoryByLogicalId] = useState<
+    Record<string, { items: DataAsset[]; total: number; offset: number }>
+  >({});
+  const [loadingLogicalId, setLoadingLogicalId] = useState("");
   const groups = datasetVersionGroups(datasets);
+
+  async function loadHistory(logicalId: string, offset: number) {
+    setLoadingLogicalId(logicalId);
+    try {
+      const page = await api.pageDatasetVersions(logicalId, { limit: 10, offset });
+      setHistoryByLogicalId((current) => ({
+        ...current,
+        [logicalId]: { items: page.items, total: page.total, offset: page.offset }
+      }));
+      return true;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not load dataset versions");
+      return false;
+    } finally {
+      setLoadingLogicalId("");
+    }
+  }
+
+  async function toggleHistory(logicalId: string) {
+    if (expanded.has(logicalId)) {
+      setExpanded((current) => {
+        const next = new Set(current);
+        next.delete(logicalId);
+        return next;
+      });
+      return;
+    }
+    if (!historyByLogicalId[logicalId]) {
+      if (!await loadHistory(logicalId, 0)) return;
+    }
+    setExpanded((current) => new Set(current).add(logicalId));
+  }
+
   return (
     <div className="panel">
       <div className="panel-header"><h2>Active datasets</h2></div>
       <div className="asset-list">
         {groups.map(({ logicalId, latest, versions }) => {
           const isExpanded = expanded.has(logicalId);
+          const historyPage = historyByLogicalId[logicalId];
+          const history = historyPage?.items ?? versions;
+          const versionCount = Math.max(latest.version_number, historyPage?.total ?? history.length);
           return (
             <div className="dataset-version-group" key={logicalId}>
               <div className="asset-row">
                 <div>
                   <strong>{latest.name} <i className="version-badge">v{latest.version_number}</i></strong>
-                  <span>{datasetMeta(latest)} / {versions.length} version{versions.length === 1 ? "" : "s"} / {latest.version_stage}</span>
+                  <span>{datasetMeta(latest)} / {versionCount} version{versionCount === 1 ? "" : "s"} / {latest.version_stage}</span>
                 </div>
                 <div className="asset-actions">
                   <em>{latest.status}</em>
@@ -4017,14 +4656,9 @@ function VersionedDatasetList({
                     onClick={() => onAnalyze(latest.id)}>
                     <BarChart3 size={14} /> Analyze latest
                   </button>
-                  <button className="secondary-button compact-button" type="button" onClick={() => {
-                    setExpanded((current) => {
-                      const next = new Set(current);
-                      if (next.has(logicalId)) next.delete(logicalId); else next.add(logicalId);
-                      return next;
-                    });
-                  }}>
-                    Versions ({versions.length})
+                  <button className="secondary-button compact-button" type="button" onClick={() => void toggleHistory(logicalId)}
+                    disabled={loadingLogicalId === logicalId}>
+                    {loadingLogicalId === logicalId ? "Loading…" : `Versions (${versionCount})`}
                   </button>
                   <button className="secondary-button compact-button" type="button" onClick={() => onAddVersion(latest)}>
                     <Plus size={14} /> Add version
@@ -4033,7 +4667,7 @@ function VersionedDatasetList({
               </div>
               {isExpanded && (
                 <div className="dataset-version-history">
-                  {[...versions].sort((a, b) => b.version_number - a.version_number).map((version) => (
+                  {[...history].sort((a, b) => b.version_number - a.version_number).map((version) => (
                     <div className="asset-row version-row" key={version.id}>
                       <div>
                         <strong>v{version.version_number} {version.id === latest.id ? "· latest" : ""}</strong>
@@ -4057,6 +4691,14 @@ function VersionedDatasetList({
                       </div>
                     </div>
                   ))}
+                  <PaginationControls
+                    total={historyPage?.total ?? history.length}
+                    limit={10}
+                    offset={historyPage?.offset ?? 0}
+                    onOffsetChange={(nextOffset) => void loadHistory(logicalId, nextOffset)}
+                    disabled={loadingLogicalId === logicalId}
+                    label="dataset versions"
+                  />
                 </div>
               )}
             </div>
@@ -4196,33 +4838,15 @@ function AnalysisPanel({
   const [purposeFilter, setPurposeFilter] = useState("");
   const [pipelineFilter, setPipelineFilter] = useState("");
   const [uploadedOnly, setUploadedOnly] = useState(false);
-  const [analysisAttachments, setAnalysisAttachments] = useState<BusinessCaseDataAttachment[]>([]);
+  const [pagedAnalysisDatasets, setPagedAnalysisDatasets] = useState<DataAsset[]>([]);
+  const [analysisDatasetTotal, setAnalysisDatasetTotal] = useState(0);
+  const [selectedAnalysisDataset, setSelectedAnalysisDataset] = useState<DataAsset | undefined>(
+    datasets.find((item) => item.id === initialDatasetId)
+  );
   const [visualizationDrill, setVisualizationDrill] = useState<VisualizationDrillRequest | null>(null);
-  useEffect(() => {
-    if (!businessCaseFilter) {
-      setAnalysisAttachments([]);
-      return;
-    }
-    let active = true;
-    api.listBusinessCaseDataAttachments(businessCaseFilter)
-      .then((items) => active && setAnalysisAttachments(items))
-      .catch((error) => active && setNotice(
-        error instanceof Error ? error.message : "Could not load Business Case datasets"
-      ));
-    return () => { active = false; };
-  }, [businessCaseFilter, setNotice]);
-  const availableDatasets = useMemo(() => {
+  const legacyAvailableDatasets = useMemo(() => {
     const active = datasets.filter((dataset) => dataset.status !== "deleted");
-    const byId = new Map(active.map((dataset) => [dataset.id, dataset]));
-    const logicalIds = new Set(
-      analysisAttachments
-        .map((attachment) => byId.get(attachment.data_asset_id)?.logical_id)
-        .filter((value): value is string => Boolean(value))
-    );
-    const businessCaseScoped = businessCaseFilter
-      ? active.filter((dataset) => logicalIds.has(dataset.logical_id))
-      : active;
-    const scoped = businessCaseScoped.filter((dataset) => {
+    const scoped = active.filter((dataset) => {
       if (uploadedOnly) return isUploadedDataset(dataset);
       return pipelineMatches(datasetPipelineId(dataset), pipelines, purposeFilter, pipelineFilter);
     });
@@ -4232,14 +4856,27 @@ function AnalysisPanel({
           left.name.localeCompare(right.name) || right.version_number - left.version_number
         );
   }, [
-    analysisAttachments,
-    businessCaseFilter,
     datasets,
     pipelineFilter,
     pipelines,
     purposeFilter,
     showOnlyLatest,
     uploadedOnly
+  ]);
+  const availableDatasets = useMemo(() => {
+    if (!allowPersistence) return legacyAvailableDatasets;
+    const selected = selectedAnalysisDataset
+      ?? datasets.find((item) => item.id === datasetId);
+    return selected && !pagedAnalysisDatasets.some((item) => item.id === selected.id)
+      ? [selected, ...pagedAnalysisDatasets]
+      : pagedAnalysisDatasets;
+  }, [
+    allowPersistence,
+    datasetId,
+    datasets,
+    legacyAvailableDatasets,
+    pagedAnalysisDatasets,
+    selectedAnalysisDataset
   ]);
   const analysisPipelines = businessCaseFilter
     ? pipelines.filter((pipeline) => pipeline.business_case_id === businessCaseFilter)
@@ -4251,6 +4888,9 @@ function AnalysisPanel({
       : availableDatasets[0]?.id ?? "";
     if (nextDatasetId !== datasetId) {
       setDatasetId(nextDatasetId);
+      setSelectedAnalysisDataset(
+        availableDatasets.find((dataset) => dataset.id === nextDatasetId)
+      );
     }
   }, [availableDatasets, datasetId]);
 
@@ -4270,14 +4910,56 @@ function AnalysisPanel({
       {allowPersistence && (
         <div className="panel analysis-dataset-filters">
           <label>
+            <span>Dataset</span>
+            <PagedCatalogSelect
+              value={datasetId}
+              selectedItem={selectedAnalysisDataset}
+              onChange={(value, item) => {
+                setDatasetId(value);
+                setSelectedAnalysisDataset(item);
+                setVisualizationDrill(null);
+              }}
+              loadPage={(query) => api.pageDatasets({
+                ...query,
+                business_case_id: businessCaseFilter,
+                families: showOnlyLatest,
+                include_deleted: false,
+                summary: true,
+                pipeline_id: pipelineFilter,
+                pipeline_type: purposeFilter,
+                uploaded_only: uploadedOnly
+              })}
+              onPageLoaded={(page) => {
+                setPagedAnalysisDatasets(page.items);
+                setAnalysisDatasetTotal(page.total);
+              }}
+              getId={(item) => item.id}
+              getLabel={(item) => `${item.name} · v${item.version_number}`}
+              emptyLabel="Choose dataset"
+              searchPlaceholder="Search datasets"
+              reloadKey={[
+                businessCaseFilter,
+                showOnlyLatest,
+                pipelineFilter,
+                purposeFilter,
+                uploadedOnly
+              ].join(":")}
+            />
+          </label>
+          <label>
             <span>Business Case</span>
-            <select value={businessCaseFilter} onChange={(event) => {
-              setBusinessCaseFilter(event.target.value);
-              setPipelineFilter("");
-            }}>
-              <option value="">All Business Cases</option>
-              {businessCases.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-            </select>
+            <PagedCatalogSelect
+              value={businessCaseFilter}
+              onChange={(value) => {
+                setBusinessCaseFilter(value);
+                setPipelineFilter("");
+              }}
+              loadPage={api.pageBusinessCases}
+              getId={(item) => item.id}
+              getLabel={(item) => item.name}
+              emptyLabel="All Business Cases"
+              searchPlaceholder="Search Business Cases"
+            />
           </label>
           <label className="analysis-latest-toggle">
             <input type="checkbox" checked={showOnlyLatest}
@@ -4291,6 +4973,7 @@ function AnalysisPanel({
             pipelineId={pipelineFilter}
             onPurposeChange={setPurposeFilter}
             onPipelineChange={setPipelineFilter}
+            businessCaseId={businessCaseFilter}
             uploadedOnly={uploadedOnly}
             onUploadedOnlyChange={(value) => {
               setUploadedOnly(value);
@@ -4300,7 +4983,7 @@ function AnalysisPanel({
               }
             }}
           />
-          <span>{availableDatasets.length} datasets available</span>
+          <span>{analysisDatasetTotal} datasets available</span>
         </div>
       )}
       <div className="analysis-tabs" role="tablist" aria-label="Analysis sections">

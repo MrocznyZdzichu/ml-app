@@ -16,10 +16,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from getpass import getpass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from typing import Any, Callable, Generic, Mapping, Protocol, Sequence, TypeVar
 from urllib.parse import quote
 
 import requests
+
+
+T = TypeVar("T")
 
 
 class ApiError(RuntimeError):
@@ -61,6 +64,31 @@ class _Session(Protocol):
     def request(self, method: str, url: str, **kwargs: Any) -> _Response: ...
 
     def close(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class CatalogPage(Generic[T]):
+    """One bounded catalog page together with the exact filtered total."""
+
+    items: tuple[T, ...]
+    total: int
+    limit: int
+    offset: int
+    has_next: bool
+
+    @classmethod
+    def from_api(
+        cls,
+        value: Mapping[str, Any],
+        decode: Callable[[Mapping[str, Any]], T],
+    ) -> "CatalogPage[T]":
+        return cls(
+            items=tuple(decode(item) for item in value.get("items", [])),
+            total=int(value.get("total", 0)),
+            limit=int(value.get("limit", 0)),
+            offset=int(value.get("offset", 0)),
+            has_next=bool(value.get("has_next", False)),
+        )
 
 
 @dataclass(frozen=True)
@@ -424,9 +452,48 @@ class MLAppClient:
         """List complete dataset metadata visible to the authenticated user."""
         return self._request("GET", "/datasets")
 
+    def page_datasets(
+        self,
+        *,
+        limit: int = 30,
+        offset: int = 0,
+        search: str = "",
+        business_case_id: str = "",
+        asset_kind: str = "",
+        include_deleted: bool = False,
+        families: bool = True,
+    ) -> CatalogPage[Dataset]:
+        """Search a bounded data catalog and return the exact filtered total."""
+        payload = self._request("GET", "/datasets/page", params={
+            "limit": limit,
+            "offset": offset,
+            "search": search,
+            "business_case_id": business_case_id,
+            "asset_kind": asset_kind,
+            "include_deleted": str(include_deleted).lower(),
+            "families": str(families).lower(),
+            "summary": "true",
+        })
+        return CatalogPage.from_api(payload, Dataset.from_api)
+
     def list_dataset_summaries(self) -> list[Mapping[str, Any]]:
         """List catalog metadata without large, non-presented metadata extensions."""
         return self._request("GET", "/datasets", params={"summary": True})
+
+    def page_dataset_versions(
+        self,
+        logical_dataset_id: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> CatalogPage[Dataset]:
+        """Browse one immutable dataset family without downloading all versions."""
+        payload = self._request(
+            "GET",
+            f"/datasets/{quote(logical_dataset_id, safe='')}/versions/page",
+            params={"limit": limit, "offset": offset},
+        )
+        return CatalogPage.from_api(payload, Dataset.from_api)
 
     def dataset_by_name(
         self,
@@ -533,6 +600,23 @@ class MLAppClient:
         """Resolve one visible Business Case by its globally unique name."""
         return self._business_case_by_name(name)
 
+    def page_business_cases(
+        self,
+        *,
+        limit: int = 30,
+        offset: int = 0,
+        search: str = "",
+        manageable_only: bool = False,
+    ) -> CatalogPage[Mapping[str, Any]]:
+        """Search visible Business Cases without loading the full catalog."""
+        payload = self._request("GET", "/business-cases/page", params={
+            "limit": limit,
+            "offset": offset,
+            "search": search,
+            "manageable_only": str(manageable_only).lower(),
+        })
+        return CatalogPage.from_api(payload, lambda item: item)
+
     def create_business_case(
         self,
         *,
@@ -609,10 +693,83 @@ class MLAppClient:
     ) -> list[Mapping[str, Any]]:
         return self._request("GET", f"/business-cases/{business_case_id}/data-attachments")
 
+    def page_business_case_attachments(
+        self,
+        business_case_id: str,
+        *,
+        limit: int = 30,
+        offset: int = 0,
+        search: str = "",
+        role: str = "",
+        pipeline_id: str = "",
+        pipeline_type: str = "",
+        uploaded_only: bool = False,
+        deleted_only: bool = False,
+    ) -> CatalogPage[Mapping[str, Any]]:
+        """Search mapped BC data with lightweight latest-version metadata."""
+        payload = self._request(
+            "GET",
+            f"/business-cases/{business_case_id}/data-attachments/page",
+            params={
+                "limit": limit,
+                "offset": offset,
+                "search": search,
+                "role": role,
+                "pipeline_id": pipeline_id,
+                "pipeline_type": pipeline_type,
+                "uploaded_only": str(uploaded_only).lower(),
+                "deleted_only": str(deleted_only).lower(),
+            },
+        )
+        return CatalogPage.from_api(payload, lambda item: item)
+
     def list_pipelines(self, business_case_id: str) -> list[Mapping[str, Any]]:
         return self._request(
             "GET", "/pipelines", params={"business_case_id": business_case_id}
         )
+
+    def page_pipeline_versions(
+        self,
+        pipeline_id: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        status: str = "",
+    ) -> CatalogPage[Mapping[str, Any]]:
+        """Read a bounded immutable version history for one pipeline."""
+        payload = self._request(
+            "GET",
+            f"/pipelines/{pipeline_id}/versions/page",
+            params={
+                "limit": limit,
+                "offset": offset,
+                "status": status,
+            },
+        )
+        return CatalogPage.from_api(payload, lambda item: item)
+
+    def page_pipelines(
+        self,
+        *,
+        limit: int = 30,
+        offset: int = 0,
+        search: str = "",
+        business_case_id: str = "",
+        pipeline_type: str = "",
+        status: str = "",
+        include_deprecated: bool = True,
+    ) -> CatalogPage[Mapping[str, Any]]:
+        """Search workflow definitions without loading every pipeline."""
+        payload = self._request("GET", "/pipelines/page", params={
+            "limit": limit,
+            "offset": offset,
+            "search": search,
+            "business_case_id": business_case_id,
+            "pipeline_type": pipeline_type,
+            "status": status,
+            "include_deprecated": str(include_deprecated).lower(),
+        })
+        return CatalogPage.from_api(payload, lambda item: item)
 
     def pipeline_by_name(
         self,
@@ -817,9 +974,45 @@ class MLAppClient:
             params["business_case_id"] = business_case_id
         return self._request("GET", "/scoring-reports", params=params)
 
+    def page_scoring_reports(
+        self,
+        *,
+        limit: int = 30,
+        offset: int = 0,
+        search: str = "",
+        business_case_id: str = "",
+        problem_type: str = "",
+        pipeline_id: str = "",
+    ) -> CatalogPage[Mapping[str, Any]]:
+        """Search immutable report families using the same bounded API as the UI."""
+        payload = self._request("GET", "/scoring-reports/page", params={
+            "limit": limit,
+            "offset": offset,
+            "search": search,
+            "business_case_id": business_case_id,
+            "problem_type": problem_type,
+            "pipeline_id": pipeline_id,
+        })
+        return CatalogPage.from_api(payload, lambda item: item)
+
     def get_scoring_report(self, report_id: str) -> Mapping[str, Any]:
         """Fetch one complete immutable scoring report."""
         return self._request("GET", f"/scoring-reports/{report_id}")
+
+    def page_scoring_report_versions(
+        self,
+        logical_report_id: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> CatalogPage[Mapping[str, Any]]:
+        """Browse summary metadata for one immutable scoring-report family."""
+        payload = self._request(
+            "GET",
+            f"/scoring-reports/{quote(logical_report_id, safe='')}/versions/page",
+            params={"limit": limit, "offset": offset, "summary": "true"},
+        )
+        return CatalogPage.from_api(payload, lambda item: item)
 
     def run_pipeline(
         self,
@@ -886,6 +1079,29 @@ class MLAppClient:
             PipelineRun.from_api(item)
             for item in self._request("GET", f"/pipelines/{pipeline_id}/runs")
         ]
+
+    def page_pipeline_runs(
+        self,
+        *,
+        limit: int = 30,
+        offset: int = 0,
+        search: str = "",
+        pipeline_id: str = "",
+        pipeline_version_id: str = "",
+        business_case_id: str = "",
+        status: str = "",
+    ) -> CatalogPage[PipelineRun]:
+        """Search the cross-pipeline run history without loading every run."""
+        payload = self._request("GET", "/pipelines/runs/history/page", params={
+            "limit": limit,
+            "offset": offset,
+            "search": search,
+            "pipeline_id": pipeline_id,
+            "pipeline_version_id": pipeline_version_id,
+            "business_case_id": business_case_id,
+            "status": status,
+        })
+        return CatalogPage.from_api(payload, PipelineRun.from_api)
 
     def pipeline_run_by_operation_key(
         self,
@@ -969,6 +1185,12 @@ class MLAppClient:
             self._request("GET", f"/pipelines/{pipeline_id}/runs/{run_id}")
         )
 
+    def get_pipeline_run_status(self, pipeline_id: str, run_id: str) -> PipelineRun:
+        """Fetch progress fields without downloading run events and manifests."""
+        return PipelineRun.from_api(
+            self._request("GET", f"/pipelines/{pipeline_id}/runs/{run_id}/status")
+        )
+
     def wait_for_pipeline_run(
         self,
         run: PipelineRun,
@@ -977,16 +1199,20 @@ class MLAppClient:
         timeout: float | None = None,
         on_update: Callable[[PipelineRun], None] | None = None,
     ) -> PipelineRun:
-        """Poll a run to completion without downloading its output data."""
+        """Poll compact progress to completion and fetch the full final run once."""
         started = time.monotonic()
         current = run
+        polled = False
         while not current.finished:
             if timeout is not None and time.monotonic() - started >= timeout:
                 raise TimeoutError(f"Pipeline run {run.id} did not finish within {timeout}s")
             time.sleep(poll_interval)
-            current = self.get_pipeline_run(run.pipeline_id, run.id)
+            current = self.get_pipeline_run_status(run.pipeline_id, run.id)
+            polled = True
             if on_update is not None:
                 on_update(current)
+        if polled:
+            current = self.get_pipeline_run(run.pipeline_id, run.id)
         if current.status != "succeeded":
             detail = current.error_message or "no error detail returned"
             raise ApiError(f"Pipeline run {current.id} ended as {current.status}: {detail}")
@@ -999,6 +1225,27 @@ class MLAppClient:
     def list_model_summaries(self) -> list[Mapping[str, Any]]:
         """List model registry/workflow fields without experiment-heavy payloads."""
         return self._request("GET", "/models", params={"summary": True})
+
+    def page_models(
+        self,
+        *,
+        limit: int = 30,
+        offset: int = 0,
+        search: str = "",
+        business_case_id: str = "",
+        stage: str = "",
+        pipeline_id: str = "",
+    ) -> CatalogPage[Mapping[str, Any]]:
+        """Search latest model families and retain their server-side version counts."""
+        payload = self._request("GET", "/models/page", params={
+            "limit": limit,
+            "offset": offset,
+            "search": search,
+            "business_case_id": business_case_id,
+            "stage": stage,
+            "pipeline_id": pipeline_id,
+        })
+        return CatalogPage.from_api(payload, lambda item: item)
 
     def model_by_name(
         self,
@@ -1069,6 +1316,21 @@ class MLAppClient:
         """List the complete version history of one logical model family."""
         path = f"/models/{quote(logical_model_id, safe='')}/versions"
         return self._request("GET", path)
+
+    def page_model_versions(
+        self,
+        logical_model_id: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> CatalogPage[Mapping[str, Any]]:
+        """Browse one logical model family with a bounded response."""
+        payload = self._request(
+            "GET",
+            f"/models/{quote(logical_model_id, safe='')}/versions/page",
+            params={"limit": limit, "offset": offset},
+        )
+        return CatalogPage.from_api(payload, lambda item: item)
 
     def promote_model(
         self,
@@ -1246,6 +1508,27 @@ class MLAppClient:
         params = {"include_archived": "true"} if include_archived else None
         return [Deployment.from_api(item) for item in self._request("GET", "/serving/deployments", params=params)]
 
+    def page_deployments(
+        self,
+        *,
+        limit: int = 30,
+        offset: int = 0,
+        search: str = "",
+        status: str = "",
+        business_case_id: str = "",
+        include_archived: bool = False,
+    ) -> CatalogPage[Deployment]:
+        """Search model services using a bounded, exact-count catalog page."""
+        payload = self._request("GET", "/serving/deployments/page", params={
+            "limit": limit,
+            "offset": offset,
+            "search": search,
+            "status": status,
+            "business_case_id": business_case_id,
+            "include_archived": str(include_archived).lower(),
+        })
+        return CatalogPage.from_api(payload, Deployment.from_api)
+
     def deployment_by_name(
         self,
         name: str,
@@ -1267,6 +1550,21 @@ class MLAppClient:
         """List active service assignments for every version in a model family."""
         path = f"/serving/model-families/{quote(logical_model_id, safe='')}/usage"
         return [ModelServingUsage.from_api(item) for item in self._request("GET", path)]
+
+    def page_model_serving_usage(
+        self,
+        model_id: str,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> CatalogPage[ModelServingUsage]:
+        """Browse active service assignments for one immutable model version."""
+        payload = self._request(
+            "GET",
+            f"/serving/models/{quote(model_id, safe='')}/usage/page",
+            params={"limit": limit, "offset": offset},
+        )
+        return CatalogPage.from_api(payload, ModelServingUsage.from_api)
 
     def create_deployment(
         self,
@@ -1452,6 +1750,29 @@ class MLAppClient:
         return self._request(
             "GET", f"/serving/deployments/{target.id}/model-options"
         )
+
+    def page_deployment_model_options(
+        self,
+        deployment: str | Deployment,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        search: str = "",
+        model_ids: Sequence[str] = (),
+    ) -> CatalogPage[Mapping[str, Any]]:
+        """Search deployable role options without loading every model bundle."""
+        target = self._deployment(deployment)
+        payload = self._request(
+            "GET",
+            f"/serving/deployments/{target.id}/model-options/page",
+            params={
+                "limit": limit,
+                "offset": offset,
+                "search": search,
+                "model_id": list(model_ids),
+            },
+        )
+        return CatalogPage.from_api(payload, lambda item: item)
 
     def inference_history(
         self,

@@ -4,8 +4,10 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import type { BusinessCase, DatasetLineageReference, Pipeline, ScoringReport } from "../api/client";
 import { ModelPerformanceReport } from "../pipelines/PipelineRunDialogs";
-import { ArtifactFilters, pipelineMatches } from "../components/ArtifactFilters";
+import { ArtifactFilters } from "../components/ArtifactFilters";
 import { DialogNavigationActions, useVersionedResourceNavigation } from "../components/dialogNavigation";
+import { PaginationControls } from "../components/PaginationControls";
+import { PagedCatalogSelect } from "../components/PagedCatalogSelect";
 import { DatasetLineageList } from "./DatasetLineageList";
 
 export function ScoringReportsPanel({
@@ -25,6 +27,11 @@ export function ScoringReportsPanel({
   const [businessCaseId, setBusinessCaseId] = useState(initialBusinessCaseId);
   const [purposeFilter, setPurposeFilter] = useState("");
   const [pipelineFilter, setPipelineFilter] = useState("");
+  const [families, setFamilies] = useState<Array<{ latest: ScoringReport; version_count: number }>>([]);
+  const [familyTotal, setFamilyTotal] = useState(0);
+  const [familyOffset, setFamilyOffset] = useState(0);
+  const [pageLoading, setPageLoading] = useState(false);
+  const [pageError, setPageError] = useState("");
   const reportNavigation = useVersionedResourceNavigation<ScoringReport>();
   const [sort, setSort] = useState<{
     key: "report" | "business_case" | "pipeline" | "problem" | "created" | "scope";
@@ -38,48 +45,11 @@ export function ScoringReportsPanel({
     () => new Map(pipelines.map((item) => [item.id, item])),
     [pipelines]
   );
-  const families = useMemo(() => {
-    const grouped = new Map<string, ScoringReport[]>();
-    reports.forEach((report) => grouped.set(
-      report.logical_id,
-      [...(grouped.get(report.logical_id) ?? []), report]
-    ));
-    return [...grouped.values()].map((versions) => {
-      const ordered = [...versions].sort((left, right) => right.version_number - left.version_number);
-      return { latest: ordered[0], versions: ordered };
-    });
-  }, [reports]);
-  const visible = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    return families.filter(({ latest }) =>
-      (!businessCaseId || latest.business_case_id === businessCaseId)
-      && pipelineMatches(latest.pipeline_id, pipelines, purposeFilter, pipelineFilter)
-      && (!normalized || [
-        latest.name,
-        latest.problem_type,
-        pipelineById.get(latest.pipeline_id)?.name ?? ""
-      ].some((value) => value.toLowerCase().includes(normalized)))
-    );
-  }, [businessCaseId, families, pipelineById, pipelineFilter, pipelines, purposeFilter, query]);
+  const visible = families;
   const availablePipelines = businessCaseId
     ? pipelines.filter((pipeline) => pipeline.business_case_id === businessCaseId)
     : pipelines;
-  const sorted = useMemo(() => [...visible].sort((left, right) => {
-    const value = ({ latest }: (typeof visible)[number]) => {
-      if (sort.key === "report") return latest.name;
-      if (sort.key === "business_case") return businessCaseById.get(latest.business_case_id)?.name ?? "";
-      if (sort.key === "pipeline") return pipelineById.get(latest.pipeline_id)?.name ?? "";
-      if (sort.key === "problem") return latest.problem_type;
-      if (sort.key === "scope") return latest.evaluated_row_count;
-      return new Date(latest.created_at).getTime();
-    };
-    const leftValue = value(left);
-    const rightValue = value(right);
-    const comparison = typeof leftValue === "number" && typeof rightValue === "number"
-      ? leftValue - rightValue
-      : String(leftValue).localeCompare(String(rightValue));
-    return sort.direction === "asc" ? comparison : -comparison;
-  }), [businessCaseById, pipelineById, sort, visible]);
+  const sorted = visible;
 
   function toggleSort(key: typeof sort.key) {
     setSort((current) => ({
@@ -90,6 +60,43 @@ export function ScoringReportsPanel({
 
   useEffect(() => setBusinessCaseId(initialBusinessCaseId), [initialBusinessCaseId]);
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setPageLoading(true);
+      setPageError("");
+      api.pageScoringReports({
+        limit: 20,
+        offset: familyOffset,
+        search: query.trim(),
+        business_case_id: businessCaseId,
+        pipeline_id: pipelineFilter,
+        pipeline_type: purposeFilter,
+        sort_by: sort.key,
+        sort_direction: sort.direction
+      })
+        .then((page) => {
+          setFamilies(page.items);
+          setFamilyTotal(page.total);
+        })
+        .catch((error) => setPageError(error instanceof Error ? error.message : "Could not load scoring reports"))
+        .finally(() => setPageLoading(false));
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [
+    businessCaseId,
+    familyOffset,
+    pipelineFilter,
+    purposeFilter,
+    query,
+    reports,
+    sort.direction,
+    sort.key
+  ]);
+
+  useEffect(() => {
+    setFamilyOffset(0);
+  }, [businessCaseId, pipelineFilter, purposeFilter, query, sort.direction, sort.key]);
+
   return (
     <section className="model-registry-screen">
       <div className="panel model-registry-panel">
@@ -97,7 +104,7 @@ export function ScoringReportsPanel({
           <div>
             <span className="builder-kicker">Evaluation registry</span>
             <h2>Scoring reports</h2>
-            <p>{visible.length} of {families.length} report families shown · {reports.length} immutable versions</p>
+            <p>{familyTotal} report families</p>
           </div>
           <div className="model-registry-summary">
             <BarChart3 size={18} />
@@ -116,13 +123,18 @@ export function ScoringReportsPanel({
           </label>
           <label>
             <span><SlidersHorizontal size={14} /> Business case</span>
-            <select value={businessCaseId} onChange={(event) => {
-              setBusinessCaseId(event.target.value);
-              setPipelineFilter("");
-            }}>
-              <option value="">All business cases</option>
-              {businessCases.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-            </select>
+            <PagedCatalogSelect
+              value={businessCaseId}
+              onChange={(value) => {
+                setBusinessCaseId(value);
+                setPipelineFilter("");
+              }}
+              loadPage={api.pageBusinessCases}
+              getId={(item) => item.id}
+              getLabel={(item) => item.name}
+              emptyLabel="All business cases"
+              searchPlaceholder="Search Business Cases"
+            />
           </label>
         </div>
         <ArtifactFilters
@@ -131,6 +143,7 @@ export function ScoringReportsPanel({
           pipelineId={pipelineFilter}
           onPurposeChange={setPurposeFilter}
           onPipelineChange={setPipelineFilter}
+          businessCaseId={businessCaseId}
         />
         <div className="model-registry-table scoring-report-table" role="table" aria-label="Scoring report registry">
           <div className="model-registry-row head" role="row">
@@ -148,11 +161,11 @@ export function ScoringReportsPanel({
               onClick={() => toggleSort("scope")} />
             <span />
           </div>
-          {sorted.map(({ latest, versions }) => (
+          {sorted.map(({ latest, version_count: versionCount }) => (
             <div className="model-registry-row" role="row" key={latest.id}>
               <span>
                 <strong>{latest.name}</strong>
-                <small>v{latest.version_number} latest · {versions.length} version{versions.length === 1 ? "" : "s"}</small>
+                <small>v{latest.version_number} latest · {versionCount} version{versionCount === 1 ? "" : "s"}</small>
               </span>
               <span>
                 <strong>{businessCaseById.get(latest.business_case_id)?.name ?? "Unassigned"}</strong>
@@ -173,8 +186,17 @@ export function ScoringReportsPanel({
               </span>
             </div>
           ))}
-          {!visible.length && <div className="catalog-empty">No scoring reports match these filters.</div>}
+          {pageError && <div className="error-banner">{pageError}</div>}
+          {!pageLoading && !visible.length && <div className="catalog-empty">No scoring reports match these filters.</div>}
         </div>
+        <PaginationControls
+          total={familyTotal}
+          limit={20}
+          offset={familyOffset}
+          onOffsetChange={setFamilyOffset}
+          disabled={pageLoading}
+          label="report families"
+        />
       </div>
       {reportNavigation.selected && <ScoringReportDialog report={reportNavigation.selected}
         onClose={reportNavigation.closeAll}
@@ -266,16 +288,25 @@ export function ScoringReportHistoryDialog({
   onView: (report: ScoringReport) => void;
 }) {
   const [versions, setVersions] = useState<ScoringReport[]>([]);
+  const [versionTotal, setVersionTotal] = useState(0);
+  const [versionOffset, setVersionOffset] = useState(0);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   useEffect(() => {
     let active = true;
-    api.listScoringReportVersions(report.logical_id)
-      .then((items) => active && setVersions([...items].reverse()))
+    setLoading(true);
+    api.pageScoringReportVersions(report.logical_id, { limit: 20, offset: versionOffset })
+      .then((page) => {
+        if (!active) return;
+        setVersions(page.items);
+        setVersionTotal(page.total);
+      })
       .catch((requestError) => active && setError(
         requestError instanceof Error ? requestError.message : "Could not load report versions"
-      ));
+      ))
+      .finally(() => active && setLoading(false));
     return () => { active = false; };
-  }, [report.logical_id]);
+  }, [report.logical_id, versionOffset]);
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <div className="modal-dialog model-version-dialog" role="dialog" aria-modal="true" aria-label={`Versions of ${report.name}`}>
@@ -289,7 +320,7 @@ export function ScoringReportHistoryDialog({
             <article key={version.id}>
               <div className="model-version-marker"><span>v{version.version_number}</span></div>
               <div>
-                <strong>v{version.version_number}{index === 0 && <i className="pipeline-status published">latest</i>}</strong>
+                <strong>v{version.version_number}{versionOffset === 0 && index === 0 && <i className="pipeline-status published">latest</i>}</strong>
                 <span>{formatDate(version.created_at)} · run {shortId(version.pipeline_run_id)}</span>
                 <small>{version.evaluated_row_count.toLocaleString()} evaluated rows</small>
               </div>
@@ -298,8 +329,16 @@ export function ScoringReportHistoryDialog({
               </button>
             </article>
           ))}
-          {!versions.length && !error && <div className="empty-state">Loading report versions…</div>}
+          {!versions.length && !error && loading && <div className="empty-state">Loading report versions…</div>}
         </div>
+        <PaginationControls
+          total={versionTotal}
+          limit={20}
+          offset={versionOffset}
+          onOffsetChange={setVersionOffset}
+          disabled={loading}
+          label="report versions"
+        />
       </div>
     </div>
   );

@@ -11,6 +11,7 @@ from sqlalchemy import (
     Text,
     and_,
     delete,
+    func,
     or_,
     select,
     text,
@@ -153,6 +154,52 @@ class PostgresSharingRepository:
             rows = connection.execute(select(access_groups_table).order_by(access_groups_table.c.name.asc()))
             return [self._group(row._mapping) for row in rows]
 
+    def page_groups(
+        self,
+        accessible_group_ids: set[str] | None,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+        is_active: bool | None = None,
+    ) -> tuple[list[AccessGroup], int]:
+        self._ensure_initialized()
+        if accessible_group_ids is not None and not accessible_group_ids:
+            return [], 0
+        filters = []
+        if accessible_group_ids is not None:
+            filters.append(access_groups_table.c.id.in_(accessible_group_ids))
+        if is_active is not None:
+            filters.append(access_groups_table.c.is_active == is_active)
+        needle = search.strip()
+        if needle:
+            pattern = f"%{needle}%"
+            filters.append(or_(
+                access_groups_table.c.name.ilike(pattern),
+                access_groups_table.c.description.ilike(pattern),
+            ))
+        count_statement = select(func.count()).select_from(access_groups_table)
+        page_statement = select(access_groups_table)
+        if filters:
+            count_statement = count_statement.where(*filters)
+            page_statement = page_statement.where(*filters)
+        page_statement = (
+            page_statement
+            .order_by(
+                access_groups_table.c.name.asc(),
+                access_groups_table.c.id.asc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+        with self.engine.begin() as connection:
+            total = int(connection.execute(count_statement).scalar_one())
+            groups = [
+                self._group(row._mapping)
+                for row in connection.execute(page_statement)
+            ]
+        return groups, total
+
     def delete_group(self, group_id: str) -> None:
         self._ensure_initialized()
         with self.engine.begin() as connection:
@@ -199,6 +246,38 @@ class PostgresSharingRepository:
             ).order_by(group_memberships_table.c.created_at.asc()))
             return [self._membership(row._mapping) for row in rows]
 
+    def page_memberships(
+        self,
+        group_id: str,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[GroupMembership], int]:
+        self._ensure_initialized()
+        filters = [group_memberships_table.c.group_id == group_id]
+        count_statement = (
+            select(func.count())
+            .select_from(group_memberships_table)
+            .where(*filters)
+        )
+        page_statement = (
+            select(group_memberships_table)
+            .where(*filters)
+            .order_by(
+                group_memberships_table.c.created_at.asc(),
+                group_memberships_table.c.id.asc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+        with self.engine.begin() as connection:
+            total = int(connection.execute(count_statement).scalar_one())
+            memberships = [
+                self._membership(row._mapping)
+                for row in connection.execute(page_statement)
+            ]
+        return memberships, total
+
     def group_ids_for_user(self, user_id: str) -> list[str]:
         self._ensure_initialized()
         with self.engine.begin() as connection:
@@ -243,6 +322,33 @@ class PostgresSharingRepository:
                 business_case_grants_table.c.business_case_id == business_case_id
             ).order_by(business_case_grants_table.c.created_at.asc()))
             return [self._bc_grant(row._mapping) for row in rows]
+
+    def page_bc_grants(
+        self,
+        business_case_id: str,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[BusinessCaseGrant], int]:
+        self._ensure_initialized()
+        condition = (
+            business_case_grants_table.c.business_case_id == business_case_id
+        )
+        with self.engine.begin() as connection:
+            total = int(connection.execute(
+                select(func.count()).select_from(business_case_grants_table).where(condition)
+            ).scalar_one())
+            rows = connection.execute(
+                select(business_case_grants_table)
+                .where(condition)
+                .order_by(
+                    business_case_grants_table.c.created_at.asc(),
+                    business_case_grants_table.c.id.asc(),
+                )
+                .limit(limit)
+                .offset(offset)
+            )
+            return [self._bc_grant(row._mapping) for row in rows], total
 
     def delete_bc_grant(self, grant_id: str) -> None:
         self._ensure_initialized()
@@ -300,6 +406,35 @@ class PostgresSharingRepository:
                 resource_grants_table.c.resource_id == resource_id,
             ).order_by(resource_grants_table.c.created_at.asc()))
             return [self._resource_grant(row._mapping) for row in rows]
+
+    def page_resource_grants(
+        self,
+        kind: ResourceKind,
+        resource_id: str,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[ResourceGrant], int]:
+        self._ensure_initialized()
+        conditions = (
+            resource_grants_table.c.resource_kind == kind.value,
+            resource_grants_table.c.resource_id == resource_id,
+        )
+        with self.engine.begin() as connection:
+            total = int(connection.execute(
+                select(func.count()).select_from(resource_grants_table).where(*conditions)
+            ).scalar_one())
+            rows = connection.execute(
+                select(resource_grants_table)
+                .where(*conditions)
+                .order_by(
+                    resource_grants_table.c.created_at.asc(),
+                    resource_grants_table.c.id.asc(),
+                )
+                .limit(limit)
+                .offset(offset)
+            )
+            return [self._resource_grant(row._mapping) for row in rows], total
 
     def delete_resource_grant(self, grant_id: str) -> None:
         self._ensure_initialized()

@@ -1,6 +1,8 @@
 import { SlidersHorizontal } from "lucide-react";
 
+import { api } from "../api/client";
 import type { DataAsset, Pipeline } from "../api/client";
+import { PagedCatalogSelect } from "./PagedCatalogSelect";
 
 const pipelineIndexCache = new WeakMap<Pipeline[], Map<string, Pipeline>>();
 
@@ -39,6 +41,7 @@ export function ArtifactFilters({
   pipelineId,
   onPurposeChange,
   onPipelineChange,
+  businessCaseId,
   uploadedOnly,
   onUploadedOnlyChange,
   role,
@@ -50,14 +53,21 @@ export function ArtifactFilters({
   pipelineId: string;
   onPurposeChange: (value: string) => void;
   onPipelineChange: (value: string) => void;
+  businessCaseId?: string;
   uploadedOnly?: boolean;
   onUploadedOnlyChange?: (value: boolean) => void;
   role?: string;
   roleOptions?: Array<{ value: string; label: string }>;
   onRoleChange?: (value: string) => void;
 }) {
-  const purposes = [...new Set(pipelines.map((pipeline) => pipeline.template).filter(Boolean))].sort();
-  const visiblePipelines = pipelines.filter((pipeline) => !purpose || pipeline.template === purpose);
+  const purposes = [...new Set([
+    "training",
+    "automl",
+    "batch_scoring",
+    "monitoring",
+    "custom",
+    ...pipelines.map((pipeline) => pipeline.template).filter(Boolean)
+  ])].sort();
 
   return (
     <div className={`artifact-filters${onRoleChange ? " artifact-filters-with-role" : ""}`} aria-label="Artifact filters">
@@ -90,17 +100,22 @@ export function ArtifactFilters({
       </label>
       <label>
         <span>Pipeline</span>
-        <select
-          aria-label="Filter by pipeline"
+        <PagedCatalogSelect
           value={pipelineId}
-          onChange={(event) => onPipelineChange(event.target.value)}
+          onChange={(value) => onPipelineChange(value)}
+          loadPage={(query) => api.pagePipelines({
+            ...query,
+            business_case_id: businessCaseId,
+            pipeline_template: purpose,
+            include_deprecated: false
+          })}
+          getId={(pipeline) => pipeline.id}
+          getLabel={(pipeline) => pipeline.name}
+          emptyLabel="All pipelines"
+          searchPlaceholder="Search pipelines"
+          reloadKey={`${businessCaseId ?? ""}:${purpose}:${Boolean(uploadedOnly)}`}
           disabled={Boolean(uploadedOnly)}
-        >
-          <option value="">All pipelines</option>
-          {visiblePipelines.map((pipeline) => (
-            <option key={pipeline.id} value={pipeline.id}>{pipeline.name}</option>
-          ))}
-        </select>
+        />
       </label>
       {onRoleChange && (
         <label>

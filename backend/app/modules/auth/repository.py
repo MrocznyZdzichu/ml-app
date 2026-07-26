@@ -1,6 +1,6 @@
 from typing import Protocol
 
-from sqlalchemy import JSON, Boolean, Column, DateTime, Integer, MetaData, String, Table, select, text
+from sqlalchemy import JSON, Boolean, Column, DateTime, Integer, MetaData, String, Table, func, or_, select, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
@@ -48,6 +48,17 @@ class UserRepository(Protocol):
     def list_all(self) -> list[UserAccount]:
         ...
 
+    def page_all(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+        is_active: bool | None = None,
+        is_technical: bool | None = None,
+    ) -> tuple[list[UserAccount], int]:
+        ...
+
     def update(self, user: UserAccount) -> UserAccount:
         ...
 
@@ -84,6 +95,36 @@ class InMemoryUserRepository:
 
     def list_all(self) -> list[UserAccount]:
         return list(self._items.values())
+
+    def page_all(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+        is_active: bool | None = None,
+        is_technical: bool | None = None,
+    ) -> tuple[list[UserAccount], int]:
+        needle = search.strip().casefold()
+        users = [
+            user
+            for user in self._items.values()
+            if (is_active is None or user.is_active == is_active)
+            and (is_technical is None or user.is_technical == is_technical)
+            and (
+                not needle
+                or any(
+                    needle in str(value or "").casefold()
+                    for value in (
+                        user.login_name,
+                        user.email,
+                        user.display_name,
+                    )
+                )
+            )
+        ]
+        users.sort(key=lambda item: (item.created_at, item.id))
+        return users[offset : offset + limit], len(users)
 
     def update(self, user: UserAccount) -> UserAccount:
         previous = self._items.get(user.id)
@@ -154,6 +195,51 @@ class PostgresUserRepository:
         statement = select(user_accounts_table).order_by(user_accounts_table.c.created_at.asc())
         with self.engine.begin() as connection:
             return [self._from_record(row._mapping) for row in connection.execute(statement)]
+
+    def page_all(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+        is_active: bool | None = None,
+        is_technical: bool | None = None,
+    ) -> tuple[list[UserAccount], int]:
+        self._ensure_initialized()
+        filters = []
+        if is_active is not None:
+            filters.append(user_accounts_table.c.is_active == is_active)
+        if is_technical is not None:
+            filters.append(user_accounts_table.c.is_technical == is_technical)
+        needle = search.strip()
+        if needle:
+            pattern = f"%{needle}%"
+            filters.append(or_(
+                user_accounts_table.c.login_name.ilike(pattern),
+                user_accounts_table.c.email.ilike(pattern),
+                user_accounts_table.c.display_name.ilike(pattern),
+            ))
+        count_statement = select(func.count()).select_from(user_accounts_table)
+        page_statement = select(user_accounts_table)
+        if filters:
+            count_statement = count_statement.where(*filters)
+            page_statement = page_statement.where(*filters)
+        page_statement = (
+            page_statement
+            .order_by(
+                user_accounts_table.c.created_at.asc(),
+                user_accounts_table.c.id.asc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+        with self.engine.begin() as connection:
+            total = int(connection.execute(count_statement).scalar_one())
+            users = [
+                self._from_record(row._mapping)
+                for row in connection.execute(page_statement)
+            ]
+        return users, total
 
     def update(self, user: UserAccount) -> UserAccount:
         self._ensure_initialized()

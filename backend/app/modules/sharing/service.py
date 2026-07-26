@@ -43,6 +43,22 @@ class SharingService:
         # Authenticated employees can resolve colleagues for explicit sharing.
         return [user for user in self.users.list_all() if user.is_active and not user.is_technical]
 
+    def page_directory_users(
+        self,
+        principal: Principal,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+    ):
+        return self.users.page_all(
+            limit=limit,
+            offset=offset,
+            search=search,
+            is_active=True,
+            is_technical=False,
+        )
+
     def create_group(self, payload: GroupCreate, principal: Principal) -> AccessGroup:
         now = datetime.now(timezone.utc)
         group = AccessGroup(
@@ -68,6 +84,29 @@ class SharingService:
         memberships = set(self.repository.group_ids_for_user(principal.user_id))
         return [group for group in groups if group.owner_id == principal.user_id or group.id in memberships]
 
+    def page_groups(
+        self,
+        principal: Principal,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+        is_active: bool | None = None,
+    ) -> tuple[list[AccessGroup], int]:
+        if principal.is_administrator:
+            accessible_group_ids: set[str] | None = None
+        else:
+            accessible_group_ids = set(
+                self.repository.group_ids_for_user(principal.user_id)
+            )
+        return self.repository.page_groups(
+            accessible_group_ids,
+            limit=limit,
+            offset=offset,
+            search=search,
+            is_active=is_active,
+        )
+
     def update_group(self, group_id: str, payload: GroupUpdate, principal: Principal) -> AccessGroup:
         group = self._managed_group(group_id, principal)
         previous = dict(group.__dict__)
@@ -88,6 +127,21 @@ class SharingService:
     def list_members(self, group_id: str, principal: Principal) -> list[GroupMembership]:
         self._visible_group(group_id, principal)
         return self.repository.list_memberships(group_id)
+
+    def page_members(
+        self,
+        group_id: str,
+        principal: Principal,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[GroupMembership], int]:
+        self._visible_group(group_id, principal)
+        return self.repository.page_memberships(
+            group_id,
+            limit=limit,
+            offset=offset,
+        )
 
     def upsert_member(self, group_id: str, payload: MembershipUpsert, principal: Principal) -> GroupMembership:
         group = self._managed_group(group_id, principal)
@@ -120,6 +174,23 @@ class SharingService:
     def list_bc_grants(self, business_case_id: str, principal: Principal) -> list[BusinessCaseGrant]:
         self.policy.require_business_case(principal, business_case_id, BusinessCaseAccessRole.MANAGER)
         return self.repository.list_bc_grants(business_case_id)
+
+    def page_bc_grants(
+        self,
+        business_case_id: str,
+        principal: Principal,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[BusinessCaseGrant], int]:
+        self.policy.require_business_case(
+            principal, business_case_id, BusinessCaseAccessRole.MANAGER
+        )
+        return self.repository.page_bc_grants(
+            business_case_id,
+            limit=limit,
+            offset=offset,
+        )
 
     def grant_business_case(self, business_case_id: str, payload: BusinessCaseGrantCreate, principal: Principal) -> BusinessCaseGrant:
         actor_role = self.policy.require_business_case(principal, business_case_id, BusinessCaseAccessRole.MANAGER)
@@ -155,6 +226,30 @@ class SharingService:
         owner_id = self._resource_owner(kind, resource_id)
         self.policy.require_resource(principal, kind, resource_id, owner_id, ResourceAccessRole.OWNER)
         return self.repository.list_resource_grants(kind, resource_id)
+
+    def page_resource_grants(
+        self,
+        kind: ResourceKind,
+        resource_id: str,
+        principal: Principal,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[ResourceGrant], int]:
+        owner_id = self._resource_owner(kind, resource_id)
+        self.policy.require_resource(
+            principal,
+            kind,
+            resource_id,
+            owner_id,
+            ResourceAccessRole.OWNER,
+        )
+        return self.repository.page_resource_grants(
+            kind,
+            resource_id,
+            limit=limit,
+            offset=offset,
+        )
 
     def grant_resource(self, payload: ResourceGrantCreate, principal: Principal) -> ResourceGrant:
         owner_id = self._resource_owner(payload.resource_kind, payload.resource_id)

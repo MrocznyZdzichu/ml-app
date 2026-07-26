@@ -3,7 +3,6 @@ import { useCallback, useEffect, useMemo, useState, type MouseEvent } from "reac
 
 import { api } from "../api/client";
 import type {
-  DataAsset,
   DatasetLineageReference,
   BusinessCase,
   BusinessCaseDataAttachment,
@@ -16,15 +15,16 @@ import type {
   InferenceInputContract,
   ModelArtifact,
   ModelEvaluationSnapshot,
-  ModelServingUsage,
   OnlineMonitoringBucketEvaluation,
   OnlineMonitoringRun,
   Pipeline,
   ScoreResponse
 } from "../api/client";
 import { AssetList } from "../components/AssetList";
-import { ArtifactFilters, pipelineMatches } from "../components/ArtifactFilters";
+import { ArtifactFilters } from "../components/ArtifactFilters";
 import { DialogNavigationActions, useVersionedResourceNavigation } from "../components/dialogNavigation";
+import { PaginationControls } from "../components/PaginationControls";
+import { PagedCatalogSelect } from "../components/PagedCatalogSelect";
 import { ModelPerformanceReport, ModelPerformanceSeriesReport } from "../pipelines/PipelineRunDialogs";
 import { DatasetLineageList } from "./DatasetLineageList";
 
@@ -52,6 +52,10 @@ export function ModelsPanel({
   const [stageFilter, setStageFilter] = useState("");
   const [purposeFilter, setPurposeFilter] = useState("");
   const [pipelineFilter, setPipelineFilter] = useState("");
+  const [modelFamilies, setModelFamilies] = useState<Array<{ latest: ModelArtifact; version_count: number }>>([]);
+  const [modelFamilyTotal, setModelFamilyTotal] = useState(0);
+  const [modelFamilyOffset, setModelFamilyOffset] = useState(0);
+  const [modelPageLoading, setModelPageLoading] = useState(false);
   const modelNavigation = useVersionedResourceNavigation<ModelArtifact>();
   const businessCaseById = useMemo(
     () => new Map(businessCases.map((item) => [item.id, item])),
@@ -61,37 +65,47 @@ export function ModelsPanel({
     () => new Map(pipelines.map((item) => [item.id, item])),
     [pipelines]
   );
-  const modelFamilies = useMemo(() => {
-    const grouped = new Map<string, ModelArtifact[]>();
-    for (const model of models) {
-      const versions = grouped.get(model.logical_id) ?? [];
-      versions.push(model);
-      grouped.set(model.logical_id, versions);
-    }
-    return [...grouped.values()].map((versions) => {
-      const ordered = [...versions].sort((left, right) => right.version_number - left.version_number);
-      return { latest: ordered[0], versions: ordered };
-    });
-  }, [models]);
-  const visibleFamilies = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    return modelFamilies.filter(({ latest, versions }) =>
-      (!businessCaseId || latest.business_case_id === businessCaseId)
-      && (!stageFilter || latest.stage === stageFilter)
-      && pipelineMatches(latest.pipeline_id, pipelines, purposeFilter, pipelineFilter)
-      && (!normalized || [
-        latest.name,
-        latest.algorithm,
-        latest.problem_type,
-        ...versions.map((version) => version.version)
-      ].some((value) => value.toLowerCase().includes(normalized)))
-    );
-  }, [businessCaseId, modelFamilies, pipelineFilter, pipelines, purposeFilter, query, stageFilter]);
+  const visibleFamilies = modelFamilies;
   const availablePipelines = businessCaseId
     ? pipelines.filter((pipeline) => pipeline.business_case_id === businessCaseId)
     : pipelines;
 
   useEffect(() => setBusinessCaseId(initialBusinessCaseId), [initialBusinessCaseId]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setModelPageLoading(true);
+      api.pageModels({
+        limit: 20,
+        offset: modelFamilyOffset,
+        search: query.trim(),
+        business_case_id: businessCaseId,
+        stage: stageFilter,
+        pipeline_id: pipelineFilter,
+        pipeline_type: purposeFilter
+      })
+        .then((page) => {
+          setModelFamilies(page.items);
+          setModelFamilyTotal(page.total);
+        })
+        .catch((error) => setNotice(error instanceof Error ? error.message : "Could not load models"))
+        .finally(() => setModelPageLoading(false));
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [
+    businessCaseId,
+    modelFamilyOffset,
+    models,
+    pipelineFilter,
+    purposeFilter,
+    query,
+    setNotice,
+    stageFilter
+  ]);
+
+  useEffect(() => {
+    setModelFamilyOffset(0);
+  }, [businessCaseId, pipelineFilter, purposeFilter, query, stageFilter]);
 
   return (
     <section className="model-registry-screen">
@@ -101,8 +115,7 @@ export function ModelsPanel({
             <span className="builder-kicker">Governance</span>
             <h2>Model registry</h2>
             <p>
-              {visibleFamilies.length} of {modelFamilies.length} model families shown
-              {" · "}{models.length} immutable versions
+              {modelFamilyTotal} model families
             </p>
           </div>
           <div className="model-registry-summary">
@@ -123,13 +136,18 @@ export function ModelsPanel({
           </label>
           <label>
             <span><SlidersHorizontal size={14} /> Business case</span>
-            <select value={businessCaseId} onChange={(event) => {
-              setBusinessCaseId(event.target.value);
-              setPipelineFilter("");
-            }}>
-              <option value="">All business cases</option>
-              {businessCases.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-            </select>
+            <PagedCatalogSelect
+              value={businessCaseId}
+              onChange={(value) => {
+                setBusinessCaseId(value);
+                setPipelineFilter("");
+              }}
+              loadPage={api.pageBusinessCases}
+              getId={(item) => item.id}
+              getLabel={(item) => item.name}
+              emptyLabel="All business cases"
+              searchPlaceholder="Search Business Cases"
+            />
           </label>
           <label>
             <span><SlidersHorizontal size={14} /> Status</span>
@@ -148,6 +166,7 @@ export function ModelsPanel({
           pipelineId={pipelineFilter}
           onPurposeChange={setPurposeFilter}
           onPipelineChange={setPipelineFilter}
+          businessCaseId={businessCaseId}
         />
 
         <div className="model-registry-table" role="table" aria-label="Model registry">
@@ -159,12 +178,12 @@ export function ModelsPanel({
             <span>Status</span>
             <span />
           </div>
-          {visibleFamilies.map(({ latest: model, versions }) => (
+          {visibleFamilies.map(({ latest: model, version_count: versionCount }) => (
             <div className="model-registry-row" role="row" key={model.id}>
               <span>
                 <strong>{model.name}</strong>
                 <small>
-                  {model.version} latest · {versions.length} version{versions.length === 1 ? "" : "s"}
+                  {model.version} latest · {versionCount} version{versionCount === 1 ? "" : "s"}
                   {" · "}{model.problem_type || "problem not recorded"}
                 </small>
               </span>
@@ -191,6 +210,14 @@ export function ModelsPanel({
             <div className="catalog-empty">No models match the selected filters.</div>
           )}
         </div>
+        <PaginationControls
+          total={modelFamilyTotal}
+          limit={20}
+          offset={modelFamilyOffset}
+          onOffsetChange={setModelFamilyOffset}
+          disabled={modelPageLoading}
+          label="model families"
+        />
       </div>
       {modelNavigation.selected && (
         <ModelDetailsDialog
@@ -237,25 +264,26 @@ export function ModelVersionHistoryDialog({
   onView: (model: ModelArtifact) => Promise<void> | void;
 }) {
   const [versions, setVersions] = useState<ModelArtifact[]>([]);
-  const [servingUsage, setServingUsage] = useState<ModelServingUsage[]>([]);
+  const [versionTotal, setVersionTotal] = useState(0);
+  const [versionOffset, setVersionOffset] = useState(0);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [openingModelId, setOpeningModelId] = useState("");
 
   useEffect(() => {
     let active = true;
-    Promise.all([
-      api.listModelVersions(model.logical_id),
-      api.listModelServingUsage(model.logical_id)
-    ])
-      .then(([items, usage]) => { if (active) {
-        setVersions([...items].sort((left, right) => right.version_number - left.version_number));
-        setServingUsage(usage);
+    setLoading(true);
+    api.pageModelVersions(model.logical_id, { limit: 20, offset: versionOffset })
+      .then((page) => { if (active) {
+        setVersions(page.items);
+        setVersionTotal(page.total);
       } })
       .catch((requestError) => active && setError(
         requestError instanceof Error ? requestError.message : "Could not load model versions"
-      ));
+      ))
+      .finally(() => active && setLoading(false));
     return () => { active = false; };
-  }, [model.logical_id]);
+  }, [model.logical_id, versionOffset]);
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -269,16 +297,15 @@ export function ModelVersionHistoryDialog({
           <button className="icon-button" type="button" onClick={onClose} aria-label="Close model versions"><X size={18} /></button>
         </div>
         {error && <div className="error-banner">{error}</div>}
-        {!versions.length && !error && <div className="empty-state">Loading model versions…</div>}
+        {!versions.length && !error && loading && <div className="empty-state">Loading model versions…</div>}
         <div className="model-version-list">
           {versions.map((version, index) => {
-            const usages = servingUsage.filter((item) => item.model_id === version.id);
-            return <article key={version.id} className={usages.length ? "model-version-in-use" : ""}>
+            return <article key={version.id}>
               <div className="model-version-marker"><span>{version.version}</span></div>
               <div>
                 <strong>
                   {version.version}
-                  {index === 0 && <i className="pipeline-status published">latest</i>}
+                  {versionOffset === 0 && index === 0 && <i className="pipeline-status published">latest</i>}
                   <i className={`model-stage-badge ${version.stage}`}>{version.stage}</i>
                 </strong>
                 <span>{formatDate(version.created_at)} · run {shortId(version.pipeline_run_id)}</span>
@@ -286,16 +313,7 @@ export function ModelVersionHistoryDialog({
                   pipeline definition {shortId(version.pipeline_version_id)}
                   {" · "}model hash {shortId(version.model_hash)}
                 </small>
-                {usages.length > 0 ? (
-                  <div className="model-serving-usage">
-                    <b><Rocket size={13} /> In production use · {usages.length} {usages.length === 1 ? "service" : "services"}</b>
-                    {usages.map((usage) => (
-                      <span key={`${usage.deployment_id}-${usage.role}`}>
-                        {usage.deployment_name} · {usage.role} · revision v{usage.revision_version} · {usage.deployment_status}
-                      </span>
-                    ))}
-                  </div>
-                ) : <span className="model-version-unused">Not assigned to an active service</span>}
+                <ModelServingUsageList modelId={version.id} />
               </div>
               <button className="secondary-button compact-button" type="button" disabled={openingModelId === version.id} onClick={async () => {
                 setOpeningModelId(version.id);
@@ -310,8 +328,72 @@ export function ModelVersionHistoryDialog({
             </article>;
           })}
         </div>
+        <PaginationControls
+          total={versionTotal}
+          limit={20}
+          offset={versionOffset}
+          onOffsetChange={setVersionOffset}
+          disabled={loading}
+          label="model versions"
+        />
       </div>
     </div>
+  );
+}
+
+function ModelServingUsageList({ modelId }: { modelId: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [items, setItems] = useState<import("../api/client").ModelServingUsage[]>([]);
+  const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!expanded) return;
+    let active = true;
+    setLoading(true);
+    api.pageModelServingUsage(modelId, { limit: 5, offset })
+      .then((page) => {
+        if (!active) return;
+        setItems(page.items);
+        setTotal(page.total);
+        setError("");
+      })
+      .catch((requestError) => active && setError(
+        requestError instanceof Error
+          ? requestError.message
+          : "Could not load active service assignments"
+      ))
+      .finally(() => active && setLoading(false));
+    return () => { active = false; };
+  }, [expanded, modelId, offset]);
+
+  return (
+    <details
+      className="model-serving-usage"
+      onToggle={(event) => setExpanded(event.currentTarget.open)}
+    >
+      <summary><Rocket size={13} /> Active service assignments</summary>
+      {loading && !items.length && <span>Loading assignments…</span>}
+      {error && <span>{error}</span>}
+      {!loading && !error && !total && (
+        <span className="model-version-unused">Not assigned to an active service</span>
+      )}
+      {items.map((usage) => (
+        <span key={`${usage.deployment_id}-${usage.role}`}>
+          {usage.deployment_name} · {usage.role} · revision v{usage.revision_version} · {usage.deployment_status}
+        </span>
+      ))}
+      <PaginationControls
+        total={total}
+        limit={5}
+        offset={offset}
+        onOffsetChange={setOffset}
+        disabled={loading}
+        label="service assignments"
+      />
+    </details>
   );
 }
 
@@ -1468,7 +1550,6 @@ function MonitoringVisualizationModal({ run, onClose }: { run: OnlineMonitoringR
 
 export function ServingPanel({
   deployments,
-  datasets,
   models,
   initialDeploymentId = "",
   onRefresh,
@@ -1476,7 +1557,6 @@ export function ServingPanel({
   setNotice
 }: {
   deployments: Deployment[];
-  datasets: DataAsset[];
   models: ModelArtifact[];
   initialDeploymentId?: string;
   onRefresh: () => Promise<void>;
@@ -1487,7 +1567,9 @@ export function ServingPanel({
   type ServingModal = "create" | "revision" | "history" | "lifecycle" | "archive" | "credential" | "replay" | "inference" | null;
   const [serviceName, setServiceName] = useState("");
   const [modelId, setModelId] = useState("");
+  const [selectedCreationModel, setSelectedCreationModel] = useState<ModelArtifact | undefined>();
   const [deploymentId, setDeploymentId] = useState("");
+  const [selectedDeploymentSnapshot, setSelectedDeploymentSnapshot] = useState<Deployment | undefined>();
   const [activeTab, setActiveTab] = useState<ServingTab>("overview");
   const [modal, setModal] = useState<ServingModal>(null);
   const [recordId, setRecordId] = useState("");
@@ -1497,6 +1579,10 @@ export function ServingPanel({
   const [featureValues, setFeatureValues] = useState<Record<string, unknown>>({});
   const [contractError, setContractError] = useState("");
   const [modelOptions, setModelOptions] = useState<DeploymentModelOption[]>([]);
+  const [modelOptionById, setModelOptionById] = useState<Record<string, DeploymentModelOption>>({});
+  const [modelOptionSearch, setModelOptionSearch] = useState("");
+  const [modelOptionTotal, setModelOptionTotal] = useState(0);
+  const [modelOptionOffset, setModelOptionOffset] = useState(0);
   const [revisionError, setRevisionError] = useState("");
   const [scoreTarget, setScoreTarget] = useState("champion");
   const [scoreResult, setScoreResult] = useState<ScoreResponse | null>(null);
@@ -1504,9 +1590,14 @@ export function ServingPanel({
   const [scoreError, setScoreError] = useState("");
   const [scoreElapsedSeconds, setScoreElapsedSeconds] = useState(0);
   const [history, setHistory] = useState<InferenceRequestSummary[]>([]);
+  const [historyNextCursor, setHistoryNextCursor] = useState<string | null>(null);
   const [inferenceDetail, setInferenceDetail] = useState<Record<string, unknown> | null>(null);
   const [replays, setReplays] = useState<ChallengerReplay[]>([]);
+  const [replayTotal, setReplayTotal] = useState(0);
+  const [replayOffset, setReplayOffset] = useState(0);
   const [revisions, setRevisions] = useState<DeploymentRevision[]>([]);
+  const [revisionTotal, setRevisionTotal] = useState(0);
+  const [revisionOffset, setRevisionOffset] = useState(0);
   const [historyError, setHistoryError] = useState("");
   const [historyLoading, setHistoryLoading] = useState(false);
   const [roleByModel, setRoleByModel] = useState<Record<string, DeploymentRole | "">>({});
@@ -1516,8 +1607,16 @@ export function ServingPanel({
   const [credential, setCredential] = useState("");
   const [busy, setBusy] = useState(false);
   const [catalogMode, setCatalogMode] = useState<"services" | "monitoring">("services");
+  const [serviceSearch, setServiceSearch] = useState("");
+  const [serviceStatus, setServiceStatus] = useState("");
+  const [catalogDeployments, setCatalogDeployments] = useState<Deployment[]>([]);
+  const [deploymentTotal, setDeploymentTotal] = useState(0);
+  const [deploymentOffset, setDeploymentOffset] = useState(0);
+  const [deploymentPageLoading, setDeploymentPageLoading] = useState(false);
   const [monitoringRuns, setMonitoringRuns] = useState<OnlineMonitoringRun[]>([]);
-  const [monitoringAttachments, setMonitoringAttachments] = useState<BusinessCaseDataAttachment[]>([]);
+  const [monitoringRunTotal, setMonitoringRunTotal] = useState(0);
+  const [monitoringRunOffset, setMonitoringRunOffset] = useState(0);
+  const [monitoringActualsSnapshot, setMonitoringActualsSnapshot] = useState<BusinessCaseDataAttachment | undefined>();
   const [actualsDatasetId, setActualsDatasetId] = useState("");
   const [monitoringSince, setMonitoringSince] = useState(() => monitoringDateInput(new Date(Date.now() - 24 * 60 * 60 * 1000)));
   const [monitoringUntil, setMonitoringUntil] = useState(() => monitoringDateInput(new Date()));
@@ -1527,57 +1626,100 @@ export function ServingPanel({
   const [monitoringVisualizationRunId, setMonitoringVisualizationRunId] = useState("");
   const [monitoringError, setMonitoringError] = useState("");
   const [selectedComparisonIds, setSelectedComparisonIds] = useState<string[]>([]);
-  const selectedDeployment = deployments.find((item) => item.id === deploymentId);
-  const eligibleModels = models.filter((item) =>
+  const [comparisonDeploymentById, setComparisonDeploymentById] = useState<Record<string, Deployment>>({});
+  const selectedDeployment = (
+    catalogDeployments.find((item) => item.id === deploymentId)
+    ?? deployments.find((item) => item.id === deploymentId)
+    ?? selectedDeploymentSnapshot
+  );
+  const eligibleModels = modelOptions.filter((item) =>
     item.business_case_id === selectedDeployment?.business_case_id
     && ["staging", "production"].includes(item.stage)
   );
-  const productionModels = models.filter((item) => item.stage === "production" && item.business_case_id);
-  const actualsOptions = monitoringAttachments
-    .filter((item) => item.role === "monitoring_actuals")
-    .map((attachment) => ({ attachment, dataset: datasets.find((item) => item.id === attachment.data_asset_id) }))
-    .filter((item): item is { attachment: BusinessCaseDataAttachment; dataset: DataAsset } => Boolean(item.dataset));
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDeploymentPageLoading(true);
+      api.pageDeployments({
+        limit: 20,
+        offset: deploymentOffset,
+        search: serviceSearch.trim(),
+        status: serviceStatus
+      })
+        .then((page) => {
+          setCatalogDeployments(page.items);
+          setDeploymentTotal(page.total);
+        })
+        .catch((error) => setNotice(error instanceof Error ? error.message : "Could not load model services"))
+        .finally(() => setDeploymentPageLoading(false));
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [deploymentOffset, deployments, serviceSearch, serviceStatus, setNotice]);
+
+  useEffect(() => {
+    setDeploymentOffset(0);
+  }, [serviceSearch, serviceStatus]);
 
   useEffect(() => {
     let active = true;
-    api.listOnlineMonitoringRuns()
-      .then((items) => active && setMonitoringRuns(items))
+    const request = selectedDeployment
+      ? api.pageDeploymentMonitoringRuns(selectedDeployment.id, {
+          limit: 10,
+          offset: monitoringRunOffset
+        })
+      : api.pageOnlineMonitoringRuns({
+          limit: 20,
+          offset: monitoringRunOffset
+        });
+    request
+      .then((page) => {
+        if (!active) return;
+        setMonitoringRuns(page.items);
+        setMonitoringRunTotal(page.total);
+      })
       .catch((error) => active && setMonitoringError(error instanceof Error ? error.message : "Could not load monitoring reports"));
     return () => { active = false; };
-  }, [deployments.length]);
+  }, [deployments.length, monitoringRunOffset, selectedDeployment?.id]);
+
+  useEffect(() => {
+    setMonitoringRunOffset(0);
+  }, [selectedDeployment?.id]);
 
   useEffect(() => {
     if (!monitoringRuns.some((item) => item.status === "queued" || item.status === "running")) return;
     const timer = window.setInterval(() => {
-      void api.listOnlineMonitoringRuns()
-        .then(setMonitoringRuns)
+      const request = selectedDeployment
+        ? api.pageDeploymentMonitoringRuns(selectedDeployment.id, {
+            limit: 10,
+            offset: monitoringRunOffset
+          })
+        : api.pageOnlineMonitoringRuns({
+            limit: 20,
+            offset: monitoringRunOffset
+          });
+      void request
+        .then((page) => {
+          setMonitoringRuns(page.items);
+          setMonitoringRunTotal(page.total);
+        })
         .catch((error) => setMonitoringError(error instanceof Error ? error.message : "Could not refresh monitoring runs"));
     }, 2000);
     return () => window.clearInterval(timer);
-  }, [monitoringRuns]);
+  }, [monitoringRunOffset, monitoringRuns, selectedDeployment?.id]);
 
   useEffect(() => {
-    if (!selectedDeployment) {
-      setMonitoringAttachments([]);
-      return;
-    }
-    let active = true;
-    api.listBusinessCaseDataAttachments(selectedDeployment.business_case_id)
-      .then((items) => {
-        if (!active) return;
-        setMonitoringAttachments(items);
-        const actuals = items.find((item) => item.role === "monitoring_actuals");
-        setActualsDatasetId((current) => current || actuals?.data_asset_id || "");
-        setMonitoringTargetColumn((current) => current || actuals?.target_column || "");
-        setMonitoringRecordColumn((current) => current || actuals?.primary_key_column || "");
-      })
-      .catch((error) => active && setMonitoringError(error instanceof Error ? error.message : "Could not load actuals attachments"));
-    return () => { active = false; };
-  }, [selectedDeployment?.id, selectedDeployment?.business_case_id]);
+    setMonitoringActualsSnapshot(undefined);
+    setActualsDatasetId("");
+    setMonitoringTargetColumn("");
+    setMonitoringRecordColumn("");
+  }, [selectedDeployment?.id]);
 
   useEffect(() => {
-    setSelectedComparisonIds((current) => current.length ? current : deployments.slice(0, 2).map((item) => item.id));
-  }, [deployments]);
+    setSelectedComparisonIds((current) => current.length ? current : catalogDeployments.slice(0, 2).map((item) => item.id));
+    setComparisonDeploymentById((current) => ({
+      ...current,
+      ...Object.fromEntries(catalogDeployments.map((item) => [item.id, item]))
+    }));
+  }, [catalogDeployments]);
 
   async function refreshServingActivity(deployment: Deployment) {
     if (historyLoading) return;
@@ -1586,10 +1728,12 @@ export function ServingPanel({
     try {
       const [page, replayItems] = await Promise.all([
         api.inferenceLogSummary(deployment.id, 50),
-        api.listChallengerReplays(deployment.id)
+        api.pageChallengerReplays(deployment.id, { limit: 10, offset: replayOffset })
       ]);
       setHistory(page.items);
-      setReplays(replayItems);
+      setHistoryNextCursor(page.next_cursor);
+      setReplays(replayItems.items);
+      setReplayTotal(replayItems.total);
       setNotice("Traffic & audit refreshed");
     } catch (error) {
       setHistoryError(error instanceof Error ? error.message : "Could not refresh serving activity");
@@ -1598,12 +1742,47 @@ export function ServingPanel({
     }
   }
 
-  useEffect(() => {
-    if (initialDeploymentId && deployments.some((item) => item.id === initialDeploymentId)) {
-      setDeploymentId(initialDeploymentId);
-      setActiveTab("overview");
+  async function loadMoreInferenceHistory() {
+    if (!selectedDeployment || !historyNextCursor || historyLoading) return;
+    setHistoryLoading(true);
+    setHistoryError("");
+    try {
+      const page = await api.inferenceLogSummary(
+        selectedDeployment.id,
+        50,
+        historyNextCursor
+      );
+      setHistory((current) => [
+        ...current,
+        ...page.items.filter((item) => !current.some((existing) => existing.id === item.id))
+      ]);
+      setHistoryNextCursor(page.next_cursor);
+    } catch (error) {
+      setHistoryError(error instanceof Error ? error.message : "Could not load more inference history");
+    } finally {
+      setHistoryLoading(false);
     }
-  }, [deployments, initialDeploymentId]);
+  }
+
+  useEffect(() => {
+    if (!initialDeploymentId) return;
+    let active = true;
+    const cached = [...catalogDeployments, ...deployments].find(
+      (item) => item.id === initialDeploymentId
+    );
+    (cached ? Promise.resolve(cached) : api.getDeployment(initialDeploymentId))
+      .then((deployment) => {
+        if (!active) return;
+        setCatalogDeployments((current) => current.some((item) => item.id === deployment.id)
+          ? current
+          : [deployment, ...current]);
+        setSelectedDeploymentSnapshot(deployment);
+        setDeploymentId(deployment.id);
+        setActiveTab("overview");
+      })
+      .catch((error) => active && setNotice(error instanceof Error ? error.message : "Service is no longer available"));
+    return () => { active = false; };
+  }, [catalogDeployments, deployments, initialDeploymentId, setNotice]);
 
   useEffect(() => {
     const assignments = selectedDeployment?.active_revision?.assignments ?? [];
@@ -1613,23 +1792,100 @@ export function ServingPanel({
       setHistory([]);
       return;
     }
+    setSelectedDeploymentSnapshot(selectedDeployment);
     let active = true;
     setHistoryError("");
     Promise.all([
       api.inferenceLogSummary(selectedDeployment.id, 50),
-      api.listChallengerReplays(selectedDeployment.id),
-      api.listDeploymentRevisions(selectedDeployment.id),
-      api.deploymentModelOptions(selectedDeployment.id)
+      api.pageChallengerReplays(selectedDeployment.id, { limit: 10, offset: replayOffset }),
+      api.pageDeploymentRevisions(selectedDeployment.id, { limit: 10, offset: revisionOffset })
     ])
-      .then(([page, replayItems, revisionItems, options]) => { if (active) {
+      .then(([page, replayItems, revisionItems]) => { if (active) {
         setHistory(page.items);
-        setReplays(replayItems);
-        setRevisions(revisionItems);
-        setModelOptions(options);
+        setHistoryNextCursor(page.next_cursor);
+        setReplays(replayItems.items);
+        setReplayTotal(replayItems.total);
+        setRevisions(revisionItems.items);
+        setRevisionTotal(revisionItems.total);
       } })
       .catch((error) => active && setHistoryError(error instanceof Error ? error.message : "Could not load inference history"));
     return () => { active = false; };
-  }, [selectedDeployment?.id, selectedDeployment?.active_revision_id]);
+  }, [
+    replayOffset,
+    revisionOffset,
+    selectedDeployment?.id,
+    selectedDeployment?.active_revision_id
+  ]);
+
+  useEffect(() => {
+    setReplayOffset(0);
+    setRevisionOffset(0);
+    setModelOptionOffset(0);
+    setModelOptionSearch("");
+    setModelOptionById({});
+  }, [selectedDeployment?.id]);
+
+  useEffect(() => {
+    if (!selectedDeployment) {
+      setModelOptions([]);
+      setModelOptionTotal(0);
+      return;
+    }
+    let active = true;
+    const timer = window.setTimeout(() => {
+      const pinnedIds = (
+        selectedDeployment.active_revision?.assignments ?? []
+      ).map((item) => item.model_id);
+      Promise.all([
+        api.pageDeploymentModelOptions(selectedDeployment.id, {
+          limit: 20,
+          offset: modelOptionOffset,
+          search: modelOptionSearch.trim()
+        }),
+        pinnedIds.length
+          ? api.pageDeploymentModelOptions(
+              selectedDeployment.id,
+              { limit: Math.min(100, pinnedIds.length), offset: 0 },
+              pinnedIds
+            )
+          : Promise.resolve({
+              items: [],
+              total: 0,
+              limit: 1,
+              offset: 0,
+              has_next: false
+            })
+      ])
+        .then(([page, pinned]) => {
+          if (!active) return;
+          const merged = new Map(
+            [...pinned.items, ...page.items].map((item) => [item.model_id, item])
+          );
+          setModelOptions([...merged.values()]);
+          setModelOptionTotal(page.total);
+          setModelOptionById((current) => ({
+            ...current,
+            ...Object.fromEntries([...merged.values()].map((item) => [item.model_id, item]))
+          }));
+        })
+        .catch((error) => active && setRevisionError(
+          error instanceof Error ? error.message : "Could not load serving model options"
+        ));
+    }, 250);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [
+    modelOptionOffset,
+    modelOptionSearch,
+    selectedDeployment?.active_revision_id,
+    selectedDeployment?.id
+  ]);
+
+  useEffect(() => {
+    setModelOptionOffset(0);
+  }, [modelOptionSearch]);
 
   useEffect(() => {
     if (!selectedDeployment) {
@@ -1753,7 +2009,7 @@ export function ServingPanel({
 
   async function activateRevision() {
     if (!selectedDeployment) return;
-    const eligibleModelIds = new Set(eligibleModels.map((model) => model.id));
+    const eligibleModelIds = new Set(Object.keys(modelOptionById));
     const assignments = Object.entries(roleByModel)
       .filter((entry): entry is [string, DeploymentRole] => Boolean(entry[1]) && eligibleModelIds.has(entry[0]))
       .map(([assignedModelId, role]) => ({ model_id: assignedModelId, role }));
@@ -1766,10 +2022,10 @@ export function ServingPanel({
       return;
     }
     const selectedChampionId = assignments.find((item) => item.role === "champion")?.model_id;
-    const championSignature = modelOptions.find((item) => item.model_id === selectedChampionId)?.contract_signature;
+    const championSignature = modelOptionById[selectedChampionId ?? ""]?.contract_signature;
     const incompatible = assignments.filter((item) =>
       item.model_id !== selectedChampionId
-      && modelOptions.find((option) => option.model_id === item.model_id)?.contract_signature !== championSignature
+      && modelOptionById[item.model_id]?.contract_signature !== championSignature
     );
     if (incompatible.length) {
       const message = "All challenger, shadow and fallback models must have the same input and output contract as the selected champion.";
@@ -1856,7 +2112,9 @@ export function ServingPanel({
       return;
     }
     const job = await api.createChallengerReplay(selectedDeployment.id, scoreTarget, 1000);
-    setReplays((current) => [job, ...current]);
+    setReplayOffset(0);
+    setReplays((current) => [job, ...current.filter((item) => item.id !== job.id)].slice(0, 10));
+    setReplayTotal((current) => current + 1);
     setModal(null);
     setNotice("Challenger replay queued over up to 1,000 historical requests");
   }
@@ -1880,7 +2138,9 @@ export function ServingPanel({
           ...(monitoringRecordColumn.trim() ? { actuals_record_id_column: monitoringRecordColumn.trim() } : {})
         }
       });
-      setMonitoringRuns((current) => [run, ...current.filter((item) => item.id !== run.id)]);
+      setMonitoringRunOffset(0);
+      setMonitoringRuns((current) => [run, ...current.filter((item) => item.id !== run.id)].slice(0, 10));
+      setMonitoringRunTotal((current) => current + 1);
       setNotice(actualsDatasetId
         ? "Full-scope online monitoring report with performance evaluation queued"
         : "Full-scope operational monitoring report queued without actuals");
@@ -1895,15 +2155,17 @@ export function ServingPanel({
 
   async function refreshMonitoringRuns() {
     try {
-      const items = selectedDeployment
-        ? await api.listDeploymentMonitoringRuns(selectedDeployment.id)
-        : await api.listOnlineMonitoringRuns();
-      setMonitoringRuns((current) => selectedDeployment
-        ? [
-            ...items,
-            ...current.filter((item) => item.deployment_id !== selectedDeployment.id)
-          ]
-        : items);
+      const page = selectedDeployment
+        ? await api.pageDeploymentMonitoringRuns(selectedDeployment.id, {
+            limit: 10,
+            offset: monitoringRunOffset
+          })
+        : await api.pageOnlineMonitoringRuns({
+            limit: 20,
+            offset: monitoringRunOffset
+          });
+      setMonitoringRuns(page.items);
+      setMonitoringRunTotal(page.total);
       setMonitoringError("");
       setNotice(selectedDeployment ? "Monitoring tab refreshed" : "Monitoring dashboard refreshed");
     } catch (error) {
@@ -1913,38 +2175,49 @@ export function ServingPanel({
 
   const refreshAllServingTabs = useCallback(async () => {
     if (!selectedDeployment) {
-      const [, runs] = await Promise.all([onRefresh(), api.listOnlineMonitoringRuns()]);
-      setMonitoringRuns(runs);
+      const [, runs] = await Promise.all([
+        onRefresh(),
+        api.pageOnlineMonitoringRuns({ limit: 20, offset: monitoringRunOffset })
+      ]);
+      setMonitoringRuns(runs.items);
+      setMonitoringRunTotal(runs.total);
       setMonitoringError("");
       return;
     }
 
     const challenger = scoreTarget === "champion" ? undefined : scoreTarget;
-    const [, page, replayItems, revisionItems, options, contract, runs, attachments] = await Promise.all([
+    const [, page, replayItems, revisionItems, contract, runs] = await Promise.all([
       onRefresh(),
       api.inferenceLogSummary(selectedDeployment.id, 50),
-      api.listChallengerReplays(selectedDeployment.id),
-      api.listDeploymentRevisions(selectedDeployment.id),
-      api.deploymentModelOptions(selectedDeployment.id),
+      api.pageChallengerReplays(selectedDeployment.id, { limit: 10, offset: replayOffset }),
+      api.pageDeploymentRevisions(selectedDeployment.id, { limit: 10, offset: revisionOffset }),
       api.deploymentInputContract(selectedDeployment.id, challenger),
-      api.listDeploymentMonitoringRuns(selectedDeployment.id),
-      api.listBusinessCaseDataAttachments(selectedDeployment.business_case_id)
+      api.pageDeploymentMonitoringRuns(selectedDeployment.id, {
+        limit: 10,
+        offset: monitoringRunOffset
+      })
     ]);
     setHistory(page.items);
-    setReplays(replayItems);
-    setRevisions(revisionItems);
-    setModelOptions(options);
+    setHistoryNextCursor(page.next_cursor);
+    setReplays(replayItems.items);
+    setReplayTotal(replayItems.total);
+    setRevisions(revisionItems.items);
+    setRevisionTotal(revisionItems.total);
     setInputContract(contract);
     setFeatureValues(contract.example_features);
-    setMonitoringRuns((current) => [
-      ...runs,
-      ...current.filter((item) => item.deployment_id !== selectedDeployment.id)
-    ]);
-    setMonitoringAttachments(attachments);
+    setMonitoringRuns(runs.items);
+    setMonitoringRunTotal(runs.total);
     setHistoryError("");
     setContractError("");
     setMonitoringError("");
-  }, [onRefresh, scoreTarget, selectedDeployment]);
+  }, [
+    monitoringRunOffset,
+    onRefresh,
+    replayOffset,
+    revisionOffset,
+    scoreTarget,
+    selectedDeployment
+  ]);
 
   useEffect(() => {
     if (!onRegisterRefresh) return;
@@ -1957,6 +2230,7 @@ export function ServingPanel({
     try {
       await api.archiveOnlineMonitoringRun(runId);
       setMonitoringRuns((current) => current.filter((item) => item.id !== runId));
+      setMonitoringRunTotal((current) => Math.max(0, current - 1));
       setNotice("Monitoring run archived");
     } catch (error) {
       setMonitoringError(error instanceof Error ? error.message : "Could not archive monitoring run");
@@ -1970,21 +2244,39 @@ export function ServingPanel({
       setMonitoringRuns((current) => current.filter((item) =>
         item.deployment_id !== selectedDeployment.id || !["succeeded", "failed"].includes(item.status)
       ));
+      setMonitoringRunOffset(0);
+      setMonitoringRunTotal((current) => Math.max(0, current - result.archived_run_count));
       setNotice(`${result.archived_run_count} monitoring run(s) archived`);
     } catch (error) {
       setMonitoringError(error instanceof Error ? error.message : "Could not archive monitoring history");
     }
   }
 
-  function toggleComparisonService(serviceId: string) {
+  function toggleComparisonService(deployment: Deployment) {
+    const serviceId = deployment.id;
+    setComparisonDeploymentById((current) => ({
+      ...current,
+      [serviceId]: deployment
+    }));
     setSelectedComparisonIds((current) =>
       current.includes(serviceId)
         ? current.filter((item) => item !== serviceId)
         : [...current, serviceId]
     );
+    if (!monitoringRuns.some((item) => item.deployment_id === serviceId)) {
+      void api.pageDeploymentMonitoringRuns(serviceId, { limit: 1, offset: 0 })
+        .then((page) => setMonitoringRuns((current) => [
+          ...current.filter((item) => item.deployment_id !== serviceId),
+          ...page.items
+        ]))
+        .catch((error) => setMonitoringError(
+          error instanceof Error ? error.message : "Could not load the selected service report"
+        ));
+    }
   }
 
   function openDeployment(deployment: Deployment) {
+    setSelectedDeploymentSnapshot(deployment);
     setDeploymentId(deployment.id);
     setActiveTab("overview");
     setScoreResult(null);
@@ -2000,7 +2292,7 @@ export function ServingPanel({
   const shadows = assignments.filter((item) => item.role === "shadow");
   const fallback = assignments.find((item) => item.role === "fallback");
   const configuredChampionId = Object.entries(roleByModel).find(([, role]) => role === "champion")?.[0];
-  const configuredChampionSignature = modelOptions.find((item) => item.model_id === configuredChampionId)?.contract_signature;
+  const configuredChampionSignature = modelOptionById[configuredChampionId ?? ""]?.contract_signature;
 
   function updateModelRole(assignedModelId: string, role: DeploymentRole | "") {
     setRevisionError("");
@@ -2018,7 +2310,7 @@ export function ServingPanel({
 
   function modelLabel(assignedModelId: string | undefined) {
     if (!assignedModelId) return "Not configured";
-    const option = modelOptions.find((item) => item.model_id === assignedModelId);
+    const option = modelOptionById[assignedModelId];
     if (option) return `${option.name} · ${option.version}`;
     const model = models.find((item) => item.id === assignedModelId);
     return model ? `${model.name} · ${model.version}` : shortId(assignedModelId);
@@ -2030,7 +2322,9 @@ export function ServingPanel({
   }
 
   const comparisonRuns = selectedComparisonIds.flatMap((serviceId) => {
-    const deployment = deployments.find((item) => item.id === serviceId);
+    const deployment = comparisonDeploymentById[serviceId]
+      ?? catalogDeployments.find((item) => item.id === serviceId)
+      ?? deployments.find((item) => item.id === serviceId);
     if (!deployment) return [];
     const runs = monitoringRuns.filter((item) => item.deployment_id === serviceId);
     const run = runs.find((item) => item.status === "succeeded") ?? runs[0];
@@ -2057,6 +2351,31 @@ export function ServingPanel({
           </div>
         </div>
 
+        <div className="model-registry-filters">
+          <label className="search-field">
+            <Search size={16} />
+            <input
+              aria-label="Search model services"
+              placeholder="Search service name, slug or endpoint"
+              value={serviceSearch}
+              onChange={(event) => setServiceSearch(event.target.value)}
+            />
+          </label>
+          <label>
+            <span><SlidersHorizontal size={14} /> Status</span>
+            <select value={serviceStatus} onChange={(event) => setServiceStatus(event.target.value)}>
+              <option value="">All active statuses</option>
+              <option value="requested">Requested</option>
+              <option value="building">Building</option>
+              <option value="running">Running</option>
+              <option value="stopped">Stopped</option>
+              <option value="degraded">Degraded</option>
+              <option value="failed">Failed</option>
+            </select>
+          </label>
+          <span>{deploymentTotal} services</span>
+        </div>
+
         {catalogMode === "services" && <div className="serving-guidance" role="note">
           <Rocket size={20} />
           <div><strong>Start with a production model.</strong><span>Create one service, then add challengers, shadows or a fallback from its Overview.</span></div>
@@ -2066,9 +2385,9 @@ export function ServingPanel({
           <div className="panel form-panel serving-monitoring-selector">
             <div className="panel-header"><div><span className="builder-kicker">Comparative read model</span><h3>Compare service reports</h3></div><button className="secondary-button compact-button" type="button" onClick={() => void refreshMonitoringRuns()}><RotateCcw size={14} /> Refresh</button></div>
             <p>Select services to compare their latest immutable manual report. Metrics remain tied to their visible window and actuals coverage.</p>
-            <div className="serving-monitoring-checkboxes">{deployments.map((deployment) => {
+            <div className="serving-monitoring-checkboxes">{catalogDeployments.map((deployment) => {
               const selected = selectedComparisonIds.includes(deployment.id);
-              return <label key={deployment.id} className={selected ? "selected" : undefined}><input type="checkbox" checked={selected} onChange={() => toggleComparisonService(deployment.id)} /><span><strong>{deployment.name}</strong><small>{deployment.status} · revision v{deployment.active_revision?.version_number ?? "—"}</small></span></label>;
+              return <label key={deployment.id} className={selected ? "selected" : undefined}><input type="checkbox" checked={selected} onChange={() => toggleComparisonService(deployment)} /><span><strong>{deployment.name}</strong><small>{deployment.status} · revision v{deployment.active_revision?.version_number ?? "—"}</small></span></label>;
             })}</div>
           </div>
           {monitoringError && <div className="error-banner">{monitoringError}</div>}
@@ -2084,10 +2403,10 @@ export function ServingPanel({
           </div>
         </div>}
 
-        {catalogMode === "services" && deployments.length > 0 && <div className="serving-table-wrap">
+        {catalogMode === "services" && catalogDeployments.length > 0 && <div className="serving-table-wrap">
           <table className="serving-table">
             <thead><tr><th>Service</th><th>Status</th><th>Champion</th><th>Revision</th><th>Additional roles</th><th className="action-column">Actions</th></tr></thead>
-            <tbody>{deployments.map((deployment) => {
+            <tbody>{catalogDeployments.map((deployment) => {
               const activeAssignments = deployment.active_revision?.assignments ?? [];
               const activeChampion = activeAssignments.find((item) => item.role === "champion");
               return <tr key={deployment.id}>
@@ -2101,7 +2420,15 @@ export function ServingPanel({
             })}</tbody>
           </table>
         </div>}
-          {catalogMode === "services" && !deployments.length && <div className="panel serving-empty-state">
+        <PaginationControls
+          total={deploymentTotal}
+          limit={20}
+          offset={deploymentOffset}
+          onOffsetChange={setDeploymentOffset}
+          disabled={deploymentPageLoading}
+          label="model services"
+        />
+          {catalogMode === "services" && !deploymentPageLoading && !catalogDeployments.length && <div className="panel serving-empty-state">
             <Rocket size={28} />
             <h3>No model services yet</h3>
             <p>Create a stable endpoint backed by your first production model.</p>
@@ -2113,8 +2440,27 @@ export function ServingPanel({
             <div className="modal-header"><div><span className="builder-kicker">New endpoint</span><h2 id="create-serving-title">Create model service</h2><p>The service name and endpoint stay stable when you change model versions later.</p></div><button className="icon-button" type="button" onClick={closeModal} aria-label="Close"><X size={18} /></button></div>
             <div className="serving-modal-body form-panel">
               <label>Service name<input autoFocus value={serviceName} onChange={(event) => setServiceName(event.target.value)} placeholder="Estates Sell Prices Service" /></label>
-              <label>Initial champion<select value={modelId} onChange={(event) => setModelId(event.target.value)}><option value="">Choose a production model</option>{productionModels.map((model) => <option key={model.id} value={model.id}>{model.name} · {model.version}</option>)}</select><small>Only production models can receive public traffic as champion.</small></label>
-              {!productionModels.length && <div className="serving-inline-warning">No production models are available. Promote a validated model from the Models section first.</div>}
+              <label>
+                Initial champion
+                <PagedCatalogSelect<ModelArtifact>
+                  value={modelId}
+                  onChange={(value, item) => {
+                    setModelId(value);
+                    setSelectedCreationModel(item);
+                  }}
+                  loadPage={async (query) => {
+                    const page = await api.pageModels({ ...query, stage: "production" });
+                    return { ...page, items: page.items.map((family) => family.latest) };
+                  }}
+                  getId={(model) => model.id}
+                  getLabel={(model) => `${model.name} · ${model.version}`}
+                  selectedItem={selectedCreationModel}
+                  emptyLabel="Choose a production model"
+                  searchPlaceholder="Search production models"
+                  reloadKey={`${models.length}:${models.map((item) => `${item.id}:${item.stage}`).join(",")}`}
+                />
+                <small>Only production models can receive public traffic as champion.</small>
+              </label>
             </div>
             <div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>Cancel</button><button className="primary-button" onClick={createDeployment} type="button" disabled={busy || !serviceName.trim() || !modelId}><Plus size={16} /> Create service</button></div>
           </div>
@@ -2205,21 +2551,50 @@ export function ServingPanel({
         <div className="serving-section-header"><div><span className="builder-kicker">Full payload retention</span><h3>Inference log</h3><p>Every accepted request and model execution is retained for audit and future monitoring.</p></div><div className="catalog-toolbar-actions"><button className="secondary-button" type="button" onClick={() => void refreshServingActivity(selectedDeployment)} disabled={historyLoading}><RotateCcw className={historyLoading ? "run-spinner" : undefined} size={16} /> {historyLoading ? "Refreshing…" : "Refresh"}</button>{challengers.length > 0 && <button className="secondary-button" type="button" onClick={() => { setScoreTarget(challengers[0].model_id); setModal("replay"); }}><History size={16} /> Replay challenger</button>}</div></div>
         {historyError && <div className="error-banner">{historyError}</div>}
         <div className="panel inference-log-list serving-traffic-list">{history.map((item) => <article key={item.id}><span><strong>{item.status}</strong><small>{formatDate(item.created_at)} · {item.record_count} records</small></span><span><code>{shortId(item.served_model_id || item.champion_model_id)}</code><small>{item.served_role || "champion"}{item.fallback_used ? " · fallback used" : ""}</small></span><span><strong>{item.latency_ms ?? "—"} ms</strong><small>{item.warnings[0] ?? item.error_message}</small></span><button className="secondary-button compact-button" type="button" onClick={() => api.inferenceDetail(selectedDeployment.id, item.id).then((detail) => { setInferenceDetail(detail); setModal("inference"); })}><Eye size={14} /> Details</button></article>)}{!history.length && !historyError && <div className="serving-list-empty"><History size={24} /><strong>No requests recorded yet</strong><span>Use Test endpoint or call the REST API to generate the first auditable request.</span></div>}</div>
-        {replays.length > 0 && <div className="serving-replay-section"><h3>Challenger replays</h3><div className="panel inference-log-list">{replays.slice(0, 10).map((item) => <article key={item.id}><span><strong>{item.status}</strong><small>{formatDate(item.created_at)}</small></span><span><code>{shortId(item.challenger_model_id)}</code><small>revision {shortId(item.deployment_revision_id)}</small></span><span><strong>{item.processed_records} records</strong><small>{item.failed_requests} failed request(s)</small></span></article>)}</div></div>}
+        {historyNextCursor && <div className="pagination-controls"><span>{history.length} requests loaded</span><button className="secondary-button compact-button" type="button" onClick={() => void loadMoreInferenceHistory()} disabled={historyLoading}>Load next 50</button></div>}
+        {replayTotal > 0 && <div className="serving-replay-section"><h3>Challenger replays</h3><div className="panel inference-log-list">{replays.map((item) => <article key={item.id}><span><strong>{item.status}</strong><small>{formatDate(item.created_at)}</small></span><span><code>{shortId(item.challenger_model_id)}</code><small>revision {shortId(item.deployment_revision_id)}</small></span><span><strong>{item.processed_records} records</strong><small>{item.failed_requests} failed request(s)</small></span></article>)}</div><PaginationControls total={replayTotal} limit={10} offset={replayOffset} onOffsetChange={setReplayOffset} label="challenger replays" /></div>}
       </div>}
 
       {activeTab === "monitoring" && <div className="serving-tab-content serving-monitoring-layout">
         <div className="panel form-panel">
           <div className="panel-header"><div><span className="builder-kicker">Manual full-scope run</span><h3>Generate monitoring report</h3></div><Activity size={18} /></div>
           <p className="serving-section-intro">The platform snapshots every retained public-endpoint execution in the selected scoring-time window. Add immutable actuals to also calculate service and per-model effectiveness.</p>
-          <label>Actuals dataset · optional<select value={actualsDatasetId} onChange={(event) => {
-            const next = event.target.value;
-            setActualsDatasetId(next);
-            const attachment = actualsOptions.find((item) => item.dataset.id === next)?.attachment;
-            setMonitoringTargetColumn(attachment?.target_column ?? "");
-            setMonitoringRecordColumn(attachment?.primary_key_column ?? "");
-          }}><option value="">No actuals · operational and distribution metrics only</option>{actualsOptions.map(({ attachment, dataset }) => <option key={dataset.id} value={dataset.id}>{dataset.name} · v{dataset.version_number} · {dataset.row_count ?? "?"} rows{attachment.target_column ? ` · target ${attachment.target_column}` : ""}</option>)}</select><small>Without actuals, performance metrics are explicitly marked as not evaluated. Eligible actuals must be attached to this Business Case with role monitoring_actuals.</small></label>
-          {!actualsOptions.length && <div className="serving-inline-warning">No monitoring_actuals dataset is attached. You can still run operational, traffic, input and prediction monitoring.</div>}
+          <label>
+            Actuals dataset · optional
+            <PagedCatalogSelect<BusinessCaseDataAttachment>
+              value={actualsDatasetId}
+              selectedItem={monitoringActualsSnapshot}
+              reloadKey={selectedDeployment?.id ?? ""}
+              loadPage={(query) => selectedDeployment
+                ? api.pageBusinessCaseDataAttachments(selectedDeployment.business_case_id, {
+                    ...query,
+                    role: "monitoring_actuals"
+                  })
+                : Promise.resolve({ items: [], total: 0, limit: query.limit, offset: query.offset, has_next: false })}
+              getId={(item) => item.data_asset_id}
+              getLabel={(item) => `${item.data_asset_name ?? item.data_asset_id} · v${item.data_asset_version_number ?? "?"}${item.target_column ? ` · target ${item.target_column}` : ""}`}
+              emptyLabel="No actuals · operational and distribution metrics only"
+              searchPlaceholder="Search monitoring actuals"
+              disabled={!selectedDeployment}
+              onPageLoaded={(page) => {
+                if (!actualsDatasetId && page.offset === 0 && page.items.length) {
+                  const first = page.items[0];
+                  setMonitoringActualsSnapshot(first);
+                  setActualsDatasetId(first.data_asset_id);
+                  setMonitoringTargetColumn(first.target_column ?? "");
+                  setMonitoringRecordColumn(first.primary_key_column ?? "");
+                }
+              }}
+              onChange={(next, attachment) => {
+                setActualsDatasetId(next);
+                setMonitoringActualsSnapshot(attachment);
+                setMonitoringTargetColumn(attachment?.target_column ?? "");
+                setMonitoringRecordColumn(attachment?.primary_key_column ?? "");
+              }}
+            />
+            <small>Without actuals, performance metrics are explicitly marked as not evaluated. Eligible actuals must be attached to this Business Case with role monitoring_actuals.</small>
+          </label>
+          {!actualsDatasetId && <div className="serving-inline-warning">No actuals dataset is selected. You can still run operational, traffic, input and prediction monitoring.</div>}
           <div className="serving-monitoring-window"><label>Since · scoring time<input type="datetime-local" value={monitoringSince} onChange={(event) => setMonitoringSince(event.target.value)} /></label><label><span className="serving-monitoring-time-label"><span>Until · scoring time</span><button type="button" onClick={() => setMonitoringUntil(monitoringDateInput(new Date()))}>Now</button></span><input type="datetime-local" value={monitoringUntil} onChange={(event) => setMonitoringUntil(event.target.value)} /></label></div>
           <label>Time aggregation<select value={monitoringAggregation} onChange={(event) => setMonitoringAggregation(event.target.value as typeof monitoringAggregation)}><option value="none">No aggregation · one summary for the full window</option><option value="hour">Per hour</option><option value="day">Per day</option><option value="week">Per week</option><option value="month">Per month</option></select><small>Calendar buckets use scored_at and include empty intervals, so the report has one row per selected period.</small></label>
           {actualsDatasetId && <details><summary>Join overrides</summary><label>Actuals record ID column<input value={monitoringRecordColumn} onChange={(event) => setMonitoringRecordColumn(event.target.value)} placeholder="Inferred from attachment" /></label><label>Actuals target column<input value={monitoringTargetColumn} onChange={(event) => setMonitoringTargetColumn(event.target.value)} placeholder="Inferred from attachment or model" /></label><small>Auto join prefers prediction_id, then request_id + record ID, then a unique record ID in this window.</small></details>}
@@ -2244,6 +2619,13 @@ export function ServingPanel({
             })}</div>}{run.warnings.length > 0 && hasActuals && <div className="serving-inline-warning">{run.warnings[0]}</div>}</>}</article>;
           })}
           {!monitoringRuns.some((item) => item.deployment_id === selectedDeployment.id) && <div className="serving-list-empty"><Activity size={24} /><strong>No monitoring report yet</strong><span>Select a retained scoring-time window to create the first immutable report. Actuals are optional.</span></div>}
+          <PaginationControls
+            total={monitoringRunTotal}
+            limit={10}
+            offset={monitoringRunOffset}
+            onOffsetChange={setMonitoringRunOffset}
+            label="monitoring reports"
+          />
         </div>
       </div>}
 
@@ -2254,13 +2636,13 @@ export function ServingPanel({
 
       {monitoringVisualizationRun && <MonitoringVisualizationModal key={monitoringVisualizationRun.id} run={monitoringVisualizationRun} onClose={() => setMonitoringVisualizationRunId("")} />}
 
-      {modal === "revision" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog serving-revision-dialog" role="dialog" aria-modal="true" aria-labelledby="revision-title"><div className="modal-header"><div><span className="builder-kicker">Immutable configuration</span><h2 id="revision-title">Configure model roles</h2><p>Saving creates and immediately activates a new service revision. Only staging and production models with a compatible inference contract can share traffic.</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body form-panel"><div className="serving-role-help"><span><strong>Champion</strong> public traffic</span><span><strong>Challenger</strong> direct tests and replay</span><span><strong>Shadow</strong> copied live traffic</span><span><strong>Fallback</strong> technical failures</span></div>{revisionError && <div className="error-banner" role="alert">{revisionError}</div>}<div className="serving-role-grid">{eligibleModels.map((model) => {
-          const option = modelOptions.find((item) => item.model_id === model.id);
+      {modal === "revision" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog serving-revision-dialog" role="dialog" aria-modal="true" aria-labelledby="revision-title"><div className="modal-header"><div><span className="builder-kicker">Immutable configuration</span><h2 id="revision-title">Configure model roles</h2><p>Saving creates and immediately activates a new service revision. Only staging and production models with a compatible inference contract can share traffic.</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body form-panel"><div className="serving-role-help"><span><strong>Champion</strong> public traffic</span><span><strong>Challenger</strong> direct tests and replay</span><span><strong>Shadow</strong> copied live traffic</span><span><strong>Fallback</strong> technical failures</span></div>{revisionError && <div className="error-banner" role="alert">{revisionError}</div>}<label className="search-field"><Search size={16} /><input aria-label="Search serving model options" placeholder="Search model name, algorithm or ID" value={modelOptionSearch} onChange={(event) => setModelOptionSearch(event.target.value)} /></label><div className="serving-role-grid">{eligibleModels.map((model) => {
+          const option = modelOptionById[model.model_id];
           const compatible = !configuredChampionSignature || option?.contract_signature === configuredChampionSignature;
-          return <label key={model.id} className={!compatible && roleByModel[model.id] !== "champion" ? "serving-model-incompatible" : ""}><span>{model.name} · {model.version}<small>{model.stage}{!compatible && roleByModel[model.id] !== "champion" ? " · incompatible with selected champion" : ""}</small></span><select value={roleByModel[model.id] ?? ""} onChange={(event) => updateModelRole(model.id, event.target.value as DeploymentRole | "")}><option value="">Not assigned</option><option value="champion" disabled={!option?.allowed_roles.includes("champion")}>Champion</option><option value="challenger" disabled={!compatible || !option?.allowed_roles.includes("challenger")}>Challenger</option><option value="shadow" disabled={!compatible || !option?.allowed_roles.includes("shadow")}>Shadow</option><option value="fallback" disabled={!compatible || !option?.allowed_roles.includes("fallback")}>Fallback</option></select></label>;
-        })}</div>{!eligibleModels.length && <div className="serving-inline-warning">No staging or production models are available in this Business Case.</div>}<label>Reason for change<input value={revisionReason} onChange={(event) => setRevisionReason(event.target.value)} placeholder="e.g. Add validated challenger v6" /></label></div><div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>Cancel</button><button className="primary-button" type="button" onClick={activateRevision} disabled={busy || !revisionReason.trim()}><GitBranch size={15} /> Activate new revision</button></div></div></div>}
+          return <label key={model.model_id} className={!compatible && roleByModel[model.model_id] !== "champion" ? "serving-model-incompatible" : ""}><span>{model.name} · {model.version}<small>{model.stage}{!compatible && roleByModel[model.model_id] !== "champion" ? " · incompatible with selected champion" : ""}</small></span><select value={roleByModel[model.model_id] ?? ""} onChange={(event) => updateModelRole(model.model_id, event.target.value as DeploymentRole | "")}><option value="">Not assigned</option><option value="champion" disabled={!option?.allowed_roles.includes("champion")}>Champion</option><option value="challenger" disabled={!compatible || !option?.allowed_roles.includes("challenger")}>Challenger</option><option value="shadow" disabled={!compatible || !option?.allowed_roles.includes("shadow")}>Shadow</option><option value="fallback" disabled={!compatible || !option?.allowed_roles.includes("fallback")}>Fallback</option></select></label>;
+        })}</div><PaginationControls total={modelOptionTotal} limit={20} offset={modelOptionOffset} onOffsetChange={setModelOptionOffset} label="serving model options" />{!eligibleModels.length && <div className="serving-inline-warning">No staging or production models are available in this Business Case.</div>}<label>Reason for change<input value={revisionReason} onChange={(event) => setRevisionReason(event.target.value)} placeholder="e.g. Add validated challenger v6" /></label></div><div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>Cancel</button><button className="primary-button" type="button" onClick={activateRevision} disabled={busy || !revisionReason.trim()}><GitBranch size={15} /> Activate new revision</button></div></div></div>}
 
-      {modal === "history" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog" role="dialog" aria-modal="true" aria-labelledby="history-title"><div className="modal-header"><div><span className="builder-kicker">Immutable history</span><h2 id="history-title">Service revisions</h2><p>Rollback copies a historical configuration into a new auditable revision.</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body form-panel"><div className="model-version-list">{revisions.map((revision) => <article key={revision.id}><div className="model-version-marker"><span>v{revision.version_number}</span></div><div><strong>Revision v{revision.version_number}</strong><span>{formatDate(revision.created_at)} · {revision.assignments.length} assigned model(s)</span><small>{revision.reason || "No reason recorded"}</small></div>{revision.id === selectedDeployment.active_revision_id ? <i className="pipeline-status published">active</i> : <button className="secondary-button compact-button" type="button" onClick={() => setRollbackRevisionId(revision.id)}>Select rollback</button>}</article>)}</div>{rollbackRevisionId && <label>Rollback reason<input value={revisionReason} onChange={(event) => setRevisionReason(event.target.value)} placeholder="Why is this revision being restored?" /></label>}</div><div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>Close</button><button className="primary-button" type="button" onClick={rollbackDeployment} disabled={busy || !rollbackRevisionId || !revisionReason.trim()}><History size={15} /> Roll back</button></div></div></div>}
+      {modal === "history" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog" role="dialog" aria-modal="true" aria-labelledby="history-title"><div className="modal-header"><div><span className="builder-kicker">Immutable history</span><h2 id="history-title">Service revisions</h2><p>Rollback copies a historical configuration into a new auditable revision.</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body form-panel"><div className="model-version-list">{revisions.map((revision) => <article key={revision.id}><div className="model-version-marker"><span>v{revision.version_number}</span></div><div><strong>Revision v{revision.version_number}</strong><span>{formatDate(revision.created_at)} · {revision.assignments.length} assigned model(s)</span><small>{revision.reason || "No reason recorded"}</small></div>{revision.id === selectedDeployment.active_revision_id ? <i className="pipeline-status published">active</i> : <button className="secondary-button compact-button" type="button" onClick={() => setRollbackRevisionId(revision.id)}>Select rollback</button>}</article>)}</div><PaginationControls total={revisionTotal} limit={10} offset={revisionOffset} onOffsetChange={setRevisionOffset} label="service revisions" />{rollbackRevisionId && <label>Rollback reason<input value={revisionReason} onChange={(event) => setRevisionReason(event.target.value)} placeholder="Why is this revision being restored?" /></label>}</div><div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>Close</button><button className="primary-button" type="button" onClick={rollbackDeployment} disabled={busy || !rollbackRevisionId || !revisionReason.trim()}><History size={15} /> Roll back</button></div></div></div>}
 
       {modal === "lifecycle" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog" role="dialog" aria-modal="true" aria-labelledby="lifecycle-title"><div className="modal-header"><div><span className="builder-kicker">Service lifecycle</span><h2 id="lifecycle-title">{selectedDeployment.status === "running" ? "Stop service" : "Validate and resume service"}</h2><p>{selectedDeployment.status === "running" ? "The endpoint will reject scoring while revision history remains available." : "The active revision will be validated before traffic is accepted."}</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body form-panel"><label>Reason<input value={lifecycleReason} onChange={(event) => setLifecycleReason(event.target.value)} placeholder="Reason for this operational change" /></label></div><div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>Cancel</button><button className="primary-button" type="button" onClick={changeDeploymentStatus} disabled={busy || !lifecycleReason.trim()}>{selectedDeployment.status === "running" ? "Stop service" : "Validate & resume"}</button></div></div></div>}
 

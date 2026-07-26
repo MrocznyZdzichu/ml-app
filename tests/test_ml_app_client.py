@@ -69,6 +69,84 @@ def run_payload(status: str = "queued", **overrides: Any) -> dict[str, Any]:
 
 
 class MLAppClientTests(unittest.TestCase):
+    def test_catalog_pages_preserve_server_totals_and_filters(self) -> None:
+        session = FakeSession([
+            FakeResponse({
+                "items": [dataset_payload()],
+                "total": 41,
+                "limit": 10,
+                "offset": 20,
+                "has_next": True,
+            }),
+            FakeResponse({
+                "items": [{"id": "bc-1", "name": "Sales", "access_role": "manager"}],
+                "total": 1,
+                "limit": 30,
+                "offset": 0,
+                "has_next": False,
+            }),
+        ])
+        client = MLAppClient(session=session)
+
+        datasets = client.page_datasets(
+            limit=10,
+            offset=20,
+            search="sales",
+            asset_kind="dataset",
+        )
+        cases = client.page_business_cases(
+            search="sales",
+            manageable_only=True,
+        )
+
+        self.assertEqual(datasets.total, 41)
+        self.assertTrue(datasets.has_next)
+        self.assertIsInstance(datasets.items[0], Dataset)
+        self.assertEqual(cases.items[0]["id"], "bc-1")
+        self.assertEqual(session.requests[0][2]["params"]["offset"], 20)
+        self.assertEqual(session.requests[1][2]["params"]["manageable_only"], "true")
+
+    def test_version_histories_use_bounded_page_contracts(self) -> None:
+        page = {
+            "items": [],
+            "total": 125,
+            "limit": 20,
+            "offset": 40,
+            "has_next": True,
+        }
+        session = FakeSession([
+            FakeResponse(page),
+            FakeResponse(page),
+            FakeResponse(page),
+            FakeResponse({
+                **page,
+                "items": [{
+                    "model_id": "model-v1",
+                    "deployment_id": "service-1",
+                    "deployment_name": "Risk service",
+                    "deployment_status": "running",
+                    "revision_version": 2,
+                    "role": "champion",
+                    "endpoint_url": "/predictions",
+                }],
+            }),
+        ])
+        client = MLAppClient(session=session)
+
+        dataset_versions = client.page_dataset_versions("dataset/family", offset=40)
+        model_versions = client.page_model_versions("model/family", offset=40)
+        report_versions = client.page_scoring_report_versions("report/family", offset=40)
+        usage = client.page_model_serving_usage("model/v1", offset=40)
+
+        self.assertEqual(dataset_versions.total, 125)
+        self.assertTrue(model_versions.has_next)
+        self.assertEqual(report_versions.offset, 40)
+        self.assertEqual(usage.items[0].role, "champion")
+        self.assertIn("/datasets/dataset%2Ffamily/versions/page", session.requests[0][1])
+        self.assertIn("/models/model%2Ffamily/versions/page", session.requests[1][1])
+        self.assertIn("/scoring-reports/report%2Ffamily/versions/page", session.requests[2][1])
+        self.assertIn("/serving/models/model%2Fv1/usage/page", session.requests[3][1])
+
     def test_me_returns_authenticated_profile(self) -> None:
         session = FakeSession([FakeResponse({
             "user_id": "user-1", "login_name": "alice", "roles": ["user"],
@@ -342,6 +420,7 @@ class MLAppClientTests(unittest.TestCase):
 
     def test_wait_returns_row_counts_and_raises_on_failed_run(self) -> None:
         success_session = FakeSession([
+            FakeResponse(run_payload("succeeded", processed_row_count=12)),
             FakeResponse(run_payload("succeeded", processed_row_count=12))
         ])
         finished = MLAppClient(session=success_session).wait_for_pipeline_run(
@@ -351,6 +430,7 @@ class MLAppClientTests(unittest.TestCase):
         self.assertEqual(finished.processed_row_count, 12)
 
         failed_session = FakeSession([
+            FakeResponse(run_payload("failed", error_message="training failed")),
             FakeResponse(run_payload("failed", error_message="training failed"))
         ])
         with self.assertRaisesRegex(ApiError, "training failed"):

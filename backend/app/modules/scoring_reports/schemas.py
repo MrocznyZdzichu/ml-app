@@ -27,6 +27,11 @@ class ScoringReportRead(BaseModel):
     created_at: datetime
 
 
+class ScoringReportFamilyRead(BaseModel):
+    latest: ScoringReportRead
+    version_count: int
+
+
 class DatasetLineageRead(BaseModel):
     artifact_id: str
     artifact_type: str
