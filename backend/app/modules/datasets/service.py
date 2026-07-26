@@ -31,6 +31,7 @@ from app.modules.datasets.sources import DatasetSourceRegistry
 from app.modules.datasets.visualizations import FullDatasetVisualization
 from app.modules.datasets.time_series import FullDatasetTimeSeriesAnalyzer
 from app.modules.datasets.temporary import TemporaryPipelineOutputResolver
+from app.ports.task_queue import TaskQueue
 from app.modules.sharing.domain import (
     BusinessCaseAccessRole,
     ResourceAccessRole,
@@ -46,6 +47,7 @@ class DatasetService:
         self,
         repository: DatasetRepository | None = None,
         temporary_outputs: TemporaryPipelineOutputResolver | None = None,
+        task_queue: TaskQueue | None = None,
     ) -> None:
         self.repository = repository or PostgresDatasetRepository()
         self.repository_root = Path("data/repository")
@@ -54,8 +56,8 @@ class DatasetService:
         self.full_profiler = FullDatasetProfiler()
         self.full_visualization = FullDatasetVisualization()
         self.time_series = FullDatasetTimeSeriesAnalyzer(self.full_visualization.store)
-        self.time_series_jobs = TimeSeriesAnalysisJobs()
-        self.profile_jobs = DescriptiveProfileJobs()
+        self.time_series_jobs = TimeSeriesAnalysisJobs(task_queue=task_queue)
+        self.profile_jobs = DescriptiveProfileJobs(task_queue=task_queue)
         self.temporary_outputs = temporary_outputs or TemporaryPipelineOutputResolver()
 
     def register(self, payload: DataAssetCreate, principal: Principal) -> DataAsset:

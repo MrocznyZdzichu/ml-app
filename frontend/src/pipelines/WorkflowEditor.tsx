@@ -664,7 +664,6 @@ export function WorkflowEditor({
   }
 
   function removeStep(index: number) {
-    const removed = definition.steps[index];
     const remaining = definition.steps.filter((_, itemIndex) => itemIndex !== index);
     const last = remaining.at(-1);
     setExpandedStepId(last?.step_id ?? "");

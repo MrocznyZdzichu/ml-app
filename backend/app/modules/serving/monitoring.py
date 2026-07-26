@@ -11,6 +11,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 from fastapi import HTTPException, status
 
 from app.core.security import Principal
+from app.modules.auth.repository import PostgresUserRepository, UserRepository
 from app.modules.business_cases.domain import (
     Artifact,
     ArtifactOrigin,
@@ -19,11 +20,14 @@ from app.modules.business_cases.domain import (
     DataArtifactKind,
     DataRole,
 )
-from app.modules.business_cases.repository import PostgresBusinessCaseRepository
+from app.modules.business_cases.repository import (
+    BusinessCaseRepository,
+    PostgresBusinessCaseRepository,
+)
 from app.modules.business_cases.lineage import DatasetLineageResolver
 from app.modules.datasets.columnar import ColumnarDatasetStore
 from app.modules.datasets.domain import DataAsset, DataAssetStatus, SourceType
-from app.modules.datasets.repository import PostgresDatasetRepository
+from app.modules.datasets.repository import DatasetRepository, PostgresDatasetRepository
 from app.modules.datasets.service import DatasetService
 from app.modules.models.service import ModelService
 from app.modules.pipelines.model_evaluation import ModelEvaluationSnapshotBuilder
@@ -34,6 +38,7 @@ from app.modules.serving.schemas import OnlineMonitoringRunCreate
 from app.modules.sharing.domain import AuditEvent, BC_ROLE_RANK, BusinessCaseAccessRole
 from app.modules.sharing.policy import access_policy
 from app.modules.sharing.repository import PostgresSharingRepository
+from app.ports.task_queue import TaskQueue, require_task_queue
 from app.shared.duckdb_runtime import configured_duckdb_connection, write_parquet_atomic
 from app.shared.sql_security import identifier
 
@@ -72,16 +77,27 @@ class OnlineMonitoringService:
         models: ModelService | None = None,
         enqueue: Callable[[str], Any] | None = None,
         repository_root: Path | None = None,
+        task_queue: TaskQueue | None = None,
+        dataset_repository: DatasetRepository | None = None,
+        business_cases: BusinessCaseRepository | None = None,
+        sharing_repository: PostgresSharingRepository | None = None,
+        users: UserRepository | None = None,
     ) -> None:
         self.repository = repository or PostgresServingRepository()
         self.datasets = datasets or DatasetService()
-        self.dataset_repository = getattr(self.datasets, "repository", None) or PostgresDatasetRepository()
+        self.dataset_repository = (
+            dataset_repository
+            or getattr(self.datasets, "repository", None)
+            or PostgresDatasetRepository()
+        )
         self.models = models or ModelService()
-        self.business_cases = PostgresBusinessCaseRepository()
-        self.sharing = PostgresSharingRepository()
+        self.business_cases = business_cases or PostgresBusinessCaseRepository()
+        self.sharing = sharing_repository or PostgresSharingRepository()
+        self.users = users or PostgresUserRepository()
         self.store = ColumnarDatasetStore(repository_root or Path("data/repository"))
         self.repository_root = (repository_root or Path("data/repository")).resolve()
         self.enqueue = enqueue
+        self.task_queue = task_queue
 
     def create_run(
         self,
@@ -184,8 +200,10 @@ class OnlineMonitoringService:
         if self.enqueue is not None:
             self.enqueue(run.id)
         else:
-            from app.worker.tasks import run_online_monitoring
-            run_online_monitoring.delay(run.id)
+            require_task_queue(self.task_queue).enqueue(
+                "app.worker.tasks.run_online_monitoring",
+                [run.id],
+            )
         return run
 
     def list_runs(
@@ -1628,10 +1646,8 @@ class OnlineMonitoringService:
         role = access_policy.business_case_role(principal, business_case_id)
         return role is not None and BC_ROLE_RANK[role] >= BC_ROLE_RANK[BusinessCaseAccessRole.REPORT_VIEWER]
 
-    @staticmethod
-    def _requester(run: OnlineMonitoringRun) -> Principal | None:
-        from app.modules.auth.repository import PostgresUserRepository
-        account = PostgresUserRepository().get(run.requested_by)
+    def _requester(self, run: OnlineMonitoringRun) -> Principal | None:
+        account = self.users.get(run.requested_by)
         if account is None or not account.is_active:
             return None
         return Principal(

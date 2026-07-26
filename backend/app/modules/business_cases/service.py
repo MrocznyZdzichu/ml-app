@@ -23,7 +23,8 @@ from app.modules.business_cases.schemas import (
 )
 from app.modules.sharing.domain import BC_ROLE_RANK, BusinessCaseAccessRole, ResourceAccessRole, ResourceKind
 from app.modules.sharing.policy import access_policy
-from app.modules.auth.repository import PostgresUserRepository
+from app.modules.auth.repository import PostgresUserRepository, UserRepository
+from app.modules.datasets.repository import DatasetRepository, PostgresDatasetRepository
 from app.modules.sharing.domain import AuditEvent
 from app.modules.sharing.repository import PostgresSharingRepository
 
@@ -32,8 +33,17 @@ business_case_repository = PostgresBusinessCaseRepository()
 
 
 class BusinessCaseService:
-    def __init__(self, repository: BusinessCaseRepository | None = None) -> None:
+    def __init__(
+        self,
+        repository: BusinessCaseRepository | None = None,
+        users: UserRepository | None = None,
+        datasets: DatasetRepository | None = None,
+        audit_repository: PostgresSharingRepository | None = None,
+    ) -> None:
         self.repository = repository or business_case_repository
+        self.users = users or PostgresUserRepository()
+        self.datasets = datasets or PostgresDatasetRepository()
+        self.audit_repository = audit_repository or PostgresSharingRepository()
 
     def create_business_case(self, payload: BusinessCaseCreate, principal: Principal) -> BusinessCase:
         name = payload.name.strip()
@@ -170,7 +180,7 @@ class BusinessCaseService:
             principal,
             minimum=BusinessCaseAccessRole.OWNER,
         )
-        new_owner = PostgresUserRepository().get(payload.new_owner_id)
+        new_owner = self.users.get(payload.new_owner_id)
         if new_owner is None or not new_owner.is_active:
             raise HTTPException(status_code=404, detail="New owner not found or inactive")
         previous_owner = business_case.owner_id
@@ -178,7 +188,7 @@ class BusinessCaseService:
         business_case.updated_by = principal.user_id
         business_case.updated_at = datetime.now(timezone.utc)
         self.repository.update_business_case(business_case)
-        PostgresSharingRepository().add_audit(AuditEvent(
+        self.audit_repository.add_audit(AuditEvent(
             id=str(uuid4()), actor_id=principal.user_id, action="business_case.ownership_transferred",
             subject_type="user", subject_id=new_owner.id,
             resource_kind="business_case", resource_id=business_case.id,
@@ -200,8 +210,7 @@ class BusinessCaseService:
             minimum=BusinessCaseAccessRole.CONTRIBUTOR,
         )
         # Contributors may attach data they can at least read; administrators bypass this centrally.
-        from app.modules.datasets.repository import PostgresDatasetRepository
-        asset = PostgresDatasetRepository().get(payload.data_asset_id)
+        asset = self.datasets.get(payload.data_asset_id)
         if asset is not None:
             access_policy.require_resource(
                 principal,

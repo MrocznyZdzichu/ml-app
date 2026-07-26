@@ -4,9 +4,10 @@ from app.core.security import Principal, require_user
 from app.modules.users.schemas import AdminPasswordReset, AdminUserUpdate, UserRead
 from app.modules.users.service import UserAdministrationService
 from app.shared.pagination import OffsetPage
+from app.core.container import get_container
 
 router = APIRouter(prefix="/users", tags=["users"])
-service = UserAdministrationService()
+service: UserAdministrationService = get_container().user_administration
 
 
 def _user_read(user) -> UserRead:

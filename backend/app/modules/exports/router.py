@@ -3,9 +3,10 @@ from fastapi import APIRouter, Depends
 from app.core.security import Principal, require_user
 from app.modules.exports.schemas import ExportJobRead, ExportRequest
 from app.modules.exports.service import ExportService
+from app.core.container import get_container
 
 router = APIRouter(prefix="/exports", tags=["exports"])
-service = ExportService()
+service: ExportService = get_container().exports
 
 
 @router.post("", response_model=ExportJobRead, status_code=201)

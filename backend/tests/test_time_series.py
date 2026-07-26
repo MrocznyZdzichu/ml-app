@@ -31,6 +31,27 @@ class FakeRedis:
             self.values.pop(key, None)
 
 
+class FakeTaskQueue:
+    def __init__(self) -> None:
+        self.submitted: dict[str, object] = {}
+
+    def enqueue(
+        self,
+        task_name: str,
+        args: list[object],
+        *,
+        task_id: str | None = None,
+    ) -> None:
+        self.submitted = {
+            "task_name": task_name,
+            "args": args,
+            "task_id": task_id,
+        }
+
+    def result(self, task_id: str):
+        raise AssertionError(f"Unexpected result lookup for {task_id}")
+
+
 def time_series_fixture(tmp_path: Path) -> tuple[ColumnarDatasetStore, DataAsset]:
     repository = tmp_path / "repository"
     dataset_dir = repository / "users" / "owner" / "time-series"
@@ -131,15 +152,22 @@ def test_time_series_visualizations_return_bounded_full_dataset_points(tmp_path:
 
 def test_time_series_job_records_ownership_and_submits_full_options(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_redis = FakeRedis()
-    submitted: dict[str, object] = {}
-    monkeypatch.setattr(time_series_jobs.time_series_analysis_dataset, "apply_async", lambda **kwargs: submitted.update(kwargs))
+    task_queue = FakeTaskQueue()
     monkeypatch.setattr(time_series_jobs, "uuid4", lambda: "time-job-1")
-    jobs = TimeSeriesAnalysisJobs(fake_redis)
+    jobs = TimeSeriesAnalysisJobs(fake_redis, task_queue)
 
     result = jobs.start("dataset-1", "owner-1", {"time_column": "timestamp", "value_column": "value"})
 
     assert result["job_id"] == "time-job-1"
-    assert submitted["task_id"] == "time-job-1"
+    assert task_queue.submitted == {
+        "task_name": "app.worker.tasks.time_series_analysis_dataset",
+        "args": [
+            "dataset-1",
+            "owner-1",
+            {"time_column": "timestamp", "value_column": "value"},
+        ],
+        "task_id": "time-job-1",
+    }
     assert json.loads(fake_redis.values["time-series-analysis-owner:time-job-1"]) == {"dataset_id": "dataset-1", "owner_id": "owner-1"}
 
 

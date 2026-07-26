@@ -11,10 +11,11 @@ from app.modules.business_cases.lineage import DatasetLineageResolver
 from app.modules.sharing.domain import BusinessCaseAccessRole
 from app.modules.sharing.policy import access_policy
 from app.shared.pagination import OffsetPage
+from app.core.container import get_container
 
 
 router = APIRouter(prefix="/scoring-reports", tags=["scoring-reports"])
-service = ScoringReportService()
+service: ScoringReportService = get_container().scoring_reports
 lineage_resolver = DatasetLineageResolver()
 
 

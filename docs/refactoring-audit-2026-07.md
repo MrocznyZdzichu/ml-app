@@ -31,17 +31,47 @@ lists and duplicated resolvers.
 These changes are behavior-preserving except for correcting inconsistent
 `pinned` handling.
 
+## Refactoring implementation follow-up
+
+The high-priority structural work from this snapshot was implemented without
+changing the public REST contracts or the visible UI:
+
+- `ApplicationContainer` is now the backend composition root. Routers resolve
+  use-case services from it instead of constructing service graphs locally.
+- Queue access is expressed through the `TaskQueue` port. Celery is an outer
+  adapter selected by the composition root, so application modules no longer
+  import worker implementations.
+- Authentication identity moved to a transport-independent `Principal` module,
+  removing the security/API-credential import cycle.
+- Pipeline execution moved from the Celery task module to
+  `PipelineRunExecutor`. The task is now a thin adapter, while the executor can
+  be tested synchronously with injected repositories.
+- The former frontend application monolith was split into domain panels for
+  Business Cases, Pipelines, Data/Analysis, Jobs, Models and Serving. `App.tsx`
+  is now the workspace shell and navigation coordinator.
+- Heavy domain panels are loaded on demand. In the production build measured
+  during the refactor, the initial application chunk decreased from about
+  324 kB (80 kB gzip) to about 100 kB (24 kB gzip).
+- Browser API transport, pagination and serving operations are separate modules.
+  The supported Python client now separates response models, errors, resource
+  resolution and serving workflows while preserving its import surface.
+- Executable architecture tests prevent application-to-worker imports, service
+  construction in routers, HTTP coupling in `Principal`, and renewed growth of
+  the pipeline task wrapper.
+
 ## Current hotspots
 
-### P1 — split application containers incrementally
+### P1 — continue splitting the Data/Analysis workspace
 
-- `frontend/src/App.tsx`: approximately 8,700 lines.
-- `frontend/src/styles.css`: approximately 7,500 lines.
-- Pipeline editor/controller files are each above 1,000 lines.
+`App.tsx` is no longer the controller hotspot. The largest remaining UI module
+is `frontend/src/data/DataWorkspacePanels.tsx`, which still combines catalog,
+roles, descriptive analysis and the record browser. Split these along existing
+API boundaries before adding new analysis modes. `styles.css` and the pipeline
+editor/controller files also remain large and should be divided by domain
+without changing class names or visual behavior.
 
-Extract Business Cases and Pipelines into domain page containers first. Keep
-API calls and state transitions unchanged during extraction. A wholesale UI
-rewrite would have high regression risk and no data-plane benefit.
+The frontend API DTO registry is also still handwritten and broad. Generate
+transport DTOs from OpenAPI before duplicating more schema definitions.
 
 ### P1 — measure and reduce repeated model-report scans
 
@@ -84,12 +114,20 @@ Prioritize:
 - category-mapping row identity and upstream dataset resolution;
 - scoring-report chart contract rendering.
 
-### P2 — decompose worker orchestration
+### Completed — decompose worker orchestration
 
-`execute_pipeline_run` owns cancellation checks, step lifecycle, materialization,
-relation binding, lineage, counters, report registration, and failure handling.
-Extract a run executor and a step-result binder behind testable contracts before
-adding approval gates or resumable runs.
+`execute_pipeline_run` now delegates to `PipelineRunExecutor`. Further
+decomposition should focus inside the executor on step-result binding and
+materialization policies only when those responsibilities need independent
+evolution.
+
+### P2 — isolate HTTP errors from remaining application services
+
+Several mature services still raise FastAPI `HTTPException` directly. New
+domain/application code should use typed exceptions and translate them in the
+router layer. Migrate existing modules incrementally with regression coverage;
+changing every error contract at once would create unnecessary compatibility
+risk.
 
 ## Deferred infrastructure decisions
 

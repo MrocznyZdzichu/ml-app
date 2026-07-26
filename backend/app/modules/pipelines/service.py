@@ -45,6 +45,7 @@ from app.modules.pipelines.workflow import (
 )
 from app.modules.sharing.domain import BusinessCaseAccessRole, ResourceAccessRole, ResourceKind
 from app.modules.sharing.policy import access_policy
+from app.ports.task_queue import TaskQueue, require_task_queue
 
 
 pipeline_repository = PostgresPipelineRepository()
@@ -58,12 +59,14 @@ class PipelineService:
         output_reader: PipelineRunOutputReader | None = None,
         datasets: DatasetRepository | None = None,
         artifacts: BusinessCaseRepository | None = None,
+        task_queue: TaskQueue | None = None,
     ) -> None:
         self.repository = repository or pipeline_repository
         self.business_cases = business_cases or BusinessCaseService()
         self.output_reader = output_reader or PipelineRunOutputReader()
         self.datasets = datasets or PostgresDatasetRepository()
         self.artifacts = artifacts or PostgresBusinessCaseRepository()
+        self.task_queue = task_queue
 
     def create_pipeline(self, payload: PipelineCreate, principal: Principal) -> Pipeline:
         business_case = self.business_cases.get_business_case(
@@ -512,10 +515,12 @@ class PipelineService:
             created_at=now,
         )
         self.repository.add_run(run)
-        from app.worker.tasks import execute_pipeline_run
 
         try:
-            execute_pipeline_run.delay(run.id)
+            require_task_queue(self.task_queue).enqueue(
+                "app.worker.tasks.execute_pipeline_run",
+                [run.id],
+            )
         except Exception as exc:
             run.status = PipelineRunStatus.FAILED
             run.error_message = f"Pipeline run could not be queued: {exc}"[:4000]

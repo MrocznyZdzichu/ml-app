@@ -1,13 +1,23 @@
 import json
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 from fastapi import HTTPException, status
 from redis import Redis
 
 from app.core.config import settings
-from app.worker.celery_app import celery_app
-from app.worker.tasks import time_series_analysis_dataset
+from app.ports.task_queue import TaskQueue, require_task_queue
+
+
+class RedisJobStore(Protocol):
+    def setex(self, name: str, time: int, value: str) -> Any:
+        ...
+
+    def get(self, name: str) -> Any:
+        ...
+
+    def delete(self, *names: str) -> Any:
+        ...
 
 
 class TimeSeriesAnalysisJobs:
@@ -15,8 +25,13 @@ class TimeSeriesAnalysisJobs:
 
     key_prefix = "time-series-analysis-owner"
 
-    def __init__(self, redis_client: Any | None = None) -> None:
+    def __init__(
+        self,
+        redis_client: RedisJobStore | None = None,
+        task_queue: TaskQueue | None = None,
+    ) -> None:
         self.redis = redis_client or Redis.from_url(settings.redis_url)
+        self.task_queue = task_queue
         self.expires_seconds = settings.descriptive_profile_result_expires_seconds
 
     def start(self, dataset_id: str, owner_id: str, options: dict[str, Any], asset_owner_id: str | None = None) -> dict[str, Any]:
@@ -27,7 +42,11 @@ class TimeSeriesAnalysisJobs:
             task_args = [dataset_id, owner_id, options]
             if asset_owner_id and asset_owner_id != owner_id:
                 task_args = [dataset_id, asset_owner_id, options, owner_id]
-            time_series_analysis_dataset.apply_async(args=task_args, task_id=job_id)
+            require_task_queue(self.task_queue).enqueue(
+                "app.worker.tasks.time_series_analysis_dataset",
+                task_args,
+                task_id=job_id,
+            )
         except Exception:
             self.redis.delete(key)
             raise
@@ -41,7 +60,7 @@ class TimeSeriesAnalysisJobs:
             ownership = {}
         if ownership.get("dataset_id") != dataset_id or ownership.get("owner_id") != owner_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Time-series analysis job not found")
-        task = celery_app.AsyncResult(job_id)
+        task = require_task_queue(self.task_queue).result(job_id)
         if task.successful():
             return {"job_id": job_id, "status": "completed", "result": task.result, "error": None}
         if task.failed() or task.state == "REVOKED":

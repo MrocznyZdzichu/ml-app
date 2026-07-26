@@ -35,7 +35,7 @@ from app.modules.pipelines.workflow import (
     WorkflowStep,
     validate_workflow_definition,
 )
-from app.worker.tasks import _definition_with_resolved_inputs
+from app.modules.pipelines.run_executor import _definition_with_resolved_inputs
 
 
 def _relation(path: Path, rows: int) -> SourceRelation:

@@ -10,26 +10,36 @@ from app.modules.models.domain import ModelArtifact, ModelStage, TrainingJob
 from app.modules.models.repository import InMemoryModelRepository, ModelRepository
 from app.modules.models.schemas import PromoteModelRequest, TrainingRequest
 from app.modules.business_cases.domain import Artifact, ArtifactType
-from app.modules.business_cases.repository import PostgresBusinessCaseRepository
+from app.modules.business_cases.repository import (
+    BusinessCaseRepository,
+    PostgresBusinessCaseRepository,
+)
 from app.modules.pipelines.domain import PipelineVersion
-from app.modules.pipelines.repository import PostgresPipelineRepository
+from app.modules.pipelines.repository import PipelineRepository, PostgresPipelineRepository
 from app.modules.sharing.domain import AuditEvent, BC_ROLE_RANK, BusinessCaseAccessRole
 from app.modules.sharing.policy import access_policy
-from app.modules.datasets.repository import PostgresDatasetRepository
+from app.modules.datasets.repository import DatasetRepository, PostgresDatasetRepository
 from app.modules.sharing.domain import ResourceAccessRole, ResourceKind
+from app.modules.serving.repository import PostgresServingRepository, ServingRepository
+from app.modules.sharing.repository import PostgresSharingRepository
 
 
 class ModelService:
     def __init__(
         self,
         repository: ModelRepository | None = None,
-        artifacts: PostgresBusinessCaseRepository | None = None,
-        pipelines: PostgresPipelineRepository | None = None,
+        artifacts: BusinessCaseRepository | None = None,
+        pipelines: PipelineRepository | None = None,
+        datasets: DatasetRepository | None = None,
+        serving_repository: ServingRepository | None = None,
+        audit_repository: PostgresSharingRepository | None = None,
     ) -> None:
         self.repository = repository or InMemoryModelRepository()
         self.artifacts = artifacts or PostgresBusinessCaseRepository()
         self.pipelines = pipelines or PostgresPipelineRepository()
-        self.datasets = PostgresDatasetRepository()
+        self.datasets = datasets or PostgresDatasetRepository()
+        self.serving_repository = serving_repository or PostgresServingRepository()
+        self.audit_repository = audit_repository or PostgresSharingRepository()
 
     def start_training(self, payload: TrainingRequest, principal: Principal) -> TrainingJob:
         asset = self.datasets.get(payload.dataset_id)
@@ -684,18 +694,16 @@ class ModelService:
         self._audit_stage_change(updated, previous_stage, payload.stage, principal)
         return updated
 
-    @staticmethod
     def _audit_stage_change(
+        self,
         model: ModelArtifact,
         previous_stage: str,
         next_stage: ModelStage,
         principal: Principal,
     ) -> None:
-        from app.modules.sharing.repository import PostgresSharingRepository
-
         if previous_stage == next_stage.value:
             return
-        PostgresSharingRepository().add_audit(AuditEvent(
+        self.audit_repository.add_audit(AuditEvent(
             id=str(uuid4()),
             actor_id=principal.user_id,
             action="model.stage_changed",
@@ -707,11 +715,12 @@ class ModelService:
             new_state={"stage": next_stage.value},
         ))
 
-    @staticmethod
-    def _require_stage_compatible_with_active_serving(model_id: str, stage: ModelStage) -> None:
-        from app.modules.serving.repository import PostgresServingRepository
-
-        usages = PostgresServingRepository().active_assignments_for_model(model_id)
+    def _require_stage_compatible_with_active_serving(
+        self,
+        model_id: str,
+        stage: ModelStage,
+    ) -> None:
+        usages = self.serving_repository.active_assignments_for_model(model_id)
         incompatible = [
             usage for usage in usages
             if (

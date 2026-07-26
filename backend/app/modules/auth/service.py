@@ -29,8 +29,13 @@ from app.modules.sharing.repository import PostgresSharingRepository
 class AuthService:
     """Owns account registration, password verification, and token issuance."""
 
-    def __init__(self, repository: UserRepository | None = None) -> None:
+    def __init__(
+        self,
+        repository: UserRepository | None = None,
+        audit_repository: PostgresSharingRepository | None = None,
+    ) -> None:
         self.repository = repository or PostgresUserRepository()
+        self.audit_repository = audit_repository or PostgresSharingRepository()
 
     def register(self, payload: RegisterRequest) -> TokenResponse:
         email = payload.email.lower()
@@ -71,7 +76,7 @@ class AuthService:
                 detail="Account is inactive",
             )
         if user.id == "root":
-            PostgresSharingRepository().add_audit(AuditEvent(
+            self.audit_repository.add_audit(AuditEvent(
                 id=str(uuid4()), actor_id=user.id, action="root.login",
                 subject_type="user", subject_id=user.id,
             ))
@@ -99,7 +104,7 @@ class AuthService:
         user.session_version += 1
         user.updated_at = datetime.now(timezone.utc)
         self.repository.update(user)
-        PostgresSharingRepository().add_audit(AuditEvent(
+        self.audit_repository.add_audit(AuditEvent(
             id=str(uuid4()), actor_id=user.id, action="user.password_changed",
             subject_type="user", subject_id=user.id,
             new_state={"sessions_invalidated": True},

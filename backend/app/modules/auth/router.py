@@ -13,10 +13,11 @@ from app.modules.auth.schemas import (
 )
 from app.modules.auth.api_credentials import ApiCredentialService
 from app.modules.auth.service import AuthService
+from app.core.container import get_container
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-service = AuthService()
-credential_service = ApiCredentialService()
+service: AuthService = get_container().auth
+credential_service: ApiCredentialService = get_container().api_credentials
 
 
 @router.post("/login", response_model=TokenResponse)

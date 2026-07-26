@@ -1,20 +1,22 @@
 """Supported Python client for integrating with ML App."""
 
-from .client import (
+from .client import MLAppClient
+from .errors import (
     ApiError,
     AuthenticationError,
     AuthorizationError,
-    CatalogPage,
     ConflictError,
+    ResourceAmbiguousError,
+    ResourceNotFoundError,
+)
+from .models import (
+    CatalogPage,
+    Dataset,
     Deployment,
     ModelServingUsage,
     OnlineMonitoringRun,
-    Dataset,
-    MLAppClient,
     PipelineRun,
     PredictionResult,
-    ResourceAmbiguousError,
-    ResourceNotFoundError,
 )
 
 __all__ = [

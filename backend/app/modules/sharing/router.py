@@ -17,9 +17,10 @@ from app.modules.sharing.schemas import (
 )
 from app.modules.sharing.service import SharingService
 from app.shared.pagination import OffsetPage
+from app.core.container import get_container
 
 router = APIRouter(prefix="/sharing", tags=["sharing"])
-service = SharingService()
+service: SharingService = get_container().sharing
 
 
 @router.get("/directory/users", response_model=list[DirectoryUserRead])

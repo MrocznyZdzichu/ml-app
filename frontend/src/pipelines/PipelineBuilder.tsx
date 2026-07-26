@@ -14,8 +14,6 @@ import type {
   PipelineStepType
 } from "./pipelineContract";
 import {
-  emptyPipelineDefinition,
-  normalizePipelineDefinition,
   rewireSequentialFlow,
   sanitizeCategoryMapping
 } from "./pipelineContract";
@@ -741,25 +739,6 @@ function FilterValueInput({ datasetId, column, operator, condition, disabled, on
   return <input type={inputType} value={String(condition.value ?? "")} onChange={(event) => onChange({ value: parseScalar(event.target.value) })} placeholder="value" disabled={disabled} />;
 }
 
-function LegacyFilterEditor({ config, columns, disabled, onChange }: {
-  config: Record<string, unknown>; columns: string[]; disabled: boolean; onChange: (config: Record<string, unknown>) => void;
-}) {
-  const mode = String(config.mode ?? "visual");
-  const conditions = recordList(config.conditions);
-  const setConditions = (next: Array<Record<string, unknown>>) => onChange({ mode: "visual", combine: config.combine ?? "and", conditions: next });
-  return <div className="filter-editor">
-    <div className="segmented-control"><button type="button" className={mode === "visual" ? "active" : ""} onClick={() => onChange({ mode: "visual", combine: "and", conditions: conditions.length ? conditions : [{ column: columns[0] ?? "", operator: "eq", value: "" }] })}>Condition builder</button><button type="button" className={mode === "sql" ? "active" : ""} onClick={() => onChange({ mode: "sql", sql: String(config.sql ?? "") })}>SQL WHERE</button></div>
-    {mode === "sql" ? <div className="sql-where-editor"><label>WHERE condition<textarea value={String(config.sql ?? "")} onChange={(event) => onChange({ mode: "sql", sql: event.target.value })} placeholder="species = 'setosa' AND sepal_length > 5" disabled={disabled} /></label><small>Enter only the predicate after WHERE. Subqueries and additional SQL clauses are blocked.</small></div> : <>
-      <label>Match<select value={String(config.combine ?? "and")} onChange={(event) => onChange({ ...config, combine: event.target.value })} disabled={disabled}><option value="and">All conditions (AND)</option><option value="or">Any condition (OR)</option></select></label>
-      <div className="condition-list">{conditions.map((condition, index) => {
-        const operator = String(condition.operator ?? "eq");
-        return <div className="condition-row" key={index}><ColumnSelect value={String(condition.column ?? "")} columns={columns} onChange={(column) => setConditions(conditions.map((item, itemIndex) => itemIndex === index ? { ...item, column } : item))} disabled={disabled} /><select value={operator} onChange={(event) => setConditions(conditions.map((item, itemIndex) => itemIndex === index ? { ...item, operator: event.target.value } : item))} disabled={disabled}>{[["eq", "="], ["ne", "≠"], ["gt", ">"], ["gte", "≥"], ["lt", "<"], ["lte", "≤"], ["in", "in list"], ["is_null", "is empty"], ["not_null", "is not empty"]].map(([value, text]) => <option key={value} value={value}>{text}</option>)}</select>{!["is_null", "not_null"].includes(operator) && <input value={operator === "in" ? stringList(condition.values).join(", ") : String(condition.value ?? "")} onChange={(event) => setConditions(conditions.map((item, itemIndex) => itemIndex === index ? (operator === "in" ? { column: item.column, operator, values: splitComma(event.target.value).map(parseScalar) } : { column: item.column, operator, value: parseScalar(event.target.value) }) : item))} placeholder={operator === "in" ? "a, b, c" : "value"} disabled={disabled} />}<button className="icon-button" type="button" onClick={() => setConditions(conditions.filter((_, itemIndex) => itemIndex !== index))} disabled={disabled || conditions.length === 1}><Trash2 size={14} /></button></div>;
-      })}</div>
-      <button className="secondary-button compact-button" type="button" onClick={() => setConditions([...conditions, { column: columns[0] ?? "", operator: "eq", value: "" }])} disabled={disabled}><Plus size={14} /> Add condition</button>
-    </>}
-  </div>;
-}
-
 function ColumnSelect({ label, value, columns, onChange, disabled }: {
   label?: string; value: string; columns: string[]; onChange: (value: string) => void; disabled: boolean;
 }) {
@@ -1426,10 +1405,6 @@ function quoteSqlIdentifier(value: string) {
 
 function safeDomId(value: string | undefined) {
   return (value ?? "none").replace(/[^a-zA-Z0-9_-]/g, "-").slice(0, 80);
-}
-
-function splitComma(value: string) {
-  return value.split(",").map((item) => item.trim()).filter(Boolean);
 }
 
 function stringList(value: unknown): string[] {

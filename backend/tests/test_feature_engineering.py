@@ -863,12 +863,13 @@ def test_group_and_time_splits_respect_boundaries(
 def test_de_to_fe_pipeline_run_creates_step_runs_dataset_and_fitted_artifact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from app.core.container import get_container
     from app.worker.tasks import execute_pipeline_run
 
     monkeypatch.setattr(
-        execute_pipeline_run,
-        "delay",
-        lambda run_id: None,
+        get_container().task_queue,
+        "enqueue",
+        lambda *args, **kwargs: None,
     )
     client = TestClient(create_app())
     email = f"alice-{uuid4()}@example.com"

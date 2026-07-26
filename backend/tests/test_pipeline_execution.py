@@ -495,7 +495,11 @@ def test_failed_pipeline_run_is_persisted_and_fails_the_celery_task(
         def update_run(updated):
             return updated
 
-    monkeypatch.setattr(worker_tasks, "PostgresPipelineRepository", Repository)
+    monkeypatch.setattr(
+        worker_tasks._pipeline_run_executor,
+        "repository_factory",
+        Repository,
+    )
 
     with pytest.raises(Exception, match="validation error"):
         worker_tasks.execute_pipeline_run.run(run.id)

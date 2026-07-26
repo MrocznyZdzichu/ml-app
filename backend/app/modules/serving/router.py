@@ -26,10 +26,11 @@ from app.modules.serving.schemas import (
 from app.modules.serving.service import ServingService
 from app.modules.serving.monitoring import OnlineMonitoringService
 from app.shared.pagination import OffsetPage
+from app.core.container import get_container
 
 router = APIRouter(prefix="/serving", tags=["serving"])
-service = ServingService()
-monitoring_service = OnlineMonitoringService(repository=service.repository, models=service.models)
+service: ServingService = get_container().serving
+monitoring_service: OnlineMonitoringService = get_container().online_monitoring
 
 
 def _deployment_read(deployment) -> DeploymentRead:

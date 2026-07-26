@@ -14,6 +14,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError
 
 from app.core.security import Principal
+from app.modules.auth.repository import PostgresUserRepository, UserRepository
 from app.modules.models.domain import ModelStage
 from app.modules.models.service import ModelService
 from app.modules.pipelines.feature_engineering import DuckDbFeatureEngineeringEngine
@@ -53,6 +54,7 @@ from app.modules.serving.schemas import (
 from app.modules.sharing.domain import AuditEvent, BusinessCaseAccessRole
 from app.modules.sharing.policy import access_policy
 from app.modules.sharing.repository import PostgresSharingRepository
+from app.ports.task_queue import TaskQueue, require_task_queue
 
 
 logger = logging.getLogger("mlapp.serving")
@@ -64,10 +66,16 @@ class ServingService:
         repository: ServingRepository | None = None,
         runtime: RuntimeGateway | None = None,
         models: ModelService | None = None,
+        task_queue: TaskQueue | None = None,
+        users: UserRepository | None = None,
+        audit_repository: PostgresSharingRepository | None = None,
     ) -> None:
         self.repository = repository or PostgresServingRepository()
         self.runtime = runtime or HttpModelRuntimeGateway()
         self.models = models or ModelService()
+        self.task_queue = task_queue
+        self.users = users or PostgresUserRepository()
+        self.audit_repository = audit_repository or PostgresSharingRepository()
 
     def create_deployment(self, payload: DeploymentCreate, principal: Principal) -> Deployment:
         champion = self.models.get_model(payload.model_id, principal)
@@ -843,8 +851,10 @@ class ServingService:
             "job_id": job.id, "challenger_model_id": job.challenger_model_id,
             "deployment_revision_id": revision.id, "max_requests": job.max_requests,
         })
-        from app.worker.tasks import replay_challenger
-        replay_challenger.delay(job.id)
+        require_task_queue(self.task_queue).enqueue(
+            "app.worker.tasks.replay_challenger",
+            [job.id],
+        )
         return job
 
     def list_replays(self, deployment_id: str, principal: Principal) -> list[ChallengerReplayJob]:
@@ -867,14 +877,12 @@ class ServingService:
         )
 
     def run_replay(self, job_id: str) -> ChallengerReplayJob:
-        from app.modules.auth.repository import PostgresUserRepository
-
         job = self.repository.get_replay(job_id)
         if job is None:
             raise ValueError("Challenger replay job not found")
         if job.status == ReplayStatus.SUCCEEDED:
             return job
-        account = PostgresUserRepository().get(job.requested_by)
+        account = self.users.get(job.requested_by)
         if account is None or not account.is_active:
             job.status = ReplayStatus.FAILED
             job.error_message = "Replay requester is no longer active"
@@ -1180,9 +1188,15 @@ class ServingService:
         except (ValueError, UnicodeDecodeError) as exc:
             raise HTTPException(status_code=422, detail="Invalid history cursor") from exc
 
-    @staticmethod
-    def _audit(principal: Principal, action: str, deployment: Deployment, previous: dict[str, Any], new: dict[str, Any]) -> None:
-        PostgresSharingRepository().add_audit(AuditEvent(
+    def _audit(
+        self,
+        principal: Principal,
+        action: str,
+        deployment: Deployment,
+        previous: dict[str, Any],
+        new: dict[str, Any],
+    ) -> None:
+        self.audit_repository.add_audit(AuditEvent(
             id=str(uuid4()),
             actor_id=principal.user_id,
             action=action,

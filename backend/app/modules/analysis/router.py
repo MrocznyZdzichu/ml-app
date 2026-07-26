@@ -8,9 +8,10 @@ from app.modules.analysis.schemas import (
     InlineRecordsRequest,
 )
 from app.modules.analysis.service import AnalysisService
+from app.core.container import get_container
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
-service = AnalysisService()
+service: AnalysisService = get_container().analysis
 
 
 @router.post("", response_model=AnalysisRead, status_code=201)

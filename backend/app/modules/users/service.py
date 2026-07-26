@@ -5,7 +5,7 @@ from fastapi import HTTPException, status
 
 from app.core.security import Principal, hash_password
 from app.modules.auth.domain import UserAccount
-from app.modules.auth.repository import PostgresUserRepository
+from app.modules.auth.repository import PostgresUserRepository, UserRepository
 from app.modules.sharing.domain import AuditEvent
 from app.modules.sharing.repository import PostgresSharingRepository
 from app.modules.users.schemas import AdminPasswordReset, AdminUserUpdate
@@ -15,9 +15,13 @@ PLATFORM_ROLES = {"user", "governance_steward", "administrator"}
 
 
 class UserAdministrationService:
-    def __init__(self) -> None:
-        self.users = PostgresUserRepository()
-        self.audit = PostgresSharingRepository(self.users.engine)
+    def __init__(
+        self,
+        users: UserRepository | None = None,
+        audit_repository: PostgresSharingRepository | None = None,
+    ) -> None:
+        self.users = users or PostgresUserRepository()
+        self.audit = audit_repository or PostgresSharingRepository()
 
     @staticmethod
     def require_admin(principal: Principal) -> None:

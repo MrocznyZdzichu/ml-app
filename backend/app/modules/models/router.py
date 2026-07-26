@@ -13,9 +13,10 @@ from app.modules.models.service import ModelService
 from app.modules.business_cases.lineage import DatasetLineageResolver
 from app.modules.models.domain import ModelStage
 from app.shared.pagination import OffsetPage
+from app.core.container import get_container
 
 router = APIRouter(prefix="/models", tags=["models"])
-service = ModelService()
+service: ModelService = get_container().models
 lineage_resolver = DatasetLineageResolver()
 
 

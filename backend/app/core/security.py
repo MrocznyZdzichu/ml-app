@@ -3,30 +3,16 @@ import hashlib
 import hmac
 import json
 import secrets
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import Header, HTTPException, status
 
 from app.core.config import settings
+from app.core.identity import Principal
 
 PBKDF2_ITERATIONS = 600_000
 LEGACY_PBKDF2_ITERATIONS = 120_000
-
-
-@dataclass(frozen=True)
-class Principal:
-    user_id: str
-    email: str
-    display_name: str
-    login_name: str = ""
-    roles: tuple[str, ...] = ("user",)
-    session_version: int = 1
-
-    @property
-    def is_administrator(self) -> bool:
-        return "administrator" in self.roles
 
 
 def hash_password(password: str) -> str:

@@ -25,9 +25,10 @@ from app.modules.datasets.schemas import (
 from app.modules.datasets.service import DatasetService
 from app.modules.datasets.domain import DataAssetStatus, SourceType
 from app.shared.pagination import OffsetPage
+from app.core.container import get_container
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
-service = DatasetService()
+service: DatasetService = get_container().datasets
 
 
 @router.post("", response_model=DataAssetRead, status_code=201)

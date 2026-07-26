@@ -21,9 +21,10 @@ from app.modules.pipelines.service import PipelineService
 from app.modules.pipelines.modeling_catalog import training_catalog
 from app.modules.pipelines.domain import PipelineStatus
 from app.shared.pagination import OffsetPage
+from app.core.container import get_container
 
 router = APIRouter(prefix="/pipelines", tags=["pipelines"])
-service = PipelineService()
+service: PipelineService = get_container().pipelines
 
 
 @router.get("/step-types", response_model=list[PipelineStepTypeRead])

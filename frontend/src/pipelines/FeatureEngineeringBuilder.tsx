@@ -2,7 +2,6 @@ import {
   ArrowDown,
   ArrowRight,
   ArrowUp,
-  CalendarDays,
   Check,
   ChevronDown,
   Database,

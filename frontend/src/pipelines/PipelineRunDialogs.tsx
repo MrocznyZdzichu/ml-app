@@ -3,6 +3,7 @@ import type { CSSProperties } from "react";
 import { lazy, Suspense, useEffect, useState } from "react";
 
 import { api } from "../api/client";
+import { durationLabel, formatDateTime, shortId } from "../shared/formatters";
 import { ArtifactDependenciesDialog } from "../operational/ArtifactDependenciesDialog";
 import { DialogNavigationActions } from "../components/dialogNavigation";
 import { PaginationControls } from "../components/PaginationControls";
@@ -1873,26 +1874,6 @@ function businessCaseName(businessCases: BusinessCase[], businessCaseId: string)
   return businessCases.find((item) => item.id === businessCaseId)?.name ?? "unknown BC";
 }
 
-function formatDateTime(value: string) {
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "short",
-    timeStyle: "short"
-  }).format(new Date(value));
-}
-
-function durationLabel(
-  startedAt: string | null | undefined,
-  finishedAt: string | null | undefined
-) {
-  if (!startedAt) return "not started";
-  const start = new Date(startedAt).getTime();
-  const end = finishedAt ? new Date(finishedAt).getTime() : Date.now();
-  const seconds = Math.max(0, Math.round((end - start) / 1000));
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes}m ${seconds % 60}s`;
-}
-
 function formatDateTimeWithSeconds(value: string) {
   return new Intl.DateTimeFormat(undefined, {
     dateStyle: "short",
@@ -1940,10 +1921,6 @@ function formatEventValue(value: unknown): string {
     return json.length > 320 ? `${json.slice(0, 320)}…` : json;
   }
   return String(value);
-}
-
-function shortId(value: string) {
-  return value.slice(0, 8);
 }
 
 function safeDownloadName(value: string) {

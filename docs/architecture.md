@@ -58,6 +58,43 @@ layout. Dataset, pipeline, artifact, auth, sharing, audit, deployment, Inference
 Log, replay, and online-monitoring metadata are backed by PostgreSQL. Legacy
 standalone analysis/training state and export jobs remain process-local.
 
+### Composition and background execution
+
+`app.core.container.ApplicationContainer` is the application composition root.
+It owns shared repository and adapter instances and creates use-case services
+with explicit dependencies. FastAPI routers resolve services from this
+container; they do not construct their own service graphs.
+
+Application services depend on the `TaskQueue` port. The Celery implementation
+is an outer adapter in `app.worker.task_queue`, selected only by the composition
+root. Services built without a queue remain usable for synchronous operations
+and fail explicitly if a background operation is requested.
+
+Celery task functions are transport adapters. Pipeline execution delegates to
+`PipelineRunExecutor`, which owns run lifecycle orchestration independently from
+Celery. This boundary permits synchronous testing and future queue adapters
+without duplicating the execution workflow.
+
+`Principal` is a transport-independent identity value. FastAPI authentication
+constructs it, but repositories, authorization policies and workers consume it
+without importing the HTTP framework.
+
+## Frontend composition
+
+`App.tsx` is the authenticated workspace shell: navigation, shared bounded
+catalog state and cross-panel navigation. Domain controllers live in separate
+modules for Business Cases, Pipelines, Data/Analysis, Jobs, Models, reports and
+Serving. Heavy workspaces are loaded with React lazy boundaries so the initial
+bundle does not contain every editor and analysis view.
+
+The browser client separates HTTP/token handling, pagination contracts and
+serving endpoints. The current `api` facade remains backward compatible while
+domain clients are extracted incrementally.
+
+The Python integration package follows the same public API semantics. Its
+facade composes separate modules for immutable response models, typed errors,
+resource-name resolution and online-serving workflows.
+
 ## Identity and Access Control
 
 The installation is single-company and keeps open self-registration. New users

@@ -14,9 +14,10 @@ from app.modules.business_cases.service import BusinessCaseService
 from app.modules.business_cases.lineage import ArtifactDependencyResolver
 from app.modules.sharing.domain import BC_ROLE_RANK, BusinessCaseAccessRole
 from app.shared.pagination import OffsetPage
+from app.core.container import get_container
 
 router = APIRouter(prefix="/business-cases", tags=["business-cases"])
-service = BusinessCaseService()
+service: BusinessCaseService = get_container().business_cases
 dependency_resolver = ArtifactDependencyResolver()
 
 
