@@ -573,6 +573,41 @@ def _add_access_artifact_and_pipeline_performance_indexes(
         connection.execute(text(statement))
 
 
+def _add_business_case_access_requests(connection: Connection) -> None:
+    statements = [
+        (
+            "CREATE TABLE IF NOT EXISTS mlapp.business_case_access_requests ("
+            "id VARCHAR(64) PRIMARY KEY, "
+            "business_case_id VARCHAR(64) NOT NULL, "
+            "requester_id VARCHAR(64) NOT NULL, "
+            "requested_role VARCHAR(32) NOT NULL, "
+            "justification TEXT NOT NULL, "
+            "status VARCHAR(32) NOT NULL, "
+            "created_at TIMESTAMPTZ NOT NULL, "
+            "decided_at TIMESTAMPTZ, "
+            "decided_by VARCHAR(64) NOT NULL DEFAULT '', "
+            "granted_role VARCHAR(32), "
+            "decision_note TEXT NOT NULL DEFAULT '')"
+        ),
+        (
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_bc_access_requests_pending "
+            "ON mlapp.business_case_access_requests (business_case_id, requester_id) "
+            "WHERE status = 'pending'"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS ix_bc_access_requests_incoming "
+            "ON mlapp.business_case_access_requests "
+            "(business_case_id, status, created_at DESC)"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS ix_bc_access_requests_mine "
+            "ON mlapp.business_case_access_requests (requester_id, created_at DESC)"
+        ),
+    ]
+    for statement in statements:
+        connection.execute(text(statement))
+
+
 MIGRATIONS = [
     Migration(
         version="20260703_0001",
@@ -638,5 +673,10 @@ MIGRATIONS = [
         version="20260726_0013",
         description="Index set-oriented access, artifact families and pipeline catalogs",
         apply=_add_access_artifact_and_pipeline_performance_indexes,
+    ),
+    Migration(
+        version="20260730_0014",
+        description="Add discoverable Business Case access request workflow",
+        apply=_add_business_case_access_requests,
     ),
 ]

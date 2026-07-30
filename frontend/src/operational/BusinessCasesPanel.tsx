@@ -32,6 +32,7 @@ import type {
   ScoringReport
 } from "../api/client";
 import { AssetList } from "../components/AssetList";
+import { BusinessCaseDirectoryPanel } from "./BusinessCaseDirectoryPanel";
 import { DeferredPanel } from "../components/DeferredPanel";
 import { PaginationControls } from "../components/PaginationControls";
 import { PagedCatalogSelect } from "../components/PagedCatalogSelect";
@@ -149,6 +150,7 @@ export function BusinessCasesPanel({
   const [businessCaseOffset, setBusinessCaseOffset] = useState(0);
   const [businessCasePageLoading, setBusinessCasePageLoading] = useState(false);
   const [businessCasePageRefresh, setBusinessCasePageRefresh] = useState(0);
+  const [catalogTab, setCatalogTab] = useState<"mine" | "directory">("mine");
   const [isRefreshingWorkspace, setIsRefreshingWorkspace] = useState(false);
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isMappingFormOpen, setIsMappingFormOpen] = useState(false);
@@ -748,6 +750,25 @@ export function BusinessCasesPanel({
   return (
     <section className="business-case-screen">
       <div className="panel business-case-catalog">
+        <nav className="bc-catalog-tabs" aria-label="Business Case catalogs">
+          <button
+            type="button"
+            className={catalogTab === "mine" ? "active" : ""}
+            aria-current={catalogTab === "mine" ? "page" : undefined}
+            onClick={() => setCatalogTab("mine")}
+          >
+            Available to me
+          </button>
+          <button
+            type="button"
+            className={catalogTab === "directory" ? "active" : ""}
+            aria-current={catalogTab === "directory" ? "page" : undefined}
+            onClick={() => setCatalogTab("directory")}
+          >
+            Organization directory
+          </button>
+        </nav>
+        {catalogTab === "mine" ? <>
         <div className="catalog-toolbar">
           <div>
             <h2>Business cases</h2>
@@ -887,6 +908,7 @@ export function BusinessCasesPanel({
           disabled={businessCasePageLoading}
           label="business cases"
         />
+        </> : <BusinessCaseDirectoryPanel setNotice={setNotice} />}
       </div>
 
       {selectedBusinessCase && activeWorkspace && (

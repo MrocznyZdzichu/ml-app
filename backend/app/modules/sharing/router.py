@@ -1,9 +1,13 @@
 from fastapi import APIRouter, Depends, Query
 
 from app.core.security import Principal, require_user
-from app.modules.sharing.domain import ResourceKind
+from app.modules.sharing.domain import AccessRequestStatus, ResourceKind
 from app.modules.sharing.schemas import (
     AuditEventRead,
+    BusinessCaseAccessRequestCreate,
+    BusinessCaseAccessRequestDecision,
+    BusinessCaseAccessRequestRead,
+    BusinessCaseAccessRequestReject,
     BusinessCaseGrantCreate,
     BusinessCaseGrantRead,
     DirectoryUserRead,
@@ -181,6 +185,87 @@ def grant_bc(business_case_id: str, payload: BusinessCaseGrantCreate, principal:
 @router.delete("/business-cases/{business_case_id}/grants/{grant_id}", status_code=204)
 def revoke_bc(business_case_id: str, grant_id: str, principal: Principal = Depends(require_user)):
     service.revoke_business_case(business_case_id, grant_id, principal)
+
+
+@router.post(
+    "/business-cases/{business_case_id}/access-requests",
+    response_model=BusinessCaseAccessRequestRead,
+    status_code=201,
+)
+def create_business_case_access_request(
+    business_case_id: str,
+    payload: BusinessCaseAccessRequestCreate,
+    principal: Principal = Depends(require_user),
+) -> BusinessCaseAccessRequestRead:
+    return BusinessCaseAccessRequestRead.model_validate(
+        service.create_business_case_access_request(
+            business_case_id,
+            payload,
+            principal,
+        )
+    )
+
+
+@router.get(
+    "/access-requests/page",
+    response_model=OffsetPage[BusinessCaseAccessRequestRead],
+)
+def page_business_case_access_requests(
+    box: str = Query(default="incoming", max_length=16),
+    request_status: AccessRequestStatus | None = Query(default=None, alias="status"),
+    limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[BusinessCaseAccessRequestRead]:
+    items, total = service.page_business_case_access_requests(
+        principal,
+        box=box,
+        status_filter=request_status,
+        limit=limit,
+        offset=offset,
+    )
+    return OffsetPage[BusinessCaseAccessRequestRead].build(
+        [BusinessCaseAccessRequestRead.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.post(
+    "/access-requests/{request_id}/approve",
+    response_model=BusinessCaseAccessRequestRead,
+)
+def approve_business_case_access_request(
+    request_id: str,
+    payload: BusinessCaseAccessRequestDecision,
+    principal: Principal = Depends(require_user),
+) -> BusinessCaseAccessRequestRead:
+    return BusinessCaseAccessRequestRead.model_validate(
+        service.approve_business_case_access_request(
+            request_id,
+            payload,
+            principal,
+        )
+    )
+
+
+@router.post(
+    "/access-requests/{request_id}/reject",
+    response_model=BusinessCaseAccessRequestRead,
+)
+def reject_business_case_access_request(
+    request_id: str,
+    payload: BusinessCaseAccessRequestReject,
+    principal: Principal = Depends(require_user),
+) -> BusinessCaseAccessRequestRead:
+    return BusinessCaseAccessRequestRead.model_validate(
+        service.reject_business_case_access_request(
+            request_id,
+            payload,
+            principal,
+        )
+    )
 
 
 @router.get("/resources/{resource_kind}/{resource_id}/grants", response_model=list[ResourceGrantRead])

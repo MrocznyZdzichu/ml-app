@@ -106,6 +106,40 @@ class PostgresBusinessCaseRepository:
             ]
         return items, total
 
+    def page_business_case_catalog(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+    ) -> tuple[list[BusinessCase], int]:
+        self._ensure_initialized()
+        filters = []
+        needle = search.strip()
+        if needle:
+            filters.append(business_cases_table.c.name.ilike(f"%{needle}%"))
+        page_statement = select(business_cases_table)
+        count_statement = select(func.count()).select_from(business_cases_table)
+        if filters:
+            page_statement = page_statement.where(*filters)
+            count_statement = count_statement.where(*filters)
+        page_statement = (
+            page_statement
+            .order_by(
+                func.lower(business_cases_table.c.name).asc(),
+                business_cases_table.c.id.asc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+        with self.engine.begin() as connection:
+            total = int(connection.execute(count_statement).scalar_one())
+            items = [
+                self._business_case_from_record(row._mapping)
+                for row in connection.execute(page_statement)
+            ]
+        return items, total
+
     def business_case_name_exists(self, name: str, *, exclude_id: str = "") -> bool:
         self._ensure_initialized()
         statement = select(business_cases_table.c.id).where(

@@ -7,6 +7,7 @@ from app.modules.business_cases.schemas import (
     BusinessCaseDataAttachmentCreate,
     BusinessCaseDataAttachmentRead,
     BusinessCaseDataAttachmentUpdate,
+    BusinessCaseCatalogEntryRead,
     BusinessCaseRead,
     BusinessCaseOwnershipTransfer,
 )
@@ -80,6 +81,27 @@ def page_business_cases(
     )
     return OffsetPage[BusinessCaseRead].build(
         [BusinessCaseRead.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/catalog/page", response_model=OffsetPage[BusinessCaseCatalogEntryRead])
+def page_business_case_catalog(
+    limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    search: str = Query(default="", max_length=200),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[BusinessCaseCatalogEntryRead]:
+    items, total = service.page_business_case_catalog(
+        principal,
+        limit=limit,
+        offset=offset,
+        search=search,
+    )
+    return OffsetPage[BusinessCaseCatalogEntryRead].build(
+        [BusinessCaseCatalogEntryRead.model_validate(item) for item in items],
         total=total,
         limit=limit,
         offset=offset,

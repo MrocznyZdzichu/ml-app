@@ -5405,6 +5405,63 @@ textarea {
   gap: 16px;
 }
 
+.bc-catalog-tabs {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid var(--border-color, #dce5e8);
+}
+
+.bc-catalog-tabs button {
+  padding: 10px 14px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-muted, #66757b);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.bc-catalog-tabs button.active {
+  border-bottom-color: #22a697;
+  color: var(--accent, #148f82);
+}
+
+.bc-directory-list {
+  display: grid;
+  border: 1px solid var(--border-color, #d8e2e8);
+  border-radius: 9px;
+  overflow: hidden;
+}
+
+.bc-directory-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px;
+  border-bottom: 1px solid var(--border-color, #d8e2e8);
+}
+
+.bc-directory-row:last-child {
+  border-bottom: 0;
+}
+
+.bc-directory-row > span:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.bc-directory-row small {
+  color: var(--text-muted, #66757b);
+}
+
+.bc-directory-state {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .search-field {
   align-items: center;
   background: #f8fafc;
@@ -10873,7 +10930,7 @@ textarea {
 
 .collaboration-tabs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(190px, 1fr));
+  grid-template-columns: repeat(4, minmax(170px, 1fr));
   gap: 8px;
   padding: 6px;
   border: 1px solid var(--border-color, #dce5e8);
@@ -10925,6 +10982,113 @@ textarea {
 .collaboration-tab-content {
   display: grid;
   gap: 16px;
+}
+
+.sharing-scope-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(240px, 1fr));
+  gap: 8px;
+  padding: 5px;
+  border: 1px solid var(--border-color, #dce5e8);
+  border-radius: 10px;
+  background: var(--surface-soft, #f7fafb);
+}
+
+.sharing-scope-tabs button {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  column-gap: 10px;
+  row-gap: 2px;
+  min-height: 56px;
+  padding: 9px 13px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted, #66757b);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sharing-scope-tabs button svg {
+  grid-row: 1 / 3;
+}
+
+.sharing-scope-tabs button span {
+  color: var(--text-color, #172126);
+  font-weight: 700;
+}
+
+.sharing-scope-tabs button small {
+  color: inherit;
+}
+
+.sharing-scope-tabs button:hover {
+  border-color: var(--border-color, #dce5e8);
+  background: var(--surface, #fff);
+}
+
+.sharing-scope-tabs button.active {
+  border-color: #238f83;
+  background: rgba(24, 143, 130, 0.12);
+  color: #38b8a8;
+  box-shadow: inset 0 -2px 0 #22a697;
+}
+
+.permission-requests-panel,
+.permission-request-list {
+  display: grid;
+  gap: 14px;
+}
+
+.permission-request-toolbar {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.permission-request-toolbar > label {
+  min-width: 180px;
+}
+
+.permission-request-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--border-color, #dce5e8);
+  border-radius: 10px;
+  background: var(--surface-soft, #f7fafb);
+}
+
+.permission-request-card p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.permission-request-summary {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.permission-request-summary > span {
+  display: grid;
+  gap: 3px;
+}
+
+.permission-request-summary small,
+.permission-request-decision {
+  color: var(--text-muted, #66757b);
+}
+
+.permission-request-actions {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.6fr) minmax(240px, 1.4fr) auto auto;
+  align-items: end;
+  gap: 10px;
+  padding-top: 4px;
 }
 
 .collaboration-group-layout {
@@ -11013,6 +11177,33 @@ textarea {
   background: var(--surface-soft, #f7fafb);
 }
 
+.access-list > .access-grant-row {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto minmax(240px, 1.35fr) auto;
+  align-items: center;
+}
+
+.access-list .access-grant-subject,
+.access-list .access-grant-permission {
+  display: grid;
+  gap: 3px;
+}
+
+.access-list .access-grant-subject > small:first-child,
+.access-list .access-grant-permission > small:first-child {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.access-list .access-grant-arrow {
+  display: block;
+  color: #22a697;
+  font-size: 20px;
+  line-height: 1;
+}
+
 .access-list span,
 .admin-user-row > span {
   display: grid;
@@ -11067,6 +11258,14 @@ textarea {
   .admin-user-row {
     grid-template-columns: 1fr 1fr;
   }
+
+  .collaboration-tabs {
+    grid-template-columns: repeat(2, minmax(190px, 1fr));
+  }
+
+  .permission-request-actions {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 @media (max-width: 720px) {
@@ -11074,11 +11273,48 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .sharing-scope-tabs {
+    grid-template-columns: 1fr;
+  }
+
   .collaboration-tabs button {
     min-height: 54px;
   }
 
+  .access-list > .access-grant-row {
+    grid-template-columns: 1fr auto;
+  }
+
+  .access-list .access-grant-arrow {
+    display: none;
+  }
+
+  .access-list .access-grant-permission {
+    grid-column: 1;
+  }
+
+  .access-list .access-grant-row > .icon-button {
+    grid-column: 2;
+    grid-row: 1 / 3;
+  }
+
   .group-selector-row {
+    grid-template-columns: 1fr;
+  }
+
+  .bc-directory-row,
+  .bc-directory-state,
+  .permission-request-toolbar,
+  .permission-request-summary {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .bc-directory-state {
+    justify-content: flex-start;
+  }
+
+  .permission-request-actions {
     grid-template-columns: 1fr;
   }
 }

@@ -26,6 +26,15 @@ class BusinessCaseRepository(Protocol):
     ) -> tuple[list[BusinessCase], int]:
         ...
 
+    def page_business_case_catalog(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+    ) -> tuple[list[BusinessCase], int]:
+        ...
+
     def business_case_name_exists(self, name: str, *, exclude_id: str = "") -> bool:
         ...
 

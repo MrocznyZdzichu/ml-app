@@ -10,6 +10,7 @@ from app.modules.business_cases.domain import (
     ArtifactOrigin,
     ArtifactType,
     BusinessCase,
+    BusinessCaseCatalogEntry,
     BusinessCaseDataAttachment,
     DataArtifactKind,
 )
@@ -109,6 +110,40 @@ class BusinessCaseService:
             role = BusinessCaseAccessRole.OWNER if roles is None else roles.get(item.id)
             item.access_role = role.value if role else ""
         return items, total
+
+    def page_business_case_catalog(
+        self,
+        principal: Principal,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+    ) -> tuple[list[BusinessCaseCatalogEntry], int]:
+        items, total = self.repository.page_business_case_catalog(
+            limit=limit,
+            offset=offset,
+            search=search,
+        )
+        business_case_ids = {item.id for item in items}
+        roles = access_policy.business_case_roles(principal, business_case_ids)
+        pending_requests = self.audit_repository.pending_access_request_statuses(
+            principal.user_id,
+            business_case_ids,
+        )
+        return [
+            BusinessCaseCatalogEntry(
+                id=item.id,
+                name=item.name,
+                status=item.status,
+                access_role=roles[item.id].value if item.id in roles else "",
+                request_status=(
+                    pending_requests[item.id].value
+                    if item.id in pending_requests
+                    else ""
+                ),
+            )
+            for item in items
+        ], total
 
     def get_business_case(
         self,

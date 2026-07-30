@@ -63,6 +63,16 @@ class BusinessCaseRead(BaseModel):
     access_role: str = "owner"
 
 
+class BusinessCaseCatalogEntryRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    name: str
+    status: BusinessCaseStatus
+    access_role: str = ""
+    request_status: str = ""
+
+
 class ArtifactRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

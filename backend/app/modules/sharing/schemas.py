@@ -1,8 +1,9 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.modules.sharing.domain import (
+    AccessRequestStatus,
     BusinessCaseAccessRole,
     MembershipRole,
     ResourceAccessRole,
@@ -66,6 +67,49 @@ class BusinessCaseGrantRead(BaseModel):
     created_at: datetime
     updated_at: datetime
     expires_at: datetime | None
+    subject_name: str = ""
+    subject_email: str = ""
+    business_case_name: str = ""
+
+
+class BusinessCaseAccessRequestCreate(BaseModel):
+    requested_role: BusinessCaseAccessRole = BusinessCaseAccessRole.READER
+    justification: str = Field(min_length=1, max_length=2000)
+
+    @field_validator("justification")
+    @classmethod
+    def require_non_blank_justification(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("justification cannot be blank")
+        return normalized
+
+
+class BusinessCaseAccessRequestDecision(BaseModel):
+    access_role: BusinessCaseAccessRole
+    decision_note: str = Field(default="", max_length=2000)
+
+
+class BusinessCaseAccessRequestReject(BaseModel):
+    decision_note: str = Field(default="", max_length=2000)
+
+
+class BusinessCaseAccessRequestRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    business_case_id: str
+    requester_id: str
+    requested_role: BusinessCaseAccessRole
+    justification: str
+    status: AccessRequestStatus
+    created_at: datetime
+    decided_at: datetime | None
+    decided_by: str
+    granted_role: BusinessCaseAccessRole | None
+    decision_note: str
+    business_case_name: str
+    requester_display_name: str
+    requester_email: str
 
 
 class ResourceGrantCreate(BaseModel):

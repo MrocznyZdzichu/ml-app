@@ -2,11 +2,21 @@ import { API_ROOT_URL, request, withQuery } from "./http";
 import type { OffsetPage, PageQuery } from "./pagination";
 import type { ModelEvaluationSnapshot } from "./contracts/modelEvaluation";
 import type { ModelServingUsage } from "./contracts/serving";
+import type {
+  BusinessCaseAccessRequest,
+  BusinessCaseAccessRole,
+  BusinessCaseCatalogEntry
+} from "./contracts/businessCaseAccess";
 import { servingApi } from "./serving";
 
 export { getAccessToken, setAccessToken } from "./http";
 export type { OffsetPage, PageQuery } from "./pagination";
 export type { ModelEvaluationMetric, ModelEvaluationSnapshot } from "./contracts/modelEvaluation";
+export type {
+  BusinessCaseAccessRequest,
+  BusinessCaseAccessRole,
+  BusinessCaseCatalogEntry
+} from "./contracts/businessCaseAccess";
 export type {
   ChallengerReplay,
   Deployment,
@@ -443,7 +453,7 @@ export type BusinessCase = {
   updated_by: string;
   created_at: string;
   updated_at: string;
-  access_role: "report_viewer" | "reader" | "contributor" | "manager" | "owner";
+  access_role: BusinessCaseAccessRole;
 };
 
 export type DirectoryUser = {
@@ -490,6 +500,9 @@ export type BusinessCaseGrant = {
   created_at: string;
   updated_at: string;
   expires_at: string | null;
+  subject_name: string;
+  subject_email: string;
+  business_case_name: string;
 };
 
 export type ResourceGrant = {
@@ -829,6 +842,10 @@ export const api = {
   listBusinessCases: () => request<BusinessCase[]>("/business-cases"),
   pageBusinessCases: (query: PageQuery & { manageable_only?: boolean } = {}) =>
     request<OffsetPage<BusinessCase>>(withQuery("/business-cases/page", query)),
+  pageBusinessCaseCatalog: (query: PageQuery = {}) =>
+    request<OffsetPage<BusinessCaseCatalogEntry>>(
+      withQuery("/business-cases/catalog/page", query)
+    ),
   createBusinessCase: (payload: Record<string, unknown>) =>
     request<BusinessCase>("/business-cases", {
       method: "POST",
@@ -1147,6 +1164,35 @@ export const api = {
     request<BusinessCaseGrant>(`/sharing/business-cases/${encodeURIComponent(businessCaseId)}/grants`, { method: "PUT", body: JSON.stringify(payload) }),
   revokeBusinessCaseGrant: (businessCaseId: string, grantId: string) =>
     request<void>(`/sharing/business-cases/${encodeURIComponent(businessCaseId)}/grants/${encodeURIComponent(grantId)}`, { method: "DELETE" }),
+  requestBusinessCaseAccess: (
+    businessCaseId: string,
+    payload: { requested_role: Exclude<BusinessCaseAccessRole, "owner">; justification: string }
+  ) => request<BusinessCaseAccessRequest>(
+    `/sharing/business-cases/${encodeURIComponent(businessCaseId)}/access-requests`,
+    { method: "POST", body: JSON.stringify(payload) }
+  ),
+  pageBusinessCaseAccessRequests: (
+    query: PageQuery & {
+      box: "incoming" | "mine";
+      status?: "pending" | "approved" | "rejected";
+    }
+  ) => request<OffsetPage<BusinessCaseAccessRequest>>(
+    withQuery("/sharing/access-requests/page", query)
+  ),
+  approveBusinessCaseAccessRequest: (
+    requestId: string,
+    payload: { access_role: Exclude<BusinessCaseAccessRole, "owner">; decision_note?: string }
+  ) => request<BusinessCaseAccessRequest>(
+    `/sharing/access-requests/${encodeURIComponent(requestId)}/approve`,
+    { method: "POST", body: JSON.stringify(payload) }
+  ),
+  rejectBusinessCaseAccessRequest: (
+    requestId: string,
+    payload: { decision_note?: string }
+  ) => request<BusinessCaseAccessRequest>(
+    `/sharing/access-requests/${encodeURIComponent(requestId)}/reject`,
+    { method: "POST", body: JSON.stringify(payload) }
+  ),
   listResourceGrants: (kind: string, resourceId: string) =>
     request<ResourceGrant[]>(`/sharing/resources/${encodeURIComponent(kind)}/${encodeURIComponent(resourceId)}/grants`),
   pageResourceGrants: (kind: string, resourceId: string, query: PageQuery = {}) =>

@@ -35,6 +35,86 @@ class BusinessCaseClientMixin(TransportClientMixin):
         })
         return CatalogPage.from_api(payload, lambda item: item)
 
+    def page_business_case_catalog(
+        self,
+        *,
+        limit: int = 30,
+        offset: int = 0,
+        search: str = "",
+    ) -> CatalogPage[Mapping[str, Any]]:
+        """Search the organization-wide minimal Business Case directory."""
+        payload = self._request("GET", "/business-cases/catalog/page", params={
+            "limit": limit,
+            "offset": offset,
+            "search": search,
+        })
+        return CatalogPage.from_api(payload, lambda item: item)
+
+    def request_business_case_access(
+        self,
+        business_case_id: str,
+        *,
+        requested_role: str = "reader",
+        justification: str,
+    ) -> Mapping[str, Any]:
+        """Submit an auditable request to the Business Case owner and managers."""
+        return self._request(
+            "POST",
+            f"/sharing/business-cases/{business_case_id}/access-requests",
+            json={
+                "requested_role": requested_role,
+                "justification": justification,
+            },
+        )
+
+    def page_business_case_access_requests(
+        self,
+        *,
+        box: str = "incoming",
+        status: str = "pending",
+        limit: int = 30,
+        offset: int = 0,
+    ) -> CatalogPage[Mapping[str, Any]]:
+        """Page incoming manageable requests or requests submitted by the caller."""
+        payload = self._request(
+            "GET",
+            "/sharing/access-requests/page",
+            params={
+                "box": box,
+                "status": status,
+                "limit": limit,
+                "offset": offset,
+            },
+        )
+        return CatalogPage.from_api(payload, lambda item: item)
+
+    def approve_business_case_access_request(
+        self,
+        request_id: str,
+        *,
+        access_role: str,
+        decision_note: str = "",
+    ) -> Mapping[str, Any]:
+        """Approve one pending request and atomically grant the selected role."""
+        return self._request(
+            "POST",
+            f"/sharing/access-requests/{request_id}/approve",
+            json={"access_role": access_role, "decision_note": decision_note},
+        )
+
+    def reject_business_case_access_request(
+        self,
+        request_id: str,
+        *,
+        decision_note: str = "",
+    ) -> Mapping[str, Any]:
+        """Reject one pending Business Case access request."""
+        return self._request(
+            "POST",
+            f"/sharing/access-requests/{request_id}/reject",
+            json={"decision_note": decision_note},
+        )
+
     def create_business_case(
         self,
         *,

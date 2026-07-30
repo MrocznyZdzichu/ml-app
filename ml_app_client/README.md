@@ -58,6 +58,27 @@ reports = client.page_scoring_reports(limit=30, business_case_id="bc-id")
 full_report = client.get_scoring_report(reports.items[0]["latest"]["id"])
 ```
 
+Business Case names are discoverable through a minimal organization directory
+without exposing case details. A user can request access and track the request;
+owners and effective managers read the incoming queue and decide the granted
+role:
+
+```python
+directory = client.page_business_case_catalog(search="churn")
+request = client.request_business_case_access(
+    directory.items[0]["id"],
+    requested_role="reader",
+    justification="I maintain the monthly churn report",
+)
+
+incoming = client.page_business_case_access_requests(box="incoming")
+client.approve_business_case_access_request(
+    incoming.items[0]["id"],
+    access_role="reader",
+    decision_note="Approved for reporting",
+)
+```
+
 ## Online model serving
 
 The same client creates versioned model services, scores through their stable

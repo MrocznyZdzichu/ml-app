@@ -18,6 +18,12 @@ class BusinessCaseAccessRole(str, Enum):
     OWNER = "owner"
 
 
+class AccessRequestStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
 class ResourceAccessRole(str, Enum):
     READER = "reader"
     EDITOR = "editor"
@@ -71,6 +77,27 @@ class BusinessCaseGrant:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     expires_at: datetime | None = None
+    subject_name: str = ""
+    subject_email: str = ""
+    business_case_name: str = ""
+
+
+@dataclass
+class BusinessCaseAccessRequest:
+    id: str
+    business_case_id: str
+    requester_id: str
+    requested_role: BusinessCaseAccessRole
+    justification: str
+    status: AccessRequestStatus
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    decided_at: datetime | None = None
+    decided_by: str = ""
+    granted_role: BusinessCaseAccessRole | None = None
+    decision_note: str = ""
+    business_case_name: str = ""
+    requester_display_name: str = ""
+    requester_email: str = ""
 
 
 @dataclass

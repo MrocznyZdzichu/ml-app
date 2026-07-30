@@ -5,6 +5,7 @@ from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
+    Index,
     MetaData,
     String,
     Table,
@@ -20,9 +21,13 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
 from app.core.database import get_engine
+from app.modules.auth.repository import user_accounts_table
+from app.modules.business_cases.tables import business_cases_table
 from app.modules.sharing.domain import (
+    AccessRequestStatus,
     AccessGroup,
     AuditEvent,
+    BusinessCaseAccessRequest,
     BusinessCaseAccessRole,
     BusinessCaseGrant,
     GroupMembership,
@@ -73,6 +78,39 @@ business_case_grants_table = Table(
     Column("expires_at", DateTime(timezone=True), nullable=True),
 )
 
+business_case_access_requests_table = Table(
+    "business_case_access_requests", metadata,
+    Column("id", String(64), primary_key=True),
+    Column("business_case_id", String(64), nullable=False, index=True),
+    Column("requester_id", String(64), nullable=False, index=True),
+    Column("requested_role", String(32), nullable=False),
+    Column("justification", Text, nullable=False),
+    Column("status", String(32), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("decided_at", DateTime(timezone=True), nullable=True),
+    Column("decided_by", String(64), nullable=False, default=""),
+    Column("granted_role", String(32), nullable=True),
+    Column("decision_note", Text, nullable=False, default=""),
+)
+Index(
+    "uq_bc_access_requests_pending",
+    business_case_access_requests_table.c.business_case_id,
+    business_case_access_requests_table.c.requester_id,
+    unique=True,
+    postgresql_where=text("status = 'pending'"),
+)
+Index(
+    "ix_bc_access_requests_incoming",
+    business_case_access_requests_table.c.business_case_id,
+    business_case_access_requests_table.c.status,
+    business_case_access_requests_table.c.created_at,
+)
+Index(
+    "ix_bc_access_requests_mine",
+    business_case_access_requests_table.c.requester_id,
+    business_case_access_requests_table.c.created_at,
+)
+
 resource_grants_table = Table(
     "resource_grants", metadata,
     Column("id", String(64), primary_key=True),
@@ -105,6 +143,10 @@ audit_events_table = Table(
 
 
 class DuplicateAccessRecord(ValueError):
+    pass
+
+
+class DuplicateAccessRequest(ValueError):
     pass
 
 
@@ -296,7 +338,17 @@ class PostgresSharingRepository:
                 business_case_grants_table.c.subject_type == grant.subject_type.value,
                 business_case_grants_table.c.subject_id == grant.subject_id,
             )).scalar_one_or_none()
-            values = {**grant.__dict__, "subject_type": grant.subject_type.value, "access_role": grant.access_role.value}
+            values = {
+                "id": grant.id,
+                "business_case_id": grant.business_case_id,
+                "subject_type": grant.subject_type.value,
+                "subject_id": grant.subject_id,
+                "access_role": grant.access_role.value,
+                "granted_by": grant.granted_by,
+                "created_at": grant.created_at,
+                "updated_at": grant.updated_at,
+                "expires_at": grant.expires_at,
+            }
             if existing:
                 values["id"] = existing
                 values["created_at"] = connection.execute(select(business_case_grants_table.c.created_at).where(
@@ -318,9 +370,14 @@ class PostgresSharingRepository:
     def list_bc_grants(self, business_case_id: str) -> list[BusinessCaseGrant]:
         self._ensure_initialized()
         with self.engine.begin() as connection:
-            rows = connection.execute(select(business_case_grants_table).where(
-                business_case_grants_table.c.business_case_id == business_case_id
-            ).order_by(business_case_grants_table.c.created_at.asc()))
+            rows = connection.execute(
+                self._bc_grant_select()
+                .where(
+                    business_case_grants_table.c.business_case_id
+                    == business_case_id
+                )
+                .order_by(business_case_grants_table.c.created_at.asc())
+            )
             return [self._bc_grant(row._mapping) for row in rows]
 
     def page_bc_grants(
@@ -339,7 +396,7 @@ class PostgresSharingRepository:
                 select(func.count()).select_from(business_case_grants_table).where(condition)
             ).scalar_one())
             rows = connection.execute(
-                select(business_case_grants_table)
+                self._bc_grant_select()
                 .where(condition)
                 .order_by(
                     business_case_grants_table.c.created_at.asc(),
@@ -371,6 +428,178 @@ class PostgresSharingRepository:
                 or_(business_case_grants_table.c.expires_at.is_(None), business_case_grants_table.c.expires_at > now),
             ))
             return [self._bc_grant(row._mapping) for row in rows]
+
+    def pending_access_request_statuses(
+        self,
+        requester_id: str,
+        business_case_ids: set[str],
+    ) -> dict[str, AccessRequestStatus]:
+        self._ensure_initialized()
+        if not business_case_ids:
+            return {}
+        with self.engine.begin() as connection:
+            rows = connection.execute(
+                select(
+                    business_case_access_requests_table.c.business_case_id,
+                    business_case_access_requests_table.c.status,
+                ).where(
+                    business_case_access_requests_table.c.requester_id == requester_id,
+                    business_case_access_requests_table.c.business_case_id.in_(business_case_ids),
+                    business_case_access_requests_table.c.status == AccessRequestStatus.PENDING.value,
+                )
+            )
+            return {
+                str(row.business_case_id): AccessRequestStatus(str(row.status))
+                for row in rows
+            }
+
+    def add_access_request(
+        self,
+        request: BusinessCaseAccessRequest,
+        audit: AuditEvent,
+    ) -> BusinessCaseAccessRequest:
+        self._ensure_initialized()
+        values = self._access_request_to_record(request)
+        try:
+            with self.engine.begin() as connection:
+                connection.execute(business_case_access_requests_table.insert().values(**values))
+                connection.execute(audit_events_table.insert().values(**audit.__dict__))
+        except IntegrityError as exc:
+            raise DuplicateAccessRequest(
+                "A pending access request already exists for this Business Case"
+            ) from exc
+        return request
+
+    def get_access_request(self, request_id: str) -> BusinessCaseAccessRequest | None:
+        self._ensure_initialized()
+        statement = self._access_request_select().where(
+            business_case_access_requests_table.c.id == request_id
+        )
+        with self.engine.begin() as connection:
+            row = connection.execute(statement).first()
+        return self._access_request(row._mapping) if row else None
+
+    def page_access_requests(
+        self,
+        *,
+        requester_id: str | None,
+        manageable_business_case_ids: set[str] | None,
+        status_filter: AccessRequestStatus | None,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[BusinessCaseAccessRequest], int]:
+        self._ensure_initialized()
+        if manageable_business_case_ids is not None and not manageable_business_case_ids:
+            return [], 0
+        filters = []
+        if requester_id is not None:
+            filters.append(
+                business_case_access_requests_table.c.requester_id == requester_id
+            )
+        if manageable_business_case_ids is not None:
+            filters.append(
+                business_case_access_requests_table.c.business_case_id.in_(
+                    manageable_business_case_ids
+                )
+            )
+        if status_filter is not None:
+            filters.append(
+                business_case_access_requests_table.c.status == status_filter.value
+            )
+        count_statement = select(func.count()).select_from(
+            business_case_access_requests_table
+        )
+        page_statement = self._access_request_select()
+        if filters:
+            count_statement = count_statement.where(*filters)
+            page_statement = page_statement.where(*filters)
+        page_statement = (
+            page_statement
+            .order_by(
+                business_case_access_requests_table.c.created_at.desc(),
+                business_case_access_requests_table.c.id.desc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+        with self.engine.begin() as connection:
+            total = int(connection.execute(count_statement).scalar_one())
+            items = [
+                self._access_request(row._mapping)
+                for row in connection.execute(page_statement)
+            ]
+        return items, total
+
+    def decide_access_request(
+        self,
+        request: BusinessCaseAccessRequest,
+        *,
+        grant: BusinessCaseGrant | None,
+        audit: AuditEvent,
+    ) -> bool:
+        self._ensure_initialized()
+        with self.engine.begin() as connection:
+            locked = connection.execute(
+                select(business_case_access_requests_table.c.status)
+                .where(business_case_access_requests_table.c.id == request.id)
+                .with_for_update()
+            ).scalar_one_or_none()
+            if locked != AccessRequestStatus.PENDING.value:
+                return False
+            if grant is not None:
+                existing = connection.execute(
+                    select(business_case_grants_table.c.id).where(
+                        business_case_grants_table.c.business_case_id == grant.business_case_id,
+                        business_case_grants_table.c.subject_type == grant.subject_type.value,
+                        business_case_grants_table.c.subject_id == grant.subject_id,
+                    )
+                ).scalar_one_or_none()
+                grant_values = {
+                    "id": grant.id,
+                    "business_case_id": grant.business_case_id,
+                    "subject_type": grant.subject_type.value,
+                    "subject_id": grant.subject_id,
+                    "access_role": grant.access_role.value,
+                    "granted_by": grant.granted_by,
+                    "created_at": grant.created_at,
+                    "updated_at": grant.updated_at,
+                    "expires_at": grant.expires_at,
+                }
+                if existing:
+                    grant_values["id"] = existing
+                    grant_values["created_at"] = connection.execute(
+                        select(business_case_grants_table.c.created_at).where(
+                            business_case_grants_table.c.id == existing
+                        )
+                    ).scalar_one()
+                    connection.execute(
+                        business_case_grants_table.update()
+                        .where(business_case_grants_table.c.id == existing)
+                        .values(**grant_values)
+                    )
+                    grant.id = str(existing)
+                    grant.created_at = grant_values["created_at"]
+                else:
+                    connection.execute(
+                        business_case_grants_table.insert().values(**grant_values)
+                    )
+            connection.execute(
+                business_case_access_requests_table.update()
+                .where(business_case_access_requests_table.c.id == request.id)
+                .values(
+                    status=request.status.value,
+                    decided_at=request.decided_at,
+                    decided_by=request.decided_by,
+                    granted_role=(
+                        request.granted_role.value
+                        if request.granted_role is not None
+                        else None
+                    ),
+                    decision_note=request.decision_note,
+                )
+            )
+            connection.execute(audit_events_table.insert().values(**audit.__dict__))
+        return True
 
     def upsert_resource_grant(self, grant: ResourceGrant) -> ResourceGrant:
         self._ensure_initialized()
@@ -483,7 +712,114 @@ class PostgresSharingRepository:
         values = dict(record)
         values["subject_type"] = SubjectType(values["subject_type"])
         values["access_role"] = BusinessCaseAccessRole(values["access_role"])
+        values.setdefault("subject_name", "")
+        values.setdefault("subject_email", "")
+        values.setdefault("business_case_name", "")
         return BusinessCaseGrant(**values)
+
+    @staticmethod
+    def _bc_grant_select():
+        return (
+            select(
+                business_case_grants_table,
+                business_cases_table.c.name.label("business_case_name"),
+                func.coalesce(
+                    user_accounts_table.c.display_name,
+                    access_groups_table.c.name,
+                    business_case_grants_table.c.subject_id,
+                ).label("subject_name"),
+                func.coalesce(user_accounts_table.c.email, "").label(
+                    "subject_email"
+                ),
+            )
+            .join(
+                business_cases_table,
+                business_cases_table.c.id
+                == business_case_grants_table.c.business_case_id,
+            )
+            .outerjoin(
+                user_accounts_table,
+                and_(
+                    business_case_grants_table.c.subject_type
+                    == SubjectType.USER.value,
+                    user_accounts_table.c.id
+                    == business_case_grants_table.c.subject_id,
+                ),
+            )
+            .outerjoin(
+                access_groups_table,
+                and_(
+                    business_case_grants_table.c.subject_type
+                    == SubjectType.GROUP.value,
+                    access_groups_table.c.id
+                    == business_case_grants_table.c.subject_id,
+                ),
+            )
+        )
+
+    @staticmethod
+    def _access_request_to_record(request: BusinessCaseAccessRequest) -> dict[str, object]:
+        return {
+            "id": request.id,
+            "business_case_id": request.business_case_id,
+            "requester_id": request.requester_id,
+            "requested_role": request.requested_role.value,
+            "justification": request.justification,
+            "status": request.status.value,
+            "created_at": request.created_at,
+            "decided_at": request.decided_at,
+            "decided_by": request.decided_by,
+            "granted_role": (
+                request.granted_role.value
+                if request.granted_role is not None
+                else None
+            ),
+            "decision_note": request.decision_note,
+        }
+
+    @staticmethod
+    def _access_request_select():
+        return (
+            select(
+                business_case_access_requests_table,
+                business_cases_table.c.name.label("business_case_name"),
+                user_accounts_table.c.display_name.label("requester_display_name"),
+                user_accounts_table.c.email.label("requester_email"),
+            )
+            .join(
+                business_cases_table,
+                business_cases_table.c.id
+                == business_case_access_requests_table.c.business_case_id,
+            )
+            .join(
+                user_accounts_table,
+                user_accounts_table.c.id
+                == business_case_access_requests_table.c.requester_id,
+            )
+        )
+
+    @staticmethod
+    def _access_request(record) -> BusinessCaseAccessRequest:
+        return BusinessCaseAccessRequest(
+            id=str(record["id"]),
+            business_case_id=str(record["business_case_id"]),
+            requester_id=str(record["requester_id"]),
+            requested_role=BusinessCaseAccessRole(str(record["requested_role"])),
+            justification=str(record["justification"]),
+            status=AccessRequestStatus(str(record["status"])),
+            created_at=record["created_at"],
+            decided_at=record["decided_at"],
+            decided_by=str(record["decided_by"] or ""),
+            granted_role=(
+                BusinessCaseAccessRole(str(record["granted_role"]))
+                if record["granted_role"]
+                else None
+            ),
+            decision_note=str(record["decision_note"] or ""),
+            business_case_name=str(record["business_case_name"]),
+            requester_display_name=str(record["requester_display_name"]),
+            requester_email=str(record["requester_email"]),
+        )
 
     @staticmethod
     def _resource_grant(record) -> ResourceGrant:

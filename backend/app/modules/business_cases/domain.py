@@ -76,6 +76,15 @@ class BusinessCase:
 
 
 @dataclass
+class BusinessCaseCatalogEntry:
+    id: str
+    name: str
+    status: BusinessCaseStatus
+    access_role: str = ""
+    request_status: str = ""
+
+
+@dataclass
 class Artifact:
     id: str
     owner_id: str

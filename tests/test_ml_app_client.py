@@ -160,6 +160,57 @@ class MLAppClientTests(unittest.TestCase):
         self.assertEqual(session.requests[0][2]["params"]["offset"], 20)
         self.assertEqual(session.requests[1][2]["params"]["manageable_only"], "true")
 
+    def test_business_case_directory_and_access_request_workflow_use_bounded_contracts(self) -> None:
+        access_request = {
+            "id": "request-1",
+            "business_case_id": "bc-1",
+            "status": "pending",
+        }
+        session = FakeSession([
+            FakeResponse(page_payload([
+                {
+                    "id": "bc-1",
+                    "name": "Churn",
+                    "status": "active",
+                    "access_role": "",
+                    "request_status": "",
+                }
+            ])),
+            FakeResponse(access_request, 201),
+            FakeResponse(page_payload([access_request])),
+            FakeResponse({**access_request, "status": "approved", "granted_role": "reader"}),
+            FakeResponse({**access_request, "status": "rejected"}),
+        ])
+        client = MLAppClient(session=session)
+
+        directory = client.page_business_case_catalog(search="churn")
+        submitted = client.request_business_case_access(
+            "bc-1",
+            requested_role="reader",
+            justification="Reporting work",
+        )
+        inbox = client.page_business_case_access_requests(box="incoming")
+        approved = client.approve_business_case_access_request(
+            "request-1",
+            access_role="reader",
+            decision_note="Approved",
+        )
+        rejected = client.reject_business_case_access_request(
+            "request-1",
+            decision_note="No longer required",
+        )
+
+        self.assertEqual(directory.items[0]["name"], "Churn")
+        self.assertEqual(submitted["id"], "request-1")
+        self.assertEqual(inbox.total, 1)
+        self.assertEqual(approved["granted_role"], "reader")
+        self.assertEqual(rejected["status"], "rejected")
+        self.assertTrue(session.requests[0][1].endswith("/business-cases/catalog/page"))
+        self.assertEqual(session.requests[1][2]["json"]["justification"], "Reporting work")
+        self.assertEqual(session.requests[2][2]["params"]["box"], "incoming")
+        self.assertTrue(session.requests[3][1].endswith("/access-requests/request-1/approve"))
+        self.assertTrue(session.requests[4][1].endswith("/access-requests/request-1/reject"))
+
     def test_version_histories_use_bounded_page_contracts(self) -> None:
         page = {
             "items": [],

@@ -197,3 +197,147 @@ def test_group_grant_and_direct_loose_dataset_exception() -> None:
     assert client.patch(
         f"/api/v1/datasets/{dataset['id']}/metadata", headers=bob_headers, json={"metadata": {"shared": True}}
     ).status_code == 200
+
+
+def test_global_business_case_directory_and_permission_request_workflow() -> None:
+    client = TestClient(create_app())
+    alice, alice_headers = register(client, "alice")
+    bob, bob_headers = register(client, "bob")
+    manager, manager_headers = register(client, "dupe")
+    rejected_user, rejected_headers = register(client, "roles-owner")
+    business_case = create_case(client, alice_headers)
+
+    directory = client.get(
+        "/api/v1/business-cases/catalog/page",
+        headers=bob_headers,
+        params={"search": "Shared churn"},
+    )
+    assert directory.status_code == 200, directory.text
+    catalog_entry = next(
+        item
+        for item in directory.json()["items"]
+        if item["id"] == business_case["id"]
+    )
+    assert catalog_entry == {
+        "id": business_case["id"],
+        "name": "Shared churn",
+        "status": "draft",
+        "access_role": "",
+        "request_status": "",
+    }
+    assert "description" not in catalog_entry
+
+    group = client.post(
+        "/api/v1/sharing/groups",
+        headers=alice_headers,
+        json={"name": f"BC managers {uuid4()}", "description": ""},
+    ).json()
+    assert client.put(
+        f"/api/v1/sharing/groups/{group['id']}/members",
+        headers=alice_headers,
+        json={"user_id": manager["user_id"], "membership_role": "member"},
+    ).status_code == 200
+    assert client.put(
+        f"/api/v1/sharing/business-cases/{business_case['id']}/grants",
+        headers=alice_headers,
+        json={
+            "subject_type": "group",
+            "subject_id": group["id"],
+            "access_role": "manager",
+        },
+    ).status_code == 200
+
+    first_request = client.post(
+        f"/api/v1/sharing/business-cases/{business_case['id']}/access-requests",
+        headers=bob_headers,
+        json={"requested_role": "reader", "justification": "I maintain the churn report"},
+    )
+    assert first_request.status_code == 201, first_request.text
+    assert first_request.json()["status"] == "pending"
+    duplicate = client.post(
+        f"/api/v1/sharing/business-cases/{business_case['id']}/access-requests",
+        headers=bob_headers,
+        json={"requested_role": "contributor", "justification": "Duplicate"},
+    )
+    assert duplicate.status_code == 409
+    assert duplicate.json()["code"] == "business_case_access_request_pending"
+
+    second_request = client.post(
+        f"/api/v1/sharing/business-cases/{business_case['id']}/access-requests",
+        headers=rejected_headers,
+        json={"requested_role": "report_viewer", "justification": "I need the published report"},
+    )
+    assert second_request.status_code == 201, second_request.text
+
+    bob_catalog = client.get(
+        "/api/v1/business-cases/catalog/page",
+        headers=bob_headers,
+        params={"search": "Shared churn"},
+    ).json()["items"]
+    assert next(item for item in bob_catalog if item["id"] == business_case["id"])[
+        "request_status"
+    ] == "pending"
+
+    incoming = client.get(
+        "/api/v1/sharing/access-requests/page",
+        headers=manager_headers,
+        params={"box": "incoming", "status": "pending"},
+    )
+    assert incoming.status_code == 200, incoming.text
+    incoming_ids = {item["id"] for item in incoming.json()["items"]}
+    assert first_request.json()["id"] in incoming_ids
+    assert second_request.json()["id"] in incoming_ids
+
+    mine = client.get(
+        "/api/v1/sharing/access-requests/page",
+        headers=bob_headers,
+        params={"box": "mine"},
+    )
+    assert mine.status_code == 200
+    assert [item["id"] for item in mine.json()["items"]] == [first_request.json()["id"]]
+
+    approved = client.post(
+        f"/api/v1/sharing/access-requests/{first_request.json()['id']}/approve",
+        headers=manager_headers,
+        json={"access_role": "contributor", "decision_note": "Approved for delivery work"},
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["status"] == "approved"
+    assert approved.json()["granted_role"] == "contributor"
+    visible = client.get("/api/v1/business-cases", headers=bob_headers).json()
+    assert next(item for item in visible if item["id"] == business_case["id"])[
+        "access_role"
+    ] == "contributor"
+    grant_page = client.get(
+        f"/api/v1/sharing/business-cases/{business_case['id']}/grants/page",
+        headers=manager_headers,
+    )
+    assert grant_page.status_code == 200, grant_page.text
+    grants_by_subject = {
+        item["subject_id"]: item for item in grant_page.json()["items"]
+    }
+    assert grants_by_subject[bob["user_id"]]["subject_name"] == "Bob"
+    assert grants_by_subject[bob["user_id"]]["subject_email"] == bob["email"]
+    assert (
+        grants_by_subject[bob["user_id"]]["business_case_name"]
+        == business_case["name"]
+    )
+    assert grants_by_subject[group["id"]]["subject_name"] == group["name"]
+    assert grants_by_subject[group["id"]]["subject_email"] == ""
+
+    rejected = client.post(
+        f"/api/v1/sharing/access-requests/{second_request.json()['id']}/reject",
+        headers=manager_headers,
+        json={"decision_note": "Use the shared aggregate instead"},
+    )
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["status"] == "rejected"
+    assert client.get("/api/v1/business-cases", headers=rejected_headers).json() == []
+
+    repeated_decision = client.post(
+        f"/api/v1/sharing/access-requests/{first_request.json()['id']}/approve",
+        headers=alice_headers,
+        json={"access_role": "reader"},
+    )
+    assert repeated_decision.status_code == 409
+    assert repeated_decision.json()["code"] == "access_request_already_decided"

@@ -54,6 +54,22 @@ class InMemoryBusinessCaseRepository:
         items.sort(key=lambda item: item.updated_at, reverse=True)
         return items[offset : offset + limit], len(items)
 
+    def page_business_case_catalog(
+        self,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+    ) -> tuple[list[BusinessCase], int]:
+        needle = search.strip().casefold()
+        items = [
+            item
+            for item in self._business_cases.values()
+            if not needle or needle in item.name.casefold()
+        ]
+        items.sort(key=lambda item: (item.name.casefold(), item.id))
+        return items[offset : offset + limit], len(items)
+
     def business_case_name_exists(self, name: str, *, exclude_id: str = "") -> bool:
         normalized = name.strip().casefold()
         return any(

@@ -26,6 +26,7 @@ from app.modules.serving.repository import (
 from app.modules.sharing.repository import (
     access_groups_table,
     audit_events_table,
+    business_case_access_requests_table,
     business_case_grants_table,
     group_memberships_table,
     resource_grants_table,
@@ -42,7 +43,8 @@ from app.modules.pipelines.repository import (
 
 TEST_ACCOUNT_PATTERN = re.compile(
     r"^(?:alice|bob|dupe|delete-owner|roles-owner|metadata-merge-owner|sql-owner|"
-    r"restart-owner|preview-owner|preview-limit-owner|view-owner)-"
+    r"restart-owner|preview-owner|preview-limit-owner|view-owner|catalog|"
+    r"pipeline-copy|versioned-input|automl-create)-"
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}@example[.]com$"
 )
 USER_REPOSITORY_ROOT = Path("data/repository/users").resolve()
@@ -90,6 +92,15 @@ def _delete_test_accounts(user_ids: set[str]) -> None:
             resource_grants_table.c.subject_type == "user",
             resource_grants_table.c.subject_id.in_(user_ids),
         ))
+        owned_business_case_ids = select(business_cases_table.c.id).where(
+            business_cases_table.c.owner_id.in_(user_ids)
+        )
+        connection.execute(delete(business_case_access_requests_table).where(or_(
+            business_case_access_requests_table.c.requester_id.in_(user_ids),
+            business_case_access_requests_table.c.business_case_id.in_(
+                owned_business_case_ids
+            ),
+        )))
         owned_group_ids = select(access_groups_table.c.id).where(access_groups_table.c.owner_id.in_(user_ids))
         connection.execute(delete(group_memberships_table).where(group_memberships_table.c.group_id.in_(owned_group_ids)))
         connection.execute(delete(business_case_grants_table).where(

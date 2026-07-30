@@ -1,4 +1,4 @@
-import { KeyRound, Plus, RotateCcw, Search, Shield, Share2, Trash2, UserCog, Users } from "lucide-react";
+import { Inbox, KeyRound, Plus, RotateCcw, Search, Shield, Share2, Trash2, UserCog, Users } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 
@@ -15,10 +15,11 @@ import type {
 } from "../api/client";
 import { PagedCatalogSelect } from "../components/PagedCatalogSelect";
 import { PaginationControls } from "../components/PaginationControls";
+import { PermissionRequestsPanel } from "./PermissionRequestsPanel";
 
 type NoticeSetter = (message: string) => void;
 type SubjectType = "user" | "group";
-type CollaborationTab = "groups" | "sharing" | "password";
+type CollaborationTab = "groups" | "sharing" | "password" | "permissions";
 
 export function CollaborationPanel({
   businessCases,
@@ -72,7 +73,9 @@ export function CollaborationPanel({
   const [newPassword, setNewPassword] = useState("");
   const [transferOwnerId, setTransferOwnerId] = useState("");
   const [activeTab, setActiveTab] = useState<CollaborationTab>("groups");
+  const [sharingScope, setSharingScope] = useState<"business-case" | "direct-object">("business-case");
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [permissionRequestsReloadKey, setPermissionRequestsReloadKey] = useState(0);
 
   const refreshDirectory = useCallback(async () => {
     const [directoryPage, groupPage] = await Promise.all([
@@ -135,6 +138,9 @@ export function CollaborationPanel({
     try {
       if (activeTab === "password") {
         setNotice("Password form does not require remote refresh");
+      } else if (activeTab === "permissions") {
+        setPermissionRequestsReloadKey((value) => value + 1);
+        setNotice("Permission requests refreshed");
       } else {
         await Promise.all([
           refreshDirectory(),
@@ -323,6 +329,7 @@ export function CollaborationPanel({
         <TabButton active={activeTab === "groups"} icon={<Users size={17} />} label="Groups" description="Teams and members" onClick={() => setActiveTab("groups")} />
         <TabButton active={activeTab === "sharing"} icon={<Share2 size={17} />} label="Object sharing" description="Business Cases and data" onClick={() => setActiveTab("sharing")} />
         <TabButton active={activeTab === "password"} icon={<KeyRound size={17} />} label="Change password" description="Account security" onClick={() => setActiveTab("password")} />
+        <TabButton active={activeTab === "permissions"} icon={<Inbox size={17} />} label="Permission requests" description="Incoming and submitted" onClick={() => setActiveTab("permissions")} />
       </nav>
 
       {(activeTab === "groups" || activeTab === "sharing") && (
@@ -367,6 +374,31 @@ export function CollaborationPanel({
       )}
 
       {activeTab === "sharing" && <div className="collaboration-tab-content" role="region" aria-label="Object sharing">
+      <nav className="sharing-scope-tabs" aria-label="Access scope" role="tablist">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={sharingScope === "business-case"}
+          className={sharingScope === "business-case" ? "active" : ""}
+          onClick={() => setSharingScope("business-case")}
+        >
+          <Share2 size={17} />
+          <span>Business Case access</span>
+          <small>Governed roles for a complete Business Case</small>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={sharingScope === "direct-object"}
+          className={sharingScope === "direct-object" ? "active" : ""}
+          onClick={() => setSharingScope("direct-object")}
+        >
+          <Shield size={17} />
+          <span>Direct object access</span>
+          <small>Exceptions for loose datasets and Data Views</small>
+        </button>
+      </nav>
+      {sharingScope === "business-case" && (
       <div className="panel">
         <div className="panel-header"><div><h2>Business Case access</h2><p>Groups are the recommended sharing path.</p></div><Share2 size={18} /></div>
         <div className="collaboration-form-grid">
@@ -392,14 +424,21 @@ export function CollaborationPanel({
           </select></label>
           <button className="primary-button" type="button" onClick={grantBusinessCase}><Share2 size={15} /> Grant access</button>
         </div>
-        <GrantList grants={bcGrants} users={users} groups={groups} onRemove={async (grantId) => {
+        <GrantList
+          grants={bcGrants}
+          users={users}
+          groups={groups}
+          targetName={(businessCases.find((item) => item.id === selectedBusinessCaseId) ?? selectedBusinessCaseSnapshot)?.name}
+          targetKind="Business Case"
+          onRemove={async (grantId) => {
           try {
             await api.revokeBusinessCaseGrant(selectedBusinessCaseId, grantId);
             setBcGrants((current) => current.filter((item) => item.id !== grantId));
             setBcGrantTotal((current) => Math.max(0, current - 1));
             setNotice("Grant revoked");
           } catch (error) { showError(error); }
-        }} />
+          }}
+        />
         <PaginationControls total={bcGrantTotal} limit={30} offset={bcGrantOffset} onOffsetChange={setBcGrantOffset} label="Business Case grants" />
         {selectedBusinessCaseId && (isAdmin || (businessCases.find((item) => item.id === selectedBusinessCaseId) ?? selectedBusinessCaseSnapshot)?.access_role === "owner") && <div className="collaboration-form-grid compact ownership-transfer">
           <label>Transfer ownership to<PagedCatalogSelect
@@ -422,7 +461,9 @@ export function CollaborationPanel({
           }}><UserCog size={15} /> Transfer ownership</button>
         </div>}
       </div>
+      )}
 
+      {sharingScope === "direct-object" && (
       <div className="panel">
           <div className="panel-header"><div><h2>Direct object access</h2><p>Exception path for loose datasets and Data Views only.</p></div><Shield size={18} /></div>
           <div className="collaboration-form-grid">
@@ -452,16 +493,24 @@ export function CollaborationPanel({
             <label>Access level<select value={resourceRole} onChange={(event) => setResourceRole(event.target.value as typeof resourceRole)}><option value="reader">Reader</option><option value="editor">Editor</option><option value="owner">Owner</option></select></label>
             <button className="secondary-button" type="button" onClick={grantDataset}><Share2 size={15} /> Grant exception</button>
           </div>
-          <GrantList grants={resourceGrants} users={users} groups={groups} onRemove={async (grantId) => {
+          <GrantList
+            grants={resourceGrants}
+            users={users}
+            groups={groups}
+            targetName={(datasets.find((item) => item.id === selectedDatasetId) ?? selectedDatasetSnapshot)?.name}
+            targetKind={(datasets.find((item) => item.id === selectedDatasetId) ?? selectedDatasetSnapshot)?.source_type === "view" ? "Data View" : "Dataset"}
+            onRemove={async (grantId) => {
             try {
               await api.revokeResourceGrant(grantId);
               setResourceGrants((current) => current.filter((item) => item.id !== grantId));
               setResourceGrantTotal((current) => Math.max(0, current - 1));
               setNotice("Grant revoked");
             } catch (error) { showError(error); }
-          }} />
+            }}
+          />
           <PaginationControls total={resourceGrantTotal} limit={30} offset={resourceGrantOffset} onOffsetChange={setResourceGrantOffset} label="direct resource grants" />
       </div>
+      )}
       </div>}
 
       {activeTab === "groups" && <div className="collaboration-tab-content" role="region" aria-label="Group management">
@@ -534,6 +583,14 @@ export function CollaborationPanel({
           <button className="primary-button" type="button" onClick={changePassword}><KeyRound size={15} /> Change password</button>
         </div>
       </div></div>}
+      {activeTab === "permissions" && (
+        <div className="collaboration-tab-content" role="region" aria-label="Permission requests">
+          <PermissionRequestsPanel
+            setNotice={setNotice}
+            reloadKey={permissionRequestsReloadKey}
+          />
+        </div>
+      )}
     </section>
   );
 }
@@ -579,12 +636,39 @@ function SubjectFields({ type, id, selectedItem, onType, onId }: {
     /></label></>;
 }
 
-function GrantList({ grants, users, groups, onRemove }: {
+function GrantList({ grants, users, groups, targetName, targetKind, onRemove }: {
   grants: Array<BusinessCaseGrant | ResourceGrant>; users: DirectoryUser[]; groups: AccessGroup[];
+  targetName?: string;
+  targetKind: string;
   onRemove: (grantId: string) => void;
 }) {
   if (!grants.length) return <div className="empty-state">No explicit grants for the selected scope.</div>;
-  return <div className="access-list">{grants.map((grant) => <div key={grant.id}><span><strong>{subjectLabel(grant.subject_type, grant.subject_id, users, groups)}</strong><small>{grant.subject_type} · {grant.access_role}{grant.expires_at ? ` · expires ${new Date(grant.expires_at).toLocaleString()}` : ""}</small></span><button className="icon-button" type="button" aria-label="Revoke grant" onClick={() => onRemove(grant.id)}><Trash2 size={14} /></button></div>)}</div>;
+  return <div className="access-list">{grants.map((grant) => {
+    const isBusinessCaseGrant = "business_case_name" in grant;
+    const resolvedSubjectName = isBusinessCaseGrant && grant.subject_name
+      ? grant.subject_name
+      : subjectLabel(grant.subject_type, grant.subject_id, users, groups);
+    const resolvedTargetName = isBusinessCaseGrant
+      ? grant.business_case_name || targetName
+      : targetName;
+    const subjectDetail = isBusinessCaseGrant && grant.subject_email
+      ? grant.subject_email
+      : grant.subject_type === "group" ? "Access group" : "User";
+    return <div className="access-grant-row" key={grant.id}>
+      <span className="access-grant-subject">
+        <small>{grant.subject_type === "group" ? "Group" : "User"}</small>
+        <strong>{resolvedSubjectName}</strong>
+        <small>{subjectDetail}</small>
+      </span>
+      <span className="access-grant-arrow" aria-hidden="true">→</span>
+      <span className="access-grant-permission">
+        <small>Has access as</small>
+        <strong>{formatAccessRole(grant.access_role)}</strong>
+        <small>{targetKind}{resolvedTargetName ? ` · ${resolvedTargetName}` : ""}{grant.expires_at ? ` · expires ${new Date(grant.expires_at).toLocaleString()}` : ""}</small>
+      </span>
+      <button className="icon-button" type="button" aria-label={`Revoke ${grant.access_role} access for ${resolvedSubjectName}`} onClick={() => onRemove(grant.id)}><Trash2 size={14} /></button>
+    </div>;
+  })}</div>;
 }
 
 function AdminUsers({ setNotice }: { setNotice: NoticeSetter }) {
@@ -643,4 +727,11 @@ function subjectLabel(type: string, id: string, users: DirectoryUser[], groups: 
   return type === "group"
     ? groups.find((item) => item.id === id)?.name ?? id
     : users.find((item) => item.id === id || item.user_id === id)?.display_name ?? id;
+}
+
+function formatAccessRole(role: string) {
+  return role
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }

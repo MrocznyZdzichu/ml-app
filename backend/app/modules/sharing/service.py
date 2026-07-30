@@ -4,15 +4,22 @@ from uuid import uuid4
 from fastapi import HTTPException, status
 from sqlalchemy import func, select
 
+from app.core.errors import ConflictError, InvalidRequestError, ResourceNotFoundError
 from app.core.security import Principal
 from app.modules.auth.repository import PostgresUserRepository
-from app.modules.business_cases.repository import business_case_data_attachments_table
+from app.modules.business_cases.domain import BusinessCaseStatus
+from app.modules.business_cases.repository import (
+    PostgresBusinessCaseRepository,
+    business_case_data_attachments_table,
+)
 from app.modules.datasets.repository import PostgresDatasetRepository
 from app.modules.sharing.domain import (
+    AccessRequestStatus,
     AccessGroup,
     AuditEvent,
     BC_ROLE_RANK,
     BusinessCaseAccessRole,
+    BusinessCaseAccessRequest,
     BusinessCaseGrant,
     GroupMembership,
     MembershipRole,
@@ -22,8 +29,15 @@ from app.modules.sharing.domain import (
     SubjectType,
 )
 from app.modules.sharing.policy import AccessPolicy
-from app.modules.sharing.repository import DuplicateAccessRecord, PostgresSharingRepository
+from app.modules.sharing.repository import (
+    DuplicateAccessRecord,
+    DuplicateAccessRequest,
+    PostgresSharingRepository,
+)
 from app.modules.sharing.schemas import (
+    BusinessCaseAccessRequestCreate,
+    BusinessCaseAccessRequestDecision,
+    BusinessCaseAccessRequestReject,
     BusinessCaseGrantCreate,
     GroupCreate,
     GroupUpdate,
@@ -38,6 +52,7 @@ class SharingService:
         self.policy = AccessPolicy(self.repository, self.repository.engine)
         self.users = PostgresUserRepository(self.repository.engine)
         self.datasets = PostgresDatasetRepository(self.repository.engine)
+        self.business_cases = PostgresBusinessCaseRepository(self.repository.engine)
 
     def directory_users(self, principal: Principal):
         # Authenticated employees can resolve colleagues for explicit sharing.
@@ -222,6 +237,225 @@ class SharingService:
                     resource_kind="business_case", resource_id=business_case_id,
                     previous={"access_role": grant.access_role.value})
 
+    def create_business_case_access_request(
+        self,
+        business_case_id: str,
+        payload: BusinessCaseAccessRequestCreate,
+        principal: Principal,
+    ) -> BusinessCaseAccessRequest:
+        business_case = self.business_cases.get_business_case(business_case_id)
+        if business_case is None:
+            raise ResourceNotFoundError(
+                "Business Case not found",
+                code="business_case_not_found",
+            )
+        if business_case.status == BusinessCaseStatus.ARCHIVED:
+            raise ConflictError(
+                "Access cannot be requested for an archived Business Case",
+                code="business_case_archived",
+            )
+        if payload.requested_role == BusinessCaseAccessRole.OWNER:
+            raise InvalidRequestError(
+                "Ownership can only be assigned through ownership transfer",
+                code="owner_role_requires_transfer",
+            )
+        current_role = self.policy.business_case_role(principal, business_case_id)
+        if (
+            current_role is not None
+            and BC_ROLE_RANK[current_role] >= BC_ROLE_RANK[payload.requested_role]
+        ):
+            raise ConflictError(
+                f"You already have {current_role.value} access to this Business Case",
+                code="business_case_access_already_sufficient",
+            )
+        now = datetime.now(timezone.utc)
+        request = BusinessCaseAccessRequest(
+            id=str(uuid4()),
+            business_case_id=business_case_id,
+            requester_id=principal.user_id,
+            requested_role=payload.requested_role,
+            justification=payload.justification.strip(),
+            status=AccessRequestStatus.PENDING,
+            created_at=now,
+            business_case_name=business_case.name,
+            requester_display_name=principal.display_name,
+            requester_email=principal.email,
+        )
+        audit = AuditEvent(
+            id=str(uuid4()),
+            actor_id=principal.user_id,
+            action="business_case.access_requested",
+            subject_type="user",
+            subject_id=principal.user_id,
+            resource_kind="business_case",
+            resource_id=business_case_id,
+            new_state={
+                "access_request_id": request.id,
+                "requested_role": request.requested_role.value,
+                "status": request.status.value,
+            },
+            reason=request.justification,
+        )
+        try:
+            return self.repository.add_access_request(request, audit)
+        except DuplicateAccessRequest as exc:
+            raise ConflictError(
+                str(exc),
+                code="business_case_access_request_pending",
+            ) from exc
+
+    def page_business_case_access_requests(
+        self,
+        principal: Principal,
+        *,
+        box: str,
+        status_filter: AccessRequestStatus | None,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[BusinessCaseAccessRequest], int]:
+        if box == "mine":
+            return self.repository.page_access_requests(
+                requester_id=principal.user_id,
+                manageable_business_case_ids=None,
+                status_filter=status_filter,
+                limit=limit,
+                offset=offset,
+            )
+        if box != "incoming":
+            raise InvalidRequestError(
+                "box must be incoming or mine",
+                code="invalid_access_request_box",
+            )
+        roles = self.policy.accessible_business_case_roles(
+            principal,
+            BusinessCaseAccessRole.MANAGER,
+        )
+        return self.repository.page_access_requests(
+            requester_id=None,
+            manageable_business_case_ids=None if roles is None else set(roles),
+            status_filter=status_filter,
+            limit=limit,
+            offset=offset,
+        )
+
+    def approve_business_case_access_request(
+        self,
+        request_id: str,
+        payload: BusinessCaseAccessRequestDecision,
+        principal: Principal,
+    ) -> BusinessCaseAccessRequest:
+        if payload.access_role == BusinessCaseAccessRole.OWNER:
+            raise InvalidRequestError(
+                "Ownership can only be assigned through ownership transfer",
+                code="owner_role_requires_transfer",
+            )
+        request = self._pending_access_request(request_id)
+        if request.requester_id == principal.user_id:
+            raise ConflictError(
+                "You cannot approve your own access request",
+                code="access_request_self_decision",
+            )
+        actor_role = self.policy.require_business_case(
+            principal,
+            request.business_case_id,
+            BusinessCaseAccessRole.MANAGER,
+        )
+        if BC_ROLE_RANK[payload.access_role] > BC_ROLE_RANK[actor_role]:
+            raise InvalidRequestError(
+                "The selected access role exceeds your Business Case role",
+                code="access_request_role_too_high",
+            )
+        now = datetime.now(timezone.utc)
+        request.status = AccessRequestStatus.APPROVED
+        request.decided_at = now
+        request.decided_by = principal.user_id
+        request.granted_role = payload.access_role
+        request.decision_note = payload.decision_note.strip()
+        grant = BusinessCaseGrant(
+            id=str(uuid4()),
+            business_case_id=request.business_case_id,
+            subject_type=SubjectType.USER,
+            subject_id=request.requester_id,
+            access_role=payload.access_role,
+            granted_by=principal.user_id,
+            created_at=now,
+            updated_at=now,
+        )
+        audit = AuditEvent(
+            id=str(uuid4()),
+            actor_id=principal.user_id,
+            action="business_case.access_request_approved",
+            subject_type="user",
+            subject_id=request.requester_id,
+            resource_kind="business_case",
+            resource_id=request.business_case_id,
+            previous_state={"status": AccessRequestStatus.PENDING.value},
+            new_state={
+                "access_request_id": request.id,
+                "status": request.status.value,
+                "access_role": payload.access_role.value,
+            },
+            reason=request.decision_note,
+        )
+        if not self.repository.decide_access_request(
+            request,
+            grant=grant,
+            audit=audit,
+        ):
+            raise ConflictError(
+                "This access request has already been decided",
+                code="access_request_already_decided",
+            )
+        return request
+
+    def reject_business_case_access_request(
+        self,
+        request_id: str,
+        payload: BusinessCaseAccessRequestReject,
+        principal: Principal,
+    ) -> BusinessCaseAccessRequest:
+        request = self._pending_access_request(request_id)
+        if request.requester_id == principal.user_id:
+            raise ConflictError(
+                "You cannot reject your own access request",
+                code="access_request_self_decision",
+            )
+        self.policy.require_business_case(
+            principal,
+            request.business_case_id,
+            BusinessCaseAccessRole.MANAGER,
+        )
+        request.status = AccessRequestStatus.REJECTED
+        request.decided_at = datetime.now(timezone.utc)
+        request.decided_by = principal.user_id
+        request.granted_role = None
+        request.decision_note = payload.decision_note.strip()
+        audit = AuditEvent(
+            id=str(uuid4()),
+            actor_id=principal.user_id,
+            action="business_case.access_request_rejected",
+            subject_type="user",
+            subject_id=request.requester_id,
+            resource_kind="business_case",
+            resource_id=request.business_case_id,
+            previous_state={"status": AccessRequestStatus.PENDING.value},
+            new_state={
+                "access_request_id": request.id,
+                "status": request.status.value,
+            },
+            reason=request.decision_note,
+        )
+        if not self.repository.decide_access_request(
+            request,
+            grant=None,
+            audit=audit,
+        ):
+            raise ConflictError(
+                "This access request has already been decided",
+                code="access_request_already_decided",
+            )
+        return request
+
     def list_resource_grants(self, kind: ResourceKind, resource_id: str, principal: Principal) -> list[ResourceGrant]:
         owner_id = self._resource_owner(kind, resource_id)
         self.policy.require_resource(principal, kind, resource_id, owner_id, ResourceAccessRole.OWNER)
@@ -315,6 +549,20 @@ class SharingService:
             group = self.repository.get_group(subject_id)
             if group is None or not group.is_active:
                 raise HTTPException(status_code=404, detail="Group not found")
+
+    def _pending_access_request(self, request_id: str) -> BusinessCaseAccessRequest:
+        request = self.repository.get_access_request(request_id)
+        if request is None:
+            raise ResourceNotFoundError(
+                "Access request not found",
+                code="access_request_not_found",
+            )
+        if request.status != AccessRequestStatus.PENDING:
+            raise ConflictError(
+                "This access request has already been decided",
+                code="access_request_already_decided",
+            )
+        return request
 
     def _resource_owner(self, kind: ResourceKind, resource_id: str) -> str:
         if kind in {ResourceKind.DATASET, ResourceKind.DATA_VIEW}:
