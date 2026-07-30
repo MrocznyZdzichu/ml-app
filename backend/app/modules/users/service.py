@@ -1,8 +1,12 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from fastapi import HTTPException, status
-
+from app.core.errors import (
+    AuthorizationError,
+    ConflictError,
+    ResourceNotFoundError,
+    ValidationError,
+)
 from app.core.security import Principal, hash_password
 from app.modules.auth.domain import UserAccount
 from app.modules.auth.repository import PostgresUserRepository, UserRepository
@@ -26,7 +30,10 @@ class UserAdministrationService:
     @staticmethod
     def require_admin(principal: Principal) -> None:
         if not principal.is_administrator:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator role required")
+            raise AuthorizationError(
+                "Administrator role required",
+                code="administrator_required",
+            )
 
     def list_users(self, principal: Principal) -> list[UserAccount]:
         self.require_admin(principal)
@@ -55,13 +62,19 @@ class UserAdministrationService:
         self.require_admin(principal)
         user = self.users.get(user_id)
         if user is None:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise ResourceNotFoundError("User not found", code="user_not_found")
         roles = set(payload.roles)
         if not roles or "user" not in roles or not roles <= PLATFORM_ROLES:
-            raise HTTPException(status_code=422, detail="Roles must contain user and only supported platform roles")
+            raise ValidationError(
+                "Roles must contain user and only supported platform roles",
+                code="invalid_platform_roles",
+            )
         next_is_technical = user.is_technical if payload.is_technical is None else payload.is_technical
         if user.id == "root" and (not payload.is_active or "administrator" not in roles or not next_is_technical):
-            raise HTTPException(status_code=409, detail="Root cannot be disabled or demoted")
+            raise ConflictError(
+                "Root cannot be disabled or demoted",
+                code="protected_root_account",
+            )
         previous = {"roles": list(user.roles), "is_active": user.is_active, "is_technical": user.is_technical}
         changed = set(user.roles) != roles or user.is_active != payload.is_active or user.is_technical != next_is_technical
         user.roles = tuple(role for role in ("user", "governance_steward", "administrator") if role in roles)
@@ -80,7 +93,7 @@ class UserAdministrationService:
         self.require_admin(principal)
         user = self.users.get(user_id)
         if user is None:
-            raise HTTPException(status_code=404, detail="User not found")
+            raise ResourceNotFoundError("User not found", code="user_not_found")
         user.password_hash = hash_password(payload.new_password)
         user.session_version += 1
         user.updated_at = datetime.now(timezone.utc)

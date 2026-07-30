@@ -1,327 +1,179 @@
 # Architecture
 
-## Product Shape
+This document explains stable component boundaries. Use
+[`CODEMAP.md`](../CODEMAP.md) for current file entry points and the feature
+references for request/response details.
 
-The application is organized around a common analytics lifecycle:
+## System shape
 
-1. Users authenticate and work inside governed Business Cases or with explicitly
-   shared loose data assets.
-2. Data assets are currently registered from local CSV/Parquet files or derived
-   views; databases, APIs, and object-storage connectors are future adapters.
-3. Data profiling, descriptive statistics, and visualizations are created.
-4. ML experiments train candidate models and record parameters, metrics, and artifacts.
-5. Production-stage models are assigned to versioned scoring services. There is
-   no separate approval-gate role in the current lifecycle.
-6. Data, analyses, visualizations, models, and exports can be shared.
+```text
+React UI ───────┐
+                ├── FastAPI API ── PostgreSQL
+Python client ──┘        │
+                         ├── local artifact repository
+                         ├── Redis/Celery workers ── DuckDB/Parquet
+                         └── private model runtime
+```
 
-## Service Boundaries
+- FastAPI owns public HTTP contracts, authentication, authorization, validation,
+  and use-case orchestration.
+- PostgreSQL owns durable metadata, access control, lineage, run state, audit,
+  deployment configuration, and the hot Inference Log.
+- Celery executes profiling, pipelines, ML, replay, monitoring, and export jobs.
+- DuckDB scans CSV/Parquet relations and returns bounded aggregates, previews,
+  pages, or immutable Parquet outputs.
+- `data/repository` is the active local artifact store. MinIO is present in
+  Compose for future object-storage work but is not used as the primary store.
+- The model runtime is private to the application network. The API validates and
+  records an inference request before reporting success.
 
-- API: owns HTTP contracts, authorization checks, orchestration, and metadata.
-- Worker: owns long-running jobs such as ingestion, profiling, training, export,
-  batch scoring, challenger replay, and online monitoring.
-- PostgreSQL: stores users, permissions, metadata, experiment runs, and audit events.
-- Local repository (`data/repository`): currently stores uploaded datasets,
-  generated Parquet, fitted transforms, reports, and trained model files.
-- MinIO/S3: started in local Compose as future object-storage infrastructure;
-  it is not yet the active artifact store.
-- Redis: broker/cache for background work.
-- Model runtime: a small container image used to expose online scoring for a model artifact.
+The current topology is a single-node development architecture. Component
+interfaces allow future storage, queue, and runtime adapters, but those adapters
+are not implemented merely by naming them here.
 
-## Refresh and catalog contracts
+## Backend boundaries
 
-The application refreshes the active section rather than reloading the complete
-workspace. A section coordinator reloads only its shared catalogs; panels with
-local state such as Jobs, Share, and Serving register an additional coordinator
-for the top Refresh action. A refresh inside a tab reloads only that tab's data.
+Modules generally separate:
 
-Large registries use explicit summary contracts for discovery:
-`GET /datasets?summary=true`, `GET /models?summary=true`, and
-`GET /scoring-reports?summary=true`. They preserve identifiers, governance,
-lineage fields and the workflow configuration required by the UI, while omitting
-large experiment/evaluation or non-presented metadata. Existing endpoints without
-`summary=true` remain backward compatible. Full payloads are fetched on demand
-from the resource detail endpoints.
+- `schemas.py` - transport DTOs;
+- `domain.py` - entities, enums, and business rules;
+- repository ports and persistence adapters;
+- `service.py` - application use cases;
+- `router.py` - FastAPI translation.
 
-## Backend Modules
+`ApplicationContainer` is the composition root. Routers resolve services from
+it instead of constructing dependency graphs. Application services depend on a
+`TaskQueue` port; the Celery adapter is selected at composition time.
 
-Each module follows the same direction:
+Celery task functions are thin transport adapters. Pipeline lifecycle and step
+binding belong to `PipelineRunExecutor`; individual step families use focused
+handlers behind `PipelineStepHandlerRegistry`.
 
-- `schemas.py` contains API DTOs.
-- `domain.py` contains domain entities and enums.
-- `repository.py` contains persistence contracts and their PostgreSQL or
-  explicitly process-local adapters.
-- `service.py` contains use-case oriented classes.
-- `router.py` exposes FastAPI endpoints.
+Application/domain code should raise typed errors from `app.core.errors`.
+FastAPI maps them in `app.api.error_handlers`. This boundary is already enforced
+for migrated authentication and user-administration services and should replace
+legacy direct `HTTPException` usage incrementally.
 
-Dataset, auth, model, serving, sharing, analysis, and export modules follow this
-layout. Dataset, pipeline, artifact, auth, sharing, audit, deployment, Inference
-Log, replay, and online-monitoring metadata are backed by PostgreSQL. Legacy
-standalone analysis/training state and export jobs remain process-local.
+Repository ports do not import SQLAlchemy. Large lists are filtered and
+paginated in PostgreSQL, not after loading all visible objects into Python. The
+Business Case repository and pipeline step-handler modules intentionally remain
+small compatibility facades while implementations live in focused modules.
 
-### Composition and background execution
+Executable checks in `backend/tests/test_architecture.py` protect these
+boundaries.
 
-`app.core.container.ApplicationContainer` is the application composition root.
-It owns shared repository and adapter instances and creates use-case services
-with explicit dependencies. FastAPI routers resolve services from this
-container; they do not construct their own service graphs.
+## Clients and public contracts
 
-Application services depend on the `TaskQueue` port. The Celery implementation
-is an outer adapter in `app.worker.task_queue`, selected only by the composition
-root. Services built without a queue remain usable for synchronous operations
-and fail explicitly if a background operation is requested.
+The REST API is the shared product contract. React and `ml_app_client` are
+peer clients and must preserve the same authorization, validation, pagination,
+idempotency, warnings, and errors.
 
-Celery task functions are transport adapters. Pipeline execution delegates to
-`PipelineRunExecutor`, which owns run lifecycle orchestration independently from
-Celery. This boundary permits synchronous testing and future queue adapters
-without duplicating the execution workflow.
+Potentially large catalogs provide bounded `/page` endpoints with an
+`items`, `total`, `limit`, `offset`, and `has_next` response. Dataset, model, and
+scoring-report discovery can return compact summary projections; full detail is
+loaded only after a user opens a resource. Legacy list endpoints remain for
+compatibility, not as the default scalable workflow.
 
-`Principal` is a transport-independent identity value. FastAPI authentication
-constructs it, but repositories, authorization policies and workers consume it
-without importing the HTTP framework.
+The React client separates transport, pagination, domain contracts, and serving
+operations. `api/client.ts` is a compatibility facade. Feature code is grouped
+by domain, and heavy workspaces are lazy-loaded from the authenticated
+`App.tsx` shell. The production build rejects import cycles before compiling
+TypeScript and producing the Vite bundle.
 
-## Frontend composition
+`MLAppClient` is the stable Python facade. It composes authentication, datasets,
+Business Cases, pipelines, reports, model registry, deployments, inference, and
+monitoring modules. Name resolution uses bounded API search; raw IDs remain
+available for deterministic automation.
 
-`App.tsx` is the authenticated workspace shell: navigation, shared bounded
-catalog state and cross-panel navigation. Domain controllers live in separate
-modules for Business Cases, Pipelines, Data/Analysis, Jobs, Models, reports and
-Serving. Heavy workspaces are loaded with React lazy boundaries so the initial
-bundle does not contain every editor and analysis view.
+## Identity and authorization
 
-The browser client separates HTTP/token handling, pagination contracts and
-serving endpoints. The current `api` facade remains backward compatible while
-domain clients are extracted incrementally.
+The installation is single-company. New users receive the `user` platform role.
+The protected `root` administrator is bootstrapped idempotently; startup does
+not restore its initial password after a change.
 
-The Python integration package follows the same public API semantics. Its
-facade composes separate modules for immutable response models, typed errors,
-resource-name resolution and online-serving workflows.
+Business Case access is the union of ownership, direct user grants, active group
+grants, and the administrator bypass. Roles are `report_viewer`, `reader`,
+`contributor`, `manager`, and `owner`. A `report_viewer` cannot access row data,
+datasets, pipeline definitions, models, or source drill-down.
 
-## Identity and Access Control
+Loose datasets and Data Views may use direct `reader`, `editor`, or `owner`
+grants. ML, scoring, serving, and monitoring require a Business Case. Access is
+checked for lists, details, files, lineage, jobs, and results; workers recheck
+the submitting identity before expensive execution.
 
-The installation is single-company and keeps open self-registration. New users
-receive only the `user` platform role. A reserved technical `root` account is
-repaired idempotently at startup with the `administrator` role; bootstrap never
-overwrites a password that has already been changed. Account state and session
-version are checked against PostgreSQL on every authenticated request, so stale
-JWT role claims do not preserve revoked access.
+## Data and full-scope analytics
 
-Business Case grants are the primary authorization boundary. Effective access
-is the union of implicit BC ownership, user grants, active-group grants and the
-administrator bypass. The hierarchy is `report_viewer`, `reader`,
-`contributor`, `manager`, `owner`. Report viewers cannot resolve datasets,
-pipeline configuration, models or data lineage. Loose datasets and Data Views
-may exceptionally use direct `reader`, `editor` or `owner` grants. Explicit
-denies are not part of the current contract.
+A dataset is a versioned `DataAsset` backed by a local CSV/Parquet file or a
+saved Data View. Data Views store declarative Browser or read-only SQL
+definitions. DuckDB resolves and materializes them to definition-hashed Parquet
+while the definition and source remain unchanged.
 
-Groups, memberships, BC grants, direct resource grants and audit events are
-stored in PostgreSQL. Authorization is resolved centrally for API reads,
-mutations, downloads, lineage and worker entrypoints. A worker rechecks the
-submitting actor immediately before starting a pipeline or full-dataset
-analysis. Business Case ownership can be transferred without rewriting
-historical artifacts or physical dataset paths; artifact lookup therefore uses
-the BC relationship rather than assuming the current BC owner created every
-artifact.
+The browser preview is deliberately bounded. Saving Browser state compiles its
+projection, filters, grouping, aggregation, and sorting into a server-side query
+over the complete relation. Custom SQL, profiling, visualization, and drill
+queries also execute server-side; only their presentation payload is bounded.
 
-## Dataset Architecture
+CSV receives a reusable Parquet sidecar on its first columnar analysis. Parquet
+is scanned natively. Connection settings cap threads and memory and permit
+dataset-local spill. Process-local conversion locks prevent duplicate work
+inside one process; cross-process coordination remains a known scaling gap.
 
-Datasets are represented by `DataAsset` records. A data asset can point to a
-physical file, a future external source, or a saved Data View.
+Descriptive profiling and time-series analysis are explicit asynchronous jobs.
+Headline statistics and reported evaluation metrics cover the full selected
+scope. Only clearly labeled rendering or explainability payloads may use bounded
+samples or bins.
 
-The dataset module is split into these responsibilities:
+## Pipelines, ML, and artifacts
 
-- `DatasetService` handles use cases: upload, registration, metadata updates,
-  deletion, preview, Custom SQL, and Data View creation.
-- `FullDatasetProfiler` and `FullDatasetSqlQuery` execute bounded previews and
-  read-only SQL directly over columnar relations. Registered external sources
-  remain metadata-only until a pushdown-capable adapter is available.
-- `ColumnarDatasetStore` owns reusable physical Parquet relations, recursive
-  Data View resolution, browser-definition pushdown, SQL-view materialization,
-  cache invalidation, and concurrency-safe first-run conversion.
-- `FullDatasetVisualization` executes bounded visualization queries over full
-  relations and returns compact chart contracts rather than raw tables.
-- `DatasetSourceRegistry` selects source-specific inspection. UTF-8 CSV and flat
-  tabular Parquet files are supported today; databases and APIs require future
-  adapters and are never implicitly copied into application memory.
-- `DatasetRepository` persists dataset metadata in PostgreSQL.
+A pipeline belongs to one Business Case. Editable drafts produce immutable
+published versions; each run and step run records status, inputs, outputs,
+warnings, row counts, and lineage. Steps exchange versioned artifacts rather
+than shared in-memory state.
 
-Uploaded CSV and Parquet files are stored under the local development repository
-directory mounted at `data/repository`. Source inspectors validate that local
-file reads stay inside that repository root. Parquet is scanned natively;
-CSV receives a reusable Parquet sidecar when full columnar analytics first need it.
+Data Engineering uses a nested DuckDB DAG. Feature Engineering fits state on
+training data and applies the same immutable state to validation, test, and
+scoring inputs. Training and AutoML create a consistent bundle containing the
+model, fitted transform, feature manifest, evaluation report, and provenance.
 
-## Data Roles Metadata
+Test Scoring evaluates labeled data and may create a Scoring Report. Batch
+Scoring creates an immutable prediction dataset without inventing performance
+metrics when actuals are absent. Monitoring later joins actuals into a new
+immutable result; it never mutates prediction history.
 
-Analyst-defined data roles are stored in `DataAsset.metadata.data_roles`. This is
-intentionally generic JSON metadata so later tools can use the same semantic
-contract without schema churn for every new role.
+Artifacts, published pipeline versions, models, prediction datasets, reports,
+and monitoring results are immutable. Lineage identifies source artifacts,
+pipeline/version/run, step and port, creator, time, schema, and row count.
 
-Saved Data Views inherit source roles for columns that still exist in the view.
-For example, if `plan_type` is ordinal in the source dataset and the view keeps
-`plan_type`, the view receives the same role.
+## Online serving and monitoring
 
-## Descriptive Analysis
+A service has a stable identity and immutable revisions. Assignments use
+deployment roles (`champion`, `challenger`, `shadow`, `fallback`) independently
+from model lifecycle stage. Revision changes and rollback are atomic and
+auditable.
 
-Descriptive Analysis for uploaded CSV assets runs as a Celery task over a DuckDB
-relation. The first explicit run converts the source CSV to a reusable,
-Zstandard-compressed Parquet sidecar. DuckDB performs full-column aggregates,
-relationships, contingency tables, graphic bins, and segment grouping over all
-rows and can spill to a dataset-local temporary directory. The API and Redis
-carry only compact profile results; raw profile rows are not sent to React.
+The API applies the pinned inference bundle, calls the private runtime, and
+persists request/item history. Fallback is attempted once for a technical
+champion failure, never for invalid input. Shadow output is retained without
+changing the response; challengers use protected scoring or replay.
 
-Profiling is explicitly started by the analyst. Dataset selection reads a small
-CSV schema sample plus stored upload metadata and does not create Parquet. After
-`Run profiling`, the API queues work and the unchanged frontend progress state
-polls for completion. Worker concurrency is deliberately limited and prefetch is
-one so multiple large scans do not multiply memory pressure unpredictably.
-Queue ownership and result lifecycle are isolated in `DescriptiveProfileJobs`;
-`DatasetService` only validates dataset access and delegates job orchestration.
+Manual online monitoring freezes a half-open UTC `scored_at` window and a log
+cutoff, streams the complete selected history into an immutable Parquet
+snapshot, optionally joins actuals, and returns bounded time-series and chart
+diagnostics. Batch and online monitoring share concepts but retain separate
+public contracts.
 
-Successful computed summaries and UI snapshots are cached in an App-owned,
-session-scoped in-memory map keyed by dataset ID. The cache
-survives Analysis tab and workspace navigation, is invalidated when dataset
-metadata has a newer `updated_at`, and is cleared during logout. No profiling
-records are persisted to browser storage.
+## Scaling decisions and current gaps
 
-The UI supports univariate profiles, target/comparison relations, optional
-histograms, KDE-like density plots, scatterplots, and a multivariate subgroup
-scan over eligible low-cardinality feature pairs. Segment results are ranked by
-coverage-adjusted impact (WRAcc for categorical targets and support-weighted
-Cohen's d for continuous targets) and cached with the rest of the computed
-profile. Only scatterplot observations are reservoir-sampled; metrics and
-aggregate graphics use all rows. Saved Data Views use the same columnar execution
-path after their transformations have been pushed down and cached as Parquet.
+The architecture favors set-oriented PostgreSQL queries, bounded catalog
+contracts, DuckDB/Parquet execution, asynchronous jobs, and compact client
+payloads. Spark or another distributed engine is not justified without measured
+single-node throughput, memory, resilience, or runtime failures.
 
-## Visualization and Trends
+Before horizontal or production scaling, the main gaps are:
 
-The dashboard layout is a 48-column session-scoped grid stored in browser
-session storage per dataset. React owns layout and presentation state, while
-analytical computation remains server-side.
-
-Each chart sends a declarative specification to the dataset visualization API.
-DuckDB scans the complete physical dataset or materialized Data View and returns
-only bounded points, series metadata, counts, or KPI values. Grouped line/bar
-charts use exact full-data aggregates; distributions use bounded KDE source
-bins; box plots use full-data quartiles and Tukey whiskers; scatter plots use
-full-data two-dimensional bins so browser cost does not scale with row
-count. Group-value selectors also query the complete relation. A window over the
-grouped result records the complete valid-row and group counts before the output
-cap is applied, so bounded transport never makes partial results look complete.
-Chart navigation slices the X domain rather than the flat point array, preserving
-all returned series for each visible coordinate.
-
-Uploaded files and materialized Data Views carry an immutable row count, so
-chart responses reuse that metadata instead of issuing a redundant full
-`count(*)` scan for every card. DuckDB connections have a configurable memory
-limit and dataset-local spill directory, while each API process bounds parallel
-chart renders. KDE and box-plot comparisons reject excessive group cardinality
-before running their expensive statistical aggregates.
-Category bars consume the same grouped aggregate contract as trend lines. Their
-side-by-side and stacked layouts are presentation concerns in React; stacked
-mode creates one stack per aggregation and maintains separate positive and
-negative baselines without rerunning or approximating the analytical query.
-Axis domains and ticks are derived in React from the bounded result contract.
-Numeric scales use nice-number steps with step-aware precision; categorical
-scales first run label-width collision detection and use all labels that fit,
-falling back to the smallest collision-free regular integer stride. Zero is
-mandatory for magnitude-encoding bars and histograms but optional for positional
-line and scatter encodings.
-Visualization measures remain numeric, including when `count` is selected;
-DuckDB then counts their non-null values in each analytical partition.
-Categorical dimensions are represented through the grouped series contract
-rather than overloaded as measures. These type rules are validated server-side.
-Numeric line/bar/scatter specifications may include an X epsilon, and scatter
-may independently include a Y epsilon. DuckDB converts each configured axis into
-deterministic, non-overlapping `2 × epsilon` buckets and aggregates every row in
-each bucket. Only the bucket centers, ranges, counts, and requested metrics are
-returned to React.
-
-Chart-mark double-click Drill uses mark metadata to build parameterized source
-predicates. The API compiles them through the columnar Browser query builder and
-uses one windowed DuckDB query to count all matches while returning only a
-bounded record window. Histogram and scatter bin
-contracts carry explicit upper-bound inclusion flags, so navigation reproduces
-the precise analytical partition for physical datasets and recursively resolved
-Data Views without moving the full relation into the API process or React.
-Frontend translation from chart marks to API filters and then to visible Browser
-filter controls is centralized in `frontend/src/analysis/drillContext.ts`; chart
-components and the general application shell do not duplicate that contract.
-
-Scatter bounds and group cardinality are calculated in one pass. The binned
-query computes full valid-row and bin counts with window functions, applies its
-point limit in SQL, and never materializes overflow bins as Python dictionaries.
-When an explicit epsilon produces more cells than the response contract, cells
-are ranked by density within each group before the global limit is applied. This
-keeps the bounded view representative across series instead of returning only a
-low-coordinate prefix. Non-finite coordinates are excluded, and epsilon widths
-that cannot produce safe 64-bit bucket indices are rejected explicitly.
-Optional scatter trends are calculated from the full filtered relation and
-partitioned by the selected series. Regression fits transfer only sufficient
-statistics to Python; splines transfer at most 24 aggregate nodes per group.
-Every returned curve is bounded to 80 points and carries its fitted-row count.
-Regression curve metadata contains original-axis coefficients and R² alongside
-the bounded render points, so React presents fit diagnostics without repeating
-statistical calculations in the browser.
-Straight-line and exponential fits use DuckDB's native `regr_*` aggregates in a
-single grouped pass. Polynomial and spline fits use compact per-group bounds
-joined back to the projected X/Y relation, avoiding full-row partition windows.
-`FullDatasetVisualization` owns chart orchestration, validation, bounded binning,
-and drill contracts. `ScatterTrendFitter` in
-`backend/app/modules/datasets/visualization_trends.py` owns regression SQL,
-polynomial sufficient-statistic solving, spline interpolation, and the typed
-bounded trend contract. This keeps numerical fitting independent from endpoint
-and chart-kind orchestration.
-
-## Data Views
-
-Data Views are stored as normal data assets with `source_type = "view"` and
-`format = "view"`. Their executable definition is stored in
-`metadata.data_view`.
-
-Two definition shapes are supported:
-
-- `kind = "browser"` for clicked Data Browser state: visible columns, search,
-  filters, sort rules, grouping, aggregation, and aggregation filters.
-- `kind = "sql"` for read-only Custom SQL.
-
-Views are recursively resolved to their physical source. Browser definitions
-are compiled into parameterized DuckDB SQL; saved SQL definitions execute
-against a temporary relation named after the source dataset. Results are
-materialized to definition-hashed Parquet files and reused while both definition
-and source remain unchanged. This makes views first-class sources for preview,
-visualization, and descriptive profiling without loading full tables into Python
-or React.
-
-## Model Operationalization
-
-Pipeline Training and AutoML runs materialize immutable model, metrics, fitted
-feature-transform, Feature Manifest, and training-report artifacts. A shared
-report envelope distinguishes `training_evaluation_report` from the reserved
-`monitoring_performance_report`; the report types have separate builders and UI
-templates rather than one overloaded schema. Training metrics refer to the full
-evaluation scope, while SHAP/permutation explainability carries its own bounded
-sample scope. AutoML creates explainability only for the final selected winner.
-
-Batch/Test Scoring and Monitoring retain separate contracts. A prediction
-dataset is row-level and lineage-backed; a report contains bounded aggregates,
-diagnostics and provenance rather than copied prediction rows.
-
-Online serving stores durable services as immutable deployment revisions with
-champion, challenger, shadow, and fallback assignments. The central API owns
-authentication, authorization, input-contract validation, idempotency, routing,
-fallback, and the durable Inference Log. It applies the fitted feature transform
-from the pinned training bundle and calls a private reusable model runtime with
-the immutable model artifact. A response is successful only after its governed
-history is persisted.
-
-Manual online monitoring is a separate asynchronous workflow. It freezes a
-half-open `scored_at` window and log cutoff, streams the full matching Inference
-Log into a Parquet prediction snapshot, optionally joins later actuals, and
-creates an immutable `online_service_monitoring_report`. UTC calendar
-aggregations store full-bucket scalar metric series. Bounded chart diagnostics
-for up to eight explicitly selected buckets are calculated from the immutable
-joined Parquet relation and never return row-level data to the browser.
-
-The local Compose topology uses one private reusable runtime rather than one
-container per service. Batch scoring and monitoring remain queued worker jobs.
-
-For production, the same contract can be backed by Docker Engine, Kubernetes,
-ECS, or another scheduler without changing the user-facing API.
+- persisted resource telemetry, cancellation, and quotas for analytical jobs;
+- cross-process materialization coordination;
+- managed online database migrations;
+- object-storage and remote-source adapters;
+- model-runtime isolation, capacity testing, and autoscaling;
+- broader automated frontend behavior tests.

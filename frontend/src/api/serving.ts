@@ -12,7 +12,7 @@ import type {
   OnlineMonitoringBucketEvaluation,
   OnlineMonitoringRun,
   ScoreResponse
-} from "./client";
+} from "./contracts/serving";
 
 export const servingApi = {
   createDeployment: (payload: Record<string, unknown>) =>

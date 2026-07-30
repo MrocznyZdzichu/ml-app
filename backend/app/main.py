@@ -5,7 +5,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router
 from app.core.config import settings
+from app.core.errors import ApplicationError
 from app.core.migrations import run_migrations
+from app.api.error_handlers import application_error_handler
 from app.shared.responses import HealthResponse
 
 
@@ -30,6 +32,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_exception_handler(ApplicationError, application_error_handler)
 
     app.include_router(api_router, prefix="/api/v1")
 

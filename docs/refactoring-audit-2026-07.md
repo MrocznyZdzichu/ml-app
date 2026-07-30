@@ -3,6 +3,14 @@
 > Dated engineering snapshot. Priorities describe the repository at audit time
 > and may no longer match the current implementation.
 
+> **Post-audit status:** the Data/Analysis workspace, Business Case repository,
+> pipeline step handlers, frontend API contracts, Python client, and serving
+> client have since been split into focused modules. Typed application errors
+> are now wired globally and used by the migrated auth/user services. Treat the
+> hotspot list below as decision history; use
+> [`CODEMAP.md`](../CODEMAP.md), [Architecture](architecture.md), and executable
+> architecture checks for the current structure.
+
 ## Executive summary
 
 The backend data plane is directionally sound for large datasets: CSV/Parquet
@@ -59,7 +67,7 @@ changing the public REST contracts or the visible UI:
   construction in routers, HTTP coupling in `Principal`, and renewed growth of
   the pipeline task wrapper.
 
-## Current hotspots
+## Hotspots identified at audit time
 
 ### P1 — continue splitting the Data/Analysis workspace
 

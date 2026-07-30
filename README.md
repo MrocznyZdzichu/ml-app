@@ -1,432 +1,153 @@
 # ML App
 
-ML App is a containerized data-science and machine-learning workbench. It covers
-file ingestion, metadata, full-dataset analysis, reusable Data Views, versioned
-Data/Feature Engineering pipelines, Training, AutoML, scoring, model registry,
-and monitoring. Online serving and manual online monitoring are functional in
-the local Docker Compose runtime; automated runtime orchestration, export, and
-external-source integrations remain provisional. Identity, Business Case
-sharing, groups and administration are durable platform capabilities.
+ML App is a local, containerized data-science and machine-learning platform. It
+covers governed data access, full-dataset analytics, versioned pipelines,
+Training/AutoML, batch scoring, model registry, online serving, and monitoring.
 
-> **AI-developed project:** This application has been designed and implemented
-> with substantial AI assistance. Treat the codebase as an actively evolving
-> prototype: review, test, and harden it before using it with sensitive data or
-> production workloads.
+The project is actively evolving and has been developed with substantial AI
+assistance. Review, test, and harden it before using sensitive data or running
+production workloads.
 
-The current product slice focuses on a practical analyst workflow:
+## Start here
 
-- upload CSV datasets,
-- assign durable data roles and column roles,
-- browse, filter, sort, group, aggregate, and drill into data,
-- profile datasets with descriptive, target-aware, and comparison summaries,
-- run read-only Custom SQL,
-- save reusable Data Views,
-- execute versioned Data Engineering → Feature Engineering → Training/AutoML workflows,
-- continue from saved views into browsing, visualization, and descriptive analysis,
-- compose reusable interactive dashboards over full datasets and Data Views,
-- register immutable models and reports, run Test/Batch Scoring and Monitoring,
-- manage Business Case access, groups and exceptional loose-data grants,
-- create versioned model services, score through a private runtime, inspect the
-  durable Inference Log, and run manual online monitoring,
-- exercise the provisional export contract.
+Requirements:
 
-The analytics paths described as full-dataset below execute against all rows.
-The explicitly identified preview and prototype paths have important limitations;
-see [Current Implementation Boundaries](#current-implementation-boundaries).
+- Docker with Compose v2;
+- free local ports `5173`, `8000`, `5432`, `6379`, `9000`, and `9001`.
 
-## Repository Layout
-
-- `backend` - FastAPI API, domain modules, services, repositories, tests.
-- `frontend` - React/TypeScript UI.
-- `services/model-runtime` - private joblib runtime used by online model serving.
-- `infra` - local infrastructure bootstrap assets.
-- `examples/data` - sample CSV datasets for manual testing.
-- `examples/API-usage` - numbered, idempotent notebooks covering the complete ML lifecycle.
-- `ml_app_client` - supported Python client for data, pipeline, model, scoring,
-  serving, and monitoring workflows.
-- `docs` - architecture, development, and feature reference notes.
-
-The Python integration client can be installed from this repository with
-`pip install -e .`. Start with the numbered
-[`examples/API-usage`](examples/API-usage/README.md) series. It creates a
-explicitly named Business Case, uploads deterministic datasets, runs AutoML, batch
-scoring and monitoring, promotes and serves the model, and scores it through
-both the client and direct REST API. Every notebook can be safely re-run.
-
-## Quick Start
-
-Prerequisites are Docker with the Compose v2 plugin and available default ports
-`5173`, `8000`, `5432`, `6379`, `9000`, and `9001`.
-
-Start the local stack:
+Start the stack:
 
 ```powershell
 docker compose up --build
 ```
 
-Then open:
+Open:
 
-- Frontend: `http://localhost:5173`
-- API docs: `http://localhost:8000/docs`
+- UI: `http://localhost:5173`
+- REST API and Swagger: `http://localhost:8000/docs`
 - MinIO console: `http://localhost:9001`
 
-The checked-in `.env.example` supplies local-development container settings.
-Create a root `.env` only to override variables interpolated by
-`docker-compose.yml`, such as ports, database connection values, worker
-concurrency, or the frontend API URL. The shipped credentials and secret are for
-local development only.
+For local administration, the first startup creates `root` with the initial
+password `toor`. Change it after signing in; later restarts do not reset a
+changed password.
 
-## Refresh After Code Changes
+The checked-in `.env.example` contains local defaults. Create `.env` only when
+you need to override Compose variables. The shipped passwords and secret are
+for local development only.
 
-For normal backend/frontend code changes:
+After normal code changes run:
 
 ```powershell
 .\rebuild-run.bat
 ```
 
-After dependency, Dockerfile, or image-level changes:
+Use `.\rebuild-run.bat build` after dependency or Dockerfile changes, and
+`.\rebuild-run.bat full` only when a no-cache rebuild is needed.
 
-```powershell
-.\rebuild-run.bat build
-```
+## First useful workflow
 
-For a clean no-cache rebuild:
+1. Sign in or register a user.
+2. Create a Business Case.
+3. Upload a CSV or Parquet dataset from `examples/data`.
+4. Assign target, identifier, timestamp, and feature roles when the workflow
+   needs them.
+5. Run descriptive profiling or build a Data View.
+6. Create and publish a pipeline, then run Training or AutoML.
+7. Use Test Scoring for labeled evaluation or Batch Scoring for production-like
+   predictions.
+8. Promote a model version, create a service, and score through its stable
+   endpoint.
 
-```powershell
-.\rebuild-run.bat full
-```
+For an executable API-first version of this lifecycle, install the client with
+`pip install -e .` and follow
+[`examples/API-usage`](examples/API-usage/README.md). The numbered notebooks use
+stable names and are designed to be rerun.
 
-## Current Features
+## What is implemented
 
-### Authentication
+- authentication, protected `root` administration, users, groups, Business Case
+  roles, direct loose-data grants, and audit events;
+- CSV and flat tabular Parquet upload, dataset versions, metadata, Data Roles,
+  bounded preview, read-only SQL, and reusable Data Views;
+- full-row DuckDB profiling, server-side visualizations, trends, drill-down, and
+  asynchronous analytical jobs;
+- versioned Data Engineering and Feature Engineering DAGs with immutable
+  outputs, fitted state, lineage, and data contracts;
+- Training and tabular AutoML for binary classification, multiclass
+  classification, and regression;
+- immutable models, evaluation reports, prediction datasets, batch monitoring,
+  and the public Python client;
+- versioned online services with champion, challenger, shadow, and fallback
+  roles, a durable Inference Log, replay, and manual online monitoring.
 
-- Local user registration and login.
-- Reserved `root` administrator bootstrap login with a changeable initial
-  password and no restart-time password reset.
-- Bearer token authentication with account/session invalidation after password,
-  role or status changes.
-- Platform roles (`user`, reserved `governance_steward`, `administrator`) and
-  Business Case roles (`report_viewer`, `reader`, `contributor`, `manager`,
-  `owner`).
-- Durable user/group grants in PostgreSQL. Private assets remain isolated unless
-  shared through a Business Case or an explicit loose-object exception.
+Full-dataset operations scan the selected relation and return bounded aggregates
+or paginated projections. Preview and rendering limits are reported separately
+and must not be interpreted as the analyzed row scope.
 
-### Data Assets
+## Important boundaries
 
-- UTF-8 CSV upload with delimiter/header detection and flat tabular Parquet
-  upload, including schema/row validation, metadata, tags, and status.
-- Dataset metadata persisted in PostgreSQL.
-- Uploaded file content stored under local `data/repository` in development.
-- Soft deletion of dataset metadata with physical local file cleanup.
+- Ingestion supports local UTF-8 CSV and flat tabular Parquet. XLSX, databases,
+  APIs, and object-storage sources are not connected yet.
+- Files and generated artifacts use `data/repository` in the local Compose
+  runtime. MinIO is running but is not the active artifact store.
+- Analytics are single-node DuckDB/Parquet jobs. There is no distributed query
+  engine, persisted cancellation, or production quota scheduler.
+- Data Browser is a bounded exploration surface. Saved views, Custom SQL,
+  profiling, and chart aggregation execute on the full server-side relation and
+  return bounded results.
+- Online serving uses one private shared model-runtime container. It does not
+  provision or autoscale a container per service.
+- Export and legacy standalone analysis/training paths remain provisional.
 
-### Analysis: Data Roles
+See the feature references for exact contracts and limits rather than relying on
+this overview.
 
-The first Analysis tab lets an analyst persist semantic metadata for each
-dataset:
+## Repository map
 
-- dataset roles such as training, validation, test, holdout, scoring,
-  target-containing, reference/baseline, and monitoring,
-- entity ID, timestamp, period/batch, and target columns,
-- per-column roles such as identifier, timestamp, period/batch identifier,
-  continuous feature, categorical feature, ordinal feature, target, sample
-  weight, text feature, boolean feature, and ignored.
+- `backend/` - FastAPI API, domain/application modules, persistence, workers,
+  migrations, and backend tests.
+- `frontend/` - React/TypeScript UI and API client.
+- `ml_app_client/` - supported Python integration client.
+- `services/model-runtime/` - private runtime for online model execution.
+- `examples/` - deterministic datasets and executable API notebooks.
+- `docs/` - architecture, development instructions, feature references, and
+  dated engineering audits.
+- [`CODEMAP.md`](CODEMAP.md) - short guide to current source-code entry points.
 
-These settings are saved as `data_roles` in dataset metadata and can be reused
-by later tools.
-
-### Analysis: Data Browsing
-
-Data Browsing supports:
-
-- shared dataset selection with the Data Roles tab,
-- bounded interactive preview filtering and searching with explicit returned-row
-  and total-row counts,
-- column selection with presets,
-- multi-column sorting,
-- flexible filters: equals, not equals, contains, regex, in, numeric
-  comparisons, empty/not empty, starts/ends with,
-- role-aware grouping and aggregation,
-- aggregation filters similar to SQL `HAVING`,
-- drill down from aggregated rows into matching detail records,
-- top and bottom horizontal table scrolling,
-- paging with direct page number input,
-- Custom SQL with a helper sidebar and read-only execution,
-- Save View for persisting the current analysis as a reusable Data View.
-
-The interactive table operates on a bounded preview (up to 50,000 returned rows),
-and its browser-side filtering, grouping, aggregation, and sorting therefore do
-not represent rows outside that preview. Saving its state as a Data View
-recompiles those operations into DuckDB and applies them to the complete source
-relation. Custom SQL results are also bounded, but the current Custom SQL
-execution path runs in DuckDB over the complete Parquet-backed relation. The API
-returns at most the requested preview limit together with the exact total result
-row count; the full result is never transferred to the browser.
-
-### Analysis: Descriptive Analysis
-
-Descriptive Analysis provides explicit, role-aware dataset profiling. Profiling
-does not start automatically after dataset selection; analysts choose the
-dataset, target, target type, and profiling range, then run profiling when ready.
-
-The tab supports:
-
-- smart dataset summary cards and quality notes based on Data Roles metadata,
-- optional profiling scope controls for summary, univariate profiles,
-  target/comparison relations, segment scans, graphic source-point limits, and
-  graphic summaries,
-- asynchronous full-row profiling of uploaded CSV datasets with DuckDB and
-  reusable Parquet materialization instead of browser-side row processing,
-- univariate profiles with collapsible UI, column selection, numeric summaries,
-  categorical distributions, and optional histograms,
-- comparison analysis that defaults to target vs features but can compare
-  features against another selected column,
-- continuous-feature vs categorical-comparison tables with rows, min, max,
-  median, average, standard deviation, and optional KDE-like density plots,
-- continuous-vs-continuous relation cards with Pearson, Spearman, R-squared,
-  slope, intercept, covariance, and optional scatterplots,
-- collapsible relation cards with Show all / Collapse all controls,
-- session-scoped in-memory profile caching when switching between datasets,
-- ranked multivariate segment scan across low-cardinality feature pairs, with
-  support-aware impact, uncertainty, lift/WRAcc for categorical targets, and
-  standardized effect size for continuous targets.
-
-Full-dataset profiling runs in the Celery analytics worker and scans every row
-for tabular statistics, relationships, and segments. Only bounded scatterplot
-source points are sampled. See
-[`docs/descriptive-profiling-performance.md`](docs/descriptive-profiling-performance.md)
-for the architecture and benchmark results.
-
-### Analysis: Visualization and Trends
-
-Visualization and Trends is an interactive dashboard canvas. Analysts explicitly
-choose a dataset, start with an empty canvas, and either add charts manually or
-use Smart start. The workspace supports:
-
-- line, bar, scatter/density-bin, KDE distribution, grouped box plot, and KPI views,
-- KPI segment filters and configurable equality/range targets with pass/fail status,
-- drag-and-drop positioning, fine-grained resizing, snapping guides, collision
-  detection, Tidy layout, and Clear canvas,
-- numeric-only scatter axes, per-chart X-epsilon bucketing for line/bar/scatter,
-  independent scatter Y epsilon, contextual epsilon help, grouping,
-  full-dataset aggregations, multiple metrics per group, and explicit group
-  selection,
-- optional straight-line, spline, degree 2–5 polynomial, and exponential scatter
-  fits calculated per group, with equations, fitted-row counts, coefficients,
-  and R-squared diagnostics,
-- grouped Category bars with side-by-side or per-metric stacked presentation,
-- adaptive axes, tooltips, zoom, pan, and scrollable mark-aware legends,
-- double-click Drill on chart marks that opens Data Browsing with the exact
-  source range and series filters applied over the full dataset or Data View,
-- stable high-contrast series colors for bar/scatter views, plus group colors
-  and metric-specific line styles for trend lines,
-- session-scoped layouts restored independently for each dataset.
-
-Chart queries run in DuckDB over the complete Parquet-backed relation. React
-receives only bounded aggregates. Scatter views use full-dataset spatial binning
-rather than silently substituting a row sample. The UI reports the number of
-rows scanned and labels the execution mode as full-dataset server analytics.
-Drill queries also execute in DuckDB before a bounded set of matching records is
-returned to the browser; the total match count remains visible.
-
-### Data Views
-
-Data Views are saved, reusable transformations over source datasets. They can be
-created from a clicked Data Browser state or Custom SQL. SQL and Browser
-definitions are compiled into DuckDB queries and materialized as reusable,
-definition-versioned Parquet artifacts. Nested views are supported with bounded
-recursion, and caches are invalidated when the definition or source changes.
-
-Views are shown in Overview, Data, and Analysis, and they can be used in Data
-Roles, Data Browsing, Visualization and Trends, and Descriptive Analysis.
-Visualization and Descriptive Analysis query the full transformed relation and
-return bounded aggregates or chart payloads. A bounded browser preview is never
-reported as a full-view profile.
-
-When possible, data roles are inherited from the source dataset for columns that
-survive in the view.
-
-### Pipelines: Data, Feature Engineering, AutoML, Training, and Scoring
-
-Versioned high-level workflows can execute Data Engineering followed by Feature
-Engineering. DE performs full-row DuckDB transformations and passes its Parquet
-result directly to FE. FE fits imputation, scaling, bounded category encoding,
-date extraction, and numeric interactions only on the declared training input,
-then applies the fitted state to validation, test, or scoring inputs.
-
-Official runs create feature datasets with schema hashes and feature manifests,
-plus a separate engine-neutral `feature_transform` artifact. Every high-level
-step has its own auditable StepRun. See
-[`docs/feature-engineering-stage-1.md`](docs/feature-engineering-stage-1.md).
-
-Training and AutoML are executable alternatives. AutoML jointly searches a
-bounded, model-aware path of numeric preparation, target-guided feature
-selection, categorical encoding, estimator family, and hyperparameters. Learned
-transformations are fitted only on training or fold-training rows. The current
-tabular scope covers binary classification, multiclass classification, and
-regression; clustering and time-series AutoML remain separate future scopes.
-
-Successful Training and AutoML runs create immutable model, metrics, fitted FE,
-Feature Manifest, and `training_evaluation_report` artifacts. Model metrics use
-the complete evaluation scope; SHAP and permutation importance use a separately
-reported bounded explanation sample and are generated only for the final
-winner. Test Scoring writes an explicitly wired, lineage-backed Parquet
-prediction dataset. See
-[`docs/model-training-scoring-stage-1.md`](docs/model-training-scoring-stage-1.md)
-and [`docs/automl-autofe-stage-1.md`](docs/automl-autofe-stage-1.md).
-
-Deleted datasets and views remain visible in the Data workspace deletion history
-but are excluded from Overview metrics, Recent assets, and Analysis selectors.
-
-### Model Registry, Sharing, Online Serving, and Export
-
-The Models workspace consumes real immutable artifacts produced by Training and
-AutoML pipeline runs, including versions, metrics and lineage. The legacy
-standalone training form remains metadata-only, while the supported online path
-uses versioned services and the private model runtime:
-
-- the legacy standalone training form creates prototype metadata; real fitting,
-  report generation and artifact registration run through Training/AutoML and
-  Scoring pipeline steps,
-- deployment services, immutable revisions, active model assignments, replay
-  jobs, Inference Log requests/items, and online monitoring runs are durable in
-  PostgreSQL,
-- champion, challenger, shadow, and fallback are deployment roles independent
-  from model lifecycle stage; role changes create a new immutable revision,
-- online scoring accepts 1–1,000 records, applies the pinned fitted transform,
-  calls the private runtime with the immutable model artifact, and persists the
-  full governed request and response before reporting success,
-- fallback is attempted once only for technical champion failure; shadow output
-  is retained without changing the response, and challengers use protected
-  scoring and bounded asynchronous replay,
-- manual online monitoring asynchronously materializes a full-scope Parquet
-  prediction snapshot and immutable report, optionally joining later actuals
-  for classification or regression effectiveness,
-- Business Case/group/direct-object grants and audit events are durable. Export
-  jobs and the legacy standalone analysis/training metadata paths remain
-  process-local prototypes.
-
-The Compose `model-runtime` service is private to the application network and
-loads the requested joblib artifact from the shared local repository. The
-platform does not yet provision a separate container or Kubernetes workload per
-deployment.
-
-## Current Implementation Boundaries
-
-- Local file ingestion supports UTF-8 CSV and flat tabular Parquet datasets.
-  XLSX, remote databases, and object-storage ingestion are not implemented.
-- Users and dataset metadata are durable in PostgreSQL. Uploaded files and
-  generated Parquet sidecars are stored in `data/repository`; MinIO is started
-  for future object-storage work but is not the active dataset store.
-- Full-dataset descriptive profiling is implemented for uploaded CSV and
-  Parquet datasets and materialized SQL/Browser Data Views.
-- Visualization, chart drill-down, and Data View materialization use DuckDB over
-  the complete physical or transformed relation and return bounded results.
-- Scatter trend output is capped at 80 render points per curve and 100 selected
-  groups. Spline fits smooth at most 24 full-data aggregate nodes per group and
-  are explicitly marked as approximate; other supported fits use full-data
-  regression aggregates or sufficient statistics.
-- Interactive Data Browsing is a bounded client-side exploration path. Custom
-  SQL is a full-dataset DuckDB path with a bounded result contract.
-- Analytics scalability is currently single-node. There is no distributed query
-  engine, persisted query cancellation, quota enforcement, or production job
-  scheduler yet.
-- Online serving is functional through one private Compose runtime, but there is
-  no automatic per-service container provisioning, autoscaling, or Kubernetes
-  adapter. Model, prediction, and report files remain in the local repository.
-
-## Example Data
-
-Use these files for manual testing:
-
-- `examples/data/iris.csv`
-- `examples/data/general-example.csv`
-- `examples/data/general-churn-batch-scoring-10k.csv`
-- `examples/data/general-churn-batch-scoring-10k-actuals.csv`
-- `examples/data/regression-example.csv`
-- `examples/data/estates-sale-prices-batch-scoring-100k.parquet`
-- `examples/data/estates-sale-prices-batch-scoring-100k-actuals.parquet`
-- `examples/data/dynamic-reactor-timeseries.csv`
-- `examples/data/equipment-operating-regimes.csv`
-
-`general-example.csv` contains 10,000 synthetic customer-churn-like rows with
-mixed numeric and categorical columns, useful for testing filtering, grouping,
-aggregation, sorting, Custom SQL, and Data Views.
-
-The two `general-churn-batch-scoring` files form an out-of-time scoring cohort
-without the target and a separately held actuals delivery joined by `customer_id`.
-Their business context, controlled drift, and limitations are documented in
-`docs/synthetic-ml-scenarios.md`.
-
-`regression-example.csv` contains 10,000 synthetic real-estate transaction rows
-for a regression task where the target is `sale_price_pln`.
-
-The two `estates-sale-prices-batch-scoring` Parquet files provide a 100,000-row
-out-of-time scoring cohort and delayed sale-price actuals for the `Estates Sell
-Prices` Business Case. Their contract and generation assumptions are documented
-in `docs/synthetic-ml-scenarios.md`.
-
-`dynamic-reactor-timeseries.csv` is a dynamic, delayed thermal-process forecasting
-case. `equipment-operating-regimes.csv` is an unlabeled machine-telemetry clustering
-case. Their business context, modeling cautions, and deterministic generator are
-documented in `docs/synthetic-ml-scenarios.md`.
+The current module boundaries are summarized in
+[`docs/architecture.md`](docs/architecture.md). Start from
+[`docs/README.md`](docs/README.md) when looking for a specific feature.
 
 ## Verification
 
-Run backend tests:
+Rebuild and start the whole application after code, configuration, dependency,
+image, or schema changes:
+
+```powershell
+.\rebuild-run.bat
+```
+
+Then run checks proportional to the change:
 
 ```powershell
 docker exec --user app ml-app-api-1 pytest tests
-```
-
-Build the frontend:
-
-```powershell
 docker exec ml-app-frontend-1 npm run build
-```
-
-Check running services:
-
-```powershell
 Invoke-WebRequest -UseBasicParsing http://localhost:8000/health
 Invoke-WebRequest -UseBasicParsing http://localhost:5173
 ```
 
-## Local Services
-
-`docker-compose.yml` starts:
-
-- PostgreSQL for users and metadata,
-- Redis for background work,
-- MinIO for future object storage workflows,
-- FastAPI API,
-- Celery worker,
-- private model runtime,
-- Vite frontend.
+The frontend build includes TypeScript compilation, an import-cycle architecture
+check, and the production Vite bundle. More focused commands and runtime tuning
+are documented in [`docs/development.md`](docs/development.md).
 
 ## Documentation
 
 - [Documentation map](docs/README.md)
 - [Architecture](docs/architecture.md)
-- [Development notes](docs/development.md)
-- [Analysis and Data Browser reference](docs/analysis-data-browser-reference.md)
-- [Descriptive profiling performance](docs/descriptive-profiling-performance.md)
-- [Feature Engineering contract](docs/feature-engineering-stage-1.md)
-- [AutoML + AutoFE current implementation](docs/automl-autofe-stage-1.md)
-- [Model Training workbench](docs/model-training-workbench.md)
-- [Model Training and Test Scoring](docs/model-training-scoring-stage-1.md)
-- [Online Model Serving](docs/online-model-serving-stage-1.md)
-- [Online Service Monitoring](docs/online-service-monitoring-stage-1.md)
-
-## Git Notes
-
-The repository is prepared to keep source code, docs, infrastructure, tests, and
-example datasets in Git while excluding local runtime data, caches, build
-outputs, virtual environments, secrets, and model artifacts.
-
-Before committing, review the working tree and staged file list:
-
-```powershell
-git status --short
-git diff --check
-git add --dry-run .
-```
+- [Development workflow](docs/development.md)
+- [Python client](ml_app_client/README.md)
+- [Executable API examples](examples/API-usage/README.md)
+- [Data and Analysis reference](docs/analysis-data-browser-reference.md)
+- [AutoML and AutoFE](docs/automl-autofe-stage-1.md)
+- [Online model serving](docs/online-model-serving-stage-1.md)
+- [Online service monitoring](docs/online-service-monitoring-stage-1.md)

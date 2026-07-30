@@ -50,6 +50,32 @@ def test_principal_identity_has_no_http_framework_dependency() -> None:
     assert not any(module.startswith("fastapi") for module in imports)
 
 
+def test_migrated_application_services_have_no_http_framework_dependency() -> None:
+    migrated_services = [
+        APP_ROOT / "modules" / "auth" / "service.py",
+        APP_ROOT / "modules" / "users" / "service.py",
+    ]
+    offenders = {
+        str(path.relative_to(APP_ROOT)): sorted(
+            module for module in _imports(path) if module.startswith("fastapi")
+        )
+        for path in migrated_services
+        if any(module.startswith("fastapi") for module in _imports(path))
+    }
+    assert offenders == {}
+
+
+def test_business_case_repository_module_is_a_port_and_compatibility_facade() -> None:
+    path = APP_ROOT / "modules" / "business_cases" / "repository.py"
+    classes = [
+        node.name
+        for node in _tree(path).body
+        if isinstance(node, ast.ClassDef)
+    ]
+    assert classes == ["BusinessCaseRepository"]
+    assert not any(module.startswith("sqlalchemy") for module in _imports(path))
+
+
 def test_pipeline_worker_task_is_only_an_executor_adapter() -> None:
     tree = _tree(APP_ROOT / "worker" / "tasks.py")
     function = next(
@@ -59,3 +85,28 @@ def test_pipeline_worker_task_is_only_an_executor_adapter() -> None:
     )
     assert len(function.body) == 1
     assert isinstance(function.body[0], ast.Return)
+
+
+def test_pipeline_step_handler_facade_only_composes_focused_handlers() -> None:
+    facade = APP_ROOT / "modules" / "pipelines" / "step_handlers.py"
+    classes = [
+        node.name
+        for node in _tree(facade).body
+        if isinstance(node, ast.ClassDef)
+    ]
+    assert classes == ["PipelineStepHandlerRegistry"]
+
+    focused_modules = [
+        "step_contracts.py",
+        "data_step_handlers.py",
+        "training_step_handler.py",
+        "automl_step_handler.py",
+        "scoring_step_handler.py",
+        "monitoring_step_handler.py",
+    ]
+    pipeline_root = facade.parent
+    assert all((pipeline_root / name).is_file() for name in focused_modules)
+    assert all(
+        "app.modules.pipelines.step_handlers" not in _imports(pipeline_root / name)
+        for name in focused_modules
+    )

@@ -1,5 +1,13 @@
 # Performance audit — 2026-07
 
+> **Dated snapshot:** this file records measurements and changes from the audit.
+> It is not the current backlog. Since the snapshot, bounded page contracts have
+> also been added for Business Cases, deployments, users, groups, grants,
+> versions, runs, and model/report families. The frontend and public Python
+> client use those contracts, and several large compatibility facades have been
+> split. See [Architecture](architecture.md) and
+> [UI scalability audit](ui-scalability-audit-2026-07.md) for current boundaries.
+
 This is a code-level and local-runtime audit of the complete repository. It
 covers the FastAPI API, PostgreSQL repositories and access policy, Celery
 workers, DuckDB/Parquet analytics, model runtime, React client, Python client,
@@ -167,7 +175,7 @@ The migration adds composite indexes matching repeated filters and ordering:
 | Regression evaluation | 6 full relation passes | 5 full relation passes |
 | Group relation profile | 3 full relation passes | 1 grouped pass |
 
-## Remaining priority risks
+## Priority risks identified at audit time
 
 1. Add persisted resource telemetry for DuckDB jobs: bytes read/written, spill
    bytes, peak memory, relation size, phase timings, and cache hit/miss state.

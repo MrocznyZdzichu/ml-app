@@ -19,7 +19,7 @@ import type {
 } from "../api/client";
 import { PaginationControls } from "../components/PaginationControls";
 import { PagedCatalogSelect } from "../components/PagedCatalogSelect";
-import { ModelPerformanceReport, ModelPerformanceSeriesReport } from "../pipelines/PipelineRunDialogs";
+import { ModelPerformanceReport, ModelPerformanceSeriesReport } from "../reports/ModelPerformanceReport";
 
 import { asRecord as objectValue, formatOptionalDateTime as formatDate, shortIdOrUnknown as shortId } from "../shared/values";
 

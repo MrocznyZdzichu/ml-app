@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../api/client";
 import type { BusinessCase, DatasetLineageReference, Pipeline, ScoringReport } from "../api/client";
-import { ModelPerformanceReport } from "../pipelines/PipelineRunDialogs";
+import { ModelPerformanceReport } from "../reports/ModelPerformanceReport";
 import { ArtifactFilters } from "../components/ArtifactFilters";
 import { DialogNavigationActions, useVersionedResourceNavigation } from "../components/dialogNavigation";
 import { PaginationControls } from "../components/PaginationControls";
