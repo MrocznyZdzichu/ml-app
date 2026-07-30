@@ -11795,3 +11795,87 @@ textarea {
     grid-template-columns: 1fr;
   }
 }
+.collaboration-directory-navigation {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.collaboration-directory-navigation > div {
+  min-width: 0;
+}
+
+@media (max-width: 800px) {
+  .collaboration-directory-navigation {
+    grid-template-columns: 1fr;
+  }
+}
+
+.pagination-controls {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 1rem;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.pagination-controls > div {
+  align-items: center;
+  display: flex;
+  gap: 0.75rem;
+}
+
+.pagination-controls strong {
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.paged-catalog-select {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.paged-catalog-search {
+  align-items: center;
+  display: flex;
+  gap: 0.4rem;
+}
+
+.paged-catalog-search input {
+  min-width: 0;
+  width: 100%;
+}
+
+.paged-catalog-navigation {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.paged-catalog-navigation button {
+  background: transparent;
+  border: 0;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0;
+}
+
+.paged-catalog-navigation button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+@media (max-width: 640px) {
+  .pagination-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pagination-controls > div {
+    justify-content: space-between;
+  }
+}

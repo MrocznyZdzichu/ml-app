@@ -13,10 +13,20 @@ from ml_app_client import (
     Dataset,
     Deployment,
     MLAppClient,
+    OnlineMonitoringRun,
     PipelineRun,
     ResourceAmbiguousError,
     ResourceNotFoundError,
 )
+from ml_app_client.auth import AuthenticationClientMixin
+from ml_app_client.business_cases import BusinessCaseClientMixin
+from ml_app_client.datasets import DatasetClientMixin
+from ml_app_client.deployments import DeploymentClientMixin
+from ml_app_client.inference import InferenceClientMixin
+from ml_app_client.model_registry import ModelRegistryClientMixin
+from ml_app_client.online_monitoring import OnlineMonitoringClientMixin
+from ml_app_client.pipelines import PipelineClientMixin
+from ml_app_client.scoring_reports import ScoringReportClientMixin
 
 
 class FakeResponse:
@@ -68,7 +78,129 @@ def run_payload(status: str = "queued", **overrides: Any) -> dict[str, Any]:
     return value
 
 
+def page_payload(
+    items: list[dict[str, Any]],
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    total: int | None = None,
+    has_next: bool = False,
+) -> dict[str, Any]:
+    return {
+        "items": items,
+        "total": len(items) if total is None else total,
+        "limit": limit,
+        "offset": offset,
+        "has_next": has_next,
+    }
+
+
 class MLAppClientTests(unittest.TestCase):
+    def test_facade_composes_focused_domain_clients(self) -> None:
+        self.assertIs(MLAppClient.login, AuthenticationClientMixin.login)
+        self.assertIs(MLAppClient.ensure_dataset, DatasetClientMixin.ensure_dataset)
+        self.assertIs(
+            MLAppClient.ensure_business_case,
+            BusinessCaseClientMixin.ensure_business_case,
+        )
+        self.assertIs(MLAppClient.run_pipeline, PipelineClientMixin.run_pipeline)
+        self.assertIs(
+            MLAppClient.scoring_report_for_run,
+            ScoringReportClientMixin.scoring_report_for_run,
+        )
+        self.assertIs(MLAppClient.promote_model, ModelRegistryClientMixin.promote_model)
+        self.assertIs(
+            MLAppClient.create_deployment,
+            DeploymentClientMixin.create_deployment,
+        )
+        self.assertIs(MLAppClient.predict, InferenceClientMixin.predict)
+        self.assertIs(
+            MLAppClient.run_deployment_monitoring,
+            OnlineMonitoringClientMixin.run_deployment_monitoring,
+        )
+        facade_path = Path(__file__).parents[1] / "ml_app_client" / "client.py"
+        serving_path = Path(__file__).parents[1] / "ml_app_client" / "serving.py"
+        self.assertLess(len(facade_path.read_text(encoding="utf-8").splitlines()), 150)
+        self.assertLess(len(serving_path.read_text(encoding="utf-8").splitlines()), 50)
+
+    def test_catalog_pages_preserve_server_totals_and_filters(self) -> None:
+        session = FakeSession([
+            FakeResponse({
+                "items": [dataset_payload()],
+                "total": 41,
+                "limit": 10,
+                "offset": 20,
+                "has_next": True,
+            }),
+            FakeResponse({
+                "items": [{"id": "bc-1", "name": "Sales", "access_role": "manager"}],
+                "total": 1,
+                "limit": 30,
+                "offset": 0,
+                "has_next": False,
+            }),
+        ])
+        client = MLAppClient(session=session)
+
+        datasets = client.page_datasets(
+            limit=10,
+            offset=20,
+            search="sales",
+            asset_kind="dataset",
+        )
+        cases = client.page_business_cases(
+            search="sales",
+            manageable_only=True,
+        )
+
+        self.assertEqual(datasets.total, 41)
+        self.assertTrue(datasets.has_next)
+        self.assertIsInstance(datasets.items[0], Dataset)
+        self.assertEqual(cases.items[0]["id"], "bc-1")
+        self.assertEqual(session.requests[0][2]["params"]["offset"], 20)
+        self.assertEqual(session.requests[1][2]["params"]["manageable_only"], "true")
+
+    def test_version_histories_use_bounded_page_contracts(self) -> None:
+        page = {
+            "items": [],
+            "total": 125,
+            "limit": 20,
+            "offset": 40,
+            "has_next": True,
+        }
+        session = FakeSession([
+            FakeResponse(page),
+            FakeResponse(page),
+            FakeResponse(page),
+            FakeResponse({
+                **page,
+                "items": [{
+                    "model_id": "model-v1",
+                    "deployment_id": "service-1",
+                    "deployment_name": "Risk service",
+                    "deployment_status": "running",
+                    "revision_version": 2,
+                    "role": "champion",
+                    "endpoint_url": "/predictions",
+                }],
+            }),
+        ])
+        client = MLAppClient(session=session)
+
+        dataset_versions = client.page_dataset_versions("dataset/family", offset=40)
+        model_versions = client.page_model_versions("model/family", offset=40)
+        report_versions = client.page_scoring_report_versions("report/family", offset=40)
+        usage = client.page_model_serving_usage("model/v1", offset=40)
+
+        self.assertEqual(dataset_versions.total, 125)
+        self.assertTrue(model_versions.has_next)
+        self.assertEqual(report_versions.offset, 40)
+        self.assertEqual(usage.items[0].role, "champion")
+        self.assertIn("/datasets/dataset%2Ffamily/versions/page", session.requests[0][1])
+        self.assertIn("/models/model%2Ffamily/versions/page", session.requests[1][1])
+        self.assertIn("/scoring-reports/report%2Ffamily/versions/page", session.requests[2][1])
+        self.assertIn("/serving/models/model%2Fv1/usage/page", session.requests[3][1])
+
     def test_me_returns_authenticated_profile(self) -> None:
         session = FakeSession([FakeResponse({
             "user_id": "user-1", "login_name": "alice", "roles": ["user"],
@@ -118,9 +250,9 @@ class MLAppClientTests(unittest.TestCase):
             )
 
     def test_ensure_business_case_is_idempotent_when_visible(self) -> None:
-        session = FakeSession([FakeResponse([
+        session = FakeSession([FakeResponse(page_payload([
             {"id": "bc-1", "name": "Sales", "access_role": "owner"}
-        ])])
+        ]))])
         business_case, created = MLAppClient(session=session).ensure_business_case(
             name="Sales", problem_type="regression"
         )
@@ -128,11 +260,38 @@ class MLAppClientTests(unittest.TestCase):
         self.assertFalse(created)
         self.assertEqual(len(session.requests), 1)
 
+    def test_name_resolution_consumes_bounded_pages_until_exact_match(self) -> None:
+        session = FakeSession([
+            FakeResponse(page_payload(
+                [{"id": "bc-other", "name": "Sales archive"}],
+                limit=1,
+                total=2,
+                has_next=True,
+            )),
+            FakeResponse(page_payload(
+                [{"id": "bc-1", "name": "Sales"}],
+                limit=1,
+                offset=1,
+                total=2,
+            )),
+        ])
+
+        business_case = MLAppClient(session=session).business_case_by_name("Sales")
+
+        self.assertEqual(business_case["id"], "bc-1")
+        self.assertEqual(
+            [request[2]["params"]["offset"] for request in session.requests],
+            [0, 1],
+        )
+        self.assertTrue(
+            all(request[2]["params"]["limit"] == 100 for request in session.requests)
+        )
+
     def test_ensure_business_case_reports_inaccessible_name_conflict(self) -> None:
         session = FakeSession([
-            FakeResponse([]),
+            FakeResponse(page_payload([])),
             FakeResponse({"detail": "already in use"}, 409),
-            FakeResponse([]),
+            FakeResponse(page_payload([])),
         ])
         with self.assertRaisesRegex(AuthorizationError, "not accessible"):
             MLAppClient(session=session).ensure_business_case(
@@ -179,9 +338,10 @@ class MLAppClientTests(unittest.TestCase):
 
     def test_name_workflow_uploads_attached_dataset_version(self) -> None:
         session = FakeSession([
-            FakeResponse([{"id": "bc-1", "name": "Sales"}]),
-            FakeResponse([{"data_asset_id": "dataset-v1"}]),
-            FakeResponse([dataset_payload(id="dataset-v1", version_number=1)]),
+            FakeResponse(page_payload([{"id": "bc-1", "name": "Sales"}])),
+            FakeResponse(page_payload([
+                dataset_payload(id="dataset-v1", version_number=1)
+            ])),
             FakeResponse(dataset_payload(), 201),
         ])
         client = MLAppClient(session=session)
@@ -196,12 +356,10 @@ class MLAppClientTests(unittest.TestCase):
 
     def test_ensure_dataset_reuses_newest_attached_family_version(self) -> None:
         session = FakeSession([
-            FakeResponse([{"id": "bc-1", "name": "Example"}]),
-            FakeResponse([{"data_asset_id": "dataset-v1"}]),
-            FakeResponse([
-                dataset_payload(id="dataset-v1", version_number=1),
+            FakeResponse(page_payload([{"id": "bc-1", "name": "Example"}])),
+            FakeResponse(page_payload([
                 dataset_payload(id="dataset-v3", version_number=3),
-            ]),
+            ])),
         ])
 
         dataset, created = MLAppClient(session=session).ensure_dataset(
@@ -213,16 +371,19 @@ class MLAppClientTests(unittest.TestCase):
 
         self.assertEqual(dataset.id, "dataset-v3")
         self.assertFalse(created)
-        self.assertEqual([item[0] for item in session.requests], ["GET", "GET", "GET"])
+        self.assertEqual([item[0] for item in session.requests], ["GET", "GET"])
+        self.assertTrue(session.requests[0][1].endswith("/business-cases/page"))
+        self.assertTrue(session.requests[1][1].endswith("/datasets/page"))
 
     def test_ensure_pipeline_reuses_latest_published_version(self) -> None:
         session = FakeSession([
-            FakeResponse([{"id": "bc-1", "name": "Example"}]),
-            FakeResponse([{"id": "pipeline-1", "name": "Train", "status": "published"}]),
-            FakeResponse([
-                {"id": "v1", "status": "published", "version_number": 1},
+            FakeResponse(page_payload([{"id": "bc-1", "name": "Example"}])),
+            FakeResponse(page_payload([
+                {"id": "pipeline-1", "name": "Train", "status": "published"}
+            ])),
+            FakeResponse(page_payload([
                 {"id": "v2", "status": "published", "version_number": 2},
-            ]),
+            ], limit=1)),
         ])
 
         pipeline, version, created = MLAppClient(session=session).ensure_pipeline(
@@ -238,13 +399,11 @@ class MLAppClientTests(unittest.TestCase):
 
     def test_run_by_name_uses_latest_published_version(self) -> None:
         session = FakeSession([
-            FakeResponse([{"id": "bc-1", "name": "Sales"}]),
-            FakeResponse([{"id": "pipeline-1", "name": "Retrain"}]),
-            FakeResponse([
-                {"id": "draft", "status": "draft", "version_number": 3},
-                {"id": "version-1", "status": "published", "version_number": 1},
+            FakeResponse(page_payload([{"id": "bc-1", "name": "Sales"}])),
+            FakeResponse(page_payload([{"id": "pipeline-1", "name": "Retrain"}])),
+            FakeResponse(page_payload([
                 {"id": "version-2", "status": "published", "version_number": 2},
-            ]),
+            ], limit=1)),
             FakeResponse(run_payload(), 201),
         ])
         run = MLAppClient(session=session).run_pipeline_by_name(
@@ -260,9 +419,11 @@ class MLAppClientTests(unittest.TestCase):
             is_dry_run=False,
         )
         session = FakeSession([
-            FakeResponse([{"id": "bc-1", "name": "Example"}]),
-            FakeResponse([{"id": "pipeline-1", "name": "Train"}]),
-            FakeResponse([{"id": "version-2", "status": "published", "version_number": 2}]),
+            FakeResponse(page_payload([{"id": "bc-1", "name": "Example"}])),
+            FakeResponse(page_payload([{"id": "pipeline-1", "name": "Train"}])),
+            FakeResponse(page_payload([
+                {"id": "version-2", "status": "published", "version_number": 2}
+            ], limit=1)),
             FakeResponse([existing]),
         ])
 
@@ -278,8 +439,8 @@ class MLAppClientTests(unittest.TestCase):
 
     def test_pipeline_run_by_operation_key_reports_preceding_notebook(self) -> None:
         session = FakeSession([
-            FakeResponse([{"id": "bc-1", "name": "Example"}]),
-            FakeResponse([{"id": "pipeline-1", "name": "Train"}]),
+            FakeResponse(page_payload([{"id": "bc-1", "name": "Example"}])),
+            FakeResponse(page_payload([{"id": "pipeline-1", "name": "Train"}])),
             FakeResponse([]),
         ])
 
@@ -302,12 +463,15 @@ class MLAppClientTests(unittest.TestCase):
 
     def test_model_by_name_scopes_to_business_case_and_selects_latest_version(self) -> None:
         session = FakeSession([
-            FakeResponse([{"id": "bc-1", "name": "Sales"}]),
-            FakeResponse([
-                {"id": "other-v9", "business_case_id": "bc-2", "name": "Churn", "logical_id": "other", "version": "v9", "version_number": 9},
-                {"id": "model-v1", "business_case_id": "bc-1", "name": "Churn", "logical_id": "churn", "version": "v1", "version_number": 1},
-                {"id": "model-v2", "business_case_id": "bc-1", "name": "Churn", "logical_id": "churn", "version": "v2", "version_number": 2},
-            ]),
+            FakeResponse(page_payload([{"id": "bc-1", "name": "Sales"}])),
+            FakeResponse(page_payload([{
+                "latest": {
+                    "id": "model-v2", "business_case_id": "bc-1",
+                    "name": "Churn", "logical_id": "churn",
+                    "version": "v2", "version_number": 2,
+                },
+                "version_count": 2,
+            }])),
         ])
 
         model = MLAppClient(session=session).model_by_name(
@@ -318,11 +482,19 @@ class MLAppClientTests(unittest.TestCase):
 
     def test_model_by_name_accepts_explicit_numeric_version(self) -> None:
         session = FakeSession([
-            FakeResponse([{"id": "bc-1", "name": "Sales"}]),
-            FakeResponse([
+            FakeResponse(page_payload([{"id": "bc-1", "name": "Sales"}])),
+            FakeResponse(page_payload([{
+                "latest": {
+                    "id": "model-v2", "business_case_id": "bc-1",
+                    "name": "Churn", "logical_id": "churn",
+                    "version": "v2", "version_number": 2,
+                },
+                "version_count": 2,
+            }])),
+            FakeResponse(page_payload([
                 {"id": "model-v1", "business_case_id": "bc-1", "name": "Churn", "logical_id": "churn", "version": "v1", "version_number": 1},
                 {"id": "model-v2", "business_case_id": "bc-1", "name": "Churn", "logical_id": "churn", "version": "v2", "version_number": 2},
-            ]),
+            ])),
         ])
 
         model = MLAppClient(session=session).model_by_name(
@@ -332,9 +504,9 @@ class MLAppClientTests(unittest.TestCase):
         self.assertEqual(model["id"], "model-v1")
 
     def test_duplicate_business_case_name_is_rejected(self) -> None:
-        session = FakeSession([FakeResponse([
+        session = FakeSession([FakeResponse(page_payload([
             {"id": "bc-1", "name": "Sales"}, {"id": "bc-2", "name": "Sales"}
-        ])])
+        ]))])
         with self.assertRaises(ResourceAmbiguousError):
             MLAppClient(session=session).run_pipeline_by_name(
                 business_case_name="Sales", pipeline_name="Retrain"
@@ -342,6 +514,7 @@ class MLAppClientTests(unittest.TestCase):
 
     def test_wait_returns_row_counts_and_raises_on_failed_run(self) -> None:
         success_session = FakeSession([
+            FakeResponse(run_payload("succeeded", processed_row_count=12)),
             FakeResponse(run_payload("succeeded", processed_row_count=12))
         ])
         finished = MLAppClient(session=success_session).wait_for_pipeline_run(
@@ -351,6 +524,7 @@ class MLAppClientTests(unittest.TestCase):
         self.assertEqual(finished.processed_row_count, 12)
 
         failed_session = FakeSession([
+            FakeResponse(run_payload("failed", error_message="training failed")),
             FakeResponse(run_payload("failed", error_message="training failed"))
         ])
         with self.assertRaisesRegex(ApiError, "training failed"):
@@ -393,7 +567,7 @@ class MLAppClientTests(unittest.TestCase):
             }],
         ))
         session = FakeSession([
-            FakeResponse([{"id": "bc-1", "name": "Sales"}]),
+            FakeResponse(page_payload([{"id": "bc-1", "name": "Sales"}])),
             FakeResponse([
                 {"id": "other-report", "pipeline_run_id": "other-run"},
                 {"id": "monitoring-report", "pipeline_run_id": run.id, "evaluation": {"metrics": []}},
@@ -420,7 +594,10 @@ class MLAppClientTests(unittest.TestCase):
             "predictions": [{"record_id": "estate-1", "prediction": 42.0, "outputs": {}}],
             "warnings": [],
         }
-        session = FakeSession([FakeResponse([deployment]), FakeResponse(response)])
+        session = FakeSession([
+            FakeResponse(page_payload([deployment])),
+            FakeResponse(response),
+        ])
         result = MLAppClient(session=session).predict(
             "Estates Service", record_id="estate-1", features={"area": 84},
             idempotency_key="valuation-1", correlation_id="crm-1",
@@ -434,11 +611,16 @@ class MLAppClientTests(unittest.TestCase):
 
     def test_create_deployment_by_model_name_chooses_latest_production_version(self) -> None:
         session = FakeSession([
-            FakeResponse([
-                {"id": "candidate", "name": "Estates Model", "stage": "candidate", "version_number": 9},
-                {"id": "production-v1", "name": "Estates Model", "stage": "production", "version_number": 1},
-                {"id": "production-v3", "name": "Estates Model", "stage": "production", "version_number": 3},
-            ]),
+            FakeResponse(page_payload([{
+                "latest": {
+                    "id": "production-v3",
+                    "logical_id": "estates-model",
+                    "name": "Estates Model",
+                    "stage": "production",
+                    "version_number": 3,
+                },
+                "version_count": 2,
+            }])),
             FakeResponse({
                 "id": "deployment-1", "name": "Estates Service", "slug": "estates-service",
                 "business_case_id": "bc-1", "status": "running", "endpoint_url": "/predictions",
@@ -460,7 +642,7 @@ class MLAppClientTests(unittest.TestCase):
                 "assignments": [{"model_id": "model-1", "role": "champion"}],
             },
         }
-        session = FakeSession([FakeResponse([deployment])])
+        session = FakeSession([FakeResponse(page_payload([deployment]))])
 
         result, created = MLAppClient(session=session).ensure_deployment(
             name="Example Service",
@@ -470,8 +652,32 @@ class MLAppClientTests(unittest.TestCase):
         self.assertEqual(result.id, "deployment-1")
         self.assertFalse(created)
 
+    def test_ensure_deployment_rejects_an_implicit_champion_change(self) -> None:
+        deployment = {
+            "id": "deployment-1", "name": "Example Service", "slug": "example-service",
+            "business_case_id": "bc-1", "status": "running", "endpoint_url": "/predictions",
+            "active_revision": {
+                "id": "revision-1",
+                "assignments": [{"model_id": "model-1", "role": "champion"}],
+            },
+        }
+        session = FakeSession([FakeResponse(page_payload([deployment]))])
+
+        with self.assertRaisesRegex(ConflictError, "different champion"):
+            MLAppClient(session=session).ensure_deployment(
+                name="Example Service",
+                model_id="model-2",
+            )
+
     def test_promote_model_resolves_friendly_name_and_explicit_version(self) -> None:
         session = FakeSession([
+            FakeResponse(page_payload([{
+                "latest": {
+                    "id": "model-v11", "name": "Estates Model",
+                    "version": "v11", "version_number": 11,
+                },
+                "version_count": 2,
+            }])),
             FakeResponse([
                 {"id": "model-v10", "name": "Estates Model", "version": "v10", "version_number": 10},
                 {"id": "model-v11", "name": "Estates Model", "version": "v11", "version_number": 11},
@@ -489,21 +695,16 @@ class MLAppClientTests(unittest.TestCase):
         self.assertEqual(kwargs["json"], {"stage": "staging"})
 
     def test_promote_model_normalizes_display_punctuation_in_friendly_name(self) -> None:
+        latest = {
+            "id": "model-v1",
+            "logical_id": "churn-family",
+            "name": "Storage Subscription Churn - Experiment 3 - AutoML+ champion",
+            "version": "v1",
+            "version_number": 1,
+        }
         session = FakeSession([
-            FakeResponse([{
-                "id": "model-v1",
-                "logical_id": "churn-family",
-                "name": "Storage Subscription Churn - Experiment 3 - AutoML+ champion",
-                "version": "v1",
-                "version_number": 1,
-            }]),
-            FakeResponse([{
-                "id": "model-v1",
-                "logical_id": "churn-family",
-                "name": "Storage Subscription Churn - Experiment 3 - AutoML+ champion",
-                "version": "v1",
-                "version_number": 1,
-            }]),
+            FakeResponse(page_payload([{"latest": latest, "version_count": 1}])),
+            FakeResponse(page_payload([latest])),
             FakeResponse({"id": "model-v1", "stage": "archived"}),
         ])
 
@@ -517,24 +718,22 @@ class MLAppClientTests(unittest.TestCase):
         self.assertIn("/models/model-v1/stage", session.requests[-1][1])
 
     def test_promote_model_prefers_exact_name_before_punctuation_fallback(self) -> None:
+        automl_plus = {
+            "id": "automl-plus-v4", "logical_id": "automl-plus",
+            "name": "Storage Subscription Churn - Experiment 3- AutoML+ champion",
+            "version": "v4", "version_number": 4,
+        }
+        automl = {
+            "id": "automl-v4", "logical_id": "automl",
+            "name": "Storage Subscription Churn - Experiment 3- AutoML champion",
+            "version": "v4", "version_number": 4,
+        }
         session = FakeSession([
-            FakeResponse([
-                {
-                    "id": "automl-plus-v4", "logical_id": "automl-plus",
-                    "name": "Storage Subscription Churn - Experiment 3- AutoML+ champion",
-                    "version": "v4", "version_number": 4,
-                },
-                {
-                    "id": "automl-v4", "logical_id": "automl",
-                    "name": "Storage Subscription Churn - Experiment 3- AutoML champion",
-                    "version": "v4", "version_number": 4,
-                },
-            ]),
-            FakeResponse([{
-                "id": "automl-v4", "logical_id": "automl",
-                "name": "Storage Subscription Churn - Experiment 3- AutoML champion",
-                "version": "v4", "version_number": 4,
-            }]),
+            FakeResponse(page_payload([
+                {"latest": automl_plus, "version_count": 1},
+                {"latest": automl, "version_count": 1},
+            ])),
+            FakeResponse(page_payload([automl])),
             FakeResponse({"id": "automl-v4", "stage": "archived"}),
         ])
 
@@ -548,13 +747,14 @@ class MLAppClientTests(unittest.TestCase):
         self.assertIn("/models/automl-v4/stage", session.requests[-1][1])
 
     def test_promote_model_resolves_old_version_from_complete_family_history(self) -> None:
+        latest = {
+            "id": "model-v9", "logical_id": "churn-family",
+            "name": "Storage Subscription Churn - Experiment 3- AutoML champion",
+            "version": "v9", "version_number": 9,
+        }
         session = FakeSession([
-            FakeResponse([{
-                "id": "model-v9", "logical_id": "churn-family",
-                "name": "Storage Subscription Churn - Experiment 3- AutoML champion",
-                "version": "v9", "version_number": 9,
-            }]),
-            FakeResponse([
+            FakeResponse(page_payload([{"latest": latest, "version_count": 2}])),
+            FakeResponse(page_payload([
                 {
                     "id": "model-v1", "logical_id": "churn-family",
                     "name": "Storage Subscription Churn - Experiment 3 - AutoML champion",
@@ -565,7 +765,7 @@ class MLAppClientTests(unittest.TestCase):
                     "name": "Storage Subscription Churn - Experiment 3- AutoML champion",
                     "version": "v9", "version_number": 9,
                 },
-            ]),
+            ])),
             FakeResponse({"id": "model-v1", "stage": "archived"}),
         ])
 
@@ -576,20 +776,21 @@ class MLAppClientTests(unittest.TestCase):
         )
 
         self.assertEqual(archived["id"], "model-v1")
-        self.assertIn("/models/churn-family/versions", session.requests[1][1])
+        self.assertIn("/models/churn-family/versions/page", session.requests[1][1])
         self.assertIn("/models/model-v1/stage", session.requests[-1][1])
 
     def test_promote_model_versions_resolves_family_once_and_preserves_order(self) -> None:
+        latest = {
+            "id": "model-v3", "logical_id": "churn-family",
+            "name": "Churn Model", "version": "v3", "version_number": 3,
+        }
         session = FakeSession([
-            FakeResponse([{
-                "id": "model-v3", "logical_id": "churn-family",
-                "name": "Churn Model", "version": "v3", "version_number": 3,
-            }]),
-            FakeResponse([
+            FakeResponse(page_payload([{"latest": latest, "version_count": 3}])),
+            FakeResponse(page_payload([
                 {"id": "model-v1", "logical_id": "churn-family", "name": "Old Churn", "version": "v1", "version_number": 1},
                 {"id": "model-v2", "logical_id": "churn-family", "name": "Churn Model", "version": "v2", "version_number": 2},
                 {"id": "model-v3", "logical_id": "churn-family", "name": "Churn Model", "version": "v3", "version_number": 3},
-            ]),
+            ])),
             FakeResponse({"id": "model-v2", "stage": "archived"}),
             FakeResponse({"id": "model-v1", "stage": "archived"}),
         ])
@@ -604,15 +805,21 @@ class MLAppClientTests(unittest.TestCase):
             ["GET", "GET", "PATCH", "PATCH"],
         )
         self.assertEqual(
-            sum("/models/churn-family/versions" in request[1] for request in session.requests),
+            sum("/models/churn-family/versions/page" in request[1] for request in session.requests),
             1,
         )
 
     def test_promote_model_uses_latest_version_and_validates_stage(self) -> None:
-        session = FakeSession([FakeResponse([
-            {"id": "model-v1", "name": "Churn Model", "version_number": 1},
-            {"id": "model-v3", "name": "Churn Model", "version_number": 3},
-        ]), FakeResponse({"id": "model-v3", "stage": "production"})])
+        session = FakeSession([
+            FakeResponse(page_payload([{
+                "latest": {
+                    "id": "model-v3", "name": "Churn Model",
+                    "version_number": 3,
+                },
+                "version_count": 2,
+            }])),
+            FakeResponse({"id": "model-v3", "stage": "production"}),
+        ])
         client = MLAppClient(session=session)
 
         client.promote_model("Churn Model", "production")
@@ -622,7 +829,13 @@ class MLAppClientTests(unittest.TestCase):
 
     def test_candidate_stage_is_sent_as_developed_compatibility_alias(self) -> None:
         session = FakeSession([
-            FakeResponse([{"id": "model-v1", "name": "Churn Model", "version_number": 1}]),
+            FakeResponse(page_payload([{
+                "latest": {
+                    "id": "model-v1", "name": "Churn Model",
+                    "version_number": 1,
+                },
+                "version_count": 1,
+            }])),
             FakeResponse({"id": "model-v1", "stage": "developed"}),
         ])
         with self.assertWarns(DeprecationWarning):
@@ -636,11 +849,11 @@ class MLAppClientTests(unittest.TestCase):
             "active_revision": {"id": "revision-2"},
         }
         session = FakeSession([
-            FakeResponse([deployment]),
+            FakeResponse(page_payload([deployment])),
             FakeResponse([{"id": "revision-2", "version_number": 2}]),
-            FakeResponse([deployment]),
+            FakeResponse(page_payload([deployment])),
             FakeResponse({"id": "revision-3", "version_number": 3}, 201),
-            FakeResponse([deployment]),
+            FakeResponse(page_payload([deployment])),
             FakeResponse({**deployment, "status": "stopped"}),
         ])
         client = MLAppClient(session=session)
@@ -712,6 +925,49 @@ class MLAppClientTests(unittest.TestCase):
             "strategy": "auto", "actuals_record_id_column": "customer_id",
         })
 
+    def test_online_monitoring_resolves_named_actuals_with_bounded_pages(self) -> None:
+        deployment = Deployment.from_api({
+            "id": "deployment-1", "name": "Churn", "slug": "churn",
+            "business_case_id": "bc-1", "status": "running",
+            "endpoint_url": "/predictions", "active_revision": {"id": "revision-1"},
+        })
+        response = {
+            "id": "monitoring-1", "deployment_id": deployment.id, "status": "queued",
+            "since": "2026-07-20T00:00:00+00:00",
+            "until": "2026-07-21T00:00:00+00:00",
+            "actuals_dataset_id": "actuals-v4", "report": {}, "error_message": "",
+        }
+        session = FakeSession([
+            FakeResponse({"detail": "Dataset not found"}, 404),
+            FakeResponse(page_payload([{
+                "id": "attachment-1",
+                "role": "monitoring_actuals",
+                "data_asset_name": "churn_actuals",
+                "data_asset_logical_id": "actuals-family",
+            }])),
+            FakeResponse(page_payload([
+                dataset_payload(
+                    id="actuals-v4",
+                    logical_id="actuals-family",
+                    name="churn_actuals",
+                    version_number=4,
+                )
+            ], limit=1)),
+            FakeResponse(response, 202),
+        ])
+
+        result = MLAppClient(session=session).run_deployment_monitoring(
+            deployment,
+            actuals="churn_actuals",
+            since="2026-07-20T00:00:00Z",
+            until="2026-07-21T00:00:00Z",
+        )
+
+        self.assertEqual(result.actuals_dataset_id, "actuals-v4")
+        self.assertIn("/data-attachments/page", session.requests[1][1])
+        self.assertIn("/datasets/actuals-family/versions/page", session.requests[2][1])
+        self.assertEqual(session.requests[-1][2]["json"]["actuals_dataset_id"], "actuals-v4")
+
     def test_online_monitoring_default_since_is_relative_to_explicit_until(self) -> None:
         deployment = Deployment.from_api({
             "id": "deployment-1", "name": "Churn", "slug": "churn",
@@ -755,7 +1011,26 @@ class MLAppClientTests(unittest.TestCase):
 
         self.assertEqual(run.actuals_dataset_id, "")
         self.assertNotIn("actuals_dataset_id", session.requests[-1][2]["json"])
-        self.assertEqual(session.requests[-1][2]["json"]["aggregation_granularity"], "hour")
+        self.assertEqual(
+            session.requests[-1][2]["json"]["aggregation_granularity"],
+            "hour",
+        )
+
+    def test_failed_online_monitoring_run_raises_typed_api_error(self) -> None:
+        client = MLAppClient(session=FakeSession([]))
+        failed_run = OnlineMonitoringRun.from_api({
+            "id": "monitoring-1",
+            "deployment_id": "deployment-1",
+            "status": "failed",
+            "since": "2026-07-20T00:00:00+00:00",
+            "until": "2026-07-21T00:00:00+00:00",
+            "actuals_dataset_id": "",
+            "report": {},
+            "error_message": "snapshot unavailable",
+        })
+
+        with self.assertRaisesRegex(ApiError, "snapshot unavailable"):
+            client.wait_for_online_monitoring_run(failed_run)
 
     def test_monitoring_bucket_evaluations_preserve_repeated_bucket_parameters(self) -> None:
         session = FakeSession([FakeResponse([{

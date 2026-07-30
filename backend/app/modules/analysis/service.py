@@ -7,15 +7,19 @@ from app.modules.analysis.domain import AnalysisJob
 from app.modules.analysis.repository import AnalysisRepository, InMemoryAnalysisRepository
 from app.modules.analysis.schemas import AnalysisCreate, DescriptiveStatsResponse
 from app.modules.analysis.statistics import describe_records
-from app.modules.datasets.repository import PostgresDatasetRepository
+from app.modules.datasets.repository import DatasetRepository, PostgresDatasetRepository
 from app.modules.sharing.domain import ResourceAccessRole, ResourceKind
 from app.modules.sharing.policy import access_policy
 
 
 class AnalysisService:
-    def __init__(self, repository: AnalysisRepository | None = None) -> None:
+    def __init__(
+        self,
+        repository: AnalysisRepository | None = None,
+        datasets: DatasetRepository | None = None,
+    ) -> None:
         self.repository = repository or InMemoryAnalysisRepository()
-        self.datasets = PostgresDatasetRepository()
+        self.datasets = datasets or PostgresDatasetRepository()
 
     def create(self, payload: AnalysisCreate, principal: Principal) -> AnalysisJob:
         asset = self.datasets.get(payload.dataset_id)

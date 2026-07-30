@@ -247,7 +247,7 @@ class ModelEvaluationSnapshotBuilder:
             f"CASE WHEN {target} = {positive_sql} THEN 1 ELSE 0 END AS positive "
             f"FROM {relation_sql} WHERE {target} IS NOT NULL AND {score} IS NOT NULL"
         )
-        auc, average_precision, positives, negatives = connection.execute(
+        auc, average_precision, positives, negatives, minimum_score, maximum_score = connection.execute(
             f"""
             WITH score_groups AS (
                 SELECT score,
@@ -269,7 +269,10 @@ class ModelEvaluationSnapshotBuilder:
                 FROM score_groups
             ),
             totals AS (
-                SELECT sum(positives) AS positive_total, sum(negatives) AS negative_total
+                SELECT sum(positives) AS positive_total,
+                       sum(negatives) AS negative_total,
+                       min(score) AS minimum_score,
+                       max(score) AS maximum_score
                 FROM score_groups
             )
             SELECT
@@ -279,11 +282,13 @@ class ModelEvaluationSnapshotBuilder:
                     * d.cumulative_positives
                     / nullif(d.cumulative_positives + d.cumulative_negatives, 0)) AS average_precision,
                 t.positive_total,
-                t.negative_total
+                t.negative_total,
+                t.minimum_score,
+                t.maximum_score
             FROM ascending a
             JOIN descending d USING (score, positives, negatives)
             CROSS JOIN totals t
-            GROUP BY t.positive_total, t.negative_total
+            GROUP BY t.positive_total, t.negative_total, t.minimum_score, t.maximum_score
             """
         ).fetchone()
         curve_rows = connection.execute(
@@ -347,6 +352,8 @@ class ModelEvaluationSnapshotBuilder:
         score_distribution = self._score_distribution(
             connection,
             base,
+            minimum=float(minimum_score),
+            maximum=float(maximum_score),
             probability=probability,
         )
         metrics = [
@@ -382,36 +389,46 @@ class ModelEvaluationSnapshotBuilder:
                 "a single threshold and ROC AUC is 0.5."
             )
         if probability:
-            brier, log_loss = connection.execute(
+            probability_rows = connection.execute(
                 f"""
-                SELECT avg(power(greatest(0.0, least(1.0, score)) - positive, 2)),
-                       avg(-(positive * ln(greatest(1e-15, least(1 - 1e-15, score)))
-                           + (1 - positive) * ln(greatest(1e-15, least(1 - 1e-15, 1 - score)))))
-                FROM ({base})
-                """
-            ).fetchone()
-            metrics.extend([
-                self._metric("brier_score", "Brier score", float(brier), "lower", unit="number"),
-                self._metric("log_loss", "Log loss", float(log_loss), "lower", unit="number"),
-            ])
-            calibration = connection.execute(
-                f"""
-                WITH binned AS (
-                    SELECT least(9, greatest(0, floor(score * 10)::INTEGER)) AS bin,
-                           score, positive
+                WITH scored AS (
+                    SELECT score, positive,
+                           CASE WHEN score BETWEEN 0 AND 1
+                               THEN least(9, greatest(0, floor(score * 10)::INTEGER))
+                               ELSE NULL
+                           END AS bin,
+                           power(greatest(0.0, least(1.0, score)) - positive, 2)
+                               AS brier_loss,
+                           -(positive * ln(greatest(1e-15, least(1 - 1e-15, score)))
+                               + (1 - positive)
+                               * ln(greatest(1e-15, least(1 - 1e-15, 1 - score))))
+                               AS logarithmic_loss
                     FROM ({base})
-                    WHERE score BETWEEN 0 AND 1
                 )
-                SELECT bin, avg(score), avg(positive), count(*)
-                FROM binned GROUP BY bin ORDER BY bin
+                SELECT bin,
+                       avg(score) AS mean_score,
+                       avg(positive) AS observed_positive_rate,
+                       count(*) AS bin_count,
+                       sum(sum(brier_loss)) OVER () / sum(count(*)) OVER () AS brier_score,
+                       sum(sum(logarithmic_loss)) OVER () / sum(count(*)) OVER () AS log_loss
+                FROM scored
+                GROUP BY bin
+                ORDER BY bin NULLS LAST
                 """
             ).fetchall()
+            brier = float(probability_rows[0][4])
+            log_loss = float(probability_rows[0][5])
+            metrics.extend([
+                self._metric("brier_score", "Brier score", brier, "lower", unit="number"),
+                self._metric("log_loss", "Log loss", log_loss, "lower", unit="number"),
+            ])
             curves["calibration"] = {
                 "x_label": "Mean predicted probability",
                 "y_label": "Observed positive rate",
                 "points": [
                     {"x": float(mean_score), "y": float(observed), "count": int(count)}
-                    for _, mean_score, observed, count in calibration
+                    for bin_index, mean_score, observed, count, _, _ in probability_rows
+                    if bin_index is not None
                 ],
                 "rendering": "10 equal-width probability bins over full data",
             }
@@ -447,11 +464,26 @@ class ModelEvaluationSnapshotBuilder:
                    quantile_cont(residual, 0.05), quantile_cont(residual, 0.5),
                    quantile_cont(residual, 0.95),
                    avg(abs(residual / nullif(actual, 0))) FILTER (WHERE actual != 0),
-                   count(*) FILTER (WHERE actual != 0)
+                   count(*) FILTER (WHERE actual != 0),
+                   min(residual), max(residual)
             FROM base
             """
         ).fetchone()
-        count, mae, mse, r2, mean_residual, residual_std, p05, median, p95, mape, mape_count = row
+        (
+            count,
+            mae,
+            mse,
+            r2,
+            mean_residual,
+            residual_std,
+            p05,
+            median,
+            p95,
+            mape,
+            mape_count,
+            minimum_residual,
+            maximum_residual,
+        ) = row
         metrics = [
             self._metric("mae", "MAE", float(mae), "lower", unit="number"),
             self._metric("rmse", "RMSE", sqrt(float(mse)), "lower", unit="number"),
@@ -474,7 +506,14 @@ class ModelEvaluationSnapshotBuilder:
                 warnings.append(
                     f"MAPE excludes {int(count) - int(mape_count)} rows with zero actual value."
                 )
-        histogram = self._residual_histogram(connection, relation_sql, target, prediction)
+        histogram = self._residual_histogram(
+            connection,
+            relation_sql,
+            target,
+            prediction,
+            minimum=float(minimum_residual),
+            maximum=float(maximum_residual),
+        )
         qq_plot = self._residual_qq_plot(connection, relation_sql, target, prediction)
         scatter = connection.execute(
             f"""
@@ -578,15 +617,12 @@ class ModelEvaluationSnapshotBuilder:
         connection: duckdb.DuckDBPyConnection,
         base_sql: str,
         *,
+        minimum: float,
+        maximum: float,
         probability: bool,
     ) -> list[dict[str, Any]]:
-        minimum, maximum = connection.execute(
-            f"SELECT min(score), max(score) FROM ({base_sql})"
-        ).fetchone()
-        if minimum is None or maximum is None:
-            return []
-        minimum = 0.0 if probability else float(minimum)
-        maximum = 1.0 if probability else float(maximum)
+        minimum = 0.0 if probability else minimum
+        maximum = 1.0 if probability else maximum
         width = (maximum - minimum) / self.histogram_bins if maximum > minimum else 1.0
         rows = connection.execute(
             f"""
@@ -615,13 +651,11 @@ class ModelEvaluationSnapshotBuilder:
         relation_sql: str,
         target: str,
         prediction: str,
+        *,
+        minimum: float,
+        maximum: float,
     ) -> list[dict[str, Any]]:
         residual = f"cast({prediction} AS DOUBLE) - cast({target} AS DOUBLE)"
-        minimum, maximum = connection.execute(
-            f"SELECT min({residual}), max({residual}) FROM {relation_sql} "
-            f"WHERE {target} IS NOT NULL AND {prediction} IS NOT NULL"
-        ).fetchone()
-        minimum, maximum = float(minimum), float(maximum)
         width = (maximum - minimum) / self.histogram_bins if maximum > minimum else 1.0
         rows = connection.execute(
             f"""

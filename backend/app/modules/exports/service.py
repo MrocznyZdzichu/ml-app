@@ -5,17 +5,22 @@ from app.modules.exports.domain import ExportJob
 from app.modules.exports.repository import ExportRepository, InMemoryExportRepository
 from app.modules.exports.schemas import ExportRequest
 from fastapi import HTTPException
-from app.modules.datasets.repository import PostgresDatasetRepository
+from app.modules.datasets.repository import DatasetRepository, PostgresDatasetRepository
 from app.modules.models.service import ModelService
 from app.modules.sharing.domain import BusinessCaseAccessRole, ResourceAccessRole, ResourceKind
 from app.modules.sharing.policy import access_policy
 
 
 class ExportService:
-    def __init__(self, repository: ExportRepository | None = None) -> None:
+    def __init__(
+        self,
+        repository: ExportRepository | None = None,
+        datasets: DatasetRepository | None = None,
+        models: ModelService | None = None,
+    ) -> None:
         self.repository = repository or InMemoryExportRepository()
-        self.datasets = PostgresDatasetRepository()
-        self.models = ModelService()
+        self.datasets = datasets or PostgresDatasetRepository()
+        self.models = models or ModelService()
 
     def create_export(self, payload: ExportRequest, principal: Principal) -> ExportJob:
         owner_id = principal.user_id

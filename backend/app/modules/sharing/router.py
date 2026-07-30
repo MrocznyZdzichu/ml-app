@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from app.core.security import Principal, require_user
 from app.modules.sharing.domain import ResourceKind
@@ -16,15 +16,47 @@ from app.modules.sharing.schemas import (
     ResourceGrantRead,
 )
 from app.modules.sharing.service import SharingService
+from app.shared.pagination import OffsetPage
+from app.core.container import get_container
 
 router = APIRouter(prefix="/sharing", tags=["sharing"])
-service = SharingService()
+service: SharingService = get_container().sharing
 
 
 @router.get("/directory/users", response_model=list[DirectoryUserRead])
 def directory_users(principal: Principal = Depends(require_user)):
     return [DirectoryUserRead(id=u.id, login_name=u.login_name, email=u.email, display_name=u.display_name, is_active=u.is_active)
             for u in service.directory_users(principal)]
+
+
+@router.get("/directory/users/page", response_model=OffsetPage[DirectoryUserRead])
+def page_directory_users(
+    limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    search: str = Query(default="", max_length=200),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[DirectoryUserRead]:
+    users, total = service.page_directory_users(
+        principal,
+        limit=limit,
+        offset=offset,
+        search=search,
+    )
+    return OffsetPage[DirectoryUserRead].build(
+        items=[
+            DirectoryUserRead(
+                id=user.id,
+                login_name=user.login_name,
+                email=user.email,
+                display_name=user.display_name,
+                is_active=user.is_active,
+            )
+            for user in users
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post("/groups", response_model=GroupRead, status_code=201)
@@ -35,6 +67,29 @@ def create_group(payload: GroupCreate, principal: Principal = Depends(require_us
 @router.get("/groups", response_model=list[GroupRead])
 def list_groups(principal: Principal = Depends(require_user)):
     return service.list_groups(principal)
+
+
+@router.get("/groups/page", response_model=OffsetPage[GroupRead])
+def page_groups(
+    limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    search: str = Query(default="", max_length=200),
+    is_active: bool | None = Query(default=None),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[GroupRead]:
+    groups, total = service.page_groups(
+        principal,
+        limit=limit,
+        offset=offset,
+        search=search,
+        is_active=is_active,
+    )
+    return OffsetPage[GroupRead].build(
+        items=[GroupRead.model_validate(group) for group in groups],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.put("/groups/{group_id}", response_model=GroupRead)
@@ -52,6 +107,33 @@ def list_members(group_id: str, principal: Principal = Depends(require_user)):
     return service.list_members(group_id, principal)
 
 
+@router.get(
+    "/groups/{group_id}/members/page",
+    response_model=OffsetPage[MembershipRead],
+)
+def page_members(
+    group_id: str,
+    limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[MembershipRead]:
+    memberships, total = service.page_members(
+        group_id,
+        principal,
+        limit=limit,
+        offset=offset,
+    )
+    return OffsetPage[MembershipRead].build(
+        items=[
+            MembershipRead.model_validate(membership)
+            for membership in memberships
+        ],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.put("/groups/{group_id}/members", response_model=MembershipRead)
 def upsert_member(group_id: str, payload: MembershipUpsert, principal: Principal = Depends(require_user)):
     return service.upsert_member(group_id, payload, principal)
@@ -67,6 +149,30 @@ def list_bc_grants(business_case_id: str, principal: Principal = Depends(require
     return service.list_bc_grants(business_case_id, principal)
 
 
+@router.get(
+    "/business-cases/{business_case_id}/grants/page",
+    response_model=OffsetPage[BusinessCaseGrantRead],
+)
+def page_bc_grants(
+    business_case_id: str,
+    limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[BusinessCaseGrantRead]:
+    items, total = service.page_bc_grants(
+        business_case_id,
+        principal,
+        limit=limit,
+        offset=offset,
+    )
+    return OffsetPage[BusinessCaseGrantRead].build(
+        [BusinessCaseGrantRead.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.put("/business-cases/{business_case_id}/grants", response_model=BusinessCaseGrantRead)
 def grant_bc(business_case_id: str, payload: BusinessCaseGrantCreate, principal: Principal = Depends(require_user)):
     return service.grant_business_case(business_case_id, payload, principal)
@@ -80,6 +186,32 @@ def revoke_bc(business_case_id: str, grant_id: str, principal: Principal = Depen
 @router.get("/resources/{resource_kind}/{resource_id}/grants", response_model=list[ResourceGrantRead])
 def list_resource_grants(resource_kind: ResourceKind, resource_id: str, principal: Principal = Depends(require_user)):
     return service.list_resource_grants(resource_kind, resource_id, principal)
+
+
+@router.get(
+    "/resources/{resource_kind}/{resource_id}/grants/page",
+    response_model=OffsetPage[ResourceGrantRead],
+)
+def page_resource_grants(
+    resource_kind: ResourceKind,
+    resource_id: str,
+    limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[ResourceGrantRead]:
+    items, total = service.page_resource_grants(
+        resource_kind,
+        resource_id,
+        principal,
+        limit=limit,
+        offset=offset,
+    )
+    return OffsetPage[ResourceGrantRead].build(
+        [ResourceGrantRead.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.put("/resources/grants", response_model=ResourceGrantRead)

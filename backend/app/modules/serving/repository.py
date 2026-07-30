@@ -173,11 +173,31 @@ class ServingRepository(Protocol):
     def add_deployment(self, deployment: Deployment, revision: DeploymentRevision) -> Deployment: ...
     def update_deployment(self, deployment: Deployment) -> Deployment: ...
     def list_all_deployments(self) -> list[Deployment]: ...
+    def list_deployments(self, business_case_ids: set[str] | None, *, include_archived: bool = False) -> list[Deployment]: ...
+    def page_deployments(
+        self,
+        business_case_ids: set[str] | None,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+        status: str = "",
+        business_case_id: str = "",
+        include_archived: bool = False,
+    ) -> tuple[list[Deployment], int]: ...
     def get_deployment(self, deployment_id_or_slug: str) -> Deployment | None: ...
     def add_revision(self, revision: DeploymentRevision, deployment: Deployment) -> DeploymentRevision: ...
     def get_revision(self, revision_id: str) -> DeploymentRevision | None: ...
+    def get_revisions(self, revision_ids: set[str]) -> dict[str, DeploymentRevision]: ...
     def list_revisions(self, deployment_id: str) -> list[DeploymentRevision]: ...
+    def page_revisions(
+        self, deployment_id: str, *, limit: int, offset: int
+    ) -> tuple[list[DeploymentRevision], int]: ...
     def active_assignments_for_model(self, model_id: str) -> list[dict[str, Any]]: ...
+    def active_assignments_for_models(self, model_ids: set[str]) -> list[dict[str, Any]]: ...
+    def page_active_assignments_for_models(
+        self, model_ids: set[str], *, limit: int, offset: int
+    ) -> tuple[list[dict[str, Any]], int]: ...
     def clear_active_assignments(self, deployment_id: str) -> None: ...
     def restore_active_assignments(self, deployment: Deployment, revision: DeploymentRevision) -> None: ...
     def set_deployment_status(self, deployment: Deployment, revision: DeploymentRevision) -> Deployment: ...
@@ -193,11 +213,23 @@ class ServingRepository(Protocol):
     def get_replay(self, job_id: str) -> ChallengerReplayJob | None: ...
     def update_replay(self, job: ChallengerReplayJob) -> ChallengerReplayJob: ...
     def list_replays(self, deployment_id: str) -> list[ChallengerReplayJob]: ...
+    def page_replays(
+        self, deployment_id: str, *, limit: int, offset: int
+    ) -> tuple[list[ChallengerReplayJob], int]: ...
     def replay_sources(self, job: ChallengerReplayJob) -> list[InferenceRequest]: ...
     def add_monitoring_run(self, run: OnlineMonitoringRun) -> OnlineMonitoringRun: ...
     def get_monitoring_run(self, run_id: str) -> OnlineMonitoringRun | None: ...
     def update_monitoring_run(self, run: OnlineMonitoringRun) -> OnlineMonitoringRun: ...
     def list_monitoring_runs(self, deployment_id: str | None = None, limit: int = 200, include_archived: bool = False) -> list[OnlineMonitoringRun]: ...
+    def page_monitoring_runs(
+        self,
+        deployment_id: str | None = None,
+        *,
+        accessible_business_case_ids: set[str] | None = None,
+        limit: int,
+        offset: int,
+        include_archived: bool = False,
+    ) -> tuple[list[OnlineMonitoringRun], int]: ...
     def archive_monitoring_runs(self, deployment_id: str, archived_by: str, archived_at: datetime, reason: str) -> int: ...
     def iter_monitoring_items(
         self, deployment_id: str, since: datetime, until: datetime, source_before: datetime
@@ -230,10 +262,86 @@ class PostgresServingRepository:
         return deployment
 
     def list_all_deployments(self) -> list[Deployment]:
+        return self.list_deployments(None, include_archived=True)
+
+    def list_deployments(
+        self,
+        business_case_ids: set[str] | None,
+        *,
+        include_archived: bool = False,
+    ) -> list[Deployment]:
         self._ensure_initialized()
+        if business_case_ids is not None and not business_case_ids:
+            return []
+        statement = select(deployments_table)
+        if business_case_ids is not None:
+            statement = statement.where(
+                deployments_table.c.business_case_id.in_(business_case_ids)
+            )
+        if not include_archived:
+            statement = statement.where(
+                deployments_table.c.status != DeploymentStatus.ARCHIVED.value
+            )
+        statement = statement.order_by(deployments_table.c.updated_at.desc())
         with self.engine.begin() as connection:
-            rows = connection.execute(select(deployments_table).order_by(deployments_table.c.updated_at.desc()))
+            rows = connection.execute(statement)
             return [self._deployment(row._mapping) for row in rows]
+
+    def page_deployments(
+        self,
+        business_case_ids: set[str] | None,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+        status: str = "",
+        business_case_id: str = "",
+        include_archived: bool = False,
+    ) -> tuple[list[Deployment], int]:
+        self._ensure_initialized()
+        if business_case_ids is not None and not business_case_ids:
+            return [], 0
+        filters = []
+        if business_case_ids is not None:
+            filters.append(
+                deployments_table.c.business_case_id.in_(business_case_ids)
+            )
+        if not include_archived:
+            filters.append(
+                deployments_table.c.status != DeploymentStatus.ARCHIVED.value
+            )
+        if status:
+            filters.append(deployments_table.c.status == status)
+        if business_case_id:
+            filters.append(
+                deployments_table.c.business_case_id == business_case_id
+            )
+        needle = search.strip()
+        if needle:
+            pattern = f"%{needle}%"
+            filters.append(or_(
+                deployments_table.c.name.ilike(pattern),
+                deployments_table.c.slug.ilike(pattern),
+                deployments_table.c.endpoint_url.ilike(pattern),
+            ))
+        count_statement = select(func.count()).select_from(deployments_table)
+        page_statement = select(deployments_table)
+        if filters:
+            count_statement = count_statement.where(*filters)
+            page_statement = page_statement.where(*filters)
+        page_statement = (
+            page_statement
+            .order_by(
+                deployments_table.c.updated_at.desc(),
+                deployments_table.c.id.desc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+        with self.engine.begin() as connection:
+            total = int(connection.execute(count_statement).scalar_one())
+            rows = connection.execute(page_statement)
+            return [self._deployment(row._mapping) for row in rows], total
 
     def get_deployment(self, deployment_id_or_slug: str) -> Deployment | None:
         self._ensure_initialized()
@@ -253,6 +361,16 @@ class PostgresServingRepository:
             ).scalar_one_or_none()
             if current is None:
                 raise LookupError("Deployment no longer exists")
+            revision.version_number = int(connection.execute(
+                select(
+                    func.coalesce(
+                        func.max(deployment_revisions_table.c.version_number),
+                        0,
+                    ) + 1
+                ).where(
+                    deployment_revisions_table.c.deployment_id == deployment.id
+                )
+            ).scalar_one())
             connection.execute(deployment_revisions_table.insert().values(**self._revision_record(revision)))
             connection.execute(
                 deployments_table.update().where(deployments_table.c.id == deployment.id).values(
@@ -273,6 +391,20 @@ class PostgresServingRepository:
             ).first()
         return self._revision(row._mapping) if row else None
 
+    def get_revisions(self, revision_ids: set[str]) -> dict[str, DeploymentRevision]:
+        self._ensure_initialized()
+        if not revision_ids:
+            return {}
+        statement = select(deployment_revisions_table).where(
+            deployment_revisions_table.c.id.in_(revision_ids)
+        )
+        with self.engine.begin() as connection:
+            revisions = [
+                self._revision(row._mapping)
+                for row in connection.execute(statement)
+            ]
+        return {revision.id: revision for revision in revisions}
+
     def list_revisions(self, deployment_id: str) -> list[DeploymentRevision]:
         self._ensure_initialized()
         with self.engine.begin() as connection:
@@ -283,10 +415,39 @@ class PostgresServingRepository:
             )
             return [self._revision(row._mapping) for row in rows]
 
-    def active_assignments_for_model(self, model_id: str) -> list[dict[str, Any]]:
+    def page_revisions(
+        self,
+        deployment_id: str,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[DeploymentRevision], int]:
         self._ensure_initialized()
+        condition = deployment_revisions_table.c.deployment_id == deployment_id
+        statement = (
+            select(deployment_revisions_table)
+            .where(condition)
+            .order_by(deployment_revisions_table.c.version_number.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        with self.engine.begin() as connection:
+            total = int(connection.execute(
+                select(func.count()).select_from(deployment_revisions_table).where(condition)
+            ).scalar_one())
+            items = [self._revision(row._mapping) for row in connection.execute(statement)]
+        return items, total
+
+    def active_assignments_for_model(self, model_id: str) -> list[dict[str, Any]]:
+        return self.active_assignments_for_models({model_id})
+
+    def active_assignments_for_models(self, model_ids: set[str]) -> list[dict[str, Any]]:
+        self._ensure_initialized()
+        if not model_ids:
+            return []
         statement = (
             select(
+                active_model_assignments_table.c.model_id,
                 active_model_assignments_table.c.deployment_id,
                 active_model_assignments_table.c.revision_id,
                 active_model_assignments_table.c.role,
@@ -298,10 +459,60 @@ class PostgresServingRepository:
             )
             .join(deployments_table, deployments_table.c.id == active_model_assignments_table.c.deployment_id)
             .join(deployment_revisions_table, deployment_revisions_table.c.id == active_model_assignments_table.c.revision_id)
-            .where(active_model_assignments_table.c.model_id == model_id)
+            .where(active_model_assignments_table.c.model_id.in_(model_ids))
         )
         with self.engine.begin() as connection:
             return [dict(row._mapping) for row in connection.execute(statement)]
+
+    def page_active_assignments_for_models(
+        self,
+        model_ids: set[str],
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        self._ensure_initialized()
+        if not model_ids:
+            return [], 0
+        condition = active_model_assignments_table.c.model_id.in_(model_ids)
+        statement = (
+            select(
+                active_model_assignments_table.c.model_id,
+                active_model_assignments_table.c.deployment_id,
+                active_model_assignments_table.c.revision_id,
+                active_model_assignments_table.c.role,
+                deployments_table.c.name.label("deployment_name"),
+                deployments_table.c.slug.label("deployment_slug"),
+                deployments_table.c.status.label("deployment_status"),
+                deployments_table.c.endpoint_url,
+                deployment_revisions_table.c.version_number.label("revision_version"),
+            )
+            .join(
+                deployments_table,
+                deployments_table.c.id
+                == active_model_assignments_table.c.deployment_id,
+            )
+            .join(
+                deployment_revisions_table,
+                deployment_revisions_table.c.id
+                == active_model_assignments_table.c.revision_id,
+            )
+            .where(condition)
+            .order_by(
+                deployments_table.c.name.asc(),
+                active_model_assignments_table.c.deployment_id.asc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+        with self.engine.begin() as connection:
+            total = int(connection.execute(
+                select(func.count())
+                .select_from(active_model_assignments_table)
+                .where(condition)
+            ).scalar_one())
+            items = [dict(row._mapping) for row in connection.execute(statement)]
+        return items, total
 
     def clear_active_assignments(self, deployment_id: str) -> None:
         self._ensure_initialized()
@@ -519,6 +730,32 @@ class PostgresServingRepository:
             )
             return [self._replay(row._mapping) for row in rows]
 
+    def page_replays(
+        self,
+        deployment_id: str,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[ChallengerReplayJob], int]:
+        self._ensure_initialized()
+        condition = challenger_replay_jobs_table.c.deployment_id == deployment_id
+        statement = (
+            select(challenger_replay_jobs_table)
+            .where(condition)
+            .order_by(
+                challenger_replay_jobs_table.c.created_at.desc(),
+                challenger_replay_jobs_table.c.id.desc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+        with self.engine.begin() as connection:
+            total = int(connection.execute(
+                select(func.count()).select_from(challenger_replay_jobs_table).where(condition)
+            ).scalar_one())
+            items = [self._replay(row._mapping) for row in connection.execute(statement)]
+        return items, total
+
     def replay_sources(self, job: ChallengerReplayJob) -> list[InferenceRequest]:
         self._ensure_initialized()
         statement = select(inference_requests_table).where(
@@ -577,6 +814,49 @@ class PostgresServingRepository:
         ).limit(limit)
         with self.engine.begin() as connection:
             return [self._monitoring_run(row._mapping) for row in connection.execute(statement)]
+
+    def page_monitoring_runs(
+        self,
+        deployment_id: str | None = None,
+        *,
+        accessible_business_case_ids: set[str] | None = None,
+        limit: int,
+        offset: int,
+        include_archived: bool = False,
+    ) -> tuple[list[OnlineMonitoringRun], int]:
+        self._ensure_initialized()
+        conditions = []
+        if deployment_id:
+            conditions.append(monitoring_runs_table.c.deployment_id == deployment_id)
+        if accessible_business_case_ids is not None:
+            if not accessible_business_case_ids:
+                return [], 0
+            conditions.append(
+                monitoring_runs_table.c.business_case_id.in_(accessible_business_case_ids)
+            )
+        if not include_archived:
+            conditions.append(monitoring_runs_table.c.archived_at.is_(None))
+        statement = select(monitoring_runs_table)
+        count_statement = select(func.count()).select_from(monitoring_runs_table)
+        if conditions:
+            statement = statement.where(*conditions)
+            count_statement = count_statement.where(*conditions)
+        statement = (
+            statement
+            .order_by(
+                monitoring_runs_table.c.created_at.desc(),
+                monitoring_runs_table.c.id.desc(),
+            )
+            .limit(limit)
+            .offset(offset)
+        )
+        with self.engine.begin() as connection:
+            total = int(connection.execute(count_statement).scalar_one())
+            items = [
+                self._monitoring_run(row._mapping)
+                for row in connection.execute(statement)
+            ]
+        return items, total
 
     def archive_monitoring_runs(
         self,

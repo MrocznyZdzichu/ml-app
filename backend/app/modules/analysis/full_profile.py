@@ -407,18 +407,40 @@ class FullDatasetProfiler:
     ) -> dict[str, Any] | None:
         group = self.store.identifier(group_column)
         numeric = self.store.identifier(numeric_column)
-        total = int(connection.execute(
-            f"SELECT count(*) FROM {relation} WHERE {group} IS NOT NULL AND {numeric} IS NOT NULL"
-        ).fetchone()[0])
-        minimum = max(3, math.floor(total * 0.03))
         rows = connection.execute(
-            f"SELECT CAST({group} AS VARCHAR), count(*), min({numeric}), max({numeric}), median({numeric}), "
-            f"avg({numeric}), coalesce(stddev_samp({numeric}), 0) FROM {relation} "
-            f"WHERE {group} IS NOT NULL AND {numeric} IS NOT NULL GROUP BY 1 HAVING count(*) >= ? ORDER BY avg({numeric}) DESC",
-            [minimum],
+            f"""
+            WITH grouped AS (
+                SELECT CAST({group} AS VARCHAR) AS group_value,
+                       count(*) AS group_count,
+                       min({numeric}) AS minimum,
+                       max({numeric}) AS maximum,
+                       median({numeric}) AS median_value,
+                       avg({numeric}) AS mean_value,
+                       coalesce(stddev_samp({numeric}), 0) AS group_stddev,
+                       sum(CAST({numeric} AS DOUBLE)) AS value_sum,
+                       sum(power(CAST({numeric} AS DOUBLE), 2)) AS value_square_sum
+                FROM {relation}
+                WHERE {group} IS NOT NULL AND {numeric} IS NOT NULL
+                GROUP BY 1
+            ),
+            totals AS (
+                SELECT sum(group_count) AS total_count,
+                       sum(value_sum) AS total_sum,
+                       sum(value_square_sum) AS total_square_sum
+                FROM grouped
+            )
+            SELECT g.group_value, g.group_count, g.minimum, g.maximum,
+                   g.median_value, g.mean_value, g.group_stddev,
+                   t.total_count, t.total_sum, t.total_square_sum
+            FROM grouped g
+            CROSS JOIN totals t
+            WHERE g.group_count >= greatest(3, floor(t.total_count * 0.03))
+            ORDER BY g.mean_value DESC
+            """
         ).fetchall()
         if len(rows) < 2 or len(rows) > 50:
             return None
+        total = int(rows[0][7])
         group_stats = [
             {
                 "group": str(row[0]), "count": int(row[1]), "minimum": self._number(row[2]),
@@ -427,9 +449,13 @@ class FullDatasetProfiler:
             }
             for index, row in enumerate(rows)
         ]
-        spread = self._number(connection.execute(
-            f"SELECT stddev_samp({numeric}) FROM {relation} WHERE {group} IS NOT NULL AND {numeric} IS NOT NULL"
-        ).fetchone()[0])
+        total_sum = float(rows[0][8])
+        total_square_sum = float(rows[0][9])
+        spread = (
+            math.sqrt(max(0.0, (total_square_sum - total_sum * total_sum / total) / (total - 1)))
+            if total > 1
+            else 0.0
+        )
         mean_range = group_stats[0]["mean"] - group_stats[-1]["mean"]
         score = 0.0 if spread == 0 else min(1.0, abs(mean_range) / (spread * 4))
         density = self._density_plot(connection, relation, group_column, numeric_column, group_stats) if include_graphics else None
@@ -673,10 +699,11 @@ class FullDatasetProfiler:
                         "score": support * difference, "format": "percent",
                     })
         results.sort(key=lambda item: abs(item["score"]), reverse=True)
+        pair_count = len(candidates) * (len(candidates) - 1) // 2
         return {
             "targetColumn": target, "targetType": target_type,
             "candidateFeatures": [column["name"] for column in candidates],
-            "pairsScanned": len(list(combinations(candidates, 2))), "segmentsEvaluated": evaluated,
+            "pairsScanned": pair_count, "segmentsEvaluated": evaluated,
             "minimumSegmentSize": minimum, "graphicSummaries": include_graphics, "results": results[:12],
         }
 

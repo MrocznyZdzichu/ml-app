@@ -6,6 +6,13 @@ and monitoring. It streams CSV/Parquet uploads from disk, resolves human-readabl
 Business Case, dataset, pipeline, model, and service names, starts asynchronous
 workflows, and polls bounded run metadata.
 
+`MLAppClient` remains the single backwards-compatible public facade. Its
+implementation is composed from focused domain modules: authentication,
+datasets, Business Cases, pipelines, scoring reports, model registry,
+deployments, inference, and online monitoring. Integrations therefore keep the
+same calls shown below, while maintenance of one workflow no longer requires
+loading the complete client implementation.
+
 ```python
 from ml_app_client import MLAppClient
 
@@ -45,10 +52,10 @@ For interactive catalogs, request the bounded list projections and fetch full
 detail only after selecting an item:
 
 ```python
-datasets = client.list_dataset_summaries()
-models = client.list_model_summaries()
-reports = client.list_scoring_report_summaries(business_case_id="bc-id")
-full_report = client.get_scoring_report(reports[0]["id"])
+datasets = client.page_datasets(limit=30, search="sales")
+models = client.page_models(limit=30, business_case_id="bc-id")
+reports = client.page_scoring_reports(limit=30, business_case_id="bc-id")
+full_report = client.get_scoring_report(reports.items[0]["latest"]["id"])
 ```
 
 ## Online model serving

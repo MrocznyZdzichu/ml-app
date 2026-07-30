@@ -499,6 +499,80 @@ def _archive_and_bucket_online_monitoring(connection: Connection) -> None:
         connection.execute(text(statement))
 
 
+def _add_catalog_and_monitoring_performance_indexes(connection: Connection) -> None:
+    """Align hot polling and monitoring indexes with their set-oriented queries."""
+    statements = [
+        (
+            "CREATE INDEX IF NOT EXISTS ix_pipeline_runs_pipeline_created_at "
+            "ON mlapp.pipeline_runs (pipeline_id, created_at DESC)"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS ix_pipeline_versions_pipeline_version "
+            "ON mlapp.pipeline_versions (pipeline_id, version_number)"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS ix_serving_deployments_bc_updated "
+            "ON mlapp.serving_deployments (business_case_id, updated_at DESC)"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS ix_serving_inference_monitoring_window "
+            "ON mlapp.serving_inference_requests "
+            "(deployment_id, requested_role, created_at, id)"
+        ),
+    ]
+    for statement in statements:
+        connection.execute(text(statement))
+
+
+def _add_access_artifact_and_pipeline_performance_indexes(
+    connection: Connection,
+) -> None:
+    """Support set-oriented RBAC and bounded catalog projections."""
+    statements = [
+        (
+            "CREATE INDEX IF NOT EXISTS ix_pipelines_bc_updated "
+            "ON mlapp.pipelines (business_case_id, updated_at DESC)"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS ix_artifacts_bc_type_created "
+            "ON mlapp.artifacts (business_case_id, type, created_at DESC, id DESC)"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS ix_artifacts_report_logical_id "
+            "ON mlapp.artifacts ((metadata->>'logical_report_id'), created_at, id) "
+            "WHERE type = 'report'"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS ix_artifacts_feature_transform_lineage "
+            "ON mlapp.artifacts "
+            "((metadata #>> '{lineage,pipeline_run_id}'), "
+            "(metadata #>> '{lineage,pipeline_step_id}')) "
+            "WHERE type = 'feature_transform'"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS ix_bc_grants_subject_bc_expiry "
+            "ON mlapp.business_case_grants "
+            "(subject_type, subject_id, business_case_id, expires_at)"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS ix_resource_grants_subject_resource_expiry "
+            "ON mlapp.resource_grants "
+            "(subject_type, subject_id, resource_kind, resource_id, expires_at)"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS ix_group_memberships_user_group "
+            "ON mlapp.group_memberships (user_id, group_id)"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS ix_bc_attachments_bc_asset "
+            "ON mlapp.business_case_data_attachments "
+            "(business_case_id, data_asset_id)"
+        ),
+    ]
+    for statement in statements:
+        connection.execute(text(statement))
+
+
 MIGRATIONS = [
     Migration(
         version="20260703_0001",
@@ -554,5 +628,15 @@ MIGRATIONS = [
         version="20260722_0011",
         description="Add logical monitoring history archival and time-bucket configuration",
         apply=_archive_and_bucket_online_monitoring,
+    ),
+    Migration(
+        version="20260726_0012",
+        description="Index set-oriented catalog polling and online monitoring windows",
+        apply=_add_catalog_and_monitoring_performance_indexes,
+    ),
+    Migration(
+        version="20260726_0013",
+        description="Index set-oriented access, artifact families and pipeline catalogs",
+        apply=_add_access_artifact_and_pipeline_performance_indexes,
     ),
 ]

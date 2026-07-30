@@ -25,10 +25,12 @@ from app.modules.serving.schemas import (
 )
 from app.modules.serving.service import ServingService
 from app.modules.serving.monitoring import OnlineMonitoringService
+from app.shared.pagination import OffsetPage
+from app.core.container import get_container
 
 router = APIRouter(prefix="/serving", tags=["serving"])
-service = ServingService()
-monitoring_service = OnlineMonitoringService(repository=service.repository, models=service.models)
+service: ServingService = get_container().serving
+monitoring_service: OnlineMonitoringService = get_container().online_monitoring
 
 
 def _deployment_read(deployment) -> DeploymentRead:
@@ -37,6 +39,27 @@ def _deployment_read(deployment) -> DeploymentRead:
         **DeploymentRead.model_validate(deployment).model_dump(exclude={"active_revision"}),
         active_revision=(DeploymentRevisionRead.model_validate(active) if active else None),
     )
+
+
+def _deployment_reads(deployments) -> list[DeploymentRead]:
+    revisions = service.repository.get_revisions(
+        {item.active_revision_id for item in deployments if item.active_revision_id}
+    )
+    return [
+        DeploymentRead(
+            **DeploymentRead.model_validate(deployment).model_dump(
+                exclude={"active_revision"}
+            ),
+            active_revision=(
+                DeploymentRevisionRead.model_validate(
+                    revisions[deployment.active_revision_id]
+                )
+                if deployment.active_revision_id in revisions
+                else None
+            ),
+        )
+        for deployment in deployments
+    ]
 
 
 @router.post("/deployments", response_model=DeploymentRead, status_code=201)
@@ -52,7 +75,36 @@ def list_deployments(
     include_archived: bool = Query(default=False),
     principal: Principal = Depends(require_user),
 ) -> list[DeploymentRead]:
-    return [_deployment_read(item) for item in service.list_deployments(principal, include_archived=include_archived)]
+    return _deployment_reads(
+        service.list_deployments(principal, include_archived=include_archived)
+    )
+
+
+@router.get("/deployments/page", response_model=OffsetPage[DeploymentRead])
+def page_deployments(
+    limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    search: str = Query(default="", max_length=200),
+    status: str = Query(default="", max_length=30),
+    business_case_id: str = Query(default="", max_length=64),
+    include_archived: bool = Query(default=False),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[DeploymentRead]:
+    deployments, total = service.page_deployments(
+        principal,
+        limit=limit,
+        offset=offset,
+        search=search,
+        deployment_status=status,
+        business_case_id=business_case_id,
+        include_archived=include_archived,
+    )
+    return OffsetPage[DeploymentRead].build(
+        items=_deployment_reads(deployments),
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/model-families/{logical_id}/usage", response_model=list[ModelServingUsageRead])
@@ -61,6 +113,30 @@ def list_model_family_usage(
     principal: Principal = Depends(require_user),
 ) -> list[ModelServingUsageRead]:
     return [ModelServingUsageRead.model_validate(item) for item in service.list_model_family_usage(logical_id, principal)]
+
+
+@router.get(
+    "/models/{model_id}/usage/page",
+    response_model=OffsetPage[ModelServingUsageRead],
+)
+def page_model_usage(
+    model_id: str,
+    limit: int = Query(default=5, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[ModelServingUsageRead]:
+    items, total = service.page_model_usage(
+        model_id,
+        principal,
+        limit=limit,
+        offset=offset,
+    )
+    return OffsetPage[ModelServingUsageRead].build(
+        [ModelServingUsageRead.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/deployments/{deployment_id}", response_model=DeploymentRead)
@@ -96,12 +172,64 @@ def get_deployment_model_options(
     ]
 
 
+@router.get(
+    "/deployments/{deployment_id}/model-options/page",
+    response_model=OffsetPage[DeploymentModelOptionRead],
+)
+def page_deployment_model_options(
+    deployment_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    search: str = Query(default="", max_length=200),
+    model_id: list[str] = Query(default=[]),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[DeploymentModelOptionRead]:
+    items, total = service.page_deployment_model_options(
+        deployment_id,
+        principal,
+        limit=limit,
+        offset=offset,
+        search=search,
+        model_ids=set(model_id) if model_id else None,
+    )
+    return OffsetPage[DeploymentModelOptionRead].build(
+        [DeploymentModelOptionRead.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.get("/deployments/{deployment_id}/revisions", response_model=list[DeploymentRevisionRead])
 def list_revisions(
     deployment_id: str,
     principal: Principal = Depends(require_user),
 ) -> list[DeploymentRevisionRead]:
     return [DeploymentRevisionRead.model_validate(item) for item in service.list_revisions(deployment_id, principal)]
+
+
+@router.get(
+    "/deployments/{deployment_id}/revisions/page",
+    response_model=OffsetPage[DeploymentRevisionRead],
+)
+def page_revisions(
+    deployment_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[DeploymentRevisionRead]:
+    items, total = service.page_revisions(
+        deployment_id,
+        principal,
+        limit=limit,
+        offset=offset,
+    )
+    return OffsetPage[DeploymentRevisionRead].build(
+        [DeploymentRevisionRead.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post("/deployments/{deployment_id}/revisions", response_model=DeploymentRevisionRead, status_code=201)
@@ -264,6 +392,30 @@ def list_challenger_replays(
     return [ChallengerReplayRead.model_validate(item) for item in service.list_replays(deployment_id, principal)]
 
 
+@router.get(
+    "/deployments/{deployment_id}/challenger-replays/page",
+    response_model=OffsetPage[ChallengerReplayRead],
+)
+def page_challenger_replays(
+    deployment_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[ChallengerReplayRead]:
+    items, total = service.page_replays(
+        deployment_id,
+        principal,
+        limit=limit,
+        offset=offset,
+    )
+    return OffsetPage[ChallengerReplayRead].build(
+        [ChallengerReplayRead.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.post(
     "/deployments/{deployment_id}/monitoring-runs",
     response_model=OnlineMonitoringRunRead,
@@ -298,6 +450,32 @@ def list_deployment_monitoring_runs(
     ]
 
 
+@router.get(
+    "/deployments/{deployment_id}/monitoring-runs/page",
+    response_model=OffsetPage[OnlineMonitoringRunRead],
+)
+def page_deployment_monitoring_runs(
+    deployment_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    include_archived: bool = Query(default=False),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[OnlineMonitoringRunRead]:
+    items, total = monitoring_service.page_runs(
+        principal,
+        deployment_id=deployment_id,
+        limit=limit,
+        offset=offset,
+        include_archived=include_archived,
+    )
+    return OffsetPage[OnlineMonitoringRunRead].build(
+        [OnlineMonitoringRunRead.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.get("/monitoring-runs", response_model=list[OnlineMonitoringRunRead])
 def list_online_monitoring_runs(
     limit: int = Query(default=200, ge=1, le=200),
@@ -310,6 +488,30 @@ def list_online_monitoring_runs(
             principal, limit=limit, include_archived=include_archived
         )
     ]
+
+
+@router.get(
+    "/monitoring-runs/page",
+    response_model=OffsetPage[OnlineMonitoringRunRead],
+)
+def page_online_monitoring_runs(
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    include_archived: bool = Query(default=False),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[OnlineMonitoringRunRead]:
+    items, total = monitoring_service.page_runs(
+        principal,
+        limit=limit,
+        offset=offset,
+        include_archived=include_archived,
+    )
+    return OffsetPage[OnlineMonitoringRunRead].build(
+        [OnlineMonitoringRunRead.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post(

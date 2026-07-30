@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+
+import httpx2
 
 from app.core.config import settings
 
@@ -32,6 +31,19 @@ class RuntimeGateway(Protocol):
 class HttpModelRuntimeGateway:
     base_url: str = settings.model_runtime_url
     timeout: float = settings.model_runtime_timeout_seconds
+    client: httpx2.Client | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.client is None:
+            self.client = httpx2.Client(
+                base_url=self.base_url.rstrip("/"),
+                timeout=self.timeout,
+                limits=httpx2.Limits(
+                    max_connections=100,
+                    max_keepalive_connections=20,
+                    keepalive_expiry=30.0,
+                ),
+            )
 
     def score(
         self,
@@ -41,32 +53,37 @@ class HttpModelRuntimeGateway:
         records: list[dict[str, Any]],
         request_id: str,
     ) -> list[dict[str, Any]]:
-        body = json.dumps({
+        payload = {
             "model_artifact_uri": model_artifact_uri,
             "model_hash": model_hash,
             "records": records,
-        }, separators=(",", ":")).encode("utf-8")
-        request = Request(
-            f"{self.base_url.rstrip('/')}/score",
-            data=body,
-            method="POST",
-            headers={
+        }
+        try:
+            assert self.client is not None
+            response = self.client.post(
+                "/score",
+                json=payload,
+                headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json",
                 "X-Request-ID": request_id,
-            },
-        )
-        try:
-            with urlopen(request, timeout=self.timeout) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except HTTPError as exc:
-            detail = exc.read(1000).decode("utf-8", errors="replace")
-            if exc.code in {400, 422}:
-                raise RuntimeInputError(f"Model rejected scoring input: {detail}") from exc
-            raise RuntimeUnavailableError(f"Model runtime returned HTTP {exc.code}: {detail}") from exc
-        except (URLError, TimeoutError, OSError, ValueError) as exc:
+                },
+            )
+            if response.status_code in {400, 422}:
+                raise RuntimeInputError(
+                    f"Model rejected scoring input: {response.text[:1000]}"
+                )
+            if response.status_code >= 400:
+                raise RuntimeUnavailableError(
+                    "Model runtime returned HTTP "
+                    f"{response.status_code}: {response.text[:1000]}"
+                )
+            result = response.json()
+        except (RuntimeInputError, RuntimeUnavailableError):
+            raise
+        except (httpx2.RequestError, ValueError) as exc:
             raise RuntimeUnavailableError(f"Model runtime is unavailable: {exc}") from exc
-        predictions = payload.get("predictions") if isinstance(payload, dict) else None
+        predictions = result.get("predictions") if isinstance(result, dict) else None
         if not isinstance(predictions, list) or len(predictions) != len(records):
             raise RuntimeUnavailableError("Model runtime returned an invalid prediction contract")
         return [item if isinstance(item, dict) else {"prediction": item} for item in predictions]

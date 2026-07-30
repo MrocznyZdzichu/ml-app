@@ -66,14 +66,15 @@ class AuthFlowTests(unittest.TestCase):
 
         payload = {"email": email, "password": "password123", "display_name": "Dupe"}
         self.assertEqual(self.client.post("/api/v1/auth/register", json=payload).status_code, 201)
-        self.assertEqual(self.client.post("/api/v1/auth/register", json=payload).status_code, 409)
-        self.assertEqual(
-            self.client.post(
-                "/api/v1/auth/login",
-                json={"email": email, "password": "wrong-password"},
-            ).status_code,
-            401,
+        duplicate = self.client.post("/api/v1/auth/register", json=payload)
+        self.assertEqual(duplicate.status_code, 409)
+        self.assertEqual(duplicate.json()["code"], "email_already_registered")
+        bad_login = self.client.post(
+            "/api/v1/auth/login",
+            json={"email": email, "password": "wrong-password"},
         )
+        self.assertEqual(bad_login.status_code, 401)
+        self.assertEqual(bad_login.json()["code"], "invalid_credentials")
 
     def test_password_hashes_are_versioned_and_legacy_hashes_remain_valid(self) -> None:
         password = "password123"

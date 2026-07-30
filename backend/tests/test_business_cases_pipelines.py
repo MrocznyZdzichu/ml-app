@@ -264,10 +264,14 @@ def test_business_case_data_mapping_can_be_updated_and_deleted() -> None:
 
 
 def test_pipeline_version_and_run_contracts_are_auditable(monkeypatch) -> None:
-    from app.worker.tasks import execute_pipeline_run
+    from app.core.container import get_container
 
     dispatched: list[str] = []
-    monkeypatch.setattr(execute_pipeline_run, "delay", lambda run_id: dispatched.append(run_id))
+    monkeypatch.setattr(
+        get_container().task_queue,
+        "enqueue",
+        lambda task_name, args, **_: dispatched.append(str(args[0])),
+    )
     client = TestClient(create_app())
     token = _register(client, "alice")
     business_case = _create_business_case(client, token)
@@ -435,9 +439,9 @@ def test_pipeline_version_and_run_contracts_are_auditable(monkeypatch) -> None:
 
 
 def test_select_at_run_requires_and_audits_a_concrete_dataset_version(monkeypatch) -> None:
-    from app.worker.tasks import execute_pipeline_run
+    from app.core.container import get_container
 
-    monkeypatch.setattr(execute_pipeline_run, "delay", lambda run_id: None)
+    monkeypatch.setattr(get_container().task_queue, "enqueue", lambda *args, **kwargs: None)
     client = TestClient(create_app())
     token = _register(client, "versioned-input")
     headers = {"Authorization": f"Bearer {token}"}
@@ -598,9 +602,9 @@ def test_pipeline_name_can_be_changed_without_creating_a_new_version() -> None:
 def test_pipeline_can_be_copied_as_editable_draft_and_only_deleted_without_runs(
     monkeypatch,
 ) -> None:
-    from app.worker.tasks import execute_pipeline_run
+    from app.core.container import get_container
 
-    monkeypatch.setattr(execute_pipeline_run, "delay", lambda run_id: None)
+    monkeypatch.setattr(get_container().task_queue, "enqueue", lambda *args, **kwargs: None)
     client = TestClient(create_app())
     token = _register(client, "pipeline-copy")
     other_token = _register(client, "pipeline-copy-other")
@@ -778,12 +782,19 @@ def test_business_case_and_pipeline_survive_app_restart_and_relogin() -> None:
 def test_pipeline_dry_run_executes_through_worker_on_full_uploaded_csv(
     monkeypatch,
 ) -> None:
+    from app.core.container import get_container
     from app.worker.tasks import execute_pipeline_run
 
+    task_queue = get_container().task_queue
+    enqueue = task_queue.enqueue
     monkeypatch.setattr(
-        execute_pipeline_run,
-        "delay",
-        lambda run_id: None,
+        task_queue,
+        "enqueue",
+        lambda task_name, args, **kwargs: (
+            None
+            if task_name == "app.worker.tasks.execute_pipeline_run"
+            else enqueue(task_name, args, **kwargs)
+        ),
     )
     client = TestClient(create_app())
     token = _register(client, "alice")
@@ -871,6 +882,15 @@ def test_pipeline_dry_run_executes_through_worker_on_full_uploaded_csv(
     assert run["output_manifest"][0]["data_scope"] == "full"
     assert run["output_manifest"][0]["row_count"] == 2
     assert run["output_manifest"][0]["preview"]["returned_count"] == 2
+    compact_status = client.get(
+        f"/api/v1/pipelines/{pipeline_id}/runs/{run_id}/status",
+        headers=headers,
+    )
+    assert compact_status.status_code == 200
+    assert compact_status.json()["status"] == "succeeded"
+    assert compact_status.json()["processed_row_count"] == 3
+    assert "events" not in compact_status.json()
+    assert "output_manifest" not in compact_status.json()
     output_id = run["output_manifest"][0]["output_id"]
     paged_preview = client.get(
         f"/api/v1/pipelines/{pipeline_id}/runs/{run_id}/preview",

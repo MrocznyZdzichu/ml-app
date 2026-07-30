@@ -39,3 +39,32 @@ def test_business_case_name_uniqueness_migration_is_recorded() -> None:
         )).scalar_one()
     assert row.description == "Enforce globally unique case-insensitive Business Case names"
     assert duplicate_count == 0
+
+
+def test_hot_catalog_and_monitoring_queries_have_composite_indexes() -> None:
+    engine = get_engine()
+    run_migrations(engine)
+    expected = {
+        "ix_pipeline_runs_pipeline_created_at",
+        "ix_pipeline_versions_pipeline_version",
+        "ix_serving_deployments_bc_updated",
+        "ix_serving_inference_monitoring_window",
+        "ix_pipelines_bc_updated",
+        "ix_artifacts_bc_type_created",
+        "ix_artifacts_report_logical_id",
+        "ix_artifacts_feature_transform_lineage",
+        "ix_bc_grants_subject_bc_expiry",
+        "ix_resource_grants_subject_resource_expiry",
+        "ix_group_memberships_user_group",
+        "ix_bc_attachments_bc_asset",
+    }
+    with engine.begin() as connection:
+        present = {
+            str(row[0])
+            for row in connection.execute(text(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE schemaname = 'mlapp' AND indexname = ANY(:names)"
+            ), {"names": list(expected)})
+        }
+
+    assert present == expected

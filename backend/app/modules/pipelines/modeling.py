@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from copy import deepcopy
 from dataclasses import dataclass
@@ -13,6 +12,7 @@ import numpy as np
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.core.storage import sha256_file
 from app.modules.pipelines.model_evaluation import ModelEvaluationSnapshotBuilder
 from app.modules.pipelines.model_training import (
     ModelOptimizationEngine,
@@ -428,16 +428,6 @@ class SklearnTrainingEngine:
                     ),
                     "",
                 )
-                cv_fold_assignments = (
-                    self._load_cv_fold_assignments(
-                        connection,
-                        training,
-                        cv_fold_column,
-                        row_count,
-                    )
-                    if uses_cross_validation and cv_fold_column
-                    else None
-                )
                 split_evaluation = (
                     training.metadata.get("split_evaluation")
                     if isinstance(training.metadata.get("split_evaluation"), dict)
@@ -475,6 +465,16 @@ class SklearnTrainingEngine:
                     definition.resource_limits.max_memory_mb,
                     preflight_rows,
                     len(definition.feature_columns),
+                )
+                cv_fold_assignments = (
+                    self._load_cv_fold_assignments(
+                        connection,
+                        training,
+                        cv_fold_column,
+                        row_count,
+                    )
+                    if uses_cross_validation and cv_fold_column
+                    else None
                 )
                 callback_only_study = (
                     study_only and optimization_score_callback is not None
@@ -639,7 +639,7 @@ class SklearnTrainingEngine:
                 "resolved_parameters": resolved_parameters,
             }
             joblib.dump(bundle, model_path, compress=3)
-            model_hash = hashlib.sha256(model_path.read_bytes()).hexdigest()
+            model_hash = sha256_file(model_path)
             metrics_path = directory / "training_metrics.json"
             metrics_path.write_text(
                 json.dumps(metrics, sort_keys=True, ensure_ascii=True),
@@ -1150,7 +1150,7 @@ class SklearnScoringEngine:
         model_path.relative_to(self.repository_root)
         expected_model_hash = str(model_manifest.get("model_hash") or "")
         if expected_model_hash:
-            actual_model_hash = hashlib.sha256(model_path.read_bytes()).hexdigest()
+            actual_model_hash = sha256_file(model_path)
             if actual_model_hash != expected_model_hash:
                 raise ValueError("Pinned model artifact hash does not match its registry metadata")
         bundle = joblib.load(model_path)

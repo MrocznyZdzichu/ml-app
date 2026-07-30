@@ -6,7 +6,7 @@ import json
 import logging
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -14,6 +14,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError
 
 from app.core.security import Principal
+from app.modules.auth.repository import PostgresUserRepository, UserRepository
 from app.modules.models.domain import ModelStage
 from app.modules.models.service import ModelService
 from app.modules.pipelines.feature_engineering import DuckDbFeatureEngineeringEngine
@@ -50,9 +51,10 @@ from app.modules.serving.schemas import (
     ScoreRecord,
     ScoreResponse,
 )
-from app.modules.sharing.domain import AuditEvent, BC_ROLE_RANK, BusinessCaseAccessRole
+from app.modules.sharing.domain import AuditEvent, BusinessCaseAccessRole
 from app.modules.sharing.policy import access_policy
 from app.modules.sharing.repository import PostgresSharingRepository
+from app.ports.task_queue import TaskQueue, require_task_queue
 
 
 logger = logging.getLogger("mlapp.serving")
@@ -64,10 +66,16 @@ class ServingService:
         repository: ServingRepository | None = None,
         runtime: RuntimeGateway | None = None,
         models: ModelService | None = None,
+        task_queue: TaskQueue | None = None,
+        users: UserRepository | None = None,
+        audit_repository: PostgresSharingRepository | None = None,
     ) -> None:
         self.repository = repository or PostgresServingRepository()
         self.runtime = runtime or HttpModelRuntimeGateway()
         self.models = models or ModelService()
+        self.task_queue = task_queue
+        self.users = users or PostgresUserRepository()
+        self.audit_repository = audit_repository or PostgresSharingRepository()
 
     def create_deployment(self, payload: DeploymentCreate, principal: Principal) -> Deployment:
         champion = self.models.get_model(payload.model_id, principal)
@@ -117,25 +125,74 @@ class ServingService:
         return deployment
 
     def list_deployments(self, principal: Principal, *, include_archived: bool = False) -> list[Deployment]:
-        return [
-            deployment for deployment in self.repository.list_all_deployments()
-            if self._can_read(principal, deployment.business_case_id)
-            and (include_archived or deployment.status != DeploymentStatus.ARCHIVED)
-        ]
+        allowed = access_policy.accessible_business_case_ids(
+            principal,
+            BusinessCaseAccessRole.READER,
+        )
+        return self.repository.list_deployments(
+            allowed,
+            include_archived=include_archived,
+        )
+
+    def page_deployments(
+        self,
+        principal: Principal,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+        deployment_status: str = "",
+        business_case_id: str = "",
+        include_archived: bool = False,
+    ) -> tuple[list[Deployment], int]:
+        allowed = access_policy.accessible_business_case_ids(
+            principal,
+            BusinessCaseAccessRole.READER,
+        )
+        return self.repository.page_deployments(
+            allowed,
+            limit=limit,
+            offset=offset,
+            search=search,
+            status=deployment_status,
+            business_case_id=business_case_id,
+            include_archived=include_archived,
+        )
 
     def list_model_family_usage(self, logical_id: str, principal: Principal) -> list[dict[str, Any]]:
-        usage: list[dict[str, Any]] = []
-        for version in self.models.list_versions(logical_id, principal):
-            for assignment in self.repository.active_assignments_for_model(version.id):
-                usage.append({"model_id": version.id, **assignment})
-        return usage
+        model_ids = {
+            version.id
+            for version in self.models.list_versions(logical_id, principal)
+        }
+        return self.repository.active_assignments_for_models(model_ids)
 
-    def get_deployment(self, deployment_id_or_slug: str, principal: Principal) -> Deployment:
+    def page_model_usage(
+        self,
+        model_id: str,
+        principal: Principal,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[dict[str, Any]], int]:
+        self.models.get_model(model_id, principal)
+        return self.repository.page_active_assignments_for_models(
+            {model_id},
+            limit=limit,
+            offset=offset,
+        )
+
+    def get_deployment(
+        self,
+        deployment_id_or_slug: str,
+        principal: Principal,
+        *,
+        minimum: BusinessCaseAccessRole = BusinessCaseAccessRole.READER,
+    ) -> Deployment:
         deployment = self.repository.get_deployment(deployment_id_or_slug)
         if not deployment:
             raise HTTPException(status_code=404, detail="Deployment not found")
         access_policy.require_business_case(
-            principal, deployment.business_case_id, BusinessCaseAccessRole.READER
+            principal, deployment.business_case_id, minimum
         )
         return deployment
 
@@ -232,6 +289,58 @@ class ServingService:
             })
         return options
 
+    def page_deployment_model_options(
+        self,
+        deployment_id: str,
+        principal: Principal,
+        *,
+        limit: int,
+        offset: int,
+        search: str = "",
+        model_ids: set[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Resolve compatibility only for the requested serving-candidate page."""
+        deployment = self.get_deployment(deployment_id, principal)
+        revision = self.get_active_revision(deployment)
+        champion_assignment = next((
+            item for item in revision.assignments
+            if item.role == DeploymentRole.CHAMPION
+        ), None)
+        if champion_assignment is None:
+            raise HTTPException(status_code=503, detail="Deployment has no champion")
+        champion = self._model_for_inference(champion_assignment.model_id, principal)
+        champion_signature = self._inference_contract_signature(champion)
+        candidates, total = self.models.page_serving_candidates(
+            deployment.business_case_id,
+            principal,
+            limit=limit,
+            offset=offset,
+            search=search,
+            model_ids=model_ids,
+        )
+        options: list[dict[str, Any]] = []
+        for model in candidates:
+            allowed_roles = [DeploymentRole.CHALLENGER, DeploymentRole.SHADOW]
+            if model.stage == ModelStage.PRODUCTION:
+                allowed_roles = [
+                    DeploymentRole.CHAMPION,
+                    DeploymentRole.CHALLENGER,
+                    DeploymentRole.SHADOW,
+                    DeploymentRole.FALLBACK,
+                ]
+            signature = self._inference_contract_signature(model)
+            options.append({
+                "model_id": model.id,
+                "name": model.name,
+                "version": model.version,
+                "business_case_id": model.business_case_id,
+                "stage": model.stage.value,
+                "contract_signature": signature,
+                "compatible_with_active_champion": signature == champion_signature,
+                "allowed_roles": allowed_roles,
+            })
+        return options, total
+
     @classmethod
     def _inference_contract_signature(cls, model) -> str:
         canonical = json.dumps(
@@ -317,25 +426,40 @@ class ServingService:
         deployment = self.get_deployment(deployment_id, principal)
         return self.repository.list_revisions(deployment.id)
 
+    def page_revisions(
+        self,
+        deployment_id: str,
+        principal: Principal,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[DeploymentRevision], int]:
+        deployment = self.get_deployment(deployment_id, principal)
+        return self.repository.page_revisions(
+            deployment.id,
+            limit=limit,
+            offset=offset,
+        )
+
     def create_revision(
         self,
         deployment_id: str,
         payload: DeploymentRevisionCreate,
         principal: Principal,
     ) -> DeploymentRevision:
-        deployment = self.get_deployment(deployment_id, principal)
+        deployment = self.get_deployment(
+            deployment_id,
+            principal,
+            minimum=BusinessCaseAccessRole.CONTRIBUTOR,
+        )
         if deployment.status == DeploymentStatus.ARCHIVED:
             raise HTTPException(status_code=409, detail="An archived deployment cannot be revised")
-        access_policy.require_business_case(
-            principal, deployment.business_case_id, BusinessCaseAccessRole.CONTRIBUTOR
-        )
         assignments = [ModelAssignment(model_id=item.model_id, role=item.role) for item in payload.assignments]
         self._validate_assignments(assignments, deployment.business_case_id, principal)
-        revisions = self.repository.list_revisions(deployment.id)
         revision = DeploymentRevision(
             id=str(uuid4()),
             deployment_id=deployment.id,
-            version_number=max((item.version_number for item in revisions), default=0) + 1,
+            version_number=0,
             assignments=assignments,
             created_by=principal.user_id,
             reason=payload.reason,
@@ -367,9 +491,10 @@ class ServingService:
         reason: str,
         principal: Principal,
     ) -> Deployment:
-        deployment = self.get_deployment(deployment_id, principal)
-        access_policy.require_business_case(
-            principal, deployment.business_case_id, BusinessCaseAccessRole.CONTRIBUTOR
+        deployment = self.get_deployment(
+            deployment_id,
+            principal,
+            minimum=BusinessCaseAccessRole.CONTRIBUTOR,
         )
         if next_status not in {DeploymentStatus.RUNNING, DeploymentStatus.STOPPED, DeploymentStatus.ARCHIVED}:
             raise HTTPException(status_code=422, detail="Deployment may be started, stopped or archived only")
@@ -426,9 +551,10 @@ class ServingService:
         challenger_model_id: str = "",
         _revision_id: str = "",
     ) -> ScoreResponse:
-        deployment = self.get_deployment(deployment_id_or_slug, principal)
-        access_policy.require_business_case(
-            principal, deployment.business_case_id, BusinessCaseAccessRole.CONTRIBUTOR
+        deployment = self.get_deployment(
+            deployment_id_or_slug,
+            principal,
+            minimum=BusinessCaseAccessRole.CONTRIBUTOR,
         )
         if deployment.status not in {DeploymentStatus.RUNNING, DeploymentStatus.DEGRADED}:
             raise HTTPException(status_code=503, detail=f"Deployment is {deployment.status.value}")
@@ -637,13 +763,6 @@ class ServingService:
             self.repository.complete_inference(inference, execution_items)
         except Exception as exc:
             raise HTTPException(status_code=503, detail="Prediction completed but its audit history could not be persisted") from exc
-        try:
-            self.repository.prune_expired(
-                deployment.id,
-                datetime.now(timezone.utc) - timedelta(days=deployment.retention_days),
-            )
-        except Exception:
-            logger.exception("Inference retention cleanup failed deployment_id=%s", deployment.id)
         return response
 
     def inference_history(
@@ -706,9 +825,10 @@ class ServingService:
         payload: ChallengerReplayCreate,
         principal: Principal,
     ) -> ChallengerReplayJob:
-        deployment = self.get_deployment(deployment_id, principal)
-        access_policy.require_business_case(
-            principal, deployment.business_case_id, BusinessCaseAccessRole.CONTRIBUTOR
+        deployment = self.get_deployment(
+            deployment_id,
+            principal,
+            minimum=BusinessCaseAccessRole.CONTRIBUTOR,
         )
         revision = self.get_active_revision(deployment)
         assigned = any(
@@ -731,23 +851,38 @@ class ServingService:
             "job_id": job.id, "challenger_model_id": job.challenger_model_id,
             "deployment_revision_id": revision.id, "max_requests": job.max_requests,
         })
-        from app.worker.tasks import replay_challenger
-        replay_challenger.delay(job.id)
+        require_task_queue(self.task_queue).enqueue(
+            "app.worker.tasks.replay_challenger",
+            [job.id],
+        )
         return job
 
     def list_replays(self, deployment_id: str, principal: Principal) -> list[ChallengerReplayJob]:
         deployment = self.get_deployment(deployment_id, principal)
         return self.repository.list_replays(deployment.id)
 
-    def run_replay(self, job_id: str) -> ChallengerReplayJob:
-        from app.modules.auth.repository import PostgresUserRepository
+    def page_replays(
+        self,
+        deployment_id: str,
+        principal: Principal,
+        *,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[ChallengerReplayJob], int]:
+        deployment = self.get_deployment(deployment_id, principal)
+        return self.repository.page_replays(
+            deployment.id,
+            limit=limit,
+            offset=offset,
+        )
 
+    def run_replay(self, job_id: str) -> ChallengerReplayJob:
         job = self.repository.get_replay(job_id)
         if job is None:
             raise ValueError("Challenger replay job not found")
         if job.status == ReplayStatus.SUCCEEDED:
             return job
-        account = PostgresUserRepository().get(job.requested_by)
+        account = self.users.get(job.requested_by)
         if account is None or not account.is_active:
             job.status = ReplayStatus.FAILED
             job.error_message = "Replay requester is no longer active"
@@ -758,9 +893,10 @@ class ServingService:
             login_name=account.login_name, roles=account.roles, session_version=account.session_version,
         )
         try:
-            deployment = self.get_deployment(job.deployment_id, principal)
-            access_policy.require_business_case(
-                principal, deployment.business_case_id, BusinessCaseAccessRole.CONTRIBUTOR
+            deployment = self.get_deployment(
+                job.deployment_id,
+                principal,
+                minimum=BusinessCaseAccessRole.CONTRIBUTOR,
             )
         except Exception as exc:
             job.status = ReplayStatus.FAILED
@@ -848,9 +984,21 @@ class ServingService:
         business_case_id: str,
         principal: Principal,
     ) -> dict[str, Any]:
+        batch_loader = getattr(self.models, "get_models_for_inference", None)
+        resolved = (
+            batch_loader({assignment.model_id for assignment in assignments}, principal)
+            if callable(batch_loader)
+            else {}
+        )
         models = []
         for assignment in assignments:
-            model = self._model_for_inference(assignment.model_id, principal)
+            model = (
+                resolved.get(assignment.model_id)
+                if resolved
+                else self._model_for_inference(assignment.model_id, principal)
+            )
+            if model is None:
+                raise HTTPException(status_code=404, detail="Assigned model not found")
             if model.business_case_id != business_case_id:
                 raise HTTPException(status_code=409, detail="Every assigned model must belong to the deployment Business Case")
             self._require_stage(model.stage, assignment.role)
@@ -1040,14 +1188,15 @@ class ServingService:
         except (ValueError, UnicodeDecodeError) as exc:
             raise HTTPException(status_code=422, detail="Invalid history cursor") from exc
 
-    @staticmethod
-    def _can_read(principal: Principal, business_case_id: str) -> bool:
-        role = access_policy.business_case_role(principal, business_case_id)
-        return role is not None and BC_ROLE_RANK[role] >= BC_ROLE_RANK[BusinessCaseAccessRole.READER]
-
-    @staticmethod
-    def _audit(principal: Principal, action: str, deployment: Deployment, previous: dict[str, Any], new: dict[str, Any]) -> None:
-        PostgresSharingRepository().add_audit(AuditEvent(
+    def _audit(
+        self,
+        principal: Principal,
+        action: str,
+        deployment: Deployment,
+        previous: dict[str, Any],
+        new: dict[str, Any],
+    ) -> None:
+        self.audit_repository.add_audit(AuditEvent(
             id=str(uuid4()),
             actor_id=principal.user_id,
             action=action,

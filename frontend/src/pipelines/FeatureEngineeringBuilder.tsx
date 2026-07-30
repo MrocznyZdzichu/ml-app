@@ -2,7 +2,6 @@ import {
   ArrowDown,
   ArrowRight,
   ArrowUp,
-  CalendarDays,
   Check,
   ChevronDown,
   Database,
@@ -17,10 +16,12 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../api/client";
+import { PagedCatalogSelect } from "../components/PagedCatalogSelect";
 import type {
   BusinessCaseDataAttachment,
   DataAsset,
-  DatasetColumn
+  DatasetColumn,
+  OffsetPage
 } from "../api/client";
 import {
   defaultFeatureTransform
@@ -74,6 +75,7 @@ export function FeatureEngineeringBuilder({
   definition,
   datasets,
   dataAttachments,
+  businessCaseId,
   upstreamDefinition,
   hasUpstream,
   fittedStateLocked = false,
@@ -83,6 +85,7 @@ export function FeatureEngineeringBuilder({
   definition: FeatureEngineeringDefinition;
   datasets: DataAsset[];
   dataAttachments: BusinessCaseDataAttachment[];
+  businessCaseId?: string;
   upstreamDefinition?: PipelineDefinition;
   hasUpstream: boolean;
   fittedStateLocked?: boolean;
@@ -90,6 +93,16 @@ export function FeatureEngineeringBuilder({
   onChange: (definition: FeatureEngineeringDefinition) => void;
 }) {
   const [schemaCache, setSchemaCache] = useState<Record<string, DatasetColumn[]>>({});
+  const [datasetSnapshots, setDatasetSnapshots] = useState<Record<string, DataAsset>>({});
+  const catalogDatasets = useMemo(
+    () => [
+      ...datasets,
+      ...Object.values(datasetSnapshots).filter(
+        (snapshot) => !datasets.some((dataset) => dataset.id === snapshot.id)
+      )
+    ],
+    [datasetSnapshots, datasets]
+  );
   const [selectedNodeId, setSelectedNodeId] = useState("__data__");
   const relevantDatasetIds = useMemo(
     () => Array.from(new Set([
@@ -100,7 +113,7 @@ export function FeatureEngineeringBuilder({
   );
   useEffect(() => {
     for (const datasetId of relevantDatasetIds) {
-      const dataset = datasets.find((item) => item.id === datasetId);
+      const dataset = catalogDatasets.find((item) => item.id === datasetId);
       if (
         !dataset
         || schemaCache[datasetId]
@@ -113,17 +126,17 @@ export function FeatureEngineeringBuilder({
         })))
         .catch(() => setSchemaCache((current) => ({ ...current, [datasetId]: [] })));
     }
-  }, [datasets, relevantDatasetIds, schemaCache]);
+  }, [catalogDatasets, relevantDatasetIds, schemaCache]);
 
   const upstreamColumns = useMemo(
-    () => inferPipelineOutputColumns(upstreamDefinition, datasets, schemaCache),
-    [datasets, schemaCache, upstreamDefinition]
+    () => inferPipelineOutputColumns(upstreamDefinition, catalogDatasets, schemaCache),
+    [catalogDatasets, schemaCache, upstreamDefinition]
   );
   const directColumns = useMemo(
     () => definition.inputs.flatMap((input) =>
-      datasetColumns(datasets.find((item) => item.id === input.dataset_id), schemaCache)
+      datasetColumns(catalogDatasets.find((item) => item.id === input.dataset_id), schemaCache)
     ),
-    [datasets, definition.inputs, schemaCache]
+    [catalogDatasets, definition.inputs, schemaCache]
   );
   const availableColumns = useMemo(
     () => mergeColumns(hasUpstream ? [...upstreamColumns, ...directColumns] : directColumns),
@@ -157,6 +170,28 @@ export function FeatureEngineeringBuilder({
   const suggestedFeatures = roleColumns
     .map((column) => column.name)
     .filter((name) => ![suggestedTarget, suggestedRowId].includes(name));
+
+  async function loadDatasetPage(
+    query: { limit: number; offset: number; search: string }
+  ): Promise<OffsetPage<DataAsset>> {
+    const page = await api.pageDatasets({
+      ...query,
+      business_case_id: businessCaseId,
+      asset_kind: "dataset",
+      families: true
+    });
+    return {
+      ...page,
+      items: page.items
+        .filter(isUsableDataset)
+        .map((item) => ({ ...item, id: item.logical_id || item.id }))
+    };
+  }
+
+  function rememberDataset(dataset: DataAsset | undefined) {
+    if (!dataset) return;
+    setDatasetSnapshots((current) => ({ ...current, [dataset.id]: dataset }));
+  }
 
   function updateInput(index: number, datasetId: string) {
     onChange({
@@ -423,7 +458,9 @@ export function FeatureEngineeringBuilder({
           {definition.evaluation.split_strategy === "predefined" ? (
             <PredefinedInputs
               definition={definition}
-              datasets={datasets}
+              datasets={catalogDatasets}
+              loadDatasetPage={loadDatasetPage}
+              onDatasetSelected={rememberDataset}
               hasUpstream={hasUpstream}
               disabled={disabled}
               onDatasetChange={updateInput}
@@ -435,7 +472,9 @@ export function FeatureEngineeringBuilder({
             <GeneratedSplitControls
               definition={definition}
               columns={availableColumns}
-              datasets={datasets}
+              datasets={catalogDatasets}
+              loadDatasetPage={loadDatasetPage}
+              onDatasetSelected={rememberDataset}
               hasUpstream={hasUpstream}
               disabled={disabled}
               onDatasetChange={(datasetId) => updateInput(0, datasetId)}
@@ -735,6 +774,8 @@ export function FeatureEngineeringBuilder({
 function PredefinedInputs({
   definition,
   datasets,
+  loadDatasetPage,
+  onDatasetSelected,
   hasUpstream,
   disabled,
   onDatasetChange,
@@ -744,6 +785,8 @@ function PredefinedInputs({
 }: {
   definition: FeatureEngineeringDefinition;
   datasets: DataAsset[];
+  loadDatasetPage: (query: { limit: number; offset: number; search: string }) => Promise<OffsetPage<DataAsset>>;
+  onDatasetSelected: (dataset: DataAsset | undefined) => void;
   hasUpstream: boolean;
   disabled: boolean;
   onDatasetChange: (index: number, datasetId: string) => void;
@@ -778,15 +821,20 @@ function PredefinedInputs({
             ) : (
               <>
               <label className="fe-field"><span>Dataset</span>
-                <select value={input.dataset_id} disabled={disabled}
-                  onChange={(event) => onDatasetChange(index, event.target.value)}>
-                  <option value="">Choose dataset…</option>
-                  {datasets.filter(isUsableDataset).map((dataset) => (
-                    <option value={dataset.id} key={dataset.id}>
-                      {dataset.name} · {dataset.row_count ?? "?"} rows
-                    </option>
-                  ))}
-                </select>
+                <PagedCatalogSelect<DataAsset>
+                  value={input.dataset_id}
+                  selectedItem={datasets.find((item) => item.id === input.dataset_id)}
+                  disabled={disabled}
+                  loadPage={loadDatasetPage}
+                  getId={(dataset) => dataset.id}
+                  getLabel={(dataset) => `${dataset.name} · ${dataset.row_count ?? "?"} rows`}
+                  emptyLabel="Choose dataset…"
+                  searchPlaceholder="Search datasets"
+                  onChange={(value, dataset) => {
+                    onDatasetSelected(dataset);
+                    onDatasetChange(index, value);
+                  }}
+                />
               </label>
               <label className="fe-field"><span>Version policy</span>
                 <select value={input.version_policy ?? "latest"} disabled={disabled}
@@ -816,6 +864,8 @@ function GeneratedSplitControls({
   definition,
   columns,
   datasets,
+  loadDatasetPage,
+  onDatasetSelected,
   hasUpstream,
   disabled,
   onDatasetChange,
@@ -825,6 +875,8 @@ function GeneratedSplitControls({
   definition: FeatureEngineeringDefinition;
   columns: DatasetColumn[];
   datasets: DataAsset[];
+  loadDatasetPage: (query: { limit: number; offset: number; search: string }) => Promise<OffsetPage<DataAsset>>;
+  onDatasetSelected: (dataset: DataAsset | undefined) => void;
   hasUpstream: boolean;
   disabled: boolean;
   onDatasetChange: (datasetId: string) => void;
@@ -841,13 +893,22 @@ function GeneratedSplitControls({
         <Database size={18} />
         <div><span>Source to partition</span>
           {hasUpstream ? <strong>Data Engineering output</strong> : (
-            <select value={definition.inputs[0]?.dataset_id ?? ""} disabled={disabled}
-              onChange={(event) => onDatasetChange(event.target.value)}>
-              <option value="">Choose dataset…</option>
-              {datasets.filter(isUsableDataset).map((dataset) => (
-                <option value={dataset.id} key={dataset.id}>{dataset.name}</option>
-              ))}
-            </select>
+            <PagedCatalogSelect<DataAsset>
+              value={definition.inputs[0]?.dataset_id ?? ""}
+              selectedItem={datasets.find(
+                (item) => item.id === definition.inputs[0]?.dataset_id
+              )}
+              disabled={disabled}
+              loadPage={loadDatasetPage}
+              getId={(dataset) => dataset.id}
+              getLabel={(dataset) => dataset.name}
+              emptyLabel="Choose dataset…"
+              searchPlaceholder="Search datasets"
+              onChange={(value, dataset) => {
+                onDatasetSelected(dataset);
+                onDatasetChange(value);
+              }}
+            />
           )}</div>
         {!hasUpstream && (
           <label className="fe-field"><span>Version policy</span>

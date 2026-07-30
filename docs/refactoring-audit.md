@@ -60,7 +60,7 @@ decode, per-cell conversion, row duplication, and unbounded SQLite copy.
 Registered source types without a columnar adapter now fail explicitly with
 HTTP 415 instead of creating an accidental in-process materialization path.
 
-## Ranked follow-up work
+## Follow-up work identified at audit time
 
 ### P1 — split the frontend application shell
 

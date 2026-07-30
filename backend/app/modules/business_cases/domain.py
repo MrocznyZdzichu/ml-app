@@ -103,3 +103,10 @@ class BusinessCaseDataAttachment:
     target_column: str = ""
     created_by: str = ""
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    data_asset_name: str = ""
+    data_asset_status: str = ""
+    data_asset_source_type: str = ""
+    data_asset_logical_id: str = ""
+    data_asset_version_number: int = 0
+    data_asset_pipeline_id: str = ""
+    data_asset_pipeline_template: str = ""

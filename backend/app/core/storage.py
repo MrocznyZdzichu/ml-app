@@ -1,4 +1,6 @@
+import hashlib
 from dataclasses import dataclass
+from pathlib import Path
 
 from app.core.config import settings
 
@@ -30,3 +32,12 @@ class ObjectStorageNamer:
             bucket=self.bucket,
             key=f"users/{owner_id}/artifacts/{artifact_id}/{safe_name}",
         )
+
+
+def sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
+    """Hash a file with bounded memory instead of materializing the artifact."""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()

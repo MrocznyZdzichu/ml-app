@@ -6,8 +6,7 @@ from fastapi import HTTPException, status
 from redis import Redis
 
 from app.core.config import settings
-from app.worker.celery_app import celery_app
-from app.worker.tasks import descriptive_profile_dataset
+from app.ports.task_queue import TaskQueue, require_task_queue
 
 
 class RedisJobStore(Protocol):
@@ -26,8 +25,13 @@ class DescriptiveProfileJobs:
 
     key_prefix = "descriptive-profile-owner"
 
-    def __init__(self, redis_client: RedisJobStore | None = None) -> None:
+    def __init__(
+        self,
+        redis_client: RedisJobStore | None = None,
+        task_queue: TaskQueue | None = None,
+    ) -> None:
         self.redis = redis_client or Redis.from_url(settings.redis_url)
+        self.task_queue = task_queue
         self.expires_seconds = settings.descriptive_profile_result_expires_seconds
 
     def start(self, dataset_id: str, owner_id: str, options: dict[str, Any], asset_owner_id: str | None = None) -> dict[str, Any]:
@@ -42,8 +46,9 @@ class DescriptiveProfileJobs:
             task_args = [dataset_id, owner_id, options]
             if asset_owner_id and asset_owner_id != owner_id:
                 task_args = [dataset_id, asset_owner_id, options, owner_id]
-            descriptive_profile_dataset.apply_async(
-                args=task_args,
+            require_task_queue(self.task_queue).enqueue(
+                "app.worker.tasks.descriptive_profile_dataset",
+                task_args,
                 task_id=job_id,
             )
         except Exception:
@@ -53,7 +58,7 @@ class DescriptiveProfileJobs:
 
     def status(self, dataset_id: str, owner_id: str, job_id: str) -> dict[str, Any]:
         self._authorize(dataset_id, owner_id, job_id)
-        task = celery_app.AsyncResult(job_id)
+        task = require_task_queue(self.task_queue).result(job_id)
         if task.successful():
             return {"job_id": job_id, "status": "completed", "result": task.result, "error": None}
         if task.failed() or task.state == "REVOKED":

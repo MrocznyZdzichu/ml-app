@@ -11,7 +11,7 @@ from sqlalchemy import Column, DateTime, MetaData, String, Table, select, text
 from sqlalchemy.engine import Engine
 
 from app.core.database import get_engine
-from app.core.security import Principal
+from app.core.identity import Principal
 from app.modules.sharing.domain import AuditEvent
 from app.modules.sharing.repository import PostgresSharingRepository
 
@@ -105,8 +105,13 @@ class ApiCredentialRepository:
 
 
 class ApiCredentialService:
-    def __init__(self, repository: ApiCredentialRepository | None = None) -> None:
+    def __init__(
+        self,
+        repository: ApiCredentialRepository | None = None,
+        audit_repository: PostgresSharingRepository | None = None,
+    ) -> None:
         self.repository = repository or ApiCredentialRepository()
+        self.audit_repository = audit_repository or PostgresSharingRepository()
 
     def create(self, name: str, expires_at: datetime | None, principal: Principal) -> tuple[ApiCredential, str]:
         clean_name = name.strip()
@@ -134,9 +139,8 @@ class ApiCredentialService:
             expires_at=None, revoked_at=now, last_used_at=None, created_at=now,
         ))
 
-    @staticmethod
-    def _audit(principal: Principal, action: str, credential: ApiCredential) -> None:
-        PostgresSharingRepository().add_audit(AuditEvent(
+    def _audit(self, principal: Principal, action: str, credential: ApiCredential) -> None:
+        self.audit_repository.add_audit(AuditEvent(
             id=str(uuid4()), actor_id=principal.user_id, action=action,
             subject_type="api_credential", subject_id=credential.id,
             new_state={"name": credential.name, "expires_at": credential.expires_at.isoformat() if credential.expires_at else None},

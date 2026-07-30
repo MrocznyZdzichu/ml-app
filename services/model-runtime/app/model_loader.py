@@ -28,10 +28,36 @@ class ModelLoader:
             raise ValueError("Model artifact is outside the allowed repository") from exc
         if not path.is_file():
             raise FileNotFoundError("Model artifact does not exist")
-        actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+        stat = path.stat()
+        actual_hash = self._hash_cached(
+            str(path),
+            int(stat.st_dev),
+            int(stat.st_ino),
+            int(stat.st_size),
+            int(stat.st_mtime_ns),
+            int(stat.st_ctime_ns),
+        )
         if expected_hash and actual_hash != expected_hash:
             raise ValueError("Model artifact hash does not match registry metadata")
         return self._load_cached(str(path), actual_hash)
+
+    @staticmethod
+    @lru_cache(maxsize=64)
+    def _hash_cached(
+        path: str,
+        device: int,
+        inode: int,
+        size: int,
+        modified_ns: int,
+        changed_ns: int,
+    ) -> str:
+        """Hash immutable artifacts once per observed filesystem identity."""
+        del device, inode, size, modified_ns, changed_ns
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     @staticmethod
     @lru_cache(maxsize=32)

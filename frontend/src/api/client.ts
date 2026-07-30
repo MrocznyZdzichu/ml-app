@@ -1,75 +1,29 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000/api/v1";
-const API_ROOT_URL = API_BASE_URL.replace(/\/api\/v1\/?$/, "");
-const TOKEN_STORAGE_KEY = "ml_app_access_token";
+import { API_ROOT_URL, request, withQuery } from "./http";
+import type { OffsetPage, PageQuery } from "./pagination";
+import type { ModelEvaluationSnapshot } from "./contracts/modelEvaluation";
+import type { ModelServingUsage } from "./contracts/serving";
+import { servingApi } from "./serving";
 
-let accessToken = localStorage.getItem(TOKEN_STORAGE_KEY) ?? "";
-
-export function setAccessToken(token: string | null) {
-  accessToken = token ?? "";
-  if (token) {
-    localStorage.setItem(TOKEN_STORAGE_KEY, token);
-  } else {
-    localStorage.removeItem(TOKEN_STORAGE_KEY);
-  }
-}
-
-export function getAccessToken() {
-  return accessToken;
-}
-
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const headers = new Headers(options.headers);
-  if (!(options.body instanceof FormData)) {
-    headers.set("Content-Type", "application/json");
-  }
-  if (accessToken) {
-    headers.set("Authorization", `Bearer ${accessToken}`);
-  }
-
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers
-  });
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(readErrorMessage(body) || response.statusText);
-  }
-
-  if (response.status === 204) {
-    return undefined as T;
-  }
-
-  return response.json() as Promise<T>;
-}
-
-function readErrorMessage(body: string) {
-  try {
-    const parsed = JSON.parse(body) as { detail?: unknown };
-    if (typeof parsed.detail === "string") {
-      return parsed.detail;
-    }
-    if (parsed.detail && typeof parsed.detail === "object") {
-      const detail = parsed.detail as { message?: unknown; errors?: unknown };
-      if (typeof detail.message === "string") {
-        const errors = Array.isArray(detail.errors)
-          ? detail.errors
-              .filter((item) => item && typeof item === "object")
-              .slice(0, 3)
-              .map((item) => {
-                const error = item as { path?: unknown; message?: unknown };
-                return `${typeof error.path === "string" && error.path ? `${error.path}: ` : ""}${String(error.message ?? "")}`;
-              })
-              .filter(Boolean)
-          : [];
-        return [detail.message, ...errors].join(" · ");
-      }
-    }
-  } catch {
-    return body;
-  }
-  return body;
-}
+export { getAccessToken, setAccessToken } from "./http";
+export type { OffsetPage, PageQuery } from "./pagination";
+export type { ModelEvaluationMetric, ModelEvaluationSnapshot } from "./contracts/modelEvaluation";
+export type {
+  ChallengerReplay,
+  Deployment,
+  DeploymentModelOption,
+  DeploymentRevision,
+  DeploymentRole,
+  InferenceInputContract,
+  InferenceInputField,
+  InferencePage,
+  InferenceRequest,
+  InferenceRequestSummary,
+  InferenceSummaryPage,
+  ModelServingUsage,
+  OnlineMonitoringBucketEvaluation,
+  OnlineMonitoringRun,
+  ScoreResponse
+} from "./contracts/serving";
 
 export type AuthResponse = {
   access_token: string;
@@ -473,188 +427,6 @@ export type DatasetLineageReference = {
   depth: number;
 };
 
-export type Deployment = {
-  id: string;
-  owner_id: string;
-  business_case_id: string;
-  name: string;
-  slug: string;
-  status: "requested" | "building" | "running" | "degraded" | "failed" | "stopped" | "archived";
-  active_revision_id: string;
-  endpoint_url: string | null;
-  retention_days: number;
-  created_by: string;
-  updated_by: string;
-  created_at: string;
-  updated_at: string;
-  active_revision: DeploymentRevision | null;
-};
-
-export type DeploymentRole = "champion" | "challenger" | "shadow" | "fallback";
-
-export type DeploymentRevision = {
-  id: string;
-  deployment_id: string;
-  version_number: number;
-  assignments: Array<{ model_id: string; role: DeploymentRole }>;
-  created_by: string;
-  reason: string;
-  created_at: string;
-};
-
-export type ModelServingUsage = {
-  model_id: string;
-  deployment_id: string;
-  deployment_name: string;
-  deployment_slug: string;
-  deployment_status: Deployment["status"];
-  endpoint_url: string | null;
-  revision_id: string;
-  revision_version: number;
-  role: DeploymentRole;
-};
-
-export type ScoreResponse = {
-  request_id: string;
-  correlation_id: string;
-  deployment_id: string;
-  deployment_revision_id: string;
-  model_id: string;
-  served_role: DeploymentRole;
-  fallback_used: boolean;
-  predictions: Array<{ prediction_id: string; record_id: string; prediction: unknown; outputs: Record<string, unknown> }>;
-  warnings: string[];
-};
-
-export type InferenceInputField = {
-  name: string;
-  value_type: "number" | "integer" | "string" | "boolean";
-  required: boolean;
-  default_value: unknown;
-  description: string;
-  minimum: number | null;
-  maximum: number | null;
-  options: unknown[];
-};
-
-export type InferenceInputContract = {
-  deployment_id: string;
-  deployment_revision_id: string;
-  model_id: string;
-  role: DeploymentRole;
-  fields: InferenceInputField[];
-  example_features: Record<string, unknown>;
-};
-
-export type DeploymentModelOption = {
-  model_id: string;
-  name: string;
-  version: string;
-  business_case_id: string;
-  stage: string;
-  contract_signature: string;
-  compatible_with_active_champion: boolean;
-  allowed_roles: DeploymentRole[];
-};
-
-export type InferenceRequest = {
-  id: string;
-  deployment_id: string;
-  deployment_revision_id: string;
-  requested_by: string;
-  correlation_id: string;
-  status: "accepted" | "succeeded" | "failed";
-  record_count: number;
-  request_payload: Record<string, unknown>;
-  response_payload: Record<string, unknown>;
-  warnings: string[];
-  error_code: string;
-  error_message: string;
-  champion_model_id: string;
-  served_model_id: string;
-  served_role: string;
-  fallback_used: boolean;
-  latency_ms: number | null;
-  created_at: string;
-  completed_at: string | null;
-};
-
-export type InferenceRequestSummary = Omit<
-  InferenceRequest,
-  "request_payload" | "response_payload"
->;
-
-export type InferencePage = {
-  items: InferenceRequest[];
-  next_cursor: string | null;
-};
-
-export type InferenceSummaryPage = {
-  items: InferenceRequestSummary[];
-  next_cursor: string | null;
-};
-
-export type ChallengerReplay = {
-  id: string;
-  deployment_id: string;
-  deployment_revision_id: string;
-  challenger_model_id: string;
-  status: "queued" | "running" | "succeeded" | "failed";
-  max_requests: number;
-  processed_requests: number;
-  processed_records: number;
-  failed_requests: number;
-  error_message: string;
-  created_at: string;
-};
-
-export type OnlineMonitoringRun = {
-  id: string;
-  deployment_id: string;
-  business_case_id: string;
-  owner_id: string;
-  requested_by: string;
-  status: "queued" | "running" | "succeeded" | "failed";
-  since: string;
-  until: string;
-  source_before: string;
-  actuals_dataset_id: string;
-  aggregation_granularity: "none" | "hour" | "day" | "week" | "month";
-  actuals_artifact_id: string;
-  join_strategy: "auto" | "prediction_id" | "request_record_id" | "record_id" | "not_applicable";
-  actuals_prediction_id_column: string;
-  actuals_request_id_column: string;
-  actuals_record_id_column: string;
-  actuals_target_column: string;
-  problem_type: string;
-  target_column: string;
-  time_basis: "scored_at";
-  processed_request_count: number;
-  processed_row_count: number;
-  matched_row_count: number;
-  missing_actuals_count: number;
-  unmatched_actuals_count: number;
-  snapshot_dataset_id: string;
-  joined_dataset_id: string;
-  report_artifact_id: string;
-  report: Record<string, unknown>;
-  warnings: string[];
-  error_message: string;
-  created_at: string;
-  started_at: string | null;
-  completed_at: string | null;
-  archived_at: string | null;
-  archived_by: string;
-  archive_reason: string;
-};
-
-export type OnlineMonitoringBucketEvaluation = {
-  bucket_start: string;
-  bucket_end: string;
-  label: string;
-  evaluation: ModelEvaluationSnapshot;
-};
-
 export type BusinessCase = {
   id: string;
   owner_id: string;
@@ -746,6 +518,13 @@ export type BusinessCaseDataAttachment = {
   target_column: string;
   created_by: string;
   created_at: string;
+  data_asset_name?: string;
+  data_asset_status?: string;
+  data_asset_source_type?: string;
+  data_asset_logical_id?: string;
+  data_asset_version_number?: number;
+  data_asset_pipeline_id?: string;
+  data_asset_pipeline_template?: string;
 };
 
 export type Pipeline = {
@@ -779,86 +558,6 @@ export type PipelineVersion = {
   created_at: string;
   published_by: string;
   published_at: string | null;
-};
-
-export type ModelEvaluationMetric = {
-  id: string;
-  label: string;
-  value: number;
-  direction: "higher" | "lower" | "target_zero" | string;
-  unit: string;
-};
-
-export type ModelEvaluationSnapshot = {
-  contract_version: string;
-  kind: "model_performance";
-  status: "available" | "target_unavailable";
-  problem_type: string;
-  generated_at: string;
-  data_scope: {
-    mode: "full";
-    scanned_row_count?: number;
-    evaluated_row_count: number;
-    excluded_row_count: number;
-  };
-  columns?: { target?: string; prediction?: string; score?: string | null };
-  metrics: ModelEvaluationMetric[];
-  class_metrics?: Array<{
-    label: unknown;
-    support: number;
-    predicted_count: number;
-    precision: number;
-    recall: number;
-    f1: number;
-  }>;
-  class_count?: number;
-  positive_class?: unknown;
-  confusion_matrix?: {
-    labels: unknown[];
-    values: number[][];
-    truncated: boolean;
-    total_class_count: number;
-  };
-  curves?: Record<string, {
-    x_label: string;
-    y_label: string;
-    points: Array<{ x: number; y: number; threshold?: number | null; count?: number }>;
-    rendering: string;
-  }>;
-  distributions?: {
-    score_by_actual?: Array<{
-      lower: number;
-      upper: number;
-      negative_count: number;
-      positive_count: number;
-    }>;
-  };
-  residuals?: {
-    summary: {
-      mean: number;
-      standard_deviation: number;
-      p05: number;
-      median: number;
-      p95: number;
-    };
-    histogram: Array<{ lower: number; upper: number; count: number }>;
-    qq_plot?: {
-      points: Array<{ theoretical: number; observed: number }>;
-      x_label: string;
-      y_label: string;
-      rendering: string;
-    };
-    actual_vs_predicted: {
-      points: Array<{ actual: number; predicted: number }>;
-      rendering: string;
-    };
-  };
-  warnings: string[];
-  monitoring: {
-    baseline_eligible: boolean;
-    requires_actuals: boolean;
-    comparison_dimensions?: string[];
-  };
 };
 
 export type PipelineRun = {
@@ -1003,6 +702,26 @@ export type PipelineStepRun = {
   finished_at: string | null;
 };
 
+export type PipelineRunStatus = Pick<
+  PipelineRun,
+  | "id"
+  | "pipeline_id"
+  | "pipeline_version_id"
+  | "business_case_id"
+  | "status"
+  | "trigger_type"
+  | "is_dry_run"
+  | "requested_step_id"
+  | "input_row_count"
+  | "processed_row_count"
+  | "output_row_count"
+  | "rejected_row_count"
+  | "error_message"
+  | "created_at"
+  | "started_at"
+  | "finished_at"
+>;
+
 export type PipelineRunEvent = {
   timestamp: string;
   level: "info" | "warning" | "error" | string;
@@ -1085,9 +804,31 @@ export const api = {
     request<void>("/auth/change-password", { method: "POST", body: JSON.stringify(payload) }),
   listDatasets: () => request<DataAsset[]>("/datasets"),
   listDatasetSummaries: () => request<DataAsset[]>("/datasets?summary=true"),
+  getDataset: (datasetId: string) =>
+    request<DataAsset>(`/datasets/${encodeURIComponent(datasetId)}`),
+  pageDatasets: (query: PageQuery & {
+    status?: string;
+    source_type?: string;
+    asset_kind?: "dataset" | "view";
+    include_deleted?: boolean;
+    families?: boolean;
+    business_case_id?: string;
+    pipeline_id?: string;
+    pipeline_type?: string;
+    uploaded_only?: boolean;
+    owned_only?: boolean;
+    summary?: boolean;
+  } = {}) =>
+    request<OffsetPage<DataAsset>>(withQuery("/datasets/page", { summary: true, ...query })),
   listDatasetVersions: (logicalId: string) =>
     request<DataAsset[]>(`/datasets/${datasetRouteId(logicalId)}/versions`),
+  pageDatasetVersions: (logicalId: string, query: PageQuery = {}) =>
+    request<OffsetPage<DataAsset>>(
+      withQuery(`/datasets/${datasetRouteId(logicalId)}/versions/page`, query)
+    ),
   listBusinessCases: () => request<BusinessCase[]>("/business-cases"),
+  pageBusinessCases: (query: PageQuery & { manageable_only?: boolean } = {}) =>
+    request<OffsetPage<BusinessCase>>(withQuery("/business-cases/page", query)),
   createBusinessCase: (payload: Record<string, unknown>) =>
     request<BusinessCase>("/business-cases", {
       method: "POST",
@@ -1109,6 +850,18 @@ export const api = {
     }),
   listBusinessCaseDataAttachments: (businessCaseId: string) =>
     request<BusinessCaseDataAttachment[]>(`/business-cases/${businessCaseId}/data-attachments`),
+  pageBusinessCaseDataAttachments: (
+    businessCaseId: string,
+    query: PageQuery & {
+      role?: string;
+      pipeline_id?: string;
+      pipeline_type?: string;
+      uploaded_only?: boolean;
+      deleted_only?: boolean;
+    } = {}
+  ) => request<OffsetPage<BusinessCaseDataAttachment>>(
+    withQuery(`/business-cases/${encodeURIComponent(businessCaseId)}/data-attachments/page`, query)
+  ),
   updateBusinessCaseDataAttachment: (businessCaseId: string, attachmentId: string, payload: Record<string, unknown>) =>
     request<BusinessCaseDataAttachment>(`/business-cases/${businessCaseId}/data-attachments/${attachmentId}`, {
       method: "PATCH",
@@ -1120,6 +873,17 @@ export const api = {
     }),
   listPipelines: (businessCaseId?: string) =>
     request<Pipeline[]>(businessCaseId ? `/pipelines?business_case_id=${encodeURIComponent(businessCaseId)}` : "/pipelines"),
+  pagePipelines: (
+    query: PageQuery & {
+      business_case_id?: string;
+      pipeline_type?: string;
+      pipeline_template?: string;
+      status?: string;
+      include_deprecated?: boolean;
+    } = {}
+  ) => request<OffsetPage<Pipeline>>(withQuery("/pipelines/page", query)),
+  getPipeline: (pipelineId: string) =>
+    request<Pipeline>(`/pipelines/${encodeURIComponent(pipelineId)}`),
   getModelTrainingCatalog: <T = unknown>() =>
     request<T>("/pipelines/model-training/catalog"),
   createPipeline: (payload: Record<string, unknown>) =>
@@ -1143,6 +907,12 @@ export const api = {
     }),
   listPipelineVersions: (pipelineId: string) =>
     request<PipelineVersion[]>(`/pipelines/${pipelineId}/versions`),
+  pagePipelineVersions: (
+    pipelineId: string,
+    query: PageQuery & { status?: "draft" | "published" | "" } = {}
+  ) => request<OffsetPage<PipelineVersion>>(
+    withQuery(`/pipelines/${encodeURIComponent(pipelineId)}/versions/page`, query)
+  ),
   updateDraftPipelineVersion: (pipelineId: string, definition: Record<string, unknown>) =>
     request<PipelineVersion>(`/pipelines/${pipelineId}/versions/draft`, {
       method: "PATCH",
@@ -1161,12 +931,26 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload)
     }),
-  listPipelineRuns: (pipelineId: string) =>
-    request<PipelineRun[]>(`/pipelines/${pipelineId}/runs`),
+  listPipelineRuns: (pipelineId: string, limit = 200, offset = 0) =>
+    request<PipelineRun[]>(
+      `/pipelines/${encodeURIComponent(pipelineId)}/runs?limit=${limit}&offset=${offset}`
+    ),
   listPipelineRunHistory: (limit = 200) =>
     request<PipelineRun[]>(`/pipelines/runs/history?limit=${limit}`),
+  pagePipelineRunHistory: (
+    query: PageQuery & {
+      status?: string;
+      pipeline_id?: string;
+      pipeline_version_id?: string;
+      business_case_id?: string;
+      trigger_type?: string;
+      dry_run?: boolean;
+    } = {}
+  ) => request<OffsetPage<PipelineRun>>(withQuery("/pipelines/runs/history/page", query)),
   getPipelineRun: (pipelineId: string, runId: string) =>
     request<PipelineRun>(`/pipelines/${pipelineId}/runs/${runId}`),
+  getPipelineRunStatus: (pipelineId: string, runId: string) =>
+    request<PipelineRunStatus>(`/pipelines/${pipelineId}/runs/${runId}/status`),
   getPipelineRunDetails: (pipelineId: string, runId: string) =>
     request<PipelineRunDetails>(`/pipelines/${pipelineId}/runs/${runId}/details`),
   cancelPipelineRun: (pipelineId: string, runId: string) =>
@@ -1245,6 +1029,16 @@ export const api = {
     }),
   listModels: () => request<ModelArtifact[]>("/models"),
   listModelSummaries: () => request<ModelArtifact[]>("/models?summary=true"),
+  pageModels: (
+    query: PageQuery & {
+      business_case_id?: string;
+      stage?: string;
+      pipeline_id?: string;
+      pipeline_type?: string;
+    } = {}
+  ) => request<OffsetPage<{ latest: ModelArtifact; version_count: number }>>(
+    withQuery("/models/page", query)
+  ),
   promoteModel: (modelId: string, stage: "developed" | "staging" | "production" | "archived") =>
     request<ModelArtifact>(`/models/${encodeURIComponent(modelId)}/stage`, {
       method: "PATCH",
@@ -1252,8 +1046,16 @@ export const api = {
     }),
   listModelVersions: (logicalId: string) =>
     request<ModelArtifact[]>(`/models/${encodeURIComponent(logicalId)}/versions`),
+  pageModelVersions: (logicalId: string, query: PageQuery = {}) =>
+    request<OffsetPage<ModelArtifact>>(
+      withQuery(`/models/${encodeURIComponent(logicalId)}/versions/page`, query)
+    ),
   listModelServingUsage: (logicalId: string) =>
     request<ModelServingUsage[]>(`/serving/model-families/${encodeURIComponent(logicalId)}/usage`),
+  pageModelServingUsage: (modelId: string, query: PageQuery = {}) =>
+    request<OffsetPage<ModelServingUsage>>(
+      withQuery(`/serving/models/${encodeURIComponent(modelId)}/usage/page`, query)
+    ),
   getModel: (modelId: string) =>
     request<ModelArtifact>(`/models/${encodeURIComponent(modelId)}`),
   getModelDataLineage: (modelId: string) =>
@@ -1270,8 +1072,27 @@ export const api = {
         ? `/scoring-reports?business_case_id=${encodeURIComponent(businessCaseId)}&summary=true`
         : "/scoring-reports?summary=true"
     ),
+  pageScoringReports: (
+    query: PageQuery & {
+      business_case_id?: string;
+      problem_type?: string;
+      pipeline_id?: string;
+      pipeline_type?: string;
+      sort_by?: "report" | "business_case" | "pipeline" | "problem" | "created" | "scope";
+      sort_direction?: "asc" | "desc";
+    } = {}
+  ) => request<OffsetPage<{ latest: ScoringReport; version_count: number }>>(
+    withQuery("/scoring-reports/page", query)
+  ),
   listScoringReportVersions: (logicalId: string) =>
     request<ScoringReport[]>(`/scoring-reports/${encodeURIComponent(logicalId)}/versions?summary=true`),
+  pageScoringReportVersions: (logicalId: string, query: PageQuery = {}) =>
+    request<OffsetPage<ScoringReport>>(
+      withQuery(`/scoring-reports/${encodeURIComponent(logicalId)}/versions/page`, {
+        summary: true,
+        ...query
+      })
+    ),
   getScoringReport: (reportId: string) =>
     request<ScoringReport>(`/scoring-reports/${encodeURIComponent(reportId)}`),
   getScoringReportDataLineage: (reportId: string) =>
@@ -1280,126 +1101,26 @@ export const api = {
     request<ArtifactDependency[]>(
       `/business-cases/dependencies/${encodeURIComponent(referenceId)}?artifact_type=${encodeURIComponent(artifactType)}`
     ),
-  createDeployment: (payload: Record<string, unknown>) =>
-    request<Deployment>("/serving/deployments", {
-      method: "POST",
-      body: JSON.stringify(payload)
-    }),
-  listDeployments: (includeArchived = false) => request<Deployment[]>(`/serving/deployments${includeArchived ? "?include_archived=true" : ""}`),
-  listDeploymentRevisions: (deploymentId: string) =>
-    request<DeploymentRevision[]>(`/serving/deployments/${encodeURIComponent(deploymentId)}/revisions`),
-  createDeploymentRevision: (deploymentId: string, assignments: Array<{ model_id: string; role: DeploymentRole }>, reason: string) =>
-    request<DeploymentRevision>(`/serving/deployments/${encodeURIComponent(deploymentId)}/revisions`, {
-      method: "POST",
-      body: JSON.stringify({ assignments, reason })
-    }),
-  setDeploymentStatus: (deploymentId: string, status: "running" | "stopped" | "archived", reason: string) =>
-    request<Deployment>(`/serving/deployments/${encodeURIComponent(deploymentId)}/status`, {
-      method: "POST",
-      body: JSON.stringify({ status, reason })
-    }),
-  rollbackDeployment: (deploymentId: string, revisionId: string, reason: string) =>
-    request<DeploymentRevision>(`/serving/deployments/${encodeURIComponent(deploymentId)}/revisions/${encodeURIComponent(revisionId)}/rollback`, {
-      method: "POST",
-      body: JSON.stringify({ reason })
-    }),
-  score: (
-    deploymentId: string,
-    instances: Array<{ record_id?: string; features: Record<string, unknown> }>,
-    challengerModelId?: string
-  ) =>
-    request<ScoreResponse>(
-      challengerModelId
-        ? `/serving/deployments/${encodeURIComponent(deploymentId)}/challengers/${encodeURIComponent(challengerModelId)}/predictions`
-        : `/serving/deployments/${encodeURIComponent(deploymentId)}/predictions`,
-      {
-        method: "POST",
-        body: JSON.stringify({ instances })
-      }
-    ),
-  deploymentInputContract: (deploymentId: string, challengerModelId?: string) => {
-    const params = new URLSearchParams();
-    if (challengerModelId) params.set("challenger_model_id", challengerModelId);
-    const query = params.size ? `?${params}` : "";
-    return request<InferenceInputContract>(`/serving/deployments/${encodeURIComponent(deploymentId)}/input-contract${query}`);
-  },
-  deploymentModelOptions: (deploymentId: string) =>
-    request<DeploymentModelOption[]>(`/serving/deployments/${encodeURIComponent(deploymentId)}/model-options`),
-  inferenceLog: (deploymentId: string, limit = 50, cursor = "", recordId = "") => {
-    const params = new URLSearchParams({ limit: String(limit) });
-    if (cursor) params.set("cursor", cursor);
-    if (recordId) params.set("record_id", recordId);
-    return request<InferencePage>(`/serving/deployments/${encodeURIComponent(deploymentId)}/inference-log?${params}`);
-  },
-  inferenceLogSummary: (deploymentId: string, limit = 50, cursor = "", recordId = "") => {
-    const params = new URLSearchParams({ limit: String(limit) });
-    if (cursor) params.set("cursor", cursor);
-    if (recordId) params.set("record_id", recordId);
-    return request<InferenceSummaryPage>(`/serving/deployments/${encodeURIComponent(deploymentId)}/inference-log-summary?${params}`);
-  },
-  inferenceDetail: (deploymentId: string, requestId: string) =>
-    request<Record<string, unknown>>(`/serving/deployments/${encodeURIComponent(deploymentId)}/inference-log/${encodeURIComponent(requestId)}`),
-  createChallengerReplay: (deploymentId: string, challengerModelId: string, maxRequests = 1000) =>
-    request<ChallengerReplay>(`/serving/deployments/${encodeURIComponent(deploymentId)}/challenger-replays`, {
-      method: "POST",
-      body: JSON.stringify({ challenger_model_id: challengerModelId, max_requests: maxRequests })
-    }),
-  listChallengerReplays: (deploymentId: string) =>
-    request<ChallengerReplay[]>(`/serving/deployments/${encodeURIComponent(deploymentId)}/challenger-replays`),
-  createOnlineMonitoringRun: (
-    deploymentId: string,
-    payload: {
-      since: string;
-      until: string;
-      actuals_dataset_id?: string;
-      aggregation_granularity?: "none" | "hour" | "day" | "week" | "month";
-      actuals_target_column?: string;
-      join?: {
-        strategy?: "auto" | "prediction_id" | "request_record_id" | "record_id";
-        actuals_prediction_id_column?: string;
-        actuals_request_id_column?: string;
-        actuals_record_id_column?: string;
-      };
-    }
-  ) => request<OnlineMonitoringRun>(`/serving/deployments/${encodeURIComponent(deploymentId)}/monitoring-runs`, {
-    method: "POST",
-    body: JSON.stringify(payload)
-  }),
-  listDeploymentMonitoringRuns: (deploymentId: string, limit = 100, includeArchived = false) =>
-    request<OnlineMonitoringRun[]>(`/serving/deployments/${encodeURIComponent(deploymentId)}/monitoring-runs?limit=${limit}&include_archived=${includeArchived}`),
-  listOnlineMonitoringRuns: (limit = 200, includeArchived = false) =>
-    request<OnlineMonitoringRun[]>(`/serving/monitoring-runs?limit=${limit}&include_archived=${includeArchived}`),
-  getOnlineMonitoringRun: (runId: string) =>
-    request<OnlineMonitoringRun>(`/serving/monitoring-runs/${encodeURIComponent(runId)}`),
-  getOnlineMonitoringBucketEvaluations: (runId: string, bucketStarts: string[]) => {
-    const params = new URLSearchParams();
-    bucketStarts.forEach((value) => params.append("bucket_start", value));
-    return request<OnlineMonitoringBucketEvaluation[]>(
-      `/serving/monitoring-runs/${encodeURIComponent(runId)}/bucket-evaluations?${params}`
-    );
-  },
-  archiveOnlineMonitoringRun: (runId: string, reason = "Archived from monitoring history") =>
-    request<OnlineMonitoringRun>(`/serving/monitoring-runs/${encodeURIComponent(runId)}/archive`, {
-      method: "POST",
-      body: JSON.stringify({ reason })
-    }),
-  archiveDeploymentMonitoringHistory: (deploymentId: string, reason = "Archived from monitoring history") =>
-    request<{ archived_run_count: number }>(`/serving/deployments/${encodeURIComponent(deploymentId)}/monitoring-runs/archive`, {
-      method: "POST",
-      body: JSON.stringify({ reason })
-    }),
+  ...servingApi,
   createApiCredential: (name: string, expiresAt: string | null) =>
     request<Record<string, unknown>>("/auth/api-credentials", {
       method: "POST",
       body: JSON.stringify({ name, expires_at: expiresAt })
     }),
   listDirectoryUsers: () => request<DirectoryUser[]>("/sharing/directory/users"),
+  pageDirectoryUsers: (query: PageQuery = {}) =>
+    request<OffsetPage<DirectoryUser>>(withQuery("/sharing/directory/users/page", query)),
   listAdminUsers: () => request<DirectoryUser[]>("/users"),
+  pageAdminUsers: (
+    query: PageQuery & { is_active?: boolean; is_technical?: boolean } = {}
+  ) => request<OffsetPage<DirectoryUser>>(withQuery("/users/page", query)),
   updateAdminUser: (userId: string, payload: { roles: string[]; is_active: boolean }) =>
     request<DirectoryUser>(`/users/${encodeURIComponent(userId)}`, { method: "PATCH", body: JSON.stringify(payload) }),
   resetUserPassword: (userId: string, newPassword: string) =>
     request<void>(`/users/${encodeURIComponent(userId)}/reset-password`, { method: "POST", body: JSON.stringify({ new_password: newPassword }) }),
   listGroups: () => request<AccessGroup[]>("/sharing/groups"),
+  pageGroups: (query: PageQuery & { is_active?: boolean } = {}) =>
+    request<OffsetPage<AccessGroup>>(withQuery("/sharing/groups/page", query)),
   createGroup: (payload: { name: string; description: string }) =>
     request<AccessGroup>("/sharing/groups", { method: "POST", body: JSON.stringify(payload) }),
   updateGroup: (groupId: string, payload: { name: string; description: string; is_active: boolean }) =>
@@ -1408,18 +1129,33 @@ export const api = {
     request<void>(`/sharing/groups/${encodeURIComponent(groupId)}`, { method: "DELETE" }),
   listGroupMembers: (groupId: string) =>
     request<GroupMembership[]>(`/sharing/groups/${encodeURIComponent(groupId)}/members`),
+  pageGroupMembers: (groupId: string, query: PageQuery = {}) =>
+    request<OffsetPage<GroupMembership>>(
+      withQuery(`/sharing/groups/${encodeURIComponent(groupId)}/members/page`, query)
+    ),
   upsertGroupMember: (groupId: string, payload: { user_id: string; membership_role: "member" | "manager" }) =>
     request<GroupMembership>(`/sharing/groups/${encodeURIComponent(groupId)}/members`, { method: "PUT", body: JSON.stringify(payload) }),
   removeGroupMember: (groupId: string, userId: string) =>
     request<void>(`/sharing/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(userId)}`, { method: "DELETE" }),
   listBusinessCaseGrants: (businessCaseId: string) =>
     request<BusinessCaseGrant[]>(`/sharing/business-cases/${encodeURIComponent(businessCaseId)}/grants`),
+  pageBusinessCaseGrants: (businessCaseId: string, query: PageQuery = {}) =>
+    request<OffsetPage<BusinessCaseGrant>>(
+      withQuery(`/sharing/business-cases/${encodeURIComponent(businessCaseId)}/grants/page`, query)
+    ),
   grantBusinessCase: (businessCaseId: string, payload: Record<string, unknown>) =>
     request<BusinessCaseGrant>(`/sharing/business-cases/${encodeURIComponent(businessCaseId)}/grants`, { method: "PUT", body: JSON.stringify(payload) }),
   revokeBusinessCaseGrant: (businessCaseId: string, grantId: string) =>
     request<void>(`/sharing/business-cases/${encodeURIComponent(businessCaseId)}/grants/${encodeURIComponent(grantId)}`, { method: "DELETE" }),
   listResourceGrants: (kind: string, resourceId: string) =>
     request<ResourceGrant[]>(`/sharing/resources/${encodeURIComponent(kind)}/${encodeURIComponent(resourceId)}/grants`),
+  pageResourceGrants: (kind: string, resourceId: string, query: PageQuery = {}) =>
+    request<OffsetPage<ResourceGrant>>(
+      withQuery(
+        `/sharing/resources/${encodeURIComponent(kind)}/${encodeURIComponent(resourceId)}/grants/page`,
+        query
+      )
+    ),
   grantResource: (payload: Record<string, unknown>) =>
     request<ResourceGrant>("/sharing/resources/grants", { method: "PUT", body: JSON.stringify(payload) }),
   revokeResourceGrant: (grantId: string) =>

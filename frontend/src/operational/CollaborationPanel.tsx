@@ -1,5 +1,5 @@
-import { KeyRound, Plus, RotateCcw, Shield, Share2, Trash2, UserCog, Users } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { KeyRound, Plus, RotateCcw, Search, Shield, Share2, Trash2, UserCog, Users } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 
 import { api } from "../api/client";
@@ -13,6 +13,8 @@ import type {
   ResourceGrant,
   UserProfile
 } from "../api/client";
+import { PagedCatalogSelect } from "../components/PagedCatalogSelect";
+import { PaginationControls } from "../components/PaginationControls";
 
 type NoticeSetter = (message: string) => void;
 type SubjectType = "user" | "group";
@@ -35,16 +37,31 @@ export function CollaborationPanel({
 }) {
   const isAdmin = currentUser.roles.includes("administrator");
   const [users, setUsers] = useState<DirectoryUser[]>([]);
-  const [adminUsers, setAdminUsers] = useState<DirectoryUser[]>([]);
   const [groups, setGroups] = useState<AccessGroup[]>([]);
+  const [directorySearch, setDirectorySearch] = useState("");
+  const [directoryTotal, setDirectoryTotal] = useState(0);
+  const [directoryOffset, setDirectoryOffset] = useState(0);
+  const [groupSearch, setGroupSearch] = useState("");
+  const [groupTotal, setGroupTotal] = useState(0);
+  const [groupOffset, setGroupOffset] = useState(0);
   const [members, setMembers] = useState<GroupMembership[]>([]);
+  const [memberTotal, setMemberTotal] = useState(0);
+  const [memberOffset, setMemberOffset] = useState(0);
   const [bcGrants, setBcGrants] = useState<BusinessCaseGrant[]>([]);
+  const [bcGrantTotal, setBcGrantTotal] = useState(0);
+  const [bcGrantOffset, setBcGrantOffset] = useState(0);
   const [resourceGrants, setResourceGrants] = useState<ResourceGrant[]>([]);
+  const [resourceGrantTotal, setResourceGrantTotal] = useState(0);
+  const [resourceGrantOffset, setResourceGrantOffset] = useState(0);
   const [selectedGroupId, setSelectedGroupId] = useState("");
+  const [selectedGroupSnapshot, setSelectedGroupSnapshot] = useState<AccessGroup | null>(null);
   const [selectedBusinessCaseId, setSelectedBusinessCaseId] = useState("");
+  const [selectedBusinessCaseSnapshot, setSelectedBusinessCaseSnapshot] = useState<BusinessCase | undefined>();
   const [selectedDatasetId, setSelectedDatasetId] = useState("");
+  const [selectedDatasetSnapshot, setSelectedDatasetSnapshot] = useState<DataAsset | undefined>();
   const [subjectType, setSubjectType] = useState<SubjectType>("group");
   const [subjectId, setSubjectId] = useState("");
+  const [selectedSubjectSnapshot, setSelectedSubjectSnapshot] = useState<{ id: string; label: string } | undefined>();
   const [bcRole, setBcRole] = useState<BusinessCase["access_role"]>("reader");
   const [resourceRole, setResourceRole] = useState<"reader" | "editor" | "owner">("reader");
   const [groupName, setGroupName] = useState("");
@@ -57,42 +74,56 @@ export function CollaborationPanel({
   const [activeTab, setActiveTab] = useState<CollaborationTab>("groups");
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  const manageableCases = useMemo(
-    () => businessCases.filter((item) => isAdmin || item.access_role === "manager" || item.access_role === "owner"),
-    [businessCases, isAdmin]
-  );
-  const directlyShareable = useMemo(
-    () => datasets.filter((item) => isAdmin || item.owner_id === currentUser.user_id),
-    [currentUser.user_id, datasets, isAdmin]
-  );
-  const subjects = subjectType === "group"
-    ? groups.map((group) => ({ id: group.id, label: group.name }))
-    : users.map((user) => ({ id: user.id, label: user.display_name || user.email }));
-
   const refreshDirectory = useCallback(async () => {
-    const [directory, groupItems] = await Promise.all([api.listDirectoryUsers(), api.listGroups()]);
-    setUsers(directory);
-    setGroups(groupItems);
-    if (isAdmin) setAdminUsers(await api.listAdminUsers());
-  }, [isAdmin]);
+    const [directoryPage, groupPage] = await Promise.all([
+      api.pageDirectoryUsers({ limit: 30, offset: directoryOffset, search: directorySearch.trim() }),
+      api.pageGroups({ limit: 30, offset: groupOffset, search: groupSearch.trim() })
+    ]);
+    setUsers(directoryPage.items);
+    setDirectoryTotal(directoryPage.total);
+    setGroups(groupPage.items);
+    setGroupTotal(groupPage.total);
+  }, [directoryOffset, directorySearch, groupOffset, groupSearch]);
+
+  useEffect(() => {
+    setDirectoryOffset(0);
+  }, [directorySearch]);
+
+  useEffect(() => {
+    setGroupOffset(0);
+  }, [groupSearch]);
 
   const refreshSelectedAccess = useCallback(async (includeAllTabs: boolean) => {
-    const selectedDataset = datasets.find((item) => item.id === selectedDatasetId);
+    const selectedDataset = datasets.find((item) => item.id === selectedDatasetId)
+      ?? selectedDatasetSnapshot;
     await Promise.all([
       (includeAllTabs || activeTab === "groups") && selectedGroupId
-        ? api.listGroupMembers(selectedGroupId).then(setMembers)
+        ? api.pageGroupMembers(selectedGroupId, { limit: 30, offset: memberOffset }).then((page) => {
+            setMembers(page.items);
+            setMemberTotal(page.total);
+          })
         : Promise.resolve(),
       (includeAllTabs || activeTab === "sharing") && selectedBusinessCaseId
-        ? api.listBusinessCaseGrants(selectedBusinessCaseId).then(setBcGrants)
+        ? api.pageBusinessCaseGrants(selectedBusinessCaseId, {
+            limit: 30,
+            offset: bcGrantOffset
+          }).then((page) => {
+            setBcGrants(page.items);
+            setBcGrantTotal(page.total);
+          })
         : Promise.resolve(),
       (includeAllTabs || activeTab === "sharing") && selectedDatasetId
-        ? api.listResourceGrants(
+        ? api.pageResourceGrants(
             selectedDataset?.source_type === "view" ? "data_view" : "dataset",
-            selectedDatasetId
-          ).then(setResourceGrants)
+            selectedDatasetId,
+            { limit: 30, offset: resourceGrantOffset }
+          ).then((page) => {
+            setResourceGrants(page.items);
+            setResourceGrantTotal(page.total);
+          })
         : Promise.resolve(),
     ]);
-  }, [activeTab, datasets, selectedBusinessCaseId, selectedDatasetId, selectedGroupId]);
+  }, [activeTab, bcGrantOffset, datasets, memberOffset, resourceGrantOffset, selectedBusinessCaseId, selectedDatasetId, selectedDatasetSnapshot, selectedGroupId]);
 
   const refreshAllShare = useCallback(async () => {
     await Promise.all([refreshDirectory(), onRefresh(), refreshSelectedAccess(true)]);
@@ -125,38 +156,70 @@ export function CollaborationPanel({
   }, [onRegisterRefresh, refreshAllShare]);
 
   useEffect(() => {
-    refreshDirectory().catch(showError);
+    const timer = window.setTimeout(() => {
+      refreshDirectory().catch(showError);
+    }, 250);
+    return () => window.clearTimeout(timer);
   }, [refreshDirectory]);
 
   useEffect(() => {
     if (!selectedGroupId) {
       setMembers([]);
+      setMemberTotal(0);
       return;
     }
-    api.listGroupMembers(selectedGroupId).then(setMembers).catch(showError);
-  }, [selectedGroupId]);
+    api.pageGroupMembers(selectedGroupId, { limit: 30, offset: memberOffset })
+      .then((page) => {
+        setMembers(page.items);
+        setMemberTotal(page.total);
+      })
+      .catch(showError);
+  }, [memberOffset, selectedGroupId]);
+
+  useEffect(() => setMemberOffset(0), [selectedGroupId]);
 
   useEffect(() => {
     if (!selectedBusinessCaseId) {
       setBcGrants([]);
+      setBcGrantTotal(0);
       return;
     }
-    api.listBusinessCaseGrants(selectedBusinessCaseId).then(setBcGrants).catch(showError);
-  }, [selectedBusinessCaseId]);
+    api.pageBusinessCaseGrants(selectedBusinessCaseId, {
+      limit: 30,
+      offset: bcGrantOffset
+    }).then((page) => {
+      setBcGrants(page.items);
+      setBcGrantTotal(page.total);
+    }).catch(showError);
+  }, [bcGrantOffset, selectedBusinessCaseId]);
+
+  useEffect(() => setBcGrantOffset(0), [selectedBusinessCaseId]);
 
   useEffect(() => {
     if (!selectedDatasetId) {
       setResourceGrants([]);
+      setResourceGrantTotal(0);
       return;
     }
-    const dataset = datasets.find((item) => item.id === selectedDatasetId);
-    api.listResourceGrants(dataset?.source_type === "view" ? "data_view" : "dataset", selectedDatasetId)
-      .then(setResourceGrants).catch(showError);
-  }, [datasets, selectedDatasetId]);
+    const dataset = datasets.find((item) => item.id === selectedDatasetId)
+      ?? selectedDatasetSnapshot;
+    api.pageResourceGrants(
+      dataset?.source_type === "view" ? "data_view" : "dataset",
+      selectedDatasetId,
+      { limit: 30, offset: resourceGrantOffset }
+    )
+      .then((page) => {
+        setResourceGrants(page.items);
+        setResourceGrantTotal(page.total);
+      }).catch(showError);
+  }, [datasets, resourceGrantOffset, selectedDatasetId, selectedDatasetSnapshot]);
+
+  useEffect(() => setResourceGrantOffset(0), [selectedDatasetId]);
 
   useEffect(() => {
-    if (subjects.length && !subjects.some((item) => item.id === subjectId)) setSubjectId(subjects[0].id);
-  }, [subjectType, groups, users]);
+    setSubjectId("");
+    setSelectedSubjectSnapshot(undefined);
+  }, [subjectType]);
 
   function showError(error: unknown) {
     setNotice(error instanceof Error ? error.message : "Operation failed");
@@ -170,6 +233,7 @@ export function CollaborationPanel({
       setGroupDescription("");
       await refreshDirectory();
       setSelectedGroupId(group.id);
+      setSelectedGroupSnapshot(group);
       setNotice("Group created");
     } catch (error) { showError(error); }
   }
@@ -178,13 +242,16 @@ export function CollaborationPanel({
     try {
       if (!selectedGroupId || !memberUserId) return setNotice("Choose a group and user");
       await api.upsertGroupMember(selectedGroupId, { user_id: memberUserId, membership_role: memberRole });
-      setMembers(await api.listGroupMembers(selectedGroupId));
+      const page = await api.pageGroupMembers(selectedGroupId, { limit: 30, offset: memberOffset });
+      setMembers(page.items);
+      setMemberTotal(page.total);
       setNotice("Group membership updated");
     } catch (error) { showError(error); }
   }
 
   async function deleteSelectedGroup() {
-    const group = groups.find((item) => item.id === selectedGroupId);
+    const group = groups.find((item) => item.id === selectedGroupId)
+      ?? selectedGroupSnapshot;
     if (!group) return setNotice("Choose a group to delete");
     if (!window.confirm(`Delete group “${group.name}”? Its access grants will also be removed.`)) return;
     try {
@@ -202,7 +269,13 @@ export function CollaborationPanel({
       await api.grantBusinessCase(selectedBusinessCaseId, {
         subject_type: subjectType, subject_id: subjectId, access_role: bcRole
       });
-      setBcGrants(await api.listBusinessCaseGrants(selectedBusinessCaseId));
+      setBcGrantOffset(0);
+      const page = await api.pageBusinessCaseGrants(selectedBusinessCaseId, {
+        limit: 30,
+        offset: 0
+      });
+      setBcGrants(page.items);
+      setBcGrantTotal(page.total);
       setNotice("Business Case access updated");
     } catch (error) { showError(error); }
   }
@@ -210,15 +283,21 @@ export function CollaborationPanel({
   async function grantDataset() {
     try {
       if (!selectedDatasetId || !subjectId) return setNotice("Choose a loose object and subject");
-      const dataset = datasets.find((item) => item.id === selectedDatasetId);
+      const dataset = datasets.find((item) => item.id === selectedDatasetId)
+        ?? selectedDatasetSnapshot;
       await api.grantResource({
         resource_kind: dataset?.source_type === "view" ? "data_view" : "dataset",
         resource_id: selectedDatasetId, subject_type: subjectType, subject_id: subjectId,
         access_role: resourceRole
       });
-      setResourceGrants(await api.listResourceGrants(
-        dataset?.source_type === "view" ? "data_view" : "dataset", selectedDatasetId
-      ));
+      setResourceGrantOffset(0);
+      const page = await api.pageResourceGrants(
+        dataset?.source_type === "view" ? "data_view" : "dataset",
+        selectedDatasetId,
+        { limit: 30, offset: 0 }
+      );
+      setResourceGrants(page.items);
+      setResourceGrantTotal(page.total);
       setNotice("Direct object access updated");
     } catch (error) { showError(error); }
   }
@@ -246,24 +325,92 @@ export function CollaborationPanel({
         <TabButton active={activeTab === "password"} icon={<KeyRound size={17} />} label="Change password" description="Account security" onClick={() => setActiveTab("password")} />
       </nav>
 
+      {(activeTab === "groups" || activeTab === "sharing") && (
+        <div className="panel collaboration-directory-navigation">
+          <div>
+            <label className="search-field">
+              <Search size={16} />
+              <input
+                aria-label="Search people directory"
+                placeholder="Search people by name, login or email"
+                value={directorySearch}
+                onChange={(event) => setDirectorySearch(event.target.value)}
+              />
+            </label>
+            <PaginationControls
+              total={directoryTotal}
+              limit={30}
+              offset={directoryOffset}
+              onOffsetChange={setDirectoryOffset}
+              label="people"
+            />
+          </div>
+          <div>
+            <label className="search-field">
+              <Search size={16} />
+              <input
+                aria-label="Search access groups"
+                placeholder="Search groups"
+                value={groupSearch}
+                onChange={(event) => setGroupSearch(event.target.value)}
+              />
+            </label>
+            <PaginationControls
+              total={groupTotal}
+              limit={30}
+              offset={groupOffset}
+              onOffsetChange={setGroupOffset}
+              label="groups"
+            />
+          </div>
+        </div>
+      )}
+
       {activeTab === "sharing" && <div className="collaboration-tab-content" role="region" aria-label="Object sharing">
       <div className="panel">
         <div className="panel-header"><div><h2>Business Case access</h2><p>Groups are the recommended sharing path.</p></div><Share2 size={18} /></div>
         <div className="collaboration-form-grid">
-          <label>Business Case<select value={selectedBusinessCaseId} onChange={(event) => setSelectedBusinessCaseId(event.target.value)}>
-            <option value="">Choose a manageable case</option>{manageableCases.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.access_role}</option>)}
-          </select></label>
-          <SubjectFields type={subjectType} id={subjectId} subjects={subjects} onType={setSubjectType} onId={setSubjectId} />
+          <label>Business Case<PagedCatalogSelect
+            value={selectedBusinessCaseId}
+            onChange={(value, item) => {
+              setSelectedBusinessCaseId(value);
+              setSelectedBusinessCaseSnapshot(item);
+            }}
+            loadPage={(query) => api.pageBusinessCases({ ...query, manageable_only: true })}
+            getId={(item) => item.id}
+            getLabel={(item) => `${item.name} · ${item.access_role}`}
+            selectedItem={selectedBusinessCaseSnapshot}
+            emptyLabel="Choose a manageable case"
+            searchPlaceholder="Search Business Cases"
+          /></label>
+          <SubjectFields type={subjectType} id={subjectId} selectedItem={selectedSubjectSnapshot} onType={setSubjectType} onId={(value, item) => {
+            setSubjectId(value);
+            setSelectedSubjectSnapshot(item);
+          }} />
           <label>Access level<select value={bcRole} onChange={(event) => setBcRole(event.target.value as BusinessCase["access_role"])}>
             <option value="report_viewer">Report viewer</option><option value="reader">Reader</option><option value="contributor">Contributor</option><option value="manager">Manager</option><option value="owner">Owner</option>
           </select></label>
           <button className="primary-button" type="button" onClick={grantBusinessCase}><Share2 size={15} /> Grant access</button>
         </div>
         <GrantList grants={bcGrants} users={users} groups={groups} onRemove={async (grantId) => {
-          try { await api.revokeBusinessCaseGrant(selectedBusinessCaseId, grantId); setBcGrants(await api.listBusinessCaseGrants(selectedBusinessCaseId)); setNotice("Grant revoked"); } catch (error) { showError(error); }
+          try {
+            await api.revokeBusinessCaseGrant(selectedBusinessCaseId, grantId);
+            setBcGrants((current) => current.filter((item) => item.id !== grantId));
+            setBcGrantTotal((current) => Math.max(0, current - 1));
+            setNotice("Grant revoked");
+          } catch (error) { showError(error); }
         }} />
-        {selectedBusinessCaseId && (isAdmin || businessCases.find((item) => item.id === selectedBusinessCaseId)?.access_role === "owner") && <div className="collaboration-form-grid compact ownership-transfer">
-          <label>Transfer ownership to<select value={transferOwnerId} onChange={(event) => setTransferOwnerId(event.target.value)}><option value="">Choose new owner</option>{users.map((user) => <option key={user.id} value={user.id}>{user.display_name} · {user.email}</option>)}</select></label>
+        <PaginationControls total={bcGrantTotal} limit={30} offset={bcGrantOffset} onOffsetChange={setBcGrantOffset} label="Business Case grants" />
+        {selectedBusinessCaseId && (isAdmin || (businessCases.find((item) => item.id === selectedBusinessCaseId) ?? selectedBusinessCaseSnapshot)?.access_role === "owner") && <div className="collaboration-form-grid compact ownership-transfer">
+          <label>Transfer ownership to<PagedCatalogSelect
+            value={transferOwnerId}
+            onChange={setTransferOwnerId}
+            loadPage={(query) => api.pageDirectoryUsers(query)}
+            getId={(user) => user.id}
+            getLabel={(user) => `${user.display_name} · ${user.email}`}
+            emptyLabel="Choose new owner"
+            searchPlaceholder="Search users"
+          /></label>
           <button className="secondary-button" type="button" onClick={async () => {
             try {
               if (!transferOwnerId) return setNotice("Choose the new Business Case owner");
@@ -279,14 +426,41 @@ export function CollaborationPanel({
       <div className="panel">
           <div className="panel-header"><div><h2>Direct object access</h2><p>Exception path for loose datasets and Data Views only.</p></div><Shield size={18} /></div>
           <div className="collaboration-form-grid">
-            <label>Loose object<select value={selectedDatasetId} onChange={(event) => setSelectedDatasetId(event.target.value)}><option value="">Choose dataset or view</option>{directlyShareable.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.source_type}</option>)}</select></label>
-            <SubjectFields type={subjectType} id={subjectId} subjects={subjects} onType={setSubjectType} onId={setSubjectId} />
+            <label>Loose object<PagedCatalogSelect
+              value={selectedDatasetId}
+              onChange={(value, item) => {
+                setSelectedDatasetId(value);
+                setSelectedDatasetSnapshot(item);
+              }}
+              loadPage={(query) => api.pageDatasets({
+                ...query,
+                summary: true,
+                families: true,
+                include_deleted: false,
+                owned_only: !isAdmin
+              })}
+              getId={(item) => item.id}
+              getLabel={(item) => `${item.name} · ${item.source_type}`}
+              selectedItem={selectedDatasetSnapshot}
+              emptyLabel="Choose dataset or view"
+              searchPlaceholder="Search loose data objects"
+            /></label>
+            <SubjectFields type={subjectType} id={subjectId} selectedItem={selectedSubjectSnapshot} onType={setSubjectType} onId={(value, item) => {
+              setSubjectId(value);
+              setSelectedSubjectSnapshot(item);
+            }} />
             <label>Access level<select value={resourceRole} onChange={(event) => setResourceRole(event.target.value as typeof resourceRole)}><option value="reader">Reader</option><option value="editor">Editor</option><option value="owner">Owner</option></select></label>
             <button className="secondary-button" type="button" onClick={grantDataset}><Share2 size={15} /> Grant exception</button>
           </div>
           <GrantList grants={resourceGrants} users={users} groups={groups} onRemove={async (grantId) => {
-            try { await api.revokeResourceGrant(grantId); setResourceGrants(resourceGrants.filter((item) => item.id !== grantId)); setNotice("Grant revoked"); } catch (error) { showError(error); }
+            try {
+              await api.revokeResourceGrant(grantId);
+              setResourceGrants((current) => current.filter((item) => item.id !== grantId));
+              setResourceGrantTotal((current) => Math.max(0, current - 1));
+              setNotice("Grant revoked");
+            } catch (error) { showError(error); }
           }} />
+          <PaginationControls total={resourceGrantTotal} limit={30} offset={resourceGrantOffset} onOffsetChange={setResourceGrantOffset} label="direct resource grants" />
       </div>
       </div>}
 
@@ -304,26 +478,51 @@ export function CollaborationPanel({
         <div className="panel">
           <div className="panel-header"><div><h2>Group members</h2><p>Select a group to manage members and group managers.</p></div><UserCog size={18} /></div>
           <div className="group-selector-row">
-          <label>Manage group<select value={selectedGroupId} onChange={(event) => setSelectedGroupId(event.target.value)}>
-            <option value="">Choose group</option>{groups.map((item) => <option key={item.id} value={item.id}>{item.name}{item.is_active ? "" : " (inactive)"}</option>)}
-          </select></label>
+          <label>Manage group<PagedCatalogSelect
+            value={selectedGroupId}
+            onChange={(value, item) => {
+              setSelectedGroupId(value);
+              setSelectedGroupSnapshot(item ?? null);
+            }}
+            loadPage={(query) => api.pageGroups(query)}
+            getId={(item) => item.id}
+            getLabel={(item) => `${item.name}${item.is_active ? "" : " (inactive)"}`}
+            selectedItem={selectedGroupSnapshot ?? undefined}
+            emptyLabel="Choose group"
+            searchPlaceholder="Search groups"
+          /></label>
           <button className="danger-button" type="button" disabled={!selectedGroupId} onClick={deleteSelectedGroup}><Trash2 size={15} /> Delete group</button>
           </div>
           {selectedGroupId && <>
             <div className="collaboration-form-grid compact">
-              <label>User<select value={memberUserId} onChange={(event) => setMemberUserId(event.target.value)}><option value="">Choose user</option>{users.map((item) => <option key={item.id} value={item.id}>{item.display_name} · {item.email}</option>)}</select></label>
+              <label>User<PagedCatalogSelect
+                value={memberUserId}
+                onChange={setMemberUserId}
+                loadPage={(query) => api.pageDirectoryUsers(query)}
+                getId={(item) => item.id}
+                getLabel={(item) => `${item.display_name} · ${item.email}`}
+                emptyLabel="Choose user"
+                searchPlaceholder="Search users"
+              /></label>
               <label>Membership<select value={memberRole} onChange={(event) => setMemberRole(event.target.value as "member" | "manager")}><option value="member">Member</option><option value="manager">Group manager</option></select></label>
               <button className="secondary-button" type="button" onClick={addMember}>Add / update</button>
             </div>
             <div className="access-list">{members.map((member) => <div key={member.id}><span><strong>{subjectLabel("user", member.user_id, users, groups)}</strong><small>{member.membership_role}</small></span>{member.membership_role !== "owner" && <button className="icon-button" type="button" aria-label="Remove member" onClick={async () => {
-              try { await api.removeGroupMember(selectedGroupId, member.user_id); setMembers(await api.listGroupMembers(selectedGroupId)); setNotice("Member removed"); } catch (error) { showError(error); }
+              try {
+                await api.removeGroupMember(selectedGroupId, member.user_id);
+                const page = await api.pageGroupMembers(selectedGroupId, { limit: 30, offset: memberOffset });
+                setMembers(page.items);
+                setMemberTotal(page.total);
+                setNotice("Member removed");
+              } catch (error) { showError(error); }
             }}><Trash2 size={14} /></button>}</div>)}</div>
+            <PaginationControls total={memberTotal} limit={30} offset={memberOffset} onOffsetChange={setMemberOffset} label="members" />
           </>}
         </div>
 
       </div>
 
-      {isAdmin && <AdminUsers users={adminUsers} onRefresh={async () => setAdminUsers(await api.listAdminUsers())} setNotice={setNotice} />}
+      {isAdmin && <AdminUsers setNotice={setNotice} />}
       </div>}
 
       {activeTab === "password" && <div className="collaboration-tab-content collaboration-password-content" role="region" aria-label="Change password"><div className="panel">
@@ -343,12 +542,41 @@ function TabButton({ active, icon, label, description, onClick }: { active: bool
   return <button type="button" className={active ? "active" : ""} onClick={onClick} aria-current={active ? "page" : undefined}>{icon}<span>{label}</span><small>{description}</small></button>;
 }
 
-function SubjectFields({ type, id, subjects, onType, onId }: {
-  type: SubjectType; id: string; subjects: Array<{ id: string; label: string }>;
-  onType: (value: SubjectType) => void; onId: (value: string) => void;
+function SubjectFields({ type, id, selectedItem, onType, onId }: {
+  type: SubjectType;
+  id: string;
+  selectedItem?: { id: string; label: string };
+  onType: (value: SubjectType) => void;
+  onId: (value: string, item?: { id: string; label: string }) => void;
 }) {
   return <><label>Subject type<select value={type} onChange={(event) => onType(event.target.value as SubjectType)}><option value="group">Group</option><option value="user">User</option></select></label>
-    <label>Subject<select value={id} onChange={(event) => onId(event.target.value)}><option value="">Choose subject</option>{subjects.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label></>;
+    <label>Subject<PagedCatalogSelect
+      value={id}
+      onChange={onId}
+      loadPage={async (query) => {
+        if (type === "group") {
+          const page = await api.pageGroups(query);
+          return {
+            ...page,
+            items: page.items.map((item) => ({ id: item.id, label: item.name }))
+          };
+        }
+        const page = await api.pageDirectoryUsers(query);
+        return {
+          ...page,
+          items: page.items.map((item) => ({
+            id: item.id,
+            label: item.display_name || item.email
+          }))
+        };
+      }}
+      getId={(item) => item.id}
+      getLabel={(item) => item.label}
+      selectedItem={selectedItem}
+      emptyLabel="Choose subject"
+      searchPlaceholder={type === "group" ? "Search groups" : "Search users"}
+      reloadKey={type}
+    /></label></>;
 }
 
 function GrantList({ grants, users, groups, onRemove }: {
@@ -359,13 +587,38 @@ function GrantList({ grants, users, groups, onRemove }: {
   return <div className="access-list">{grants.map((grant) => <div key={grant.id}><span><strong>{subjectLabel(grant.subject_type, grant.subject_id, users, groups)}</strong><small>{grant.subject_type} · {grant.access_role}{grant.expires_at ? ` · expires ${new Date(grant.expires_at).toLocaleString()}` : ""}</small></span><button className="icon-button" type="button" aria-label="Revoke grant" onClick={() => onRemove(grant.id)}><Trash2 size={14} /></button></div>)}</div>;
 }
 
-function AdminUsers({ users, onRefresh, setNotice }: { users: DirectoryUser[]; onRefresh: () => Promise<void>; setNotice: NoticeSetter }) {
+function AdminUsers({ setNotice }: { setNotice: NoticeSetter }) {
+  const [users, setUsers] = useState<DirectoryUser[]>([]);
+  const [query, setQuery] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setLoading(true);
+      api.pageAdminUsers({ limit: 20, offset, search: query.trim() })
+        .then((page) => {
+          setUsers(page.items);
+          setTotal(page.total);
+        })
+        .catch((error) => setNotice(error instanceof Error ? error.message : "Could not load users"))
+        .finally(() => setLoading(false));
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [offset, query, refreshKey, setNotice]);
+
+  useEffect(() => setOffset(0), [query]);
+
   async function save(user: DirectoryUser, roles: string[], active: boolean) {
-    try { await api.updateAdminUser(user.user_id ?? user.id, { roles, is_active: active }); await onRefresh(); setNotice("User permissions updated; existing sessions were invalidated"); }
+    try { await api.updateAdminUser(user.user_id ?? user.id, { roles, is_active: active }); setRefreshKey((value) => value + 1); setNotice("User permissions updated; existing sessions were invalidated"); }
     catch (error) { setNotice(error instanceof Error ? error.message : "User update failed"); }
   }
   return <div className="panel"><div className="panel-header"><div><h2>Application administration</h2><p>All registered users and platform roles.</p></div><UserCog size={18} /></div>
+    <label className="search-field"><Search size={16} /><input aria-label="Search registered users" placeholder="Search users" value={query} onChange={(event) => setQuery(event.target.value)} /></label>
     <div className="admin-user-list">{users.map((user) => <AdminUserRow key={user.user_id ?? user.id} user={user} onSave={save} setNotice={setNotice} />)}</div>
+    <PaginationControls total={total} limit={20} offset={offset} onOffsetChange={setOffset} disabled={loading} label="users" />
   </div>;
 }
 

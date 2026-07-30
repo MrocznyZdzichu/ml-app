@@ -1,8 +1,12 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from fastapi import HTTPException, status
-
+from app.core.errors import (
+    AuthenticationError,
+    AuthorizationError,
+    ConflictError,
+    InvalidRequestError,
+)
 from app.core.security import (
     Principal,
     create_access_token,
@@ -29,15 +33,20 @@ from app.modules.sharing.repository import PostgresSharingRepository
 class AuthService:
     """Owns account registration, password verification, and token issuance."""
 
-    def __init__(self, repository: UserRepository | None = None) -> None:
+    def __init__(
+        self,
+        repository: UserRepository | None = None,
+        audit_repository: PostgresSharingRepository | None = None,
+    ) -> None:
         self.repository = repository or PostgresUserRepository()
+        self.audit_repository = audit_repository or PostgresSharingRepository()
 
     def register(self, payload: RegisterRequest) -> TokenResponse:
         email = payload.email.lower()
         if self.repository.get_by_email(email):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="User with this email already exists",
+            raise ConflictError(
+                "User with this email already exists",
+                code="email_already_registered",
             )
 
         display_name = payload.display_name.strip() or email.split("@")[0]
@@ -52,26 +61,26 @@ class AuthService:
         try:
             self.repository.add(user)
         except DuplicateEmailError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="User with this email already exists",
+            raise ConflictError(
+                "User with this email already exists",
+                code="email_already_registered",
             ) from exc
         return self._token_for(user)
 
     def login(self, payload: LoginRequest) -> TokenResponse:
         user = self.repository.get_by_login(payload.login)
         if not user or not verify_password(payload.password, user.password_hash):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid login or password",
+            raise AuthenticationError(
+                "Invalid login or password",
+                code="invalid_credentials",
             )
         if not user.is_active:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Account is inactive",
+            raise AuthorizationError(
+                "Account is inactive",
+                code="account_inactive",
             )
         if user.id == "root":
-            PostgresSharingRepository().add_audit(AuditEvent(
+            self.audit_repository.add_audit(AuditEvent(
                 id=str(uuid4()), actor_id=user.id, action="root.login",
                 subject_type="user", subject_id=user.id,
             ))
@@ -80,7 +89,7 @@ class AuthService:
     def profile(self, principal: Principal) -> UserProfile:
         user = self.repository.get(principal.user_id)
         if user is None:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account not found")
+            raise AuthenticationError("Account not found", code="account_not_found")
         return UserProfile(
             user_id=user.id,
             email=user.email,
@@ -94,12 +103,15 @@ class AuthService:
     def change_password(self, payload: PasswordChangeRequest, principal: Principal) -> None:
         user = self.repository.get(principal.user_id)
         if user is None or not verify_password(payload.current_password, user.password_hash):
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is invalid")
+            raise InvalidRequestError(
+                "Current password is invalid",
+                code="invalid_current_password",
+            )
         user.password_hash = hash_password(payload.new_password)
         user.session_version += 1
         user.updated_at = datetime.now(timezone.utc)
         self.repository.update(user)
-        PostgresSharingRepository().add_audit(AuditEvent(
+        self.audit_repository.add_audit(AuditEvent(
             id=str(uuid4()), actor_id=user.id, action="user.password_changed",
             subject_type="user", subject_id=user.id,
             new_state={"sessions_invalidated": True},

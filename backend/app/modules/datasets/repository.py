@@ -14,12 +14,15 @@ from sqlalchemy import (
     Table,
     Text,
     func,
+    or_,
     select,
     text,
 )
 from sqlalchemy.engine import Engine
 
 from app.core.database import get_engine
+from app.modules.business_cases.repository import business_case_data_attachments_table
+from app.modules.pipelines.repository import pipelines_table
 from app.modules.datasets.domain import DataAsset
 from app.modules.datasets.domain import DataAssetStatus, SourceType
 
@@ -86,10 +89,45 @@ class DatasetRepository(Protocol):
     def list_summaries(self, owner_id: str | None = None) -> list[DataAsset]:
         ...
 
+    def list_by_ids(
+        self,
+        asset_ids: set[str],
+        *,
+        summary: bool = False,
+    ) -> list[DataAsset]:
+        ...
+
+    def get_many(self, asset_ids: set[str]) -> dict[str, DataAsset]:
+        ...
+
+    def page_by_ids(
+        self,
+        asset_ids: set[str] | None,
+        *,
+        limit: int,
+        offset: int,
+        summary: bool = False,
+        search: str = "",
+        status: str = "",
+        source_type: str = "",
+        asset_kind: str = "",
+        include_deleted: bool = True,
+        families: bool = False,
+        business_case_id: str = "",
+        pipeline_id: str = "",
+        pipeline_type: str = "",
+        uploaded_only: bool = False,
+        owner_id: str = "",
+    ) -> tuple[list[DataAsset], int]:
+        ...
+
     def get(self, asset_id: str) -> DataAsset | None:
         ...
 
     def list_versions(self, owner_id: str, logical_id: str) -> list[DataAsset]:
+        ...
+
+    def list_by_logical_id(self, logical_id: str) -> list[DataAsset]:
         ...
 
     def get_latest_version(self, owner_id: str, logical_id: str) -> DataAsset | None:
@@ -133,6 +171,129 @@ class InMemoryDatasetRepository:
             if owner_id is None or asset.owner_id == owner_id
         ]
 
+    def list_by_ids(
+        self,
+        asset_ids: set[str],
+        *,
+        summary: bool = False,
+    ) -> list[DataAsset]:
+        items = [asset for asset in self._items.values() if asset.id in asset_ids]
+        if not summary:
+            return items
+        return [
+            replace(
+                asset,
+                metadata={
+                    key: asset.metadata[key]
+                    for key in DATASET_SUMMARY_METADATA_KEYS
+                    if key in asset.metadata
+                },
+            )
+            for asset in items
+        ]
+
+    def get_many(self, asset_ids: set[str]) -> dict[str, DataAsset]:
+        return {
+            asset_id: self._items[asset_id]
+            for asset_id in asset_ids
+            if asset_id in self._items
+        }
+
+    def page_by_ids(
+        self,
+        asset_ids: set[str] | None,
+        *,
+        limit: int,
+        offset: int,
+        summary: bool = False,
+        search: str = "",
+        status: str = "",
+        source_type: str = "",
+        asset_kind: str = "",
+        include_deleted: bool = True,
+        families: bool = False,
+        business_case_id: str = "",
+        pipeline_id: str = "",
+        pipeline_type: str = "",
+        uploaded_only: bool = False,
+        owner_id: str = "",
+    ) -> tuple[list[DataAsset], int]:
+        needle = search.strip().casefold()
+        candidates = [
+            asset
+            for asset in self._items.values()
+            if asset_ids is None or asset.id in asset_ids
+            if not owner_id or asset.owner_id == owner_id
+        ]
+        if families:
+            grouped: dict[str, list[DataAsset]] = {}
+            for asset in candidates:
+                grouped.setdefault(asset.logical_id, []).append(asset)
+            candidates = [
+                max(
+                    versions,
+                    key=lambda item: (
+                        item.version_number,
+                        item.created_at,
+                        item.id,
+                    ),
+                )
+                for versions in grouped.values()
+            ]
+        items = [
+            asset
+            for asset in candidates
+            if (asset_ids is None or asset.id in asset_ids)
+            and (not status or asset.status.value == status)
+            and (not source_type or asset.source_type.value == source_type)
+            and (
+                not asset_kind
+                or (asset_kind == "view" and asset.source_type.value == "view")
+                or (asset_kind == "dataset" and asset.source_type.value != "view")
+            )
+            and (include_deleted or asset.status.value != "deleted")
+            and (
+                not pipeline_id
+                or str((asset.metadata.get("pipeline_output") or {}).get("pipeline_id") or "")
+                == pipeline_id
+            )
+            and (
+                not uploaded_only
+                or (
+                    asset.source_type.value != "view"
+                    and not str((asset.metadata.get("pipeline_output") or {}).get("pipeline_id") or "")
+                    and asset.metadata.get("origin") != "platform_generated"
+                )
+            )
+            and (
+                not needle
+                or any(
+                    needle in str(value or "").casefold()
+                    for value in (
+                        asset.name,
+                        asset.description,
+                        asset.logical_id,
+                        asset.original_filename,
+                    )
+                )
+            )
+        ]
+        items.sort(key=lambda asset: asset.created_at, reverse=True)
+        page = items[offset : offset + limit]
+        if summary:
+            page = [
+                replace(
+                    asset,
+                    metadata={
+                        key: asset.metadata[key]
+                        for key in DATASET_SUMMARY_METADATA_KEYS
+                        if key in asset.metadata
+                    },
+                )
+                for asset in page
+            ]
+        return page, len(items)
+
     def get(self, asset_id: str) -> DataAsset | None:
         return self._items.get(asset_id)
 
@@ -141,6 +302,15 @@ class InMemoryDatasetRepository:
             (
                 asset for asset in self._items.values()
                 if asset.owner_id == owner_id and asset.logical_id == logical_id
+            ),
+            key=lambda asset: asset.version_number,
+        )
+
+    def list_by_logical_id(self, logical_id: str) -> list[DataAsset]:
+        return sorted(
+            (
+                asset for asset in self._items.values()
+                if asset.logical_id == logical_id
             ),
             key=lambda asset: asset.version_number,
         )
@@ -205,6 +375,268 @@ class PostgresDatasetRepository:
 
     def list_summaries(self, owner_id: str | None = None) -> list[DataAsset]:
         """Project catalog fields and the small metadata subset consumed by the UI."""
+        return self._list_summaries(owner_id=owner_id)
+
+    def list_by_ids(
+        self,
+        asset_ids: set[str],
+        *,
+        summary: bool = False,
+    ) -> list[DataAsset]:
+        self._ensure_initialized()
+        if not asset_ids:
+            return []
+        if summary:
+            return self._list_summaries(asset_ids=asset_ids)
+        statement = (
+            select(data_assets_table)
+            .where(data_assets_table.c.id.in_(asset_ids))
+            .order_by(data_assets_table.c.created_at.desc())
+        )
+        with self.engine.begin() as connection:
+            return [
+                self._from_record(row._mapping)
+                for row in connection.execute(statement)
+            ]
+
+    def get_many(self, asset_ids: set[str]) -> dict[str, DataAsset]:
+        return {
+            asset.id: asset
+            for asset in self.list_by_ids(asset_ids)
+        }
+
+    def page_by_ids(
+        self,
+        asset_ids: set[str] | None,
+        *,
+        limit: int,
+        offset: int,
+        summary: bool = False,
+        search: str = "",
+        status: str = "",
+        source_type: str = "",
+        asset_kind: str = "",
+        include_deleted: bool = True,
+        families: bool = False,
+        business_case_id: str = "",
+        pipeline_id: str = "",
+        pipeline_type: str = "",
+        uploaded_only: bool = False,
+        owner_id: str = "",
+    ) -> tuple[list[DataAsset], int]:
+        self._ensure_initialized()
+        if asset_ids is not None and not asset_ids:
+            return [], 0
+        if families:
+            return self._page_family_summaries(
+                asset_ids,
+                limit=limit,
+                offset=offset,
+                search=search,
+                status=status,
+                source_type=source_type,
+                asset_kind=asset_kind,
+                include_deleted=include_deleted,
+                business_case_id=business_case_id,
+                pipeline_id=pipeline_id,
+                pipeline_type=pipeline_type,
+                uploaded_only=uploaded_only,
+                owner_id=owner_id,
+            )
+        filters = []
+        if asset_ids is not None:
+            filters.append(data_assets_table.c.id.in_(asset_ids))
+        if owner_id:
+            filters.append(data_assets_table.c.owner_id == owner_id)
+        if status:
+            filters.append(data_assets_table.c.status == status)
+        if source_type:
+            filters.append(data_assets_table.c.source_type == source_type)
+        if asset_kind == "view":
+            filters.append(data_assets_table.c.source_type == "view")
+        elif asset_kind == "dataset":
+            filters.append(data_assets_table.c.source_type != "view")
+        if not include_deleted:
+            filters.append(data_assets_table.c.status != "deleted")
+        needle = search.strip()
+        if needle:
+            pattern = f"%{needle}%"
+            filters.append(or_(
+                data_assets_table.c.name.ilike(pattern),
+                data_assets_table.c.description.ilike(pattern),
+                data_assets_table.c.logical_id.ilike(pattern),
+                data_assets_table.c.original_filename.ilike(pattern),
+            ))
+        if summary:
+            columns = [
+                column
+                for column in data_assets_table.c
+                if column.name != "metadata"
+            ]
+            page_statement = select(
+                *columns,
+                *(
+                    data_assets_table.c.metadata[key].label(f"metadata_{key}")
+                    for key in DATASET_SUMMARY_METADATA_KEYS
+                ),
+            )
+        else:
+            page_statement = select(data_assets_table)
+        count_statement = select(func.count()).select_from(data_assets_table)
+        if filters:
+            page_statement = page_statement.where(*filters)
+            count_statement = count_statement.where(*filters)
+        page_statement = (
+            page_statement
+            .order_by(data_assets_table.c.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        with self.engine.begin() as connection:
+            total = int(connection.execute(count_statement).scalar_one())
+            rows = [row._mapping for row in connection.execute(page_statement)]
+        if not summary:
+            return [self._from_record(row) for row in rows], total
+        items: list[DataAsset] = []
+        for row in rows:
+            values = dict(row)
+            values["metadata"] = {
+                key: values.get(f"metadata_{key}")
+                for key in DATASET_SUMMARY_METADATA_KEYS
+                if values.get(f"metadata_{key}") is not None
+            }
+            items.append(self._from_record(values))
+        return items, total
+
+    def _page_family_summaries(
+        self,
+        asset_ids: set[str] | None,
+        *,
+        limit: int,
+        offset: int,
+        search: str,
+        status: str,
+        source_type: str,
+        asset_kind: str,
+        include_deleted: bool,
+        business_case_id: str,
+        pipeline_id: str,
+        pipeline_type: str,
+        uploaded_only: bool,
+        owner_id: str,
+    ) -> tuple[list[DataAsset], int]:
+        columns = [
+            column
+            for column in data_assets_table.c
+            if column.name != "metadata"
+        ]
+        ranked = select(
+            *columns,
+            *(
+                data_assets_table.c.metadata[key].label(f"metadata_{key}")
+                for key in DATASET_SUMMARY_METADATA_KEYS
+            ),
+            func.row_number().over(
+                partition_by=data_assets_table.c.logical_id,
+                order_by=(
+                    data_assets_table.c.version_number.desc(),
+                    data_assets_table.c.created_at.desc(),
+                    data_assets_table.c.id.desc(),
+                ),
+            ).label("family_rank"),
+        )
+        if asset_ids is not None:
+            ranked = ranked.where(data_assets_table.c.id.in_(asset_ids))
+        if owner_id:
+            ranked = ranked.where(data_assets_table.c.owner_id == owner_id)
+        if business_case_id:
+            attached_logical_ids = (
+                select(data_assets_table.c.logical_id)
+                .join(
+                    business_case_data_attachments_table,
+                    business_case_data_attachments_table.c.data_asset_id
+                    == data_assets_table.c.id,
+                )
+                .where(
+                    business_case_data_attachments_table.c.business_case_id
+                    == business_case_id
+                )
+            )
+            ranked = ranked.where(
+                data_assets_table.c.logical_id.in_(attached_logical_ids)
+            )
+        ranked_rows = ranked.subquery()
+        filters = [ranked_rows.c.family_rank == 1]
+        ranked_pipeline_id = (
+            ranked_rows.c.metadata_pipeline_output["pipeline_id"].as_string()
+        )
+        if status:
+            filters.append(ranked_rows.c.status == status)
+        if source_type:
+            filters.append(ranked_rows.c.source_type == source_type)
+        if asset_kind == "view":
+            filters.append(ranked_rows.c.source_type == "view")
+        elif asset_kind == "dataset":
+            filters.append(ranked_rows.c.source_type != "view")
+        if not include_deleted:
+            filters.append(ranked_rows.c.status != "deleted")
+        if pipeline_id:
+            filters.append(ranked_pipeline_id == pipeline_id)
+        if pipeline_type:
+            filters.append(
+                ranked_pipeline_id.in_(
+                    select(pipelines_table.c.id).where(
+                        pipelines_table.c.template == pipeline_type
+                    )
+                )
+            )
+        if uploaded_only:
+            filters.extend([
+                ranked_rows.c.source_type != "view",
+                or_(ranked_pipeline_id.is_(None), ranked_pipeline_id == ""),
+                or_(
+                    ranked_rows.c.metadata_origin.is_(None),
+                    ranked_rows.c.metadata_origin != "platform_generated",
+                ),
+            ])
+        needle = search.strip()
+        if needle:
+            pattern = f"%{needle}%"
+            filters.append(or_(
+                ranked_rows.c.name.ilike(pattern),
+                ranked_rows.c.description.ilike(pattern),
+                ranked_rows.c.logical_id.ilike(pattern),
+                ranked_rows.c.original_filename.ilike(pattern),
+            ))
+        filtered = select(ranked_rows).where(*filters).subquery()
+        count_statement = select(func.count()).select_from(filtered)
+        page_statement = (
+            select(filtered)
+            .order_by(filtered.c.created_at.desc(), filtered.c.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        with self.engine.begin() as connection:
+            total = int(connection.execute(count_statement).scalar_one())
+            rows = [row._mapping for row in connection.execute(page_statement)]
+        items: list[DataAsset] = []
+        for row in rows:
+            values = dict(row)
+            values["metadata"] = {
+                key: values.get(f"metadata_{key}")
+                for key in DATASET_SUMMARY_METADATA_KEYS
+                if values.get(f"metadata_{key}") is not None
+            }
+            items.append(self._from_record(values))
+        return items, total
+
+    def _list_summaries(
+        self,
+        *,
+        owner_id: str | None = None,
+        asset_ids: set[str] | None = None,
+    ) -> list[DataAsset]:
+        """Execute the bounded dataset catalog projection with SQL-side filters."""
         self._ensure_initialized()
         columns = [column for column in data_assets_table.c if column.name != "metadata"]
         statement = select(
@@ -216,6 +648,8 @@ class PostgresDatasetRepository:
         )
         if owner_id is not None:
             statement = statement.where(data_assets_table.c.owner_id == owner_id)
+        if asset_ids is not None:
+            statement = statement.where(data_assets_table.c.id.in_(asset_ids))
         statement = statement.order_by(data_assets_table.c.created_at.desc())
         with self.engine.begin() as connection:
             rows = [row._mapping for row in connection.execute(statement)]
@@ -249,6 +683,19 @@ class PostgresDatasetRepository:
         )
         with self.engine.begin() as connection:
             return [self._from_record(row._mapping) for row in connection.execute(statement)]
+
+    def list_by_logical_id(self, logical_id: str) -> list[DataAsset]:
+        self._ensure_initialized()
+        statement = (
+            select(data_assets_table)
+            .where(data_assets_table.c.logical_id == logical_id)
+            .order_by(data_assets_table.c.version_number.asc())
+        )
+        with self.engine.begin() as connection:
+            return [
+                self._from_record(row._mapping)
+                for row in connection.execute(statement)
+            ]
 
     def get_latest_version(self, owner_id: str, logical_id: str) -> DataAsset | None:
         self._ensure_initialized()

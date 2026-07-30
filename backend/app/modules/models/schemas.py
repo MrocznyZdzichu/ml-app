@@ -60,6 +60,11 @@ class ModelArtifactRead(BaseModel):
     created_at: datetime
 
 
+class ModelFamilyRead(BaseModel):
+    latest: ModelArtifactRead
+    version_count: int
+
+
 class PromoteModelRequest(BaseModel):
     stage: ModelStage
 

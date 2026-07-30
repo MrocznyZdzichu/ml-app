@@ -22,22 +22,41 @@ class FakeRedis:
             self.values.pop(key, None)
 
 
+class FakeTaskQueue:
+    def __init__(self) -> None:
+        self.submitted: dict[str, object] = {}
+
+    def enqueue(
+        self,
+        task_name: str,
+        args: list[object],
+        *,
+        task_id: str | None = None,
+    ) -> None:
+        self.submitted = {
+            "task_name": task_name,
+            "args": args,
+            "task_id": task_id,
+        }
+
+    def result(self, task_id: str):
+        raise AssertionError(f"Unexpected result lookup for {task_id}")
+
+
 def test_profile_job_start_records_dataset_ownership(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_redis = FakeRedis()
-
-    submitted: dict[str, object] = {}
-    monkeypatch.setattr(
-        profile_jobs.descriptive_profile_dataset,
-        "apply_async",
-        lambda **kwargs: submitted.update(kwargs),
-    )
+    task_queue = FakeTaskQueue()
     monkeypatch.setattr(profile_jobs, "uuid4", lambda: "job-1")
-    jobs = DescriptiveProfileJobs(fake_redis)
+    jobs = DescriptiveProfileJobs(fake_redis, task_queue)
 
     response = jobs.start("dataset-1", "owner-1", {"include_summary": True})
 
     assert response["job_id"] == "job-1"
-    assert submitted["task_id"] == "job-1"
+    assert task_queue.submitted == {
+        "task_name": "app.worker.tasks.descriptive_profile_dataset",
+        "args": ["dataset-1", "owner-1", {"include_summary": True}],
+        "task_id": "job-1",
+    }
     ownership = json.loads(fake_redis.values["descriptive-profile-owner:job-1"])
     assert ownership == {"dataset_id": "dataset-1", "owner_id": "owner-1"}
 

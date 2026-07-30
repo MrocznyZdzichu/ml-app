@@ -21,13 +21,22 @@ export function Overview({
   datasets,
   pipelines,
   models,
-  deployments
+  deployments,
+  counts
 }: {
   businessCases: BusinessCase[];
   datasets: DataAsset[];
   pipelines: Pipeline[];
   models: ModelArtifact[];
   deployments: Deployment[];
+  counts: {
+    businessCases: number;
+    datasets: number;
+    dataViews: number;
+    pipelines: number;
+    models: number;
+    deployments: number;
+  };
 }) {
   const activeDataAssets = datasets.filter((dataset) => dataset.status !== "deleted");
   const dataViews = activeDataAssets.filter((dataset) => dataset.source_type === "view");
@@ -73,12 +82,12 @@ export function Overview({
 
   return (
     <section className="overview-grid">
-      <Metric icon={ListChecks} label="Business Cases" value={businessCases.length} tone="teal" />
-      <Metric icon={Database} label="Datasets" value={sourceDatasets.length} tone="teal" />
-      <Metric icon={Table2} label="Data Views" value={dataViews.length} tone="blue" />
-      <Metric icon={Drill} label="Pipelines" value={pipelines.length} tone="amber" />
-      <Metric icon={Brain} label="Models" value={models.length} tone="blue" />
-      <Metric icon={Rocket} label="Deployments" value={deployments.length} tone="amber" />
+      <Metric icon={ListChecks} label="Business Cases" value={counts.businessCases} tone="teal" />
+      <Metric icon={Database} label="Datasets" value={counts.datasets} tone="teal" />
+      <Metric icon={Table2} label="Data Views" value={counts.dataViews} tone="blue" />
+      <Metric icon={Drill} label="Pipelines" value={counts.pipelines} tone="amber" />
+      <Metric icon={Brain} label="Models" value={counts.models} tone="blue" />
+      <Metric icon={Rocket} label="Deployments" value={counts.deployments} tone="amber" />
       <div className="panel wide">
         <div className="panel-header">
           <h2>Recent assets</h2>
