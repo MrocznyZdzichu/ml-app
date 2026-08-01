@@ -16,10 +16,12 @@ type RequestStatus = BusinessCaseAccessRequest["status"];
 
 export function PermissionRequestsPanel({
   setNotice,
-  reloadKey = 0
+  reloadKey = 0,
+  businessCaseId
 }: {
   setNotice: (message: string) => void;
   reloadKey?: number;
+  businessCaseId?: string;
 }) {
   const [mode, setMode] = useState<"current" | "history">("current");
   const [currentBox, setCurrentBox] = useState<CurrentRequestBox>("incoming");
@@ -35,17 +37,27 @@ export function PermissionRequestsPanel({
   const [busyId, setBusyId] = useState("");
   const box: RequestBox = mode === "current" ? currentBox : historyBox;
   const statusFilter = mode === "current" ? "pending" : historyStatus;
-  const isIncomingCurrent = mode === "current" && currentBox === "incoming";
+  const isIncomingCurrent = mode === "current" && (
+    businessCaseId !== undefined || currentBox === "incoming"
+  );
+  const showRequester = businessCaseId !== undefined || isIncomingCurrent || historyBox === "handled";
 
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const page = await api.pageBusinessCaseAccessRequests({
-        box,
-        status: statusFilter || undefined,
-        limit: 30,
-        offset
-      });
+      const page = businessCaseId === undefined
+        ? await api.pageBusinessCaseAccessRequests({
+          box,
+          status: statusFilter || undefined,
+          limit: 30,
+          offset
+        })
+        : await api.pageBusinessCaseAccessRequestsForBusinessCase(businessCaseId, {
+          history: mode === "history",
+          status: statusFilter || undefined,
+          limit: 30,
+          offset
+        });
       setItems(page.items);
       setTotal(page.total);
       if (page.total > 0 && page.offset >= page.total) {
@@ -56,7 +68,7 @@ export function PermissionRequestsPanel({
     } finally {
       setLoading(false);
     }
-  }, [box, offset, setNotice, statusFilter]);
+  }, [box, businessCaseId, mode, offset, setNotice, statusFilter]);
 
   useEffect(() => {
     void refresh();
@@ -98,8 +110,11 @@ export function PermissionRequestsPanel({
   return <div className="panel permission-requests-panel">
     <div className="panel-header">
       <div>
-        <h2>Permission requests</h2>
-        <p>Review current requests and your submitted or handled request history.</p>
+        <h2>{businessCaseId ? "Access requests" : "Permission requests"}</h2>
+        <p>{businessCaseId
+          ? "Review open requests and completed decisions for this Business Case."
+          : "Review current requests and your submitted or handled request history."}
+        </p>
       </div>
       <button className="secondary-button compact-button" type="button" disabled={loading} onClick={() => void refresh()}>
         <RotateCcw className={loading ? "run-spinner" : undefined} size={15} />
@@ -116,35 +131,32 @@ export function PermissionRequestsPanel({
           <Clock3 size={15} /> History
         </button>
       </div>
-      {mode === "current" ? (
-        <div className="segmented-control" role="group" aria-label="Current permission requests">
-          <button type="button" className={currentBox === "incoming" ? "active" : ""} onClick={() => setCurrentBox("incoming")}>
-            <Inbox size={15} /> Incoming
-          </button>
-          <button type="button" className={currentBox === "mine" ? "active" : ""} onClick={() => setCurrentBox("mine")}>
-            <Clock3 size={15} /> My requests
-          </button>
-        </div>
-      ) : (
-        <>
-          <div className="segmented-control" role="group" aria-label="Permission request history">
-            <button type="button" className={historyBox === "submitted_history" ? "active" : ""} onClick={() => setHistoryBox("submitted_history")}>
-              <Clock3 size={15} /> Submitted by me
+      {businessCaseId === undefined ? (
+        mode === "current" ? (
+          <div className="segmented-control" role="group" aria-label="Current permission requests">
+            <button type="button" className={currentBox === "incoming" ? "active" : ""} onClick={() => setCurrentBox("incoming")}>
+              <Inbox size={15} /> Incoming
             </button>
-            <button type="button" className={historyBox === "handled" ? "active" : ""} onClick={() => setHistoryBox("handled")}>
-              <Check size={15} /> Handled by me
+            <button type="button" className={currentBox === "mine" ? "active" : ""} onClick={() => setCurrentBox("mine")}>
+              <Clock3 size={15} /> My requests
             </button>
           </div>
-          <label>
-            Status
-            <select value={historyStatus} onChange={(event) => setHistoryStatus(event.target.value as RequestStatus | "")}>
-              <option value="">All decisions</option>
-              <option value="approved">Approved</option>
-              <option value="rejected">Rejected</option>
-            </select>
-          </label>
-        </>
-      )}
+        ) : (
+          <>
+            <div className="segmented-control" role="group" aria-label="Permission request history">
+              <button type="button" className={historyBox === "submitted_history" ? "active" : ""} onClick={() => setHistoryBox("submitted_history")}>
+                <Clock3 size={15} /> Submitted by me
+              </button>
+              <button type="button" className={historyBox === "handled" ? "active" : ""} onClick={() => setHistoryBox("handled")}>
+                <Check size={15} /> Handled by me
+              </button>
+            </div>
+            <HistoryStatusFilter value={historyStatus} onChange={setHistoryStatus} />
+          </>
+        )
+      ) : mode === "history" ? (
+        <HistoryStatusFilter value={historyStatus} onChange={setHistoryStatus} />
+      ) : null}
     </div>
 
     <div className="permission-request-list" aria-busy={loading}>
@@ -153,7 +165,7 @@ export function PermissionRequestsPanel({
           <span>
             <strong>{item.business_case_name}</strong>
             <small>
-              {isIncomingCurrent || historyBox === "handled"
+              {showRequester
                 ? `${item.requester_display_name} · ${item.requester_email}`
                 : `Requested ${item.requested_role}`}
               {" · "}{mode === "history" && item.decided_at
@@ -223,4 +235,21 @@ export function PermissionRequestsPanel({
       label="permission requests"
     />
   </div>;
+}
+
+function HistoryStatusFilter({
+  value,
+  onChange
+}: {
+  value: RequestStatus | "";
+  onChange: (value: RequestStatus | "") => void;
+}) {
+  return <label>
+    Status
+    <select value={value} onChange={(event) => onChange(event.target.value as RequestStatus | "")}>
+      <option value="">All decisions</option>
+      <option value="approved">Approved</option>
+      <option value="rejected">Rejected</option>
+    </select>
+  </label>;
 }

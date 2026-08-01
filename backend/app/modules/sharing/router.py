@@ -232,6 +232,34 @@ def page_business_case_access_requests(
     )
 
 
+@router.get(
+    "/business-cases/{business_case_id}/access-requests/page",
+    response_model=OffsetPage[BusinessCaseAccessRequestRead],
+)
+def page_business_case_access_requests_for_business_case(
+    business_case_id: str,
+    history: bool = Query(default=False),
+    request_status: AccessRequestStatus | None = Query(default=None, alias="status"),
+    limit: int = Query(default=30, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    principal: Principal = Depends(require_user),
+) -> OffsetPage[BusinessCaseAccessRequestRead]:
+    items, total = service.page_business_case_access_requests_for_business_case(
+        business_case_id,
+        principal,
+        historical_only=history,
+        status_filter=request_status,
+        limit=limit,
+        offset=offset,
+    )
+    return OffsetPage[BusinessCaseAccessRequestRead].build(
+        [BusinessCaseAccessRequestRead.model_validate(item) for item in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.post(
     "/access-requests/{request_id}/approve",
     response_model=BusinessCaseAccessRequestRead,

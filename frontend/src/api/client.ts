@@ -1179,6 +1179,18 @@ export const api = {
   ) => request<OffsetPage<BusinessCaseAccessRequest>>(
     withQuery("/sharing/access-requests/page", query)
   ),
+  pageBusinessCaseAccessRequestsForBusinessCase: (
+    businessCaseId: string,
+    query: PageQuery & {
+      history?: boolean;
+      status?: "pending" | "approved" | "rejected";
+    }
+  ) => request<OffsetPage<BusinessCaseAccessRequest>>(
+    withQuery(
+      `/sharing/business-cases/${encodeURIComponent(businessCaseId)}/access-requests/page`,
+      query
+    )
+  ),
   approveBusinessCaseAccessRequest: (
     requestId: string,
     payload: { access_role: Exclude<BusinessCaseAccessRole, "owner">; decision_note?: string }

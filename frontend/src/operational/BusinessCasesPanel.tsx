@@ -4,6 +4,7 @@ import {
   Database,
   Filter,
   History,
+  Inbox,
   GitBranch,
   ListChecks,
   Play,
@@ -33,6 +34,7 @@ import type {
 } from "../api/client";
 import { AssetList } from "../components/AssetList";
 import { BusinessCaseDirectoryPanel } from "./BusinessCaseDirectoryPanel";
+import { PermissionRequestsPanel } from "./PermissionRequestsPanel";
 import { DeferredPanel } from "../components/DeferredPanel";
 import { PaginationControls } from "../components/PaginationControls";
 import { PagedCatalogSelect } from "../components/PagedCatalogSelect";
@@ -155,7 +157,7 @@ export function BusinessCasesPanel({
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isMappingFormOpen, setIsMappingFormOpen] = useState(false);
   const [editingAttachmentId, setEditingAttachmentId] = useState("");
-  const [activeWorkspace, setActiveWorkspace] = useState<"details" | "data" | "pipelines" | "models" | "services" | "reports" | null>(null);
+  const [activeWorkspace, setActiveWorkspace] = useState<"details" | "data" | "pipelines" | "models" | "services" | "reports" | "accessRequests" | null>(null);
   const bcModelNavigation = useVersionedResourceNavigation<ModelArtifact>();
   const bcReportNavigation = useVersionedResourceNavigation<ScoringReport>();
   const [bcDatasetHistory, setBcDatasetHistory] = useState<DataAsset | null>(null);
@@ -203,6 +205,8 @@ export function BusinessCasesPanel({
     ?? businessCases.find((item) => item.id === selectedBusinessCaseId)
     ?? selectedBusinessCaseSnapshot
   );
+  const canManageSelectedBusinessCase = selectedBusinessCase?.access_role === "manager"
+    || selectedBusinessCase?.access_role === "owner";
   const datasetById = useMemo(
     () => new Map(datasets.map((dataset) => [dataset.id, dataset])),
     [datasets]
@@ -927,6 +931,10 @@ export function BusinessCasesPanel({
                 <ListChecks size={14} />
                 Details
               </button>
+              {canManageSelectedBusinessCase && <button className={`secondary-button compact-button${activeWorkspace === "accessRequests" ? " active" : ""}`} type="button" onClick={() => setActiveWorkspace("accessRequests")}>
+                <Inbox size={14} />
+                Access requests
+              </button>}
               <button className={`secondary-button compact-button${activeWorkspace === "data" ? " active" : ""}`} type="button" onClick={() => setActiveWorkspace("data")}>
                 <Database size={14} />
                 Data
@@ -1022,6 +1030,10 @@ export function BusinessCasesPanel({
               </button>
             </div>
           </form>
+        )}
+
+        {selectedBusinessCase && activeWorkspace === "accessRequests" && canManageSelectedBusinessCase && (
+          <PermissionRequestsPanel businessCaseId={selectedBusinessCase.id} setNotice={setNotice} />
         )}
 
         {selectedBusinessCase && activeWorkspace === "data" && (

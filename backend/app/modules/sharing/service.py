@@ -362,6 +362,34 @@ class SharingService:
             offset=offset,
         )
 
+    def page_business_case_access_requests_for_business_case(
+        self,
+        business_case_id: str,
+        principal: Principal,
+        *,
+        historical_only: bool,
+        status_filter: AccessRequestStatus | None,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[BusinessCaseAccessRequest], int]:
+        self.policy.require_business_case(
+            principal,
+            business_case_id,
+            BusinessCaseAccessRole.MANAGER,
+        )
+        effective_status = status_filter
+        if not historical_only and effective_status is None:
+            effective_status = AccessRequestStatus.PENDING
+        return self.repository.page_access_requests(
+            requester_id=None,
+            manageable_business_case_ids={business_case_id},
+            decided_by=None,
+            historical_only=historical_only,
+            status_filter=effective_status,
+            limit=limit,
+            offset=offset,
+        )
+
     def approve_business_case_access_request(
         self,
         request_id: str,

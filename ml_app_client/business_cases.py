@@ -171,6 +171,21 @@ class BusinessCaseClientMixin(TransportClientMixin):
         })
         return CatalogPage.from_api(payload, BusinessCaseAccessRequest.from_api)
 
+    def page_business_case_access_requests_for_business_case(
+        self, business_case: BusinessCaseRef, *, history: bool = False,
+        status: str | None = None, limit: int = 30, offset: int = 0,
+    ) -> CatalogPage[BusinessCaseAccessRequest]:
+        """Page open requests or completed decision history for one manageable Business Case."""
+        business_case_id = self._business_case_id(business_case)
+        effective_status = status if status is not None else (None if history else "pending")
+        payload = self._request(
+            "GET", f"/sharing/business-cases/{business_case_id}/access-requests/page", params={
+                "history": str(history).lower(), "status": effective_status,
+                "limit": limit, "offset": offset,
+            },
+        )
+        return CatalogPage.from_api(payload, BusinessCaseAccessRequest.from_api)
+
     def approve_business_case_access_request(
         self, request_id: str, *, access_role: str, decision_note: str = "",
     ) -> BusinessCaseAccessRequest:
