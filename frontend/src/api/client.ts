@@ -1173,7 +1173,7 @@ export const api = {
   ),
   pageBusinessCaseAccessRequests: (
     query: PageQuery & {
-      box: "incoming" | "mine";
+      box: "incoming" | "mine" | "submitted_history" | "handled";
       status?: "pending" | "approved" | "rejected";
     }
   ) => request<OffsetPage<BusinessCaseAccessRequest>>(

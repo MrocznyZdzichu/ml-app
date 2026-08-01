@@ -1070,7 +1070,10 @@ class PostgresBusinessCaseRepository:
                     latest.logical_id AS data_asset_logical_id,
                     latest.version_number AS data_asset_version_number,
                     COALESCE(latest.metadata #>> '{pipeline_output,pipeline_id}', '') AS data_asset_pipeline_id,
-                    COALESCE(pipeline.template, '') AS data_asset_pipeline_template
+                    -- Pipeline templates are derived at the application boundary and
+                    -- are not a persisted column.  `type` is the durable catalog
+                    -- classification available to this set-oriented query.
+                    COALESCE(pipeline.type, '') AS data_asset_pipeline_template
                 FROM mlapp.business_case_data_attachments AS attachment
                 JOIN mlapp.data_assets AS attached
                   ON attached.id = attachment.data_asset_id

@@ -14,6 +14,7 @@ from .datasets import DatasetClientMixin
 from .errors import AuthenticationError
 from .model_registry import ModelRegistryClientMixin
 from .pipelines import PipelineClientMixin
+from .presentation import PresentationClientMixin
 from .scoring_reports import ScoringReportClientMixin
 from .serving import ServingClientMixin
 from .transport import Session
@@ -24,6 +25,7 @@ class MLAppClient(
     DatasetClientMixin,
     BusinessCaseClientMixin,
     PipelineClientMixin,
+    PresentationClientMixin,
     ScoringReportClientMixin,
     ModelRegistryClientMixin,
     ServingClientMixin,

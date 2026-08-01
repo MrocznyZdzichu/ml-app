@@ -26,6 +26,7 @@ from ml_app_client.inference import InferenceClientMixin
 from ml_app_client.model_registry import ModelRegistryClientMixin
 from ml_app_client.online_monitoring import OnlineMonitoringClientMixin
 from ml_app_client.pipelines import PipelineClientMixin
+from ml_app_client.presentation import PresentationClientMixin
 from ml_app_client.scoring_reports import ScoringReportClientMixin
 
 
@@ -104,6 +105,7 @@ class MLAppClientTests(unittest.TestCase):
             BusinessCaseClientMixin.ensure_business_case,
         )
         self.assertIs(MLAppClient.run_pipeline, PipelineClientMixin.run_pipeline)
+        self.assertIs(MLAppClient.present, PresentationClientMixin.present)
         self.assertIs(
             MLAppClient.scoring_report_for_run,
             ScoringReportClientMixin.scoring_report_for_run,
@@ -122,6 +124,16 @@ class MLAppClientTests(unittest.TestCase):
         serving_path = Path(__file__).parents[1] / "ml_app_client" / "serving.py"
         self.assertLess(len(facade_path.read_text(encoding="utf-8").splitlines()), 150)
         self.assertLess(len(serving_path.read_text(encoding="utf-8").splitlines()), 50)
+
+    def test_client_presentation_hides_raw_payload_and_escapes_html(self) -> None:
+        view = MLAppClient(session=FakeSession([])).present({
+            "name": "<Customer churn>", "status": "active", "raw": {"secret": "hidden"},
+        }, title="Business Case")
+
+        self.assertIn("Business Case", str(view))
+        self.assertNotIn("secret", str(view))
+        self.assertIn("&lt;Customer churn&gt;", view._repr_html_())
+        self.assertNotIn("secret", view._repr_html_())
 
     def test_catalog_pages_preserve_server_totals_and_filters(self) -> None:
         session = FakeSession([
@@ -310,6 +322,33 @@ class MLAppClientTests(unittest.TestCase):
         self.assertEqual(business_case["id"], "bc-1")
         self.assertFalse(created)
         self.assertEqual(len(session.requests), 1)
+
+    def test_business_case_models_are_typed_and_keep_mapping_compatibility(self) -> None:
+        session = FakeSession([
+            FakeResponse({
+                "id": "bc-1", "name": "Sales", "description": "Revenue forecasting",
+                "problem_type": "regression", "status": "draft", "owner_id": "owner-1",
+                "access_role": "owner", "business_owner": "Finance",
+                "primary_metric": "mae", "target_column": "revenue",
+                "business_goal": "Forecast revenue", "success_criteria": "MAE < 10",
+            }),
+            FakeResponse({
+                "id": "bc-1", "name": "Sales", "description": "Revenue forecasting",
+                "problem_type": "regression", "status": "active", "owner_id": "owner-1",
+                "access_role": "owner", "business_owner": "Finance",
+                "primary_metric": "mae", "target_column": "revenue",
+                "business_goal": "Forecast revenue", "success_criteria": "MAE < 10",
+            }),
+        ])
+        client = MLAppClient(session=session)
+
+        case = client.get_business_case("bc-1")
+        updated = client.update_business_case(case, status="active")
+
+        self.assertEqual(case.id, "bc-1")
+        self.assertEqual(case["name"], "Sales")
+        self.assertEqual(updated.status, "active")
+        self.assertEqual(session.requests[1][2]["json"]["description"], "Revenue forecasting")
 
     def test_name_resolution_consumes_bounded_pages_until_exact_match(self) -> None:
         session = FakeSession([

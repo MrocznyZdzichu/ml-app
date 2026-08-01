@@ -334,6 +334,39 @@ def test_global_business_case_directory_and_permission_request_workflow() -> Non
     assert rejected.json()["status"] == "rejected"
     assert client.get("/api/v1/business-cases", headers=rejected_headers).json() == []
 
+    submitted_history = client.get(
+        "/api/v1/sharing/access-requests/page",
+        headers=bob_headers,
+        params={"box": "submitted_history"},
+    )
+    assert submitted_history.status_code == 200, submitted_history.text
+    assert [item["id"] for item in submitted_history.json()["items"]] == [
+        first_request.json()["id"]
+    ]
+
+    handled_history = client.get(
+        "/api/v1/sharing/access-requests/page",
+        headers=manager_headers,
+        params={"box": "handled"},
+    )
+    assert handled_history.status_code == 200, handled_history.text
+    assert {item["id"] for item in handled_history.json()["items"]} == {
+        first_request.json()["id"], second_request.json()["id"]
+    }
+    assert client.get(
+        "/api/v1/sharing/access-requests/page",
+        headers=bob_headers,
+        params={"box": "handled"},
+    ).json()["items"] == []
+    rejected_history = client.get(
+        "/api/v1/sharing/access-requests/page",
+        headers=manager_headers,
+        params={"box": "handled", "status": "rejected"},
+    )
+    assert [item["id"] for item in rejected_history.json()["items"]] == [
+        second_request.json()["id"]
+    ]
+
     repeated_decision = client.post(
         f"/api/v1/sharing/access-requests/{first_request.json()['id']}/approve",
         headers=alice_headers,

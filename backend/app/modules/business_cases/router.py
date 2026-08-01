@@ -125,6 +125,16 @@ def update_business_case(
     return BusinessCaseRead.model_validate(service.update_business_case(business_case_id, payload, principal))
 
 
+@router.delete("/{business_case_id}/admin-cascade")
+def permanently_delete_business_case_as_root(
+    business_case_id: str,
+    principal: Principal = Depends(require_user),
+) -> dict[str, object]:
+    """Root-only irreversible cleanup; normal Business Case lifecycle has no delete."""
+    deletion = service.delete_business_case_as_root(business_case_id, principal)
+    return {"deleted": True, "business_case_id": deletion.business_case_id, "cascade": deletion.deleted}
+
+
 @router.post("/{business_case_id}/transfer-ownership", response_model=BusinessCaseRead)
 def transfer_business_case_ownership(
     business_case_id: str,

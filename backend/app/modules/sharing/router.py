@@ -211,7 +211,7 @@ def create_business_case_access_request(
     response_model=OffsetPage[BusinessCaseAccessRequestRead],
 )
 def page_business_case_access_requests(
-    box: str = Query(default="incoming", max_length=16),
+    box: str = Query(default="incoming", max_length=32),
     request_status: AccessRequestStatus | None = Query(default=None, alias="status"),
     limit: int = Query(default=30, ge=1, le=100),
     offset: int = Query(default=0, ge=0),

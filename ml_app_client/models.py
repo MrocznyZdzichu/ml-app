@@ -3,10 +3,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Generic, Mapping, TypeVar
+from typing import Any, Callable, Generic, Iterator, Mapping, TypeVar
 
 
 T = TypeVar("T")
+
+
+class ApiModel(Mapping[str, Any]):
+    """Typed response model that remains compatible with legacy mapping access."""
+
+    raw: Mapping[str, Any]
+
+    def __getitem__(self, key: str) -> Any:
+        return self.raw[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.raw)
+
+    def __len__(self) -> int:
+        return len(self.raw)
 
 
 @dataclass(frozen=True)
@@ -35,7 +50,7 @@ class CatalogPage(Generic[T]):
 
 
 @dataclass(frozen=True)
-class Dataset:
+class Dataset(ApiModel):
     id: str
     logical_id: str
     name: str
@@ -54,6 +69,102 @@ class Dataset:
             row_count=None if value.get("row_count") is None else int(value["row_count"]),
             format=str(value["format"]),
             raw=value,
+        )
+
+
+@dataclass(frozen=True)
+class BusinessCase(ApiModel):
+    """A visible Business Case and its lifecycle metadata."""
+
+    id: str
+    name: str
+    description: str
+    problem_type: str
+    status: str
+    owner_id: str
+    access_role: str
+    business_owner: str
+    primary_metric: str
+    target_column: str
+    business_goal: str
+    success_criteria: str
+    raw: Mapping[str, Any]
+
+    @classmethod
+    def from_api(cls, value: Mapping[str, Any]) -> "BusinessCase":
+        return cls(
+            id=str(value["id"]), name=str(value["name"]),
+            description=str(value.get("description") or ""),
+            problem_type=str(value.get("problem_type") or "custom"),
+            status=str(value.get("status") or "draft"),
+            owner_id=str(value.get("owner_id") or ""),
+            access_role=str(value.get("access_role") or ""),
+            business_owner=str(value.get("business_owner") or ""),
+            primary_metric=str(value.get("primary_metric") or ""),
+            target_column=str(value.get("target_column") or ""),
+            business_goal=str(value.get("business_goal") or ""),
+            success_criteria=str(value.get("success_criteria") or ""),
+            raw=value,
+        )
+
+
+@dataclass(frozen=True)
+class BusinessCaseCatalogEntry(ApiModel):
+    """Minimal organization-wide Business Case directory entry."""
+
+    id: str
+    name: str
+    status: str
+    access_role: str
+    request_status: str
+    raw: Mapping[str, Any]
+
+    @classmethod
+    def from_api(cls, value: Mapping[str, Any]) -> "BusinessCaseCatalogEntry":
+        return cls(
+            id=str(value["id"]), name=str(value["name"]),
+            status=str(value.get("status") or ""),
+            access_role=str(value.get("access_role") or ""),
+            request_status=str(value.get("request_status") or ""), raw=value,
+        )
+
+
+@dataclass(frozen=True)
+class BusinessCaseAccessRequest(ApiModel):
+    """An auditable request for access to a Business Case."""
+
+    id: str
+    business_case_id: str
+    status: str
+    requested_role: str
+    raw: Mapping[str, Any]
+
+    @classmethod
+    def from_api(cls, value: Mapping[str, Any]) -> "BusinessCaseAccessRequest":
+        return cls(
+            id=str(value["id"]), business_case_id=str(value["business_case_id"]),
+            status=str(value.get("status") or ""),
+            requested_role=str(value.get("requested_role") or ""), raw=value,
+        )
+
+
+@dataclass(frozen=True)
+class BusinessCaseDataAttachment(ApiModel):
+    """A role-specific binding between a Business Case and immutable data."""
+
+    id: str
+    business_case_id: str
+    data_asset_id: str
+    role: str
+    context_note: str
+    raw: Mapping[str, Any]
+
+    @classmethod
+    def from_api(cls, value: Mapping[str, Any]) -> "BusinessCaseDataAttachment":
+        return cls(
+            id=str(value["id"]), business_case_id=str(value.get("business_case_id") or ""),
+            data_asset_id=str(value.get("data_asset_id") or ""), role=str(value.get("role") or ""),
+            context_note=str(value.get("context_note") or ""), raw=value,
         )
 
 

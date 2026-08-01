@@ -317,13 +317,35 @@ class SharingService:
             return self.repository.page_access_requests(
                 requester_id=principal.user_id,
                 manageable_business_case_ids=None,
+                decided_by=None,
+                historical_only=False,
+                status_filter=status_filter,
+                limit=limit,
+                offset=offset,
+            )
+        if box == "submitted_history":
+            return self.repository.page_access_requests(
+                requester_id=principal.user_id,
+                manageable_business_case_ids=None,
+                decided_by=None,
+                historical_only=True,
+                status_filter=status_filter,
+                limit=limit,
+                offset=offset,
+            )
+        if box == "handled":
+            return self.repository.page_access_requests(
+                requester_id=None,
+                manageable_business_case_ids=None,
+                decided_by=principal.user_id,
+                historical_only=True,
                 status_filter=status_filter,
                 limit=limit,
                 offset=offset,
             )
         if box != "incoming":
             raise InvalidRequestError(
-                "box must be incoming or mine",
+                "box must be incoming, mine, submitted_history, or handled",
                 code="invalid_access_request_box",
             )
         roles = self.policy.accessible_business_case_roles(
@@ -333,6 +355,8 @@ class SharingService:
         return self.repository.page_access_requests(
             requester_id=None,
             manageable_business_case_ids=None if roles is None else set(roles),
+            decided_by=None,
+            historical_only=False,
             status_filter=status_filter,
             limit=limit,
             offset=offset,

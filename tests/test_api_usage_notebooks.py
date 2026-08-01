@@ -7,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 NOTEBOOKS = ROOT / "examples" / "API-usage"
+CLIENT_MODULE_NOTEBOOKS = ROOT / "examples" / "client-modules"
 EXPECTED = [
     "Example01_01_setup_business_case.ipynb",
     "Example01_02_upload_datasets.ipynb",
@@ -116,6 +117,24 @@ class ApiUsageNotebookTests(unittest.TestCase):
             "MODEL_SERVICE_NAME",
         ):
             self.assertIn(name, source)
+
+    def test_client_module_business_case_notebook_compiles_and_covers_the_public_workflow(self) -> None:
+        payload = json.loads((CLIENT_MODULE_NOTEBOOKS / "business_cases.ipynb").read_text(encoding="utf-8"))
+        self.assertEqual(payload["nbformat"], 4)
+        source = "\n".join("".join(cell["source"]) for cell in payload["cells"])
+        for operation in (
+            "client.ensure_business_case(",
+            "client.get_business_case_by_name(",
+            "client.update_business_case(",
+            "client.page_business_cases(",
+            "client.attach_dataset(",
+            "client.page_business_case_catalog(",
+            "client.archive_business_case(",
+        ):
+            self.assertIn(operation, source)
+        for index, cell in enumerate(payload["cells"]):
+            if cell["cell_type"] == "code":
+                compile("".join(cell["source"]), f"business_cases.ipynb:cell-{index}", "exec")
 
 
 if __name__ == "__main__":

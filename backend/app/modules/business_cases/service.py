@@ -28,6 +28,10 @@ from app.modules.auth.repository import PostgresUserRepository, UserRepository
 from app.modules.datasets.repository import DatasetRepository, PostgresDatasetRepository
 from app.modules.sharing.domain import AuditEvent
 from app.modules.sharing.repository import PostgresSharingRepository
+from app.modules.business_cases.admin_deletion import (
+    BusinessCaseCascadeDeletion,
+    PostgresBusinessCaseAdminDeletion,
+)
 
 
 business_case_repository = PostgresBusinessCaseRepository()
@@ -45,6 +49,34 @@ class BusinessCaseService:
         self.users = users or PostgresUserRepository()
         self.datasets = datasets or PostgresDatasetRepository()
         self.audit_repository = audit_repository or PostgresSharingRepository()
+
+    def delete_business_case_as_root(
+        self, business_case_id: str, principal: Principal
+    ) -> BusinessCaseCascadeDeletion:
+        """Permanently delete one BC and its case-owned state for test cleanup."""
+        if principal.user_id != "root" or not principal.is_administrator:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only the protected root administrator can permanently delete a Business Case",
+            )
+        if not isinstance(self.repository, PostgresBusinessCaseRepository):
+            raise HTTPException(
+                status_code=status.HTTP_501_NOT_IMPLEMENTED,
+                detail="Permanent Business Case deletion requires the PostgreSQL repository",
+            )
+        deletion = PostgresBusinessCaseAdminDeletion(self.repository.engine).delete(business_case_id)
+        if not deletion.deleted:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Business case not found")
+        self.audit_repository.add_audit(AuditEvent(
+            id=str(uuid4()), actor_id=principal.user_id, action="business_case.permanently_deleted",
+            subject_type="business_case", subject_id=business_case_id,
+            resource_kind="business_case", resource_id=business_case_id,
+            new_state={"deleted": deletion.deleted},
+            reason="Root administrator permanent cascade deletion",
+        ))
+        deletion_service = PostgresBusinessCaseAdminDeletion(self.repository.engine)
+        deletion_service.delete_storage(deletion)
+        return deletion
 
     def create_business_case(self, payload: BusinessCaseCreate, principal: Principal) -> BusinessCase:
         name = payload.name.strip()

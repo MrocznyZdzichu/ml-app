@@ -37,6 +37,14 @@ def _create_business_case(client: TestClient, token: str) -> dict:
     return response.json()
 
 
+def _root_token(client: TestClient) -> str:
+    response = client.post(
+        "/api/v1/auth/login", json={"login": "root", "password": "toor"}
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["access_token"]
+
+
 def test_business_case_names_are_globally_case_insensitive_unique() -> None:
     client = TestClient(create_app())
     token_a = _register(client, "alice")
@@ -108,6 +116,43 @@ def test_automl_pipeline_purpose_is_accepted_by_create_api() -> None:
 
     assert response.status_code == 201, response.text
     assert response.json()["type"] == "automl"
+
+
+def test_only_root_can_permanently_cascade_delete_a_business_case() -> None:
+    client = TestClient(create_app())
+    token = _register(client, "delete-owner")
+    headers = {"Authorization": f"Bearer {token}"}
+    business_case = _create_business_case(client, token)
+    pipeline = client.post(
+        "/api/v1/pipelines",
+        headers=headers,
+        json={
+            "business_case_id": business_case["id"],
+            "name": f"Cleanup pipeline {uuid4()}",
+            "type": "custom",
+        },
+    )
+    assert pipeline.status_code == 201, pipeline.text
+
+    forbidden = client.delete(
+        f"/api/v1/business-cases/{business_case['id']}/admin-cascade",
+        headers=headers,
+    )
+    assert forbidden.status_code == 403
+
+    root_headers = {"Authorization": f"Bearer {_root_token(client)}"}
+    deleted = client.delete(
+        f"/api/v1/business-cases/{business_case['id']}/admin-cascade",
+        headers=root_headers,
+    )
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["cascade"]["business_cases"] == 1
+    assert deleted.json()["cascade"]["pipelines"] == 1
+
+    missing = client.get(
+        f"/api/v1/business-cases/{business_case['id']}", headers=root_headers
+    )
+    assert missing.status_code == 404
 
 
 def test_business_case_can_exist_without_data_and_owns_data_mappings() -> None:
@@ -261,6 +306,42 @@ def test_business_case_data_mapping_can_be_updated_and_deleted() -> None:
     assert attachments.status_code == 200
     assert [item["id"] for item in attachments.json()] == [first.json()["id"]]
     assert attachments.json()[0]["role"] == "source"
+
+
+def test_business_case_data_mapping_page_returns_attached_uploaded_dataset() -> None:
+    client = TestClient(create_app())
+    token = _register(client, "alice")
+    headers = {"Authorization": f"Bearer {token}"}
+    business_case = _create_business_case(client, token)
+    uploaded = client.post(
+        "/api/v1/datasets/upload",
+        headers=headers,
+        data={"name": "Mapped catalog dataset"},
+        files={"file": ("mapped.csv", b"id,target\n1,yes\n", "text/csv")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+
+    attached = client.post(
+        f"/api/v1/business-cases/{business_case['id']}/data-attachments",
+        headers=headers,
+        json={
+            "data_asset_id": uploaded.json()["id"],
+            "data_asset_kind": "dataset",
+            "role": "training",
+            "origin": "uploaded",
+        },
+    )
+    assert attached.status_code == 201, attached.text
+
+    page = client.get(
+        f"/api/v1/business-cases/{business_case['id']}/data-attachments/page",
+        headers=headers,
+    )
+
+    assert page.status_code == 200, page.text
+    assert page.json()["total"] == 1
+    assert page.json()["items"][0]["data_asset_id"] == uploaded.json()["id"]
+    assert page.json()["items"][0]["data_asset_name"] == "Mapped catalog dataset"
 
 
 def test_pipeline_version_and_run_contracts_are_auditable(monkeypatch) -> None:

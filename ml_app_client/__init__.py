@@ -11,6 +11,10 @@ from .errors import (
 )
 from .models import (
     CatalogPage,
+    BusinessCase,
+    BusinessCaseAccessRequest,
+    BusinessCaseCatalogEntry,
+    BusinessCaseDataAttachment,
     Dataset,
     Deployment,
     ModelServingUsage,
@@ -18,16 +22,22 @@ from .models import (
     PipelineRun,
     PredictionResult,
 )
+from .presentation import ObjectPresentation
 
 __all__ = [
     "ApiError",
     "AuthenticationError",
+    "BusinessCase",
+    "BusinessCaseAccessRequest",
+    "BusinessCaseCatalogEntry",
+    "BusinessCaseDataAttachment",
     "AuthorizationError",
     "CatalogPage",
     "ConflictError",
     "Deployment",
     "ModelServingUsage",
     "OnlineMonitoringRun",
+    "ObjectPresentation",
     "Dataset",
     "MLAppClient",
     "PipelineRun",

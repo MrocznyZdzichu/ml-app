@@ -603,9 +603,35 @@ def _add_business_case_access_requests(connection: Connection) -> None:
             "CREATE INDEX IF NOT EXISTS ix_bc_access_requests_mine "
             "ON mlapp.business_case_access_requests (requester_id, created_at DESC)"
         ),
+        (
+            "CREATE INDEX IF NOT EXISTS ix_bc_access_requests_decided_by "
+            "ON mlapp.business_case_access_requests (decided_by, decided_at DESC, id DESC) "
+            "WHERE decided_by <> ''"
+        ),
+        (
+            "CREATE INDEX IF NOT EXISTS ix_bc_access_requests_submitted_history "
+            "ON mlapp.business_case_access_requests (requester_id, decided_at DESC, id DESC) "
+            "WHERE status <> 'pending'"
+        ),
     ]
     for statement in statements:
         connection.execute(text(statement))
+
+
+def _index_business_case_access_request_history(connection: Connection) -> None:
+    connection.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_bc_access_requests_decided_by "
+        "ON mlapp.business_case_access_requests (decided_by, decided_at DESC, id DESC) "
+        "WHERE decided_by <> ''"
+    ))
+
+
+def _index_submitted_business_case_access_request_history(connection: Connection) -> None:
+    connection.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_bc_access_requests_submitted_history "
+        "ON mlapp.business_case_access_requests (requester_id, decided_at DESC, id DESC) "
+        "WHERE status <> 'pending'"
+    ))
 
 
 MIGRATIONS = [
@@ -678,5 +704,15 @@ MIGRATIONS = [
         version="20260730_0014",
         description="Add discoverable Business Case access request workflow",
         apply=_add_business_case_access_requests,
+    ),
+    Migration(
+        version="20260801_0015",
+        description="Index Business Case access request decision history",
+        apply=_index_business_case_access_request_history,
+    ),
+    Migration(
+        version="20260801_0016",
+        description="Index submitted Business Case access request history",
+        apply=_index_submitted_business_case_access_request_history,
     ),
 ]

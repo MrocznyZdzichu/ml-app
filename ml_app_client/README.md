@@ -1,5 +1,8 @@
 # ML App Python client
 
+Business Case lifecycle, access, and dataset bindings are documented in the
+[interactive client reference](reference/index.html).
+
 `ml_app_client` is the supported, deliberately small integration interface for
 dataset ingestion, pipeline execution, model lifecycle, scoring, online serving,
 and monitoring. It streams CSV/Parquet uploads from disk, resolves human-readable

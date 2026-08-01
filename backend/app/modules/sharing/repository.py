@@ -110,6 +110,20 @@ Index(
     business_case_access_requests_table.c.requester_id,
     business_case_access_requests_table.c.created_at,
 )
+Index(
+    "ix_bc_access_requests_decided_by",
+    business_case_access_requests_table.c.decided_by,
+    business_case_access_requests_table.c.decided_at,
+    business_case_access_requests_table.c.id,
+    postgresql_where=text("decided_by <> ''"),
+)
+Index(
+    "ix_bc_access_requests_submitted_history",
+    business_case_access_requests_table.c.requester_id,
+    business_case_access_requests_table.c.decided_at,
+    business_case_access_requests_table.c.id,
+    postgresql_where=text("status <> 'pending'"),
+)
 
 resource_grants_table = Table(
     "resource_grants", metadata,
@@ -484,6 +498,8 @@ class PostgresSharingRepository:
         *,
         requester_id: str | None,
         manageable_business_case_ids: set[str] | None,
+        decided_by: str | None,
+        historical_only: bool,
         status_filter: AccessRequestStatus | None,
         limit: int,
         offset: int,
@@ -502,6 +518,15 @@ class PostgresSharingRepository:
                     manageable_business_case_ids
                 )
             )
+        if decided_by is not None:
+            filters.append(
+                business_case_access_requests_table.c.decided_by == decided_by
+            )
+        if historical_only:
+            filters.append(
+                business_case_access_requests_table.c.status
+                != AccessRequestStatus.PENDING.value
+            )
         if status_filter is not None:
             filters.append(
                 business_case_access_requests_table.c.status == status_filter.value
@@ -513,15 +538,18 @@ class PostgresSharingRepository:
         if filters:
             count_statement = count_statement.where(*filters)
             page_statement = page_statement.where(*filters)
-        page_statement = (
-            page_statement
-            .order_by(
+        ordering = (
+            (
+                business_case_access_requests_table.c.decided_at.desc(),
+                business_case_access_requests_table.c.id.desc(),
+            )
+            if historical_only
+            else (
                 business_case_access_requests_table.c.created_at.desc(),
                 business_case_access_requests_table.c.id.desc(),
             )
-            .limit(limit)
-            .offset(offset)
         )
+        page_statement = page_statement.order_by(*ordering).limit(limit).offset(offset)
         with self.engine.begin() as connection:
             total = int(connection.execute(count_statement).scalar_one())
             items = [
