@@ -128,13 +128,29 @@ class ApiUsageNotebookTests(unittest.TestCase):
             "client.update_business_case(",
             "client.page_business_cases(",
             "client.attach_dataset(",
-            "client.page_business_case_catalog(",
             "client.archive_business_case(",
         ):
             self.assertIn(operation, source)
         for index, cell in enumerate(payload["cells"]):
             if cell["cell_type"] == "code":
                 compile("".join(cell["source"]), f"business_cases.ipynb:cell-{index}", "exec")
+
+    def test_client_module_access_request_notebook_compiles_and_covers_the_public_workflow(self) -> None:
+        payload = json.loads((CLIENT_MODULE_NOTEBOOKS / "access_requests.ipynb").read_text(encoding="utf-8"))
+        self.assertEqual(payload["nbformat"], 4)
+        source = "\n".join("".join(cell["source"]) for cell in payload["cells"])
+        for operation in (
+            "client.page_business_case_catalog(",
+            "client.request_business_case_access(",
+            "client.page_business_case_access_requests(",
+            "client.page_business_case_access_requests_for_business_case(",
+            "client.approve_business_case_access_request(",
+            "client.reject_business_case_access_request(",
+        ):
+            self.assertIn(operation, source)
+        for index, cell in enumerate(payload["cells"]):
+            if cell["cell_type"] == "code":
+                compile("".join(cell["source"]), f"access_requests.ipynb:cell-{index}", "exec")
 
 
 if __name__ == "__main__":

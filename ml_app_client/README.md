@@ -1,6 +1,6 @@
 # ML App Python client
 
-Business Case lifecycle, access, and dataset bindings are documented in the
+Business Case lifecycle, data bindings, and Access Requests are documented in the
 [interactive client reference](reference/index.html).
 
 `ml_app_client` is the supported, deliberately small integration interface for
@@ -11,7 +11,7 @@ workflows, and polls bounded run metadata.
 
 `MLAppClient` remains the single backwards-compatible public facade. Its
 implementation is composed from focused domain modules: authentication,
-datasets, Business Cases, pipelines, scoring reports, model registry,
+datasets, Business Cases, Access Requests, pipelines, scoring reports, model registry,
 deployments, inference, and online monitoring. Integrations therefore keep the
 same calls shown below, while maintenance of one workflow no longer requires
 loading the complete client implementation.
@@ -61,7 +61,7 @@ reports = client.page_scoring_reports(limit=30, business_case_id="bc-id")
 full_report = client.get_scoring_report(reports.items[0]["latest"]["id"])
 ```
 
-Business Case names are discoverable through a minimal organization directory
+The Access Requests module exposes a minimal organization directory
 without exposing case details. A user can request access and track the request;
 owners and effective managers read the incoming queue and decide the granted
 role:

@@ -9,6 +9,7 @@ from typing import Any, Callable
 import requests
 
 from .auth import AuthenticationClientMixin
+from .access_requests import AccessRequestClientMixin
 from .business_cases import BusinessCaseClientMixin
 from .datasets import DatasetClientMixin
 from .errors import AuthenticationError
@@ -24,6 +25,7 @@ class MLAppClient(
     AuthenticationClientMixin,
     DatasetClientMixin,
     BusinessCaseClientMixin,
+    AccessRequestClientMixin,
     PipelineClientMixin,
     PresentationClientMixin,
     ScoringReportClientMixin,

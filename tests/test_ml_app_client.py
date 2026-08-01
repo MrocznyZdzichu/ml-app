@@ -19,6 +19,7 @@ from ml_app_client import (
     ResourceNotFoundError,
 )
 from ml_app_client.auth import AuthenticationClientMixin
+from ml_app_client.access_requests import AccessRequestClientMixin
 from ml_app_client.business_cases import BusinessCaseClientMixin
 from ml_app_client.datasets import DatasetClientMixin
 from ml_app_client.deployments import DeploymentClientMixin
@@ -103,6 +104,14 @@ class MLAppClientTests(unittest.TestCase):
         self.assertIs(
             MLAppClient.ensure_business_case,
             BusinessCaseClientMixin.ensure_business_case,
+        )
+        self.assertIs(
+            MLAppClient.request_business_case_access,
+            AccessRequestClientMixin.request_business_case_access,
+        )
+        self.assertIs(
+            MLAppClient.page_business_case_catalog,
+            AccessRequestClientMixin.page_business_case_catalog,
         )
         self.assertIs(MLAppClient.run_pipeline, PipelineClientMixin.run_pipeline)
         self.assertIs(MLAppClient.present, PresentationClientMixin.present)
@@ -222,6 +231,17 @@ class MLAppClientTests(unittest.TestCase):
         self.assertEqual(session.requests[2][2]["params"]["box"], "incoming")
         self.assertTrue(session.requests[3][1].endswith("/access-requests/request-1/approve"))
         self.assertTrue(session.requests[4][1].endswith("/access-requests/request-1/reject"))
+
+    def test_business_case_mixin_does_not_own_access_request_operations(self) -> None:
+        for method in (
+            "page_business_case_catalog",
+            "request_business_case_access",
+            "page_business_case_access_requests",
+            "page_business_case_access_requests_for_business_case",
+            "approve_business_case_access_request",
+            "reject_business_case_access_request",
+        ):
+            self.assertNotIn(method, BusinessCaseClientMixin.__dict__)
 
     def test_version_histories_use_bounded_page_contracts(self) -> None:
         page = {

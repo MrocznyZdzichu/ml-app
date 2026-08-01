@@ -1,4 +1,4 @@
-"""Typed Business Case lifecycle, discovery, access, and data-binding workflows."""
+"""Typed Business Case lifecycle and data-binding workflows."""
 
 from __future__ import annotations
 
@@ -8,8 +8,6 @@ from typing import Any
 from .errors import AuthorizationError, ConflictError, ResourceAmbiguousError, ResourceNotFoundError
 from .models import (
     BusinessCase,
-    BusinessCaseAccessRequest,
-    BusinessCaseCatalogEntry,
     BusinessCaseDataAttachment,
     CatalogPage,
     Dataset,
@@ -134,75 +132,6 @@ class BusinessCaseClientMixin(TransportClientMixin):
                     f"Business Case {name!r} already exists but is not accessible. "
                     "Ask an administrator or Business Case manager to grant access."
                 ) from exc
-
-    def page_business_case_catalog(
-        self, *, limit: int = 30, offset: int = 0, search: str = "",
-    ) -> CatalogPage[BusinessCaseCatalogEntry]:
-        """Search the organization-wide minimal Business Case directory."""
-        payload = self._request("GET", "/business-cases/catalog/page", params={
-            "limit": limit, "offset": offset, "search": search,
-        })
-        return CatalogPage.from_api(payload, BusinessCaseCatalogEntry.from_api)
-
-    def request_business_case_access(
-        self, business_case: BusinessCaseRef, *, requested_role: str = "reader", justification: str,
-    ) -> BusinessCaseAccessRequest:
-        """Submit an auditable request to the Business Case owner and managers."""
-        business_case_id = self._business_case_id(business_case)
-        return BusinessCaseAccessRequest.from_api(self._request(
-            "POST", f"/sharing/business-cases/{business_case_id}/access-requests",
-            json={"requested_role": requested_role, "justification": justification},
-        ))
-
-    def page_business_case_access_requests(
-        self, *, box: str = "incoming", status: str | None = None, limit: int = 30, offset: int = 0,
-    ) -> CatalogPage[BusinessCaseAccessRequest]:
-        """Page current requests or a caller-scoped submitted/handled history.
-
-        ``submitted_history`` returns the caller's completed requests and
-        ``handled`` returns completed requests decided by the caller.  Current
-        inboxes retain the ``pending`` default unless another status is given.
-        """
-        effective_status = status
-        if effective_status is None and box not in {"submitted_history", "handled"}:
-            effective_status = "pending"
-        payload = self._request("GET", "/sharing/access-requests/page", params={
-            "box": box, "status": effective_status, "limit": limit, "offset": offset,
-        })
-        return CatalogPage.from_api(payload, BusinessCaseAccessRequest.from_api)
-
-    def page_business_case_access_requests_for_business_case(
-        self, business_case: BusinessCaseRef, *, history: bool = False,
-        status: str | None = None, limit: int = 30, offset: int = 0,
-    ) -> CatalogPage[BusinessCaseAccessRequest]:
-        """Page open requests or completed decision history for one manageable Business Case."""
-        business_case_id = self._business_case_id(business_case)
-        effective_status = status if status is not None else (None if history else "pending")
-        payload = self._request(
-            "GET", f"/sharing/business-cases/{business_case_id}/access-requests/page", params={
-                "history": str(history).lower(), "status": effective_status,
-                "limit": limit, "offset": offset,
-            },
-        )
-        return CatalogPage.from_api(payload, BusinessCaseAccessRequest.from_api)
-
-    def approve_business_case_access_request(
-        self, request_id: str, *, access_role: str, decision_note: str = "",
-    ) -> BusinessCaseAccessRequest:
-        """Approve one pending request and atomically grant the selected role."""
-        return BusinessCaseAccessRequest.from_api(self._request(
-            "POST", f"/sharing/access-requests/{request_id}/approve",
-            json={"access_role": access_role, "decision_note": decision_note},
-        ))
-
-    def reject_business_case_access_request(
-        self, request_id: str, *, decision_note: str = "",
-    ) -> BusinessCaseAccessRequest:
-        """Reject one pending Business Case access request."""
-        return BusinessCaseAccessRequest.from_api(self._request(
-            "POST", f"/sharing/access-requests/{request_id}/reject",
-            json={"decision_note": decision_note},
-        ))
 
     def attach_dataset(
         self, business_case: BusinessCaseRef, dataset: str | Dataset, *, role: str,
