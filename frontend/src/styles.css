@@ -4598,6 +4598,27 @@ textarea {
   gap: 8px;
 }
 
+.dataset-identifiers {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.4rem;
+  margin-top: 0.25rem;
+}
+
+.dataset-identifiers code {
+  color: var(--muted);
+  font-size: 0.72rem;
+  overflow-wrap: anywhere;
+}
+
+.dataset-identifiers .icon-button {
+  height: 1.45rem;
+  min-height: 1.45rem;
+  min-width: 1.45rem;
+  padding: 0.2rem;
+}
+
 .danger-icon {
   color: #9a3412;
 }

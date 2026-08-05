@@ -533,7 +533,11 @@ class PostgresDatasetRepository:
         ranked = select(
             *columns,
             *(
-                data_assets_table.c.metadata[key].label(f"metadata_{key}")
+                (
+                    data_assets_table.c.metadata[key].as_string()
+                    if key == "origin"
+                    else data_assets_table.c.metadata[key]
+                ).label(f"metadata_{key}")
                 for key in DATASET_SUMMARY_METADATA_KEYS
             ),
             func.row_number().over(
@@ -570,6 +574,7 @@ class PostgresDatasetRepository:
         ranked_pipeline_id = (
             ranked_rows.c.metadata_pipeline_output["pipeline_id"].as_string()
         )
+        ranked_origin = ranked_rows.c.metadata_origin
         if status:
             filters.append(ranked_rows.c.status == status)
         if source_type:
@@ -595,8 +600,8 @@ class PostgresDatasetRepository:
                 ranked_rows.c.source_type != "view",
                 or_(ranked_pipeline_id.is_(None), ranked_pipeline_id == ""),
                 or_(
-                    ranked_rows.c.metadata_origin.is_(None),
-                    ranked_rows.c.metadata_origin != "platform_generated",
+                    ranked_origin.is_(None),
+                    ranked_origin != "platform_generated",
                 ),
             ])
         needle = search.strip()

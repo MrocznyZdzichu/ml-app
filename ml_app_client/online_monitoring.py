@@ -203,7 +203,7 @@ class OnlineMonitoringClientMixin(TransportClientMixin):
         candidates = [
             attachment
             for attachment in iter_offset_items(
-                lambda limit, offset: self.page_business_case_attachments(
+                lambda limit, offset: self.page_dataset_attachments(
                     deployment.business_case_id,
                     limit=limit,
                     offset=offset,

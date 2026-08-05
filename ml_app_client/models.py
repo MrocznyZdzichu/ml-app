@@ -51,12 +51,21 @@ class CatalogPage(Generic[T]):
 
 @dataclass(frozen=True)
 class Dataset(ApiModel):
+    """An immutable dataset version, with mapping compatibility for full metadata."""
+
     id: str
     logical_id: str
     name: str
     version_number: int
     row_count: int | None
     format: str
+    owner_id: str
+    source_type: str
+    version_stage: str
+    description: str
+    status: str
+    tags: tuple[str, ...]
+    metadata: Mapping[str, Any]
     raw: Mapping[str, Any]
 
     @classmethod
@@ -68,6 +77,13 @@ class Dataset(ApiModel):
             version_number=int(value["version_number"]),
             row_count=None if value.get("row_count") is None else int(value["row_count"]),
             format=str(value["format"]),
+            owner_id=str(value.get("owner_id") or ""),
+            source_type=str(value.get("source_type") or ""),
+            version_stage=str(value.get("version_stage") or ""),
+            description=str(value.get("description") or ""),
+            status=str(value.get("status") or ""),
+            tags=tuple(str(tag) for tag in value.get("tags") or ()),
+            metadata=dict(value.get("metadata") or {}),
             raw=value,
         )
 
@@ -149,8 +165,8 @@ class BusinessCaseAccessRequest(ApiModel):
 
 
 @dataclass(frozen=True)
-class BusinessCaseDataAttachment(ApiModel):
-    """A role-specific binding between a Business Case and immutable data."""
+class DatasetAttachment(ApiModel):
+    """A role-specific mapping between a Business Case and immutable data."""
 
     id: str
     business_case_id: str
@@ -166,6 +182,11 @@ class BusinessCaseDataAttachment(ApiModel):
             data_asset_id=str(value.get("data_asset_id") or ""), role=str(value.get("role") or ""),
             context_note=str(value.get("context_note") or ""), raw=value,
         )
+
+
+# Kept as a public compatibility name for integrations written before the
+# dedicated datasets_attachment module was introduced.
+BusinessCaseDataAttachment = DatasetAttachment
 
 
 @dataclass(frozen=True)

@@ -280,7 +280,7 @@ def build() -> None:
         code("""
         for specification in missing:
             dataset = datasets[specification["name"]]
-            client.attach_dataset(
+            client.create_dataset_attachment(
                 str(business_case["id"]),
                 dataset.id,
                 role=specification["role"],
@@ -856,7 +856,7 @@ def build() -> None:
 
         for specification in missing:
             dataset = datasets[specification["name"]]
-            client.attach_dataset(
+            client.create_dataset_attachment(
                 str(business_case["id"]),
                 dataset.id,
                 role=specification["role"],

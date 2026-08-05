@@ -22,6 +22,7 @@ from ml_app_client.auth import AuthenticationClientMixin
 from ml_app_client.access_requests import AccessRequestClientMixin
 from ml_app_client.business_cases import BusinessCaseClientMixin
 from ml_app_client.datasets import DatasetClientMixin
+from ml_app_client.datasets_attachment import DatasetAttachmentClientMixin
 from ml_app_client.deployments import DeploymentClientMixin
 from ml_app_client.inference import InferenceClientMixin
 from ml_app_client.model_registry import ModelRegistryClientMixin
@@ -102,6 +103,10 @@ class MLAppClientTests(unittest.TestCase):
         self.assertIs(MLAppClient.login, AuthenticationClientMixin.login)
         self.assertIs(MLAppClient.ensure_dataset, DatasetClientMixin.ensure_dataset)
         self.assertIs(
+            MLAppClient.create_dataset_attachment,
+            DatasetAttachmentClientMixin.create_dataset_attachment,
+        )
+        self.assertIs(
             MLAppClient.ensure_business_case,
             BusinessCaseClientMixin.ensure_business_case,
         )
@@ -167,7 +172,15 @@ class MLAppClientTests(unittest.TestCase):
             limit=10,
             offset=20,
             search="sales",
+            status="ready",
+            source_type="file",
             asset_kind="dataset",
+            include_deleted=True,
+            families=False,
+            pipeline_id="pipeline-1",
+            pipeline_type="training",
+            uploaded_only=True,
+            owned_only=True,
         )
         cases = client.page_business_cases(
             search="sales",
@@ -178,8 +191,41 @@ class MLAppClientTests(unittest.TestCase):
         self.assertTrue(datasets.has_next)
         self.assertIsInstance(datasets.items[0], Dataset)
         self.assertEqual(cases.items[0]["id"], "bc-1")
-        self.assertEqual(session.requests[0][2]["params"]["offset"], 20)
+        self.assertEqual(session.requests[0][2]["params"], {
+            "limit": 10,
+            "offset": 20,
+            "search": "sales",
+            "business_case_id": "",
+            "status": "ready",
+            "source_type": "file",
+            "asset_kind": "dataset",
+            "include_deleted": "true",
+            "families": "false",
+            "pipeline_id": "pipeline-1",
+            "pipeline_type": "training",
+            "uploaded_only": "true",
+            "owned_only": "true",
+            "summary": "true",
+        })
         self.assertEqual(session.requests[1][2]["params"]["manageable_only"], "true")
+
+    def test_dataset_catalog_omits_unselected_enum_filters(self) -> None:
+        session = FakeSession([FakeResponse(page_payload([]))])
+
+        MLAppClient(session=session).page_datasets()
+
+        params = session.requests[0][2]["params"]
+        self.assertNotIn("status", params)
+        self.assertNotIn("source_type", params)
+
+    def test_client_formats_fastapi_validation_errors(self) -> None:
+        session = FakeSession([FakeResponse({"detail": [{
+            "type": "enum", "loc": ["query", "status"],
+            "msg": "Input should be 'ready'", "input": "",
+        }]}, 422)])
+
+        with self.assertRaisesRegex(ApiError, "status: Input should be 'ready'"):
+            MLAppClient(session=session).page_datasets(status="unknown")
 
     def test_business_case_directory_and_access_request_workflow_use_bounded_contracts(self) -> None:
         access_request = {
@@ -242,6 +288,138 @@ class MLAppClientTests(unittest.TestCase):
             "reject_business_case_access_request",
         ):
             self.assertNotIn(method, BusinessCaseClientMixin.__dict__)
+
+    def test_dataset_attachment_mixin_owns_attachment_crud_with_compatible_aliases(self) -> None:
+        attachment = {
+            "id": "attachment-1", "business_case_id": "bc-1", "data_asset_id": "dataset-1",
+            "role": "training", "context_note": "Initial training data",
+            "primary_key_column": "id", "target_column": "outcome",
+        }
+        session = FakeSession([
+            FakeResponse(attachment, 201),
+            FakeResponse(page_payload([attachment])),
+            FakeResponse({**attachment, "role": "validation"}),
+            FakeResponse({"deleted": True}),
+        ])
+        client = MLAppClient(session=session)
+
+        created = client.create_dataset_attachment("bc-1", "dataset-1", role="training")
+        found = client.get_dataset_attachment("bc-1", created.id)
+        updated = client.update_dataset_attachment(found.business_case_id, found, role="validation")
+        client.delete_dataset_attachment("bc-1", updated)
+
+        self.assertEqual(created.id, "attachment-1")
+        self.assertEqual(found.role, "training")
+        self.assertEqual(updated.role, "validation")
+        self.assertTrue(session.requests[-1][1].endswith("/data-attachments/attachment-1"))
+        self.assertNotIn("create_dataset_attachment", BusinessCaseClientMixin.__dict__)
+        self.assertFalse(hasattr(MLAppClient, "attach_dataset"))
+
+    def test_dataset_crud_and_version_creation_use_dataset_contracts(self) -> None:
+        registered = dataset_payload(id="dataset-registered", logical_id="registered-family")
+        updated = dataset_payload(id="dataset-registered", metadata={"retention": "30d"})
+        deleted = dataset_payload(id="dataset-registered", status="deleted")
+        next_version = dataset_payload(id="dataset-v3", version_number=3)
+        session = FakeSession([
+            FakeResponse(page_payload([])),
+            FakeResponse(registered, 201),
+            FakeResponse(registered),
+            FakeResponse(updated),
+            FakeResponse(deleted),
+            FakeResponse(dataset_payload(id="dataset-v2", logical_id="dataset-family")),
+            FakeResponse(next_version, 201),
+        ])
+        client = MLAppClient(session=session)
+
+        created = client.create_dataset(
+            name="Remote orders", source_type="database", format="parquet",
+            database={"engine": "postgresql", "host": "db", "port": 5432,
+                      "database": "warehouse", "username": "reader"},
+            metadata={"owner_team": "analytics"},
+        )
+        self.assertEqual(client.get_dataset(created.id).id, "dataset-registered")
+        self.assertEqual(client.update_dataset_metadata(created, metadata={"retention": "30d"}).metadata["retention"], "30d")
+        self.assertEqual(client.delete_dataset(created).status, "deleted")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "orders.csv"
+            path.write_text("id\n1\n", encoding="utf-8")
+            version = client.create_dataset_version(path, "dataset-v2")
+
+        self.assertEqual(version.version_number, 3)
+        self.assertEqual(session.requests[1][2]["json"]["source_type"], "database")
+        self.assertTrue(session.requests[2][1].endswith("/datasets/dataset-registered"))
+        self.assertTrue(session.requests[3][1].endswith("/datasets/dataset-registered/metadata"))
+        self.assertEqual(session.requests[-1][2]["data"]["logical_id"], "dataset-family")
+
+    def test_new_dataset_requires_force_only_for_visible_duplicate_name(self) -> None:
+        duplicate = dataset_payload(id="visible-dataset", logical_id="visible-family", name="Sales")
+        session = FakeSession([FakeResponse(page_payload([duplicate]))])
+
+        with self.assertRaisesRegex(ConflictError, "force=True"):
+            MLAppClient(session=session).create_dataset(
+                name="sales", source_type="database", format="parquet",
+            )
+
+        self.assertEqual(len(session.requests), 1)
+        self.assertTrue(session.requests[0][1].endswith("/datasets/page"))
+
+    def test_force_allows_duplicate_dataset_name_and_invisible_result_does_not_block(self) -> None:
+        created = dataset_payload(id="new-dataset", logical_id="new-family", name="Sales")
+        session = FakeSession([
+            FakeResponse(page_payload([])),
+            FakeResponse(created, 201),
+            FakeResponse(created, 201),
+        ])
+        client = MLAppClient(session=session)
+
+        invisible = client.create_dataset(name="Sales", source_type="database", format="parquet")
+        forced = client.create_dataset(
+            name="Sales", source_type="database", format="parquet", force=True,
+        )
+
+        self.assertEqual(invisible.id, "new-dataset")
+        self.assertEqual(forced.id, "new-dataset")
+        self.assertEqual(len(session.requests), 3)
+        self.assertEqual(session.requests[2][0], "POST")
+
+    def test_upload_new_family_requires_force_but_uploading_version_does_not(self) -> None:
+        duplicate = dataset_payload(id="visible-dataset", logical_id="visible-family", name="sales")
+        uploaded = dataset_payload(id="new-version", logical_id="dataset-family", version_number=3)
+        session = FakeSession([
+            FakeResponse(page_payload([duplicate])),
+            FakeResponse(uploaded, 201),
+        ])
+        client = MLAppClient(session=session)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sales.csv"
+            path.write_text("id\n1\n", encoding="utf-8")
+            with self.assertRaisesRegex(ConflictError, "force=True"):
+                client.upload_dataset(path, name="Sales")
+            version = client.upload_dataset(path, logical_id="dataset-family")
+
+        self.assertEqual(version.id, "new-version")
+        self.assertEqual(len(session.requests), 2)
+        self.assertEqual(session.requests[1][0], "POST")
+
+    def test_dataset_metadata_presentation_structures_schema_and_nested_metadata(self) -> None:
+        dataset = Dataset.from_api(dataset_payload(metadata={
+            "source_schema": [
+                {"name": "customer_id", "type": "text"},
+                {"name": "churned", "type": "number", "nullable": False},
+            ],
+            "data_roles": {"target_column": "churned"},
+        }))
+        client = MLAppClient(session=FakeSession([]))
+
+        presentation = client.present_dataset_metadata(dataset)
+
+        self.assertIn("Columns:", str(presentation))
+        self.assertIn("customer_id: text", str(presentation))
+        html = presentation._repr_html_()
+        self.assertIn("Version ID", html)
+        self.assertIn("Family ID", html)
+        self.assertIn("customer_id", html)
+        self.assertIn("data_roles", html)
 
     def test_version_histories_use_bounded_page_contracts(self) -> None:
         page = {
@@ -417,7 +595,7 @@ class MLAppClientTests(unittest.TestCase):
         ])
         client = MLAppClient(session=session)
         business_case = client.create_business_case(name="Sales")
-        client.attach_dataset(business_case["id"], "dataset-1", role="training")
+        client.create_dataset_attachment(business_case["id"], "dataset-1", role="training")
         pipeline = client.create_pipeline(
             business_case_id=business_case["id"],
             name="Train",

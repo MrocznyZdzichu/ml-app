@@ -63,7 +63,7 @@ class ApiUsageNotebookTests(unittest.TestCase):
             "client.me()",
             "client.create_business_case(",
             "client.upload_dataset(",
-            "client.attach_dataset(",
+            "client.create_dataset_attachment(",
             "build_training_definition(",
             "client.run_pipeline_by_name(",
             "build_batch_scoring_definition(",
@@ -84,7 +84,7 @@ class ApiUsageNotebookTests(unittest.TestCase):
 
         self.assertIn("client.dataset_by_name(", source)
         self.assertIn("client.upload_dataset(", source)
-        self.assertIn("client.attach_dataset(", source)
+        self.assertIn("client.create_dataset_attachment(", source)
         self.assertNotIn("ensure_dataset", source)
 
     def test_notebooks_do_not_hide_lifecycle_in_ensure_helpers(self) -> None:
@@ -127,7 +127,6 @@ class ApiUsageNotebookTests(unittest.TestCase):
             "client.get_business_case_by_name(",
             "client.update_business_case(",
             "client.page_business_cases(",
-            "client.attach_dataset(",
             "client.archive_business_case(",
         ):
             self.assertIn(operation, source)
@@ -151,6 +150,31 @@ class ApiUsageNotebookTests(unittest.TestCase):
         for index, cell in enumerate(payload["cells"]):
             if cell["cell_type"] == "code":
                 compile("".join(cell["source"]), f"access_requests.ipynb:cell-{index}", "exec")
+
+    def test_client_module_datasets_and_attachments_notebook_compiles_and_covers_crud(self) -> None:
+        filename = "datasets_and_attachments.ipynb"
+        payload = json.loads((CLIENT_MODULE_NOTEBOOKS / filename).read_text(encoding="utf-8"))
+        self.assertEqual(payload["nbformat"], 4)
+        source = "\n".join("".join(cell["source"]) for cell in payload["cells"])
+        for operation in (
+            "client.ensure_dataset(",
+            "client.get_dataset(",
+            "client.update_dataset_metadata(",
+            "client.create_dataset_version(",
+            "client.page_dataset_versions(",
+            "client.create_dataset_attachment(",
+            "client.get_dataset_attachment(",
+            "client.update_dataset_attachment(",
+            "client.page_dataset_attachments(",
+            "client.delete_dataset_attachment(",
+            "client.delete_dataset(",
+        ):
+            self.assertIn(operation, source)
+        for index, cell in enumerate(payload["cells"]):
+            if cell["cell_type"] == "code":
+                self.assertIsNone(cell["execution_count"])
+                self.assertEqual(cell["outputs"], [])
+                compile("".join(cell["source"]), f"{filename}:cell-{index}", "exec")
 
 
 if __name__ == "__main__":

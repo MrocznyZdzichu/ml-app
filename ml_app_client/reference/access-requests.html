@@ -56,6 +56,7 @@
       reject_business_case_access_request: `response = requests.post(f"{BASE_URL}/sharing/access-requests/{request_id}/reject", headers=HEADERS, json={"decision_note": "Access is not required."})\nresponse.raise_for_status()`,
     };
     const copy = async (value) => navigator.clipboard.writeText(value);
+    const copyIcon = '<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="11" height="11" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
     document.querySelectorAll('.methods details').forEach((entry) => {
       const name = entry.querySelector('summary code').textContent.match(/^([a-z_]+)/)[1];
       const code = apiExamples[name];
@@ -68,10 +69,14 @@
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'copy-code';
-      button.textContent = 'Copy';
-      button.addEventListener('click', async () => { await copy(pre.textContent); button.textContent = 'Copied'; setTimeout(() => { button.textContent = 'Copy'; }, 1400); });
+      button.setAttribute('aria-label', 'Copy code example');
+      button.title = 'Copy code';
+      button.innerHTML = copyIcon;
+      button.addEventListener('click', async () => { await copy(pre.textContent); button.classList.add('copied'); button.title = 'Copied'; setTimeout(() => { button.classList.remove('copied'); button.title = 'Copy code'; }, 1400); });
       box.append(button);
       entry.querySelector('.method-body').append(box);
     });
   </script>
+  <style>.api-call{position:relative}</style>
+  <script src="copy-code.js"></script>
 </main></body></html>

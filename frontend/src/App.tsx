@@ -210,6 +210,10 @@ export default function App() {
     (handler: (() => Promise<void>) | null) => registerSectionRefresh("serving", handler),
     [registerSectionRefresh]
   );
+  const registerDataRefresh = useCallback(
+    (handler: (() => Promise<void>) | null) => registerSectionRefresh("data", handler),
+    [registerSectionRefresh]
+  );
   const registerJobsRefresh = useCallback(
     (handler: (() => Promise<void>) | null) => registerSectionRefresh("jobs", handler),
     [registerSectionRefresh]
@@ -440,6 +444,7 @@ export default function App() {
               pipelines={pipelines}
               onAnalyze={openDatasetAnalysis}
               onRefresh={() => refreshResources("data")}
+              onRegisterRefresh={registerDataRefresh}
               setNotice={setNotice}
             />
           </DeferredPanel>

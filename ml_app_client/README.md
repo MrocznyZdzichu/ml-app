@@ -16,6 +16,38 @@ deployments, inference, and online monitoring. Integrations therefore keep the
 same calls shown below, while maintenance of one workflow no longer requires
 loading the complete client implementation.
 
+## Datasets and Dataset Attachments
+
+The focused `datasets` module covers registration, streamed uploads, retrieval,
+metadata updates, soft deletion, bounded catalog browsing, and immutable version
+histories. `datasets_attachment` separately manages the role-specific mappings
+between one immutable dataset version and a Business Case. It is the sole owner
+of the `*_dataset_attachment` operations; attachment methods are not exposed by
+the Business Cases module.
+
+```python
+from ml_app_client import MLAppClient
+
+client = MLAppClient.connect()
+dataset = client.upload_dataset("orders.csv", name="orders")
+dataset = client.update_dataset_metadata(dataset, metadata={"retention": "90d"})
+
+# A new upload creates the next immutable version in the same family.
+next_version = client.create_dataset_version("orders-next.csv", dataset)
+
+attachment = client.create_dataset_attachment(
+    "business-case-id", next_version, role="training", primary_key_column="order_id"
+)
+client.update_dataset_attachment(attachment.business_case_id, attachment, role="source")
+```
+
+Use `page_datasets`, `page_dataset_versions`, and `page_dataset_attachments` for
+interactive work. `list_dataset_versions` and `list_dataset_attachments` remain
+explicit legacy methods only when loading a complete result is intentional.
+Deleting a dataset is a soft deletion of a concrete version; it never mutates a
+previous version or removes Business Case lineage. The only mutable dataset field
+currently exposed by REST is merged `metadata`.
+
 ```python
 from ml_app_client import MLAppClient
 

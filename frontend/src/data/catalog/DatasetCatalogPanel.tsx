@@ -1,6 +1,6 @@
-import { BarChart3, CheckCircle2, Filter, Plus, Search, Trash2, Upload, X } from "lucide-react";
+import { BarChart3, CheckCircle2, Copy, Filter, Plus, Search, Trash2, Upload, X } from "lucide-react";
 import type { FormEvent } from "react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { api } from "../../api/client";
 import type { BusinessCase, DataAsset, Pipeline } from "../../api/client";
@@ -87,6 +87,7 @@ export function DataPanel({
   pipelines,
   onAnalyze,
   onRefresh,
+  onRegisterRefresh,
   setNotice
 }: {
   businessCases: BusinessCase[];
@@ -94,6 +95,7 @@ export function DataPanel({
   pipelines: Pipeline[];
   onAnalyze: (datasetId: string) => void;
   onRefresh: () => Promise<void>;
+  onRegisterRefresh: (handler: (() => Promise<void>) | null) => void;
   setNotice: (message: string) => void;
 }) {
   const [name, setName] = useState("");
@@ -123,6 +125,16 @@ export function DataPanel({
   const filterPipelines = businessCaseFilter
     ? pipelines.filter((pipeline) => pipeline.business_case_id === businessCaseFilter)
     : pipelines;
+
+  const refreshCatalog = useCallback(async () => {
+    await onRefresh();
+    setDatasetRefreshKey((value) => value + 1);
+  }, [onRefresh]);
+
+  useEffect(() => {
+    onRegisterRefresh(refreshCatalog);
+    return () => onRegisterRefresh(null);
+  }, [onRegisterRefresh, refreshCatalog]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -233,8 +245,7 @@ export function DataPanel({
       setFile(null);
       setUploadLogicalId("");
       setFileInputKey((current) => current + 1);
-      await onRefresh();
-      setDatasetRefreshKey((value) => value + 1);
+      await refreshCatalog();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Dataset upload failed");
     } finally {
@@ -245,8 +256,7 @@ export function DataPanel({
   async function deleteDataset(dataset: DataAsset) {
     const deleted = await api.deleteDataset(dataset.id);
     setNotice(`Deleted ${deleted.name}`);
-    await onRefresh();
-    setDatasetRefreshKey((value) => value + 1);
+    await refreshCatalog();
   }
 
   function addDatasetVersion(dataset: DataAsset) {
@@ -554,6 +564,20 @@ function VersionedDatasetList({
                 <div>
                   <strong>{latest.name} <i className="version-badge">v{latest.version_number}</i></strong>
                   <span>{datasetMeta(latest)} / {versionCount} version{versionCount === 1 ? "" : "s"} / {latest.version_stage}</span>
+                  <div className="dataset-identifiers" aria-label={`Identifiers for ${latest.name}`}>
+                    <code>Version ID: {latest.id}</code>
+                    <button className="icon-button" type="button" title="Copy version ID"
+                      aria-label={`Copy version ID for ${latest.name}`}
+                      onClick={() => void navigator.clipboard.writeText(latest.id)}>
+                      <Copy size={14} />
+                    </button>
+                    <code>Family ID: {latest.logical_id}</code>
+                    <button className="icon-button" type="button" title="Copy family ID"
+                      aria-label={`Copy family ID for ${latest.name}`}
+                      onClick={() => void navigator.clipboard.writeText(latest.logical_id)}>
+                      <Copy size={14} />
+                    </button>
+                  </div>
                 </div>
                 <div className="asset-actions">
                   <em>{latest.status}</em>

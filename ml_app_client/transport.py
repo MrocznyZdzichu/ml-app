@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 import requests
 
@@ -58,6 +58,22 @@ class TransportClientMixin:
             raise ApiError(f"{method} {path} returned invalid JSON") from exc
 
     @staticmethod
+    def _format_error_detail(detail: Any) -> str:
+        """Turn FastAPI validation arrays into a compact actionable message."""
+        if not isinstance(detail, list):
+            return str(detail)
+        messages: list[str] = []
+        for item in detail:
+            if not isinstance(item, Mapping):
+                messages.append(str(item))
+                continue
+            location = item.get("loc", ())
+            label = ".".join(str(part) for part in location if part not in {"query", "body"})
+            message = str(item.get("msg") or "invalid value")
+            messages.append(f"{label}: {message}" if label else message)
+        return "; ".join(messages)
+
+    @staticmethod
     def _raise_for_status(response: Response, method: str, path: str) -> None:
         if response.status_code < 400:
             return
@@ -69,8 +85,11 @@ class TransportClientMixin:
         error = (
             AuthenticationError if response.status_code == 401
             else AuthorizationError if response.status_code == 403
-            else ResourceNotFoundError if response.status_code == 404
+        else ResourceNotFoundError if response.status_code == 404
             else ConflictError if response.status_code == 409
             else ApiError
         )
-        raise error(f"{method} {path} returned HTTP {response.status_code}: {detail}")
+        raise error(
+            f"{method} {path} returned HTTP {response.status_code}: "
+            f"{TransportClientMixin._format_error_detail(detail)}"
+        )

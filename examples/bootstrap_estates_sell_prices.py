@@ -44,7 +44,7 @@ def _data_directory() -> Path:
 
 
 def _attached_datasets(client: MLAppClient, business_case_id: str) -> dict[str, dict[str, Any]]:
-    attachments = client.list_business_case_attachments(business_case_id)
+    attachments = client.list_dataset_attachments(business_case_id)
     attached_ids = {str(item["data_asset_id"]) for item in attachments}
     return {
         str(dataset["name"]): dict(dataset)
@@ -87,7 +87,7 @@ def bootstrap(client: MLAppClient) -> dict[str, Any]:
             description=str(spec["description"]),
             tags=["demo", "estates", "bootstrap"],
         )
-        client.attach_dataset(
+        client.create_dataset_attachment(
             str(business_case["id"]),
             uploaded.id,
             role=str(spec["role"]),

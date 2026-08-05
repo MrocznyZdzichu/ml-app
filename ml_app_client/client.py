@@ -12,6 +12,7 @@ from .auth import AuthenticationClientMixin
 from .access_requests import AccessRequestClientMixin
 from .business_cases import BusinessCaseClientMixin
 from .datasets import DatasetClientMixin
+from .datasets_attachment import DatasetAttachmentClientMixin
 from .errors import AuthenticationError
 from .model_registry import ModelRegistryClientMixin
 from .pipelines import PipelineClientMixin
@@ -24,6 +25,7 @@ from .transport import Session
 class MLAppClient(
     AuthenticationClientMixin,
     DatasetClientMixin,
+    DatasetAttachmentClientMixin,
     BusinessCaseClientMixin,
     AccessRequestClientMixin,
     PipelineClientMixin,

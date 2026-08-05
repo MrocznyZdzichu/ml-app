@@ -5,12 +5,10 @@ from __future__ import annotations
 from collections.abc import Iterator
 from typing import Any
 
-from .errors import AuthorizationError, ConflictError, ResourceAmbiguousError, ResourceNotFoundError
+from .errors import AuthorizationError, ConflictError, ResourceNotFoundError
 from .models import (
     BusinessCase,
-    BusinessCaseDataAttachment,
     CatalogPage,
-    Dataset,
 )
 from .pagination import iter_offset_items
 from .resolution import _one_named
@@ -18,9 +16,6 @@ from .transport import TransportClientMixin
 
 
 BusinessCaseRef = str | BusinessCase
-AttachmentRef = str | BusinessCaseDataAttachment
-
-
 class BusinessCaseClientMixin(TransportClientMixin):
     """Business Case operations composed into :class:`MLAppClient`.
 
@@ -132,98 +127,6 @@ class BusinessCaseClientMixin(TransportClientMixin):
                     f"Business Case {name!r} already exists but is not accessible. "
                     "Ask an administrator or Business Case manager to grant access."
                 ) from exc
-
-    def attach_dataset(
-        self, business_case: BusinessCaseRef, dataset: str | Dataset, *, role: str,
-        context_note: str = "", primary_key_column: str = "", target_column: str = "",
-    ) -> BusinessCaseDataAttachment:
-        """Bind one readable immutable dataset version to a Business Case."""
-        business_case_id = self._business_case_id(business_case)
-        dataset_id = dataset.id if isinstance(dataset, Dataset) else dataset
-        return BusinessCaseDataAttachment.from_api(self._request(
-            "POST", f"/business-cases/{business_case_id}/data-attachments",
-            json={"data_asset_id": dataset_id, "data_asset_kind": "dataset", "role": role,
-                  "context_note": context_note, "primary_key_column": primary_key_column,
-                  "target_column": target_column, "origin": "uploaded"},
-        ))
-
-    def page_business_case_attachments(
-        self, business_case: BusinessCaseRef, *, limit: int = 30, offset: int = 0,
-        search: str = "", role: str = "", pipeline_id: str = "", pipeline_type: str = "",
-        uploaded_only: bool = False, deleted_only: bool = False,
-    ) -> CatalogPage[BusinessCaseDataAttachment]:
-        """Search mapped BC data with lightweight latest-version metadata."""
-        business_case_id = self._business_case_id(business_case)
-        payload = self._request("GET", f"/business-cases/{business_case_id}/data-attachments/page", params={
-            "limit": limit, "offset": offset, "search": search, "role": role,
-            "pipeline_id": pipeline_id, "pipeline_type": pipeline_type,
-            "uploaded_only": str(uploaded_only).lower(), "deleted_only": str(deleted_only).lower(),
-        })
-        return CatalogPage.from_api(payload, BusinessCaseDataAttachment.from_api)
-
-    def list_business_case_attachments(
-        self, business_case: BusinessCaseRef,
-    ) -> list[BusinessCaseDataAttachment]:
-        """Legacy unbounded attachment listing; prefer :meth:`page_business_case_attachments`."""
-        business_case_id = self._business_case_id(business_case)
-        payload = self._request("GET", f"/business-cases/{business_case_id}/data-attachments")
-        return [BusinessCaseDataAttachment.from_api(item) for item in payload]
-
-    def iter_business_case_attachments(
-        self, business_case: BusinessCaseRef, *, search: str = "", role: str = "", page_size: int = 100,
-    ) -> Iterator[BusinessCaseDataAttachment]:
-        """Iterate an explicitly selected full attachment result."""
-        return iter_offset_items(
-            lambda limit, offset: self.page_business_case_attachments(
-                business_case, limit=limit, offset=offset, search=search, role=role,
-            ), page_size=page_size,
-        )
-
-    def get_business_case_attachment(
-        self, business_case: BusinessCaseRef, attachment_id: str,
-    ) -> BusinessCaseDataAttachment:
-        """Resolve one attachment through bounded pages until REST exposes a detail endpoint."""
-        for attachment in self.iter_business_case_attachments(business_case):
-            if attachment.id == attachment_id:
-                return attachment
-        raise ResourceNotFoundError(f"Business Case data attachment {attachment_id!r} was not found")
-
-    def update_business_case_attachment(
-        self, business_case: BusinessCaseRef, attachment: AttachmentRef, **changes: Any,
-    ) -> BusinessCaseDataAttachment:
-        """Update attachment context; it never changes the immutable data version."""
-        business_case_id = self._business_case_id(business_case)
-        current = attachment if isinstance(attachment, BusinessCaseDataAttachment) else self.get_business_case_attachment(business_case_id, attachment)
-        allowed = {"role", "context_note", "primary_key_column", "target_column"}
-        unknown = set(changes) - allowed
-        if unknown:
-            raise ValueError(f"Unsupported attachment fields: {', '.join(sorted(unknown))}")
-        payload = {field: current.raw.get(field, "") for field in allowed}
-        payload.update(changes)
-        return BusinessCaseDataAttachment.from_api(self._request(
-            "PATCH", f"/business-cases/{business_case_id}/data-attachments/{current.id}", json=payload,
-        ))
-
-    def detach_dataset(self, business_case: BusinessCaseRef, attachment: AttachmentRef) -> None:
-        """Remove only the BC-to-data binding; the dataset and its lineage remain."""
-        business_case_id = self._business_case_id(business_case)
-        attachment_id = attachment.id if isinstance(attachment, BusinessCaseDataAttachment) else attachment
-        self._request("DELETE", f"/business-cases/{business_case_id}/data-attachments/{attachment_id}")
-
-    def find_attachment(
-        self, business_case: BusinessCaseRef, dataset: str | Dataset, *, role: str | None = None,
-    ) -> BusinessCaseDataAttachment:
-        """Resolve one attachment by immutable dataset ID and optional role."""
-        dataset_id = dataset.id if isinstance(dataset, Dataset) else dataset
-        matches = [
-            item for item in self.iter_business_case_attachments(business_case, role=role or "")
-            if item.data_asset_id == dataset_id and (role is None or item.role == role)
-        ]
-        if not matches:
-            raise ResourceNotFoundError(f"Dataset {dataset_id!r} is not attached to the Business Case")
-        if len(matches) > 1:
-            raise ResourceAmbiguousError(f"Dataset {dataset_id!r} has {len(matches)} matching Business Case attachments")
-        return matches[0]
 
     def _business_case_by_name(self, name: str) -> BusinessCase:
         candidates = [

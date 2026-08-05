@@ -27,7 +27,7 @@ class FakeBootstrapClient:
             }
         return self.business_case, created
 
-    def list_business_case_attachments(self, _business_case_id: str):
+    def list_dataset_attachments(self, _business_case_id: str):
         return self.attachments
 
     def list_datasets(self):
@@ -46,7 +46,7 @@ class FakeBootstrapClient:
         self.datasets.append(payload)
         return Dataset.from_api(payload)
 
-    def attach_dataset(self, _business_case_id, dataset_id, **_kwargs):
+    def create_dataset_attachment(self, _business_case_id, dataset_id, **_kwargs):
         self.attachments.append({"data_asset_id": dataset_id})
         return {"id": f"attachment-{len(self.attachments)}"}
 
