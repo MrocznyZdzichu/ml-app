@@ -1,6 +1,16 @@
 """Supported Python client for integrating with ML App."""
 
 from .client import MLAppClient
+from .analysis import (
+    DescriptiveProfile,
+    DescriptiveProfileJob,
+    DescriptiveProfilePresentation,
+    TimeSeriesAnalysis,
+    TimeSeriesAnalysisJob,
+    TimeSeriesAnalysisPresentation,
+    VisualizationPresentation,
+    VisualizationResult,
+)
 from .errors import (
     ApiError,
     AuthenticationError,
@@ -36,6 +46,9 @@ __all__ = [
     "AuthorizationError",
     "CatalogPage",
     "ConflictError",
+    "DescriptiveProfile",
+    "DescriptiveProfileJob",
+    "DescriptiveProfilePresentation",
     "Deployment",
     "ModelServingUsage",
     "OnlineMonitoringRun",
@@ -46,4 +59,9 @@ __all__ = [
     "PredictionResult",
     "ResourceAmbiguousError",
     "ResourceNotFoundError",
+    "TimeSeriesAnalysis",
+    "TimeSeriesAnalysisJob",
+    "TimeSeriesAnalysisPresentation",
+    "VisualizationPresentation",
+    "VisualizationResult",
 ]

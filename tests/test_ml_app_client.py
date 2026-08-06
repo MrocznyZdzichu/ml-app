@@ -20,6 +20,7 @@ from ml_app_client import (
 )
 from ml_app_client.auth import AuthenticationClientMixin
 from ml_app_client.access_requests import AccessRequestClientMixin
+from ml_app_client.analysis import AnalysisClientMixin
 from ml_app_client.business_cases import BusinessCaseClientMixin
 from ml_app_client.datasets import DatasetClientMixin
 from ml_app_client.datasets_attachment import DatasetAttachmentClientMixin
@@ -101,6 +102,7 @@ def page_payload(
 class MLAppClientTests(unittest.TestCase):
     def test_facade_composes_focused_domain_clients(self) -> None:
         self.assertIs(MLAppClient.login, AuthenticationClientMixin.login)
+        self.assertIs(MLAppClient.profile_dataset, AnalysisClientMixin.profile_dataset)
         self.assertIs(MLAppClient.ensure_dataset, DatasetClientMixin.ensure_dataset)
         self.assertIs(
             MLAppClient.create_dataset_attachment,
@@ -820,6 +822,114 @@ class MLAppClientTests(unittest.TestCase):
                 PipelineRun.from_api(run_payload()),
                 poll_interval=0,
             )
+
+    def test_full_descriptive_profile_is_polled_and_rendered_without_source_rows(self) -> None:
+        completed = {
+            "job_id": "profile-1", "status": "completed", "error": None,
+            "result": {
+                "dataset_id": "dataset-v2", "row_count": 1_200,
+                "columns": [{"name": "amount", "type": "number"}],
+                "profile": {
+                    "columnProfiles": [{
+                        "name": "region", "type": "text", "role": "feature_categorical",
+                        "count": 1_200, "missing": 0, "unique": 3, "mode": "north",
+                        "topValues": [
+                            {"value": "north", "count": 600, "share": 0.5},
+                            {"value": "south", "count": 360, "share": 0.3},
+                            {"value": "west", "count": 240, "share": 0.2},
+                        ],
+                    }, {
+                        "name": "amount", "type": "number", "role": "feature_continuous",
+                        "count": 1_100, "missing": 100, "unique": 1_050, "mean": 42.5,
+                        "median": 40.0, "histogram": [
+                            {"label": "0 - 25", "count": 280, "share": 0.2545},
+                            {"label": "25 - 50", "count": 530, "share": 0.4818},
+                            {"label": "50 - 75", "count": 290, "share": 0.2636},
+                        ],
+                        "notes": ["High missingness"],
+                    }],
+                    "targetRelations": [{"feature": "amount"}],
+                    "dataQualityNotes": ["High missingness in amount"],
+                },
+            },
+        }
+        session = FakeSession([
+            FakeResponse({"job_id": "profile-1", "status": "queued", "result": None, "error": None}, 202),
+            FakeResponse(completed),
+        ])
+
+        result = MLAppClient(session=session).profile_dataset(
+            "dataset-v2", target_column="churn", row_limit=600,
+        )
+
+        self.assertEqual(result.row_count, 1_200)
+        amount_profile = next(item for item in result.profile["columnProfiles"] if item["name"] == "amount")
+        self.assertEqual(amount_profile["mean"], 42.5)
+        method, url, kwargs = session.requests[0]
+        self.assertEqual((method, url), ("POST", "http://localhost:8000/api/v1/datasets/dataset-v2/descriptive-profile"))
+        self.assertEqual(kwargs["json"]["target_column"], "churn")
+        self.assertEqual(kwargs["json"]["row_limit"], 600)
+        rendered = MLAppClient(session=FakeSession([])).present_descriptive_profile(result)._repr_html_()
+        self.assertIn("Rows analyzed", rendered)
+        self.assertIn("High missingness", rendered)
+        self.assertIn("Numeric distributions", rendered)
+        self.assertIn("Distribution of amount", rendered)
+        self.assertIn("<rect", rendered)
+        self.assertIn("Categorical distributions", rendered)
+        self.assertIn("50.0%", rendered)
+        self.assertIn("north", rendered)
+        self.assertNotIn("<td>records</td>", rendered)
+
+    def test_visualization_uses_server_contract_and_renders_bounded_svg(self) -> None:
+        session = FakeSession([
+            FakeResponse({
+                "dataset_id": "dataset-v2", "row_count": 20_000, "scanned_row_count": 20_000,
+                "valid_count": 19_800, "points": [
+                    {"x": 1, "y": 2, "series": "north"}, {"x": 2, "y": 4, "series": "south"},
+                ],
+                "trends": [{"series": "north", "kind": "linear", "valid_count": 9_900, "r_squared": 0.91}],
+                "series": ["north", "south"], "execution_mode": "full_dataset", "truncated": True,
+                "approximate": False,
+            }),
+            FakeResponse({"dataset_id": "dataset-v2", "values": ["north", "south"], "truncated": False}),
+        ])
+        client = MLAppClient(session=session)
+
+        result = client.visualize_dataset("dataset-v2", kind="scatter", x="age", y="amount", trend="linear", max_points=500)
+        groups = client.visualization_group_values("dataset-v2", "region", limit=20)
+
+        self.assertEqual(result.scanned_row_count, 20_000)
+        self.assertEqual(groups["values"], ["north", "south"])
+        self.assertEqual(session.requests[0][2]["json"]["max_points"], 500)
+        self.assertEqual(session.requests[1][2]["json"], {"column": "region", "limit": 20})
+        rendered = client.present_visualization(result)._repr_html_()
+        self.assertIn("<svg", rendered)
+        self.assertIn("Display points are capped", rendered)
+
+    def test_time_series_analysis_is_polled_to_its_full_dataset_result(self) -> None:
+        session = FakeSession([
+            FakeResponse({"job_id": "time-1", "status": "queued", "result": None, "error": None}, 202),
+            FakeResponse({
+                "job_id": "time-1", "status": "completed", "error": None,
+                "result": {
+                    "dataset_id": "dataset-v2", "time_column": "day", "value_column": "revenue",
+                    "row_count": 3_000, "scanned_row_count": 3_000, "valid_count": 2_900,
+                    "execution_mode": "full_dataset", "summary": {"trend_r_squared": 0.7},
+                    "autocorrelation": [{"lag": 1, "value": 0.4}], "driver_relationships": [],
+                    "quality_notes": ["One cadence gap"],
+                },
+            }),
+        ])
+
+        result = MLAppClient(session=session).analyze_time_series(
+            "dataset-v2", time_column="day", value_column="revenue", driver_columns=["marketing"],
+        )
+
+        self.assertEqual(result.valid_count, 2_900)
+        self.assertEqual(session.requests[0][2]["json"]["driver_columns"], ["marketing"])
+        rendered = MLAppClient(session=FakeSession([])).present_time_series_analysis(result)._repr_html_()
+        self.assertIn("One cadence gap", rendered)
+        self.assertIn("ACF lags", rendered)
 
     def test_prediction_output_can_be_previewed_and_streamed_to_disk(self) -> None:
         run = PipelineRun.from_api(run_payload(

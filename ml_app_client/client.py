@@ -10,6 +10,7 @@ import requests
 
 from .auth import AuthenticationClientMixin
 from .access_requests import AccessRequestClientMixin
+from .analysis import AnalysisClientMixin
 from .business_cases import BusinessCaseClientMixin
 from .datasets import DatasetClientMixin
 from .datasets_attachment import DatasetAttachmentClientMixin
@@ -24,6 +25,7 @@ from .transport import Session
 
 class MLAppClient(
     AuthenticationClientMixin,
+    AnalysisClientMixin,
     DatasetClientMixin,
     DatasetAttachmentClientMixin,
     BusinessCaseClientMixin,

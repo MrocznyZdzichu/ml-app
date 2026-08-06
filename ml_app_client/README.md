@@ -4,14 +4,14 @@ Business Case lifecycle, data bindings, and Access Requests are documented in th
 [interactive client reference](reference/index.html).
 
 `ml_app_client` is the supported, deliberately small integration interface for
-dataset ingestion, pipeline execution, model lifecycle, scoring, online serving,
+dataset ingestion, full-dataset analysis, pipeline execution, model lifecycle, scoring, online serving,
 and monitoring. It streams CSV/Parquet uploads from disk, resolves human-readable
 Business Case, dataset, pipeline, model, and service names, starts asynchronous
 workflows, and polls bounded run metadata.
 
 `MLAppClient` remains the single backwards-compatible public facade. Its
 implementation is composed from focused domain modules: authentication,
-datasets, Business Cases, Access Requests, pipelines, scoring reports, model registry,
+datasets, analysis, Business Cases, Access Requests, pipelines, scoring reports, model registry,
 deployments, inference, and online monitoring. Integrations therefore keep the
 same calls shown below, while maintenance of one workflow no longer requires
 loading the complete client implementation.
@@ -47,6 +47,32 @@ explicit legacy methods only when loading a complete result is intentional.
 Deleting a dataset is a soft deletion of a concrete version; it never mutates a
 previous version or removes Business Case lineage. The only mutable dataset field
 currently exposed by REST is merged `metadata`.
+
+## Analysis
+
+The `analysis` module submits full-dataset work to the platform and receives
+only compact result contracts. Descriptive profiling and time-series diagnostics
+are asynchronous; chart points and trend curves are bounded server-side outputs
+from a full relation scan. `present_*` and `display_*` provide readable terminal
+and Jupyter output without moving source rows into the client process.
+
+```python
+profile = client.profile_dataset(dataset, target_column="churn")
+client.display_descriptive_profile(profile)
+
+chart = client.visualize_dataset(
+    dataset, kind="scatter", x="tenure", y="monthly_spend", trend="linear",
+)
+client.display_visualization(chart)
+
+diagnostics = client.analyze_time_series(
+    dataset, time_column="event_time", value_column="revenue",
+)
+client.display_time_series_analysis(diagnostics)
+```
+
+See the [Analysis reference](reference/analysis.html) for every method,
+accepted limits, direct REST examples, and server-side execution guarantees.
 
 ```python
 from ml_app_client import MLAppClient

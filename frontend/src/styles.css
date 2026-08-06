@@ -267,6 +267,21 @@ h2 {
   display: block;
 }
 
+.user-account-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.user-account-button:focus-visible {
+  outline: 2px solid #238f83;
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
 .user-menu strong {
   font-size: 14px;
 }
@@ -11156,6 +11171,85 @@ textarea {
   grid-template-columns: minmax(0, 720px);
 }
 
+.personal-tokens-content {
+  display: grid;
+  gap: 18px;
+}
+
+.personal-token-warning,
+.personal-token-once {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid #2b8f83;
+  border-radius: 10px;
+  background: rgba(24, 143, 130, 0.1);
+}
+
+.personal-token-warning {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+}
+
+.personal-token-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.4fr) minmax(150px, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+  margin-top: 16px;
+}
+
+.personal-token-form label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted-color, #647383);
+  font-size: 13px;
+}
+
+.personal-token-once code {
+  display: block;
+  overflow-wrap: anywhere;
+  padding: 10px;
+  border-radius: 7px;
+  background: var(--code-background, #101923);
+}
+
+.personal-token-list {
+  display: grid;
+  gap: 8px;
+}
+
+.personal-token-list > article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px;
+  border: 1px solid var(--border-color, #d8e0e8);
+  border-radius: 9px;
+}
+
+.personal-token-list > article.revoked {
+  opacity: 0.62;
+}
+
+.personal-token-list strong,
+.personal-token-list small {
+  display: block;
+}
+
+.personal-token-list small {
+  color: var(--muted-color, #647383);
+}
+
+.personal-token-list > article > span {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-align: right;
+}
+
 .password-manager-isolated-input {
   -webkit-text-security: disc;
 }
@@ -11300,6 +11394,15 @@ textarea {
 
   .collaboration-tabs button {
     min-height: 54px;
+  }
+
+  .personal-token-form {
+    grid-template-columns: 1fr;
+  }
+
+  .personal-token-list > article {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .access-list > .access-grant-row {

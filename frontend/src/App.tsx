@@ -49,7 +49,7 @@ const navItems: NavItem[] = [
   { id: "models", label: "Models", icon: Brain },
   { id: "scoring-reports", label: "Scoring Reports", icon: BarChart3 },
   { id: "serving", label: "Serving", icon: Rocket },
-  { id: "share", label: "Share", icon: Share2 }
+  { id: "share", label: "Access & Account", icon: Share2 }
 ];
 
 const ModelsPanel = lazy(() =>
@@ -97,6 +97,7 @@ export default function App() {
   const [modelBusinessCaseFilter, setModelBusinessCaseFilter] = useState("");
   const [reportBusinessCaseFilter, setReportBusinessCaseFilter] = useState("");
   const [servingDeploymentId, setServingDeploymentId] = useState("");
+  const [openPersonalTokensRequest, setOpenPersonalTokensRequest] = useState(0);
   const [apiStatus, setApiStatus] = useState("checking");
   const [authStatus, setAuthStatus] = useState(getAccessToken() ? "checking" : "anonymous");
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
@@ -395,10 +396,13 @@ export default function App() {
             </button>
           </div>
           <div className="user-menu">
-            <div>
+            <button className="user-account-button" type="button" onClick={() => {
+              setOpenPersonalTokensRequest((current) => current + 1);
+              setActiveTab("share");
+            }} aria-label="Open account security and personal access tokens" title="Account security and personal access tokens">
               <strong>{currentUser.display_name}</strong>
               <span>{currentUser.email}</span>
-            </div>
+            </button>
             <button className="icon-button" onClick={logout} type="button" aria-label="Sign out">
               <LogOut size={18} />
             </button>
@@ -532,6 +536,7 @@ export default function App() {
               currentUser={currentUser}
               onRefresh={refreshShareCatalog}
               onRegisterRefresh={registerShareRefresh}
+              openPersonalTokensRequest={openPersonalTokensRequest}
               setNotice={setNotice}
             />
           </DeferredPanel>

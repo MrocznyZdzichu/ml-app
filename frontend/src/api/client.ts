@@ -7,6 +7,7 @@ import type {
   BusinessCaseAccessRole,
   BusinessCaseCatalogEntry
 } from "./contracts/businessCaseAccess";
+import type { CreatedPersonalAccessToken, PersonalAccessToken } from "./contracts/personalAccessToken";
 import { servingApi } from "./serving";
 
 export { getAccessToken, setAccessToken } from "./http";
@@ -17,6 +18,7 @@ export type {
   BusinessCaseAccessRole,
   BusinessCaseCatalogEntry
 } from "./contracts/businessCaseAccess";
+export type { CreatedPersonalAccessToken, PersonalAccessToken } from "./contracts/personalAccessToken";
 export type {
   ChallengerReplay,
   Deployment,
@@ -1119,11 +1121,14 @@ export const api = {
       `/business-cases/dependencies/${encodeURIComponent(referenceId)}?artifact_type=${encodeURIComponent(artifactType)}`
     ),
   ...servingApi,
-  createApiCredential: (name: string, expiresAt: string | null) =>
-    request<Record<string, unknown>>("/auth/api-credentials", {
+  createPersonalAccessToken: (name: string, expiresAt: string | null) =>
+    request<CreatedPersonalAccessToken>("/auth/api-credentials", {
       method: "POST",
       body: JSON.stringify({ name, expires_at: expiresAt })
     }),
+  listPersonalAccessTokens: () => request<PersonalAccessToken[]>("/auth/api-credentials"),
+  revokePersonalAccessToken: (tokenId: string) =>
+    request<void>(`/auth/api-credentials/${encodeURIComponent(tokenId)}`, { method: "DELETE" }),
   listDirectoryUsers: () => request<DirectoryUser[]>("/sharing/directory/users"),
   pageDirectoryUsers: (query: PageQuery = {}) =>
     request<OffsetPage<DirectoryUser>>(withQuery("/sharing/directory/users/page", query)),

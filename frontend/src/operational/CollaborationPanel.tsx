@@ -16,10 +16,11 @@ import type {
 import { PagedCatalogSelect } from "../components/PagedCatalogSelect";
 import { PaginationControls } from "../components/PaginationControls";
 import { PermissionRequestsPanel } from "./PermissionRequestsPanel";
+import { PersonalAccessTokensPanel } from "./PersonalAccessTokensPanel";
 
 type NoticeSetter = (message: string) => void;
 type SubjectType = "user" | "group";
-type CollaborationTab = "groups" | "sharing" | "password" | "permissions";
+type CollaborationTab = "groups" | "sharing" | "password" | "tokens" | "permissions";
 
 export function CollaborationPanel({
   businessCases,
@@ -27,6 +28,7 @@ export function CollaborationPanel({
   currentUser,
   onRefresh,
   onRegisterRefresh,
+  openPersonalTokensRequest = 0,
   setNotice
 }: {
   businessCases: BusinessCase[];
@@ -34,6 +36,7 @@ export function CollaborationPanel({
   currentUser: UserProfile;
   onRefresh: () => Promise<void>;
   onRegisterRefresh: (handler: (() => Promise<void>) | null) => void;
+  openPersonalTokensRequest?: number;
   setNotice: NoticeSetter;
 }) {
   const isAdmin = currentUser.roles.includes("administrator");
@@ -95,6 +98,10 @@ export function CollaborationPanel({
   useEffect(() => {
     setGroupOffset(0);
   }, [groupSearch]);
+
+  useEffect(() => {
+    if (openPersonalTokensRequest > 0) setActiveTab("tokens");
+  }, [openPersonalTokensRequest]);
 
   const refreshSelectedAccess = useCallback(async (includeAllTabs: boolean) => {
     const selectedDataset = datasets.find((item) => item.id === selectedDatasetId)
@@ -325,10 +332,11 @@ export function CollaborationPanel({
           {isRefreshing ? "Refreshing…" : "Refresh"}
         </button>
       </div>
-      <nav className="collaboration-tabs" aria-label="Share settings">
+      <nav className="collaboration-tabs" aria-label="Collaboration and account settings">
         <TabButton active={activeTab === "groups"} icon={<Users size={17} />} label="Groups" description="Teams and members" onClick={() => setActiveTab("groups")} />
         <TabButton active={activeTab === "sharing"} icon={<Share2 size={17} />} label="Object sharing" description="Business Cases and data" onClick={() => setActiveTab("sharing")} />
         <TabButton active={activeTab === "password"} icon={<KeyRound size={17} />} label="Change password" description="Account security" onClick={() => setActiveTab("password")} />
+        <TabButton active={activeTab === "tokens"} icon={<KeyRound size={17} />} label="Personal tokens" description="Notebook and script sign-in" onClick={() => setActiveTab("tokens")} />
         <TabButton active={activeTab === "permissions"} icon={<Inbox size={17} />} label="Permission requests" description="Incoming and submitted" onClick={() => setActiveTab("permissions")} />
       </nav>
 
@@ -583,6 +591,7 @@ export function CollaborationPanel({
           <button className="primary-button" type="button" onClick={changePassword}><KeyRound size={15} /> Change password</button>
         </div>
       </div></div>}
+      {activeTab === "tokens" && <PersonalAccessTokensPanel setNotice={setNotice} />}
       {activeTab === "permissions" && (
         <div className="collaboration-tab-content" role="region" aria-label="Permission requests">
           <PermissionRequestsPanel

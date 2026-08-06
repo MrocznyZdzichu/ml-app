@@ -321,7 +321,7 @@ export function ServingPanel({
   setNotice: NoticeSetter;
 }) {
   type ServingTab = "overview" | "test" | "traffic" | "monitoring" | "access";
-  type ServingModal = "create" | "revision" | "history" | "lifecycle" | "archive" | "credential" | "replay" | "inference" | null;
+  type ServingModal = "create" | "revision" | "history" | "lifecycle" | "archive" | "replay" | "inference" | null;
   const [serviceName, setServiceName] = useState("");
   const [modelId, setModelId] = useState("");
   const [selectedCreationModel, setSelectedCreationModel] = useState<ModelArtifact | undefined>();
@@ -361,7 +361,6 @@ export function ServingPanel({
   const [revisionReason, setRevisionReason] = useState("");
   const [lifecycleReason, setLifecycleReason] = useState("");
   const [rollbackRevisionId, setRollbackRevisionId] = useState("");
-  const [credential, setCredential] = useState("");
   const [busy, setBusy] = useState(false);
   const [catalogMode, setCatalogMode] = useState<"services" | "monitoring">("services");
   const [serviceSearch, setServiceSearch] = useState("");
@@ -847,17 +846,6 @@ export function ServingPanel({
       setModal(null);
       setNotice("Rollback activated as a new immutable service revision");
       await onRefresh();
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function createCredential() {
-    setBusy(true);
-    try {
-      const created = await api.createApiCredential(`${selectedDeployment?.slug ?? "serving"}-client`, null);
-      setCredential(String(created.token ?? ""));
-      setNotice("Credential created; copy it now because it will not be shown again");
     } finally {
       setBusy(false);
     }
@@ -1387,8 +1375,7 @@ export function ServingPanel({
       </div>}
 
       {activeTab === "access" && <div className="serving-tab-content serving-access-layout">
-        <div className="panel"><div className="panel-header"><div><span className="builder-kicker">REST API</span><h3>Call this service directly</h3></div><ShieldCheck size={18} /></div><p className="serving-section-intro">Authenticate as an existing platform account. Business Case grants still determine access.</p><div className="serving-code-block"><code>POST {selectedDeployment.endpoint_url}</code><button className="icon-button" type="button" onClick={() => navigator.clipboard.writeText(selectedDeployment.endpoint_url ?? "")}><Copy size={15} /></button></div><pre className="json-output serving-code-example">{JSON.stringify({ instances: [{ record_id: "property-1042", features: { area: 84, rooms: 4 } }] }, null, 2)}</pre></div>
-        <div className="panel"><div className="panel-header"><div><span className="builder-kicker">Python client</span><h3>Create client credential</h3></div><KeyRound size={18} /></div><p className="serving-section-intro">Create a revocable credential for scripts and notebooks. The secret is displayed only once.</p><button className="primary-button" type="button" onClick={() => { setCredential(""); setModal("credential"); }}><KeyRound size={16} /> Generate credential</button></div>
+        <div className="panel"><div className="panel-header"><div><span className="builder-kicker">REST API</span><h3>Call this service directly</h3></div><ShieldCheck size={18} /></div><p className="serving-section-intro">Authenticate as an existing platform account. Business Case grants still determine access. Create or revoke a Personal Access Token from Account security, not from this service.</p><div className="serving-code-block"><code>POST {selectedDeployment.endpoint_url}</code><button className="icon-button" type="button" onClick={() => navigator.clipboard.writeText(selectedDeployment.endpoint_url ?? "")}><Copy size={15} /></button></div><pre className="json-output serving-code-example">{JSON.stringify({ instances: [{ record_id: "property-1042", features: { area: 84, rooms: 4 } }] }, null, 2)}</pre></div>
       </div>}
 
       {monitoringVisualizationRun && <MonitoringVisualizationModal key={monitoringVisualizationRun.id} run={monitoringVisualizationRun} onClose={() => setMonitoringVisualizationRunId("")} />}
@@ -1407,7 +1394,6 @@ export function ServingPanel({
 
       {modal === "replay" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog" role="dialog" aria-modal="true" aria-labelledby="replay-title"><div className="modal-header"><div><span className="builder-kicker">Batch evaluation</span><h2 id="replay-title">Replay historical traffic</h2><p>Score up to 1,000 retained requests with a challenger. Production responses are not changed.</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body form-panel"><label>Challenger<select value={scoreTarget === "champion" ? "" : scoreTarget} onChange={(event) => setScoreTarget(event.target.value)}><option value="">Choose a challenger</option>{challengers.map((item) => <option key={item.model_id} value={item.model_id}>{modelLabel(item.model_id)}</option>)}</select></label><div className="serving-inline-warning">Replay uses the current immutable revision and retained historical inputs.</div></div><div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>Cancel</button><button className="primary-button" type="button" onClick={replayChallenger} disabled={busy || scoreTarget === "champion" || !scoreTarget}><History size={16} /> Queue replay</button></div></div></div>}
 
-      {modal === "credential" && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog" role="dialog" aria-modal="true" aria-labelledby="credential-title"><div className="modal-header"><div><span className="builder-kicker">Python client</span><h2 id="credential-title">{credential ? "Copy your credential" : "Generate client credential"}</h2><p>{credential ? "This secret will not be shown again after you close this window." : "The credential inherits your current account and Business Case permissions."}</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body">{credential ? <div className="credential-once"><strong>Copy now — shown once</strong><code>{credential}</code><button className="secondary-button" type="button" onClick={() => navigator.clipboard.writeText(credential)}><Copy size={15} /> Copy credential</button></div> : <div className="serving-credential-explainer"><ShieldCheck size={24} /><p>You can revoke this credential later through the API. Creating it does not bypass platform permissions.</p></div>}</div><div className="modal-actions"><button className="secondary-button" type="button" onClick={closeModal}>{credential ? "Done" : "Cancel"}</button>{!credential && <button className="primary-button" type="button" onClick={createCredential} disabled={busy}><KeyRound size={16} /> Generate credential</button>}</div></div></div>}
 
       {modal === "inference" && inferenceDetail && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && closeModal()}><div className="modal-dialog serving-action-dialog serving-inference-dialog" role="dialog" aria-modal="true" aria-labelledby="inference-title"><div className="modal-header"><div><span className="builder-kicker">Audited request</span><h2 id="inference-title">Inference details</h2><p>Stored request, response and per-model executions.</p></div><button className="icon-button" type="button" onClick={closeModal}><X size={18} /></button></div><div className="serving-modal-body"><pre className="json-output">{JSON.stringify(inferenceDetail, null, 2)}</pre></div></div></div>}
     </section>
