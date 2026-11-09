@@ -44,7 +44,7 @@ goto end
 
 :cached_rebuild
 echo Rebuilding local application images with Docker cache...
-docker compose build api worker beat frontend model-runtime
+docker compose build api worker beat frontend model-runtime minio
 if errorlevel 1 (
     echo.
     echo Build failed. Application was not restarted.
