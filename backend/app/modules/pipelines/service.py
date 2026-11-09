@@ -1,6 +1,7 @@
 import hashlib
 import json
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -44,7 +45,7 @@ from app.modules.pipelines.workflow import (
     workflow_validation_errors,
 )
 from app.modules.sharing.domain import BusinessCaseAccessRole, ResourceAccessRole, ResourceKind
-from app.modules.sharing.policy import access_policy
+from app.modules.sharing.postgres_access import access_policy
 from app.ports.task_queue import TaskQueue, require_task_queue
 
 
@@ -522,10 +523,16 @@ class PipelineService:
                 [run.id],
             )
         except Exception as exc:
-            run.status = PipelineRunStatus.FAILED
-            run.error_message = f"Pipeline run could not be queued: {exc}"[:4000]
-            run.finished_at = datetime.now(timezone.utc)
-            self.repository.update_run(run)
+            self.repository.change_run(
+                run.id,
+                (PipelineRunStatus.QUEUED,),
+                lambda current: replace(
+                    current,
+                    status=PipelineRunStatus.FAILED,
+                    error_message=f"Pipeline run could not be queued: {exc}"[:4000],
+                    finished_at=datetime.now(timezone.utc),
+                ),
+            )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail={"message": "Pipeline execution queue is unavailable", "run_id": run.id},
@@ -1016,26 +1023,35 @@ class PipelineService:
             principal,
             minimum=BusinessCaseAccessRole.CONTRIBUTOR,
         )
-        if run.status not in {PipelineRunStatus.QUEUED, PipelineRunStatus.RUNNING}:
+        def cancel(current: PipelineRun) -> PipelineRun:
+            current.status = PipelineRunStatus.CANCELLED
+            current.finished_at = datetime.now(timezone.utc)
+            current.warnings = [
+                *current.warnings,
+                "Cancellation requested; an active DuckDB step stops at the next step boundary",
+            ]
+            current.events = [
+                *current.events,
+                {
+                    "timestamp": current.finished_at.isoformat(),
+                    "level": "warning",
+                    "type": "run.cancel_requested",
+                    "step_id": "",
+                    "message": "Cancellation requested by user",
+                    "details": {},
+                },
+            ][-1000:]
+            return current
+
+        cancelled = self.repository.change_run(
+            run.id, (PipelineRunStatus.QUEUED, PipelineRunStatus.RUNNING), cancel
+        )
+        if cancelled is None:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Only queued or running pipeline runs can be cancelled",
             )
-        run.status = PipelineRunStatus.CANCELLED
-        run.finished_at = datetime.now(timezone.utc)
-        run.warnings = [*run.warnings, "Cancellation requested; an active DuckDB step stops at the next step boundary"]
-        run.events = [
-            *run.events,
-            {
-                "timestamp": run.finished_at.isoformat(),
-                "level": "warning",
-                "type": "run.cancel_requested",
-                "step_id": "",
-                "message": "Cancellation requested by user",
-                "details": {},
-            },
-        ][-1000:]
-        return self.repository.update_run(run)
+        return cancelled
 
     def retry_run(self, pipeline_id: str, run_id: str, principal: Principal) -> PipelineRun:
         previous = self.get_run(
@@ -1249,48 +1265,12 @@ class PipelineService:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Pipeline has no runnable version")
 
     def _repair_finished_active_run(self, run: PipelineRun) -> PipelineRun:
-        if run.status not in {PipelineRunStatus.QUEUED, PipelineRunStatus.RUNNING}:
+        if run.finished_at is None or run.status not in {PipelineRunStatus.QUEUED, PipelineRunStatus.RUNNING}:
             return run
-        if run.finished_at is None:
-            return run
-        message = (
-            "Pipeline worker stopped after setting a finish timestamp without a terminal status; "
-            "the run was marked failed during status reconciliation."
-        )
-        run.status = PipelineRunStatus.FAILED
-        run.error_message = run.error_message or message
-        run.warnings = list(dict.fromkeys([*run.warnings, message]))
-        run.events = [
-            *run.events,
-            {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "level": "error",
-                "type": "run.reconciled_failed",
-                "step_id": "",
-                "message": "Pipeline run status reconciled to failed",
-                "details": {"reason": message},
-            },
-        ][-1000:]
-        for step_run in self.repository.list_step_runs(run.id, run.owner_id):
-            if step_run.status not in {PipelineRunStatus.QUEUED, PipelineRunStatus.RUNNING}:
-                continue
-            step_run.status = PipelineRunStatus.FAILED
-            step_run.finished_at = step_run.finished_at or run.finished_at
-            step_run.error_message = step_run.error_message or message
-            step_run.warnings = list(dict.fromkeys([*step_run.warnings, message]))
-            step_run.events = [
-                *step_run.events,
-                {
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                    "level": "error",
-                    "type": "step.reconciled_failed",
-                    "step_id": step_run.pipeline_step_id,
-                    "message": "Pipeline step status reconciled to failed",
-                    "details": {"reason": message},
-                },
-            ][-1000:]
-            self.repository.update_step_run(step_run)
-        return self.repository.update_run(run)
+        with self.repository.lock_run_execution(run.id) as verify_lock:
+            if verify_lock is not None:
+                return self.repository.reconcile_interrupted_run(run.id) or self.repository.get_run(run.id) or run
+        return run
 
 
 def normalize_definition(definition: dict) -> dict:

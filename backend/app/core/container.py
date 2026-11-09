@@ -1,6 +1,7 @@
 from functools import cached_property, lru_cache
 
 from app.core.database import get_engine
+from app.modules.analysis.dataset_execution import DatasetAnalysisExecutor
 from app.modules.analysis.repository import InMemoryAnalysisRepository
 from app.modules.analysis.service import AnalysisService
 from app.modules.auth.api_credentials import ApiCredentialRepository, ApiCredentialService
@@ -30,7 +31,7 @@ from app.worker.task_queue import CeleryTaskQueue
 
 
 class ApplicationContainer:
-    """Single composition root for HTTP-facing application services."""
+    """Compose application services for HTTP and worker adapters."""
 
     def __init__(self) -> None:
         engine = get_engine()
@@ -71,13 +72,16 @@ class ApplicationContainer:
         )
 
     @cached_property
+    def temporary_outputs(self) -> TemporaryPipelineOutputResolver:
+        return TemporaryPipelineOutputResolver(self.pipeline_repository, PipelineRunOutputReader())
+
+    @cached_property
     def datasets(self) -> DatasetService:
-        output_reader = PipelineRunOutputReader()
-        return DatasetService(
-            self.dataset_repository,
-            TemporaryPipelineOutputResolver(self.pipeline_repository, output_reader),
-            self.task_queue,
-        )
+        return DatasetService(self.dataset_repository, self.temporary_outputs, self.task_queue)
+
+    @cached_property
+    def dataset_analysis_executor(self) -> DatasetAnalysisExecutor:
+        return DatasetAnalysisExecutor(self.dataset_repository, self.users, self.temporary_outputs)
 
     @cached_property
     def pipelines(self) -> PipelineService:

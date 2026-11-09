@@ -50,8 +50,18 @@ def test_principal_identity_has_no_http_framework_dependency() -> None:
     assert not any(module.startswith("fastapi") for module in imports)
 
 
+def test_access_policy_has_no_http_or_database_dependency() -> None:
+    imports = _imports(APP_ROOT / "modules" / "sharing" / "policy.py")
+    assert not any(
+        module.startswith(("fastapi", "sqlalchemy", "app.core.database", "app.modules.sharing.postgres_access"))
+        for module in imports
+    )
+
+
 def test_migrated_application_services_have_no_http_framework_dependency() -> None:
     migrated_services = [
+        APP_ROOT / "modules" / "analysis" / "dataset_execution.py",
+        APP_ROOT / "modules" / "analysis" / "dataset_jobs.py",
         APP_ROOT / "modules" / "auth" / "service.py",
         APP_ROOT / "modules" / "users" / "service.py",
     ]

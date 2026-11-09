@@ -36,7 +36,7 @@ from app.modules.serving.domain import MonitoringRunStatus, OnlineMonitoringRun
 from app.modules.serving.repository import PostgresServingRepository, ServingRepository
 from app.modules.serving.schemas import OnlineMonitoringRunCreate
 from app.modules.sharing.domain import AuditEvent, BC_ROLE_RANK, BusinessCaseAccessRole
-from app.modules.sharing.policy import access_policy
+from app.modules.sharing.postgres_access import access_policy
 from app.modules.sharing.repository import PostgresSharingRepository
 from app.ports.task_queue import TaskQueue, require_task_queue
 from app.shared.duckdb_runtime import configured_duckdb_connection, write_parquet_atomic

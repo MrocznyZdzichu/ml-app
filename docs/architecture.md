@@ -49,6 +49,12 @@ Celery task functions are thin transport adapters. Pipeline lifecycle and step
 binding belong to `PipelineRunExecutor`; individual step families use focused
 handlers behind `PipelineStepHandlerRegistry`.
 
+One PostgreSQL session lock protects each pipeline run while it executes. Run
+state transitions use short row-locking transactions. On redelivery or periodic
+reconciliation, an unlocked run interrupted during execution is marked failed
+along with its unfinished steps. Retrying creates a new run with its own lineage
+and uses the previously resolved input and model versions.
+
 Application/domain code should raise typed errors from `app.core.errors`.
 FastAPI maps them in `app.api.error_handlers`. This boundary is already enforced
 for migrated authentication and user-administration services and should replace
@@ -67,6 +73,11 @@ boundaries.
 The REST API is the shared product contract. React and `ml_app_client` are
 peer clients and must preserve the same authorization, validation, pagination,
 idempotency, warnings, and errors.
+
+Start training through a Training or AutoML pipeline. The deprecated
+`POST /api/v1/models/training-jobs` returns HTTP 410. Background resource export
+is unavailable and `POST /api/v1/exports` returns HTTP 501. Both legacy GET
+endpoints remain available for compatibility.
 
 Potentially large catalogs provide bounded `/page` endpoints with an
 `items`, `total`, `limit`, `offset`, and `has_next` response. Dataset, model, and

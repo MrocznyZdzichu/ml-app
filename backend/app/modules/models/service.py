@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from app.core.security import Principal
 from app.modules.models.domain import ModelArtifact, ModelStage, TrainingJob
 from app.modules.models.repository import InMemoryModelRepository, ModelRepository
-from app.modules.models.schemas import PromoteModelRequest, TrainingRequest
+from app.modules.models.schemas import PromoteModelRequest
 from app.modules.business_cases.domain import Artifact, ArtifactType
 from app.modules.business_cases.repository import (
     BusinessCaseRepository,
@@ -17,9 +17,8 @@ from app.modules.business_cases.repository import (
 from app.modules.pipelines.domain import PipelineVersion
 from app.modules.pipelines.repository import PipelineRepository, PostgresPipelineRepository
 from app.modules.sharing.domain import AuditEvent, BC_ROLE_RANK, BusinessCaseAccessRole
-from app.modules.sharing.policy import access_policy
+from app.modules.sharing.postgres_access import access_policy
 from app.modules.datasets.repository import DatasetRepository, PostgresDatasetRepository
-from app.modules.sharing.domain import ResourceAccessRole, ResourceKind
 from app.modules.serving.repository import PostgresServingRepository, ServingRepository
 from app.modules.sharing.repository import PostgresSharingRepository
 
@@ -40,40 +39,6 @@ class ModelService:
         self.datasets = datasets or PostgresDatasetRepository()
         self.serving_repository = serving_repository or PostgresServingRepository()
         self.audit_repository = audit_repository or PostgresSharingRepository()
-
-    def start_training(self, payload: TrainingRequest, principal: Principal) -> TrainingJob:
-        asset = self.datasets.get(payload.dataset_id)
-        if asset is None:
-            raise HTTPException(status_code=404, detail="Dataset not found")
-        access_policy.require_resource(
-            principal,
-            ResourceKind.DATA_VIEW if asset.source_type.value == "view" else ResourceKind.DATASET,
-            asset.id,
-            asset.owner_id,
-            ResourceAccessRole.EDITOR,
-        )
-        job = TrainingJob(
-            id=str(uuid4()),
-            owner_id=principal.user_id,
-            dataset_id=payload.dataset_id,
-            target_column=payload.target_column,
-            algorithm=payload.algorithm,
-            feature_columns=list(payload.feature_columns),
-            parameters=dict(payload.parameters),
-        )
-        self.repository.add_training_job(job)
-
-        model = ModelArtifact(
-            id=str(uuid4()),
-            owner_id=principal.user_id,
-            training_job_id=job.id,
-            name=f"{payload.algorithm}-{payload.target_column}",
-            version="0.1.0",
-            algorithm=payload.algorithm,
-            artifact_uri=f"s3://models/{principal.user_id}/{job.id}/model.joblib",
-        )
-        self.repository.add_model(model)
-        return job
 
     def list_training_jobs(self, principal: Principal) -> list[TrainingJob]:
         return self.repository.list_all_training_jobs() if principal.is_administrator else self.repository.list_training_jobs(principal.user_id)

@@ -13,6 +13,7 @@ from uuid import uuid4
 from fastapi import HTTPException, status
 from sqlalchemy.exc import IntegrityError
 
+from app.core.errors import ResourceNotFoundError
 from app.core.security import Principal
 from app.modules.auth.repository import PostgresUserRepository, UserRepository
 from app.modules.models.domain import ModelStage
@@ -52,7 +53,7 @@ from app.modules.serving.schemas import (
     ScoreResponse,
 )
 from app.modules.sharing.domain import AuditEvent, BusinessCaseAccessRole
-from app.modules.sharing.policy import access_policy
+from app.modules.sharing.postgres_access import access_policy
 from app.modules.sharing.repository import PostgresSharingRepository
 from app.ports.task_queue import TaskQueue, require_task_queue
 
@@ -567,7 +568,7 @@ class ServingService:
                 resolved_models = self._validate_assignments(
                     revision.assignments, deployment.business_case_id, principal
                 )
-            except HTTPException as exc:
+            except (HTTPException, ResourceNotFoundError) as exc:
                 deployment.status = DeploymentStatus.DEGRADED
                 deployment.updated_at = datetime.now(timezone.utc)
                 self.repository.update_deployment(deployment)

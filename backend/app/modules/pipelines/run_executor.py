@@ -1,11 +1,14 @@
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from app.core.security import Principal
+from app.core.errors import AuthorizationError, ResourceNotFoundError
+from app.core.identity import Principal
 from app.modules.auth.repository import PostgresUserRepository, UserRepository
 from app.modules.pipelines.domain import (
     PipelineExecutionCancelled,
+    PipelineRun,
     PipelineRunStatus,
     PipelineStepRun,
 )
@@ -27,7 +30,7 @@ from app.modules.pipelines.workflow import (
     normalize_workflow_definition,
 )
 from app.modules.sharing.domain import BusinessCaseAccessRole
-from app.modules.sharing.policy import access_policy
+from app.modules.sharing.postgres_access import access_policy
 
 
 class PipelineRunExecutor:
@@ -49,39 +52,35 @@ class PipelineRunExecutor:
 
     def execute(self, run_id: str) -> dict:
         repository = self.repository_factory()
-        run = repository.get_run(run_id)
-        if run is None:
-            raise ValueError("Pipeline run not found")
-        version = repository.get_version(run.pipeline_version_id)
-        if version is None:
-            raise ValueError("Pipeline version not found")
-        if run.status in {PipelineRunStatus.CANCELLED, PipelineRunStatus.SUCCEEDED}:
-            return {"run_id": run.id, "status": run.status.value}
-    
-        if hasattr(run, "created_by") and hasattr(run, "business_case_id"):
-            try:
-                actor = self.users.get(run.created_by)
-                if actor is None or not actor.is_active:
-                    raise ValueError("Pipeline run actor is no longer active")
-                access_policy.require_business_case(
-                    Principal(
-                        user_id=actor.id,
-                        email=actor.email,
-                        display_name=actor.display_name,
-                        login_name=actor.login_name,
-                        roles=actor.roles,
-                        session_version=actor.session_version,
-                    ),
-                    run.business_case_id,
-                    BusinessCaseAccessRole.CONTRIBUTOR,
-                )
-            except Exception as exc:
-                run.status = PipelineRunStatus.FAILED
-                run.error_message = f"Execution access check failed: {exc}"[:4000]
-                run.finished_at = datetime.now(timezone.utc)
-                repository.update_run(run)
-                return {"run_id": run.id, "status": run.status.value, "error": run.error_message}
-    
+        with repository.lock_run_execution(run_id) as verify_lock:
+            run = repository.get_run(run_id)
+            if run is None:
+                raise ResourceNotFoundError("Pipeline run not found")
+            if verify_lock is None:
+                return {"run_id": run.id, "status": run.status.value}
+            if run.status != PipelineRunStatus.QUEUED or run.finished_at is not None:
+                settled = repository.reconcile_interrupted_run(run_id) or repository.get_run(run_id) or run
+                return {"run_id": run_id, "status": settled.status.value}
+            claimed = repository.change_run(run_id, (PipelineRunStatus.QUEUED,), self._start_run)
+            if claimed is None:
+                current = repository.get_run(run_id) or run
+                return {"run_id": current.id, "status": current.status.value}
+            return self._execute_claimed(repository, claimed, verify_lock)
+
+    def reconcile_interrupted_runs(self) -> dict[str, int]:
+        repository = self.repository_factory()
+        recovered = 0
+        after_id = ""
+        while run_ids := repository.interrupted_run_candidates(after_id, limit=100):
+            for run_id in run_ids:
+                with repository.lock_run_execution(run_id) as verify_lock:
+                    if verify_lock is not None and repository.reconcile_interrupted_run(run_id) is not None:
+                        recovered += 1
+            after_id = run_ids[-1]
+        return {"recovered_runs": recovered}
+
+    @staticmethod
+    def _start_run(run: PipelineRun) -> PipelineRun:
         run.status = PipelineRunStatus.RUNNING
         run.started_at = datetime.now(timezone.utc)
         _append_run_event(
@@ -89,10 +88,45 @@ class PipelineRunExecutor:
             "run.started",
             {"message": "Pipeline run started in worker", "status": run.status.value},
         )
-        repository.update_run(run)
+        return run
+
+    def _require_execution_access(self, run: PipelineRun) -> None:
+        actor = self.users.get(run.created_by)
+        if actor is None or not actor.is_active:
+            raise AuthorizationError("Pipeline run actor is no longer active")
+        access_policy.require_business_case(
+            Principal(
+                user_id=actor.id,
+                email=actor.email,
+                display_name=actor.display_name,
+                login_name=actor.login_name,
+                roles=actor.roles,
+                session_version=actor.session_version,
+            ),
+            run.business_case_id,
+            BusinessCaseAccessRole.CONTRIBUTOR,
+        )
+
+    def _execute_claimed(
+        self, repository: PipelineRepository, run: PipelineRun, verify_lock: Callable[[], None],
+    ) -> dict:
+        try:
+            self._require_execution_access(run)
+        except Exception as exc:
+            verify_lock()
+            run.status = PipelineRunStatus.FAILED
+            run.error_message = f"Execution access check failed: {exc}"[:4000]
+            run.finished_at = datetime.now(timezone.utc)
+            saved = repository.change_run(run.id, (PipelineRunStatus.RUNNING,), lambda _: run)
+            current = saved or repository.get_run(run.id) or run
+            return {"run_id": run.id, "status": current.status.value, "error": current.error_message}
+
         failure: Exception | None = None
         active_step_run: PipelineStepRun | None = None
         try:
+            version = repository.get_version(run.pipeline_version_id)
+            if version is None:
+                raise ResourceNotFoundError("Pipeline version not found")
             workflow = WorkflowDefinition.model_validate(
                 _definition_with_resolved_inputs(
                     normalize_workflow_definition(version.definition),
@@ -128,14 +162,14 @@ class PipelineRunExecutor:
                     details,
                     step_id=active_step_run.pipeline_step_id if active_step_run else "",
                 )
-                latest = repository.get_run(run.id)
-                if latest is not None:
-                    run.status = latest.status
-                    run.finished_at = latest.finished_at
-                    run.warnings = list(latest.warnings)
-                    run.events = list(getattr(latest, "events", []) or [])
-                run.events = [*list(getattr(run, "events", []) or []), event][-1000:]
-                repository.update_run(run)
+                verify_lock()
+                updated = repository.change_run(
+                    run.id, (PipelineRunStatus.RUNNING,),
+                    lambda current: replace(current, events=[*current.events, event][-1000:]),
+                )
+                if updated is None:
+                    raise PipelineExecutionCancelled("Pipeline run is no longer active")
+                run.events = updated.events
                 if active_step_run is not None:
                     active_step_run.events = [
                         *list(getattr(active_step_run, "events", []) or []),
@@ -145,13 +179,13 @@ class PipelineRunExecutor:
     
             def cancellation_requested() -> bool:
                 current_run = repository.get_run(run.id)
-                return current_run is not None and current_run.status == PipelineRunStatus.CANCELLED
+                return current_run is None or current_run.status != PipelineRunStatus.RUNNING
     
             for index, step in enumerate(workflow.steps):
                 if index > requested_index:
                     break
-                current = repository.get_run(run.id)
-                if current is not None and current.status == PipelineRunStatus.CANCELLED:
+                verify_lock()
+                if cancellation_requested():
                     raise PipelineExecutionCancelled("Pipeline run was cancelled")
                 executed_step = step
                 active_step_run = PipelineStepRun(
@@ -186,8 +220,8 @@ class PipelineRunExecutor:
                         is_cancel_requested=cancellation_requested,
                     ),
                 )
-                current = repository.get_run(run.id)
-                if current is not None and current.status == PipelineRunStatus.CANCELLED:
+                verify_lock()
+                if cancellation_requested():
                     active_step_run.status = PipelineRunStatus.CANCELLED
                     active_step_run.finished_at = datetime.now(timezone.utc)
                     active_step_run.events = [
@@ -348,6 +382,9 @@ class PipelineRunExecutor:
                 for item in all_output_manifests
                 if item.get("quality_output_kind") == "rejected_records"
             )
+            verify_lock()
+            if cancellation_requested():
+                raise PipelineExecutionCancelled("Pipeline run was cancelled")
             if not run.is_dry_run:
                 report_manifests, report_artifact_ids = self.report_materializer_factory().materialize(
                     run=run,
@@ -372,6 +409,7 @@ class PipelineRunExecutor:
                 },
             )
         except PipelineExecutionCancelled:
+            verify_lock()
             if active_step_run is not None:
                 active_step_run.status = PipelineRunStatus.CANCELLED
                 active_step_run.finished_at = datetime.now(timezone.utc)
@@ -400,6 +438,7 @@ class PipelineRunExecutor:
                 level="warning",
             )
         except Exception as exc:
+            verify_lock()
             if active_step_run is not None:
                 active_step_run.status = PipelineRunStatus.FAILED
                 active_step_run.error_message = str(exc)[:4000]
@@ -427,16 +466,19 @@ class PipelineRunExecutor:
                 level="error",
             )
             failure = exc
-        finally:
-            run.finished_at = datetime.now(timezone.utc)
-            repository.update_run(run)
+        verify_lock()
+        run.finished_at = datetime.now(timezone.utc)
+        saved = repository.change_run(run.id, (PipelineRunStatus.RUNNING,), lambda _: run)
+        if saved is None:
+            current = repository.get_run(run.id) or run
+            return {"run_id": current.id, "status": current.status.value}
         if failure is not None:
             raise failure
         return {
-            "run_id": run.id,
-            "status": run.status.value,
-            "input_row_count": run.input_row_count,
-            "output_row_count": run.output_row_count,
+            "run_id": saved.id,
+            "status": saved.status.value,
+            "input_row_count": saved.input_row_count,
+            "output_row_count": saved.output_row_count,
         }
 
 

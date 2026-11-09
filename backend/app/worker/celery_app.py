@@ -14,12 +14,12 @@ celery_app = Celery(
 celery_app.conf.update(
     task_routes={
         "app.worker.tasks.profile_dataset": {"queue": "analytics"},
-        "app.worker.tasks.train_model": {"queue": "ml"},
+        "app.worker.tasks.descriptive_profile_dataset": {"queue": "analytics"},
+        "app.worker.tasks.time_series_analysis_dataset": {"queue": "analytics"},
         "app.worker.tasks.batch_score": {"queue": "serving"},
         "app.worker.tasks.replay_challenger": {"queue": "serving"},
         "app.worker.tasks.run_online_monitoring": {"queue": "serving"},
         "app.worker.tasks.prune_serving_inference_history": {"queue": "serving"},
-        "app.worker.tasks.export_resource": {"queue": "exports"},
     },
     task_serializer="json",
     result_serializer="json",
@@ -30,6 +30,10 @@ celery_app.conf.update(
     task_acks_late=True,
     worker_prefetch_multiplier=1,
     beat_schedule={
+        "reconcile-interrupted-pipeline-runs": {
+            "task": "app.worker.tasks.reconcile_interrupted_pipeline_runs",
+            "schedule": 60.0,
+        },
         "prune-serving-inference-history-daily": {
             "task": "app.worker.tasks.prune_serving_inference_history",
             "schedule": crontab(hour=2, minute=15),

@@ -23,6 +23,7 @@ from app.modules.pipelines.execution import (
     compile_condition,
 )
 from app.modules.pipelines.run_preview import PipelineRunOutputReader
+from app.modules.pipelines.repository import InMemoryPipelineRepository
 from app.modules.pipelines.step_handlers import (
     HandledStepResult,
     PipelineStepHandlerRegistry,
@@ -474,39 +475,29 @@ def test_user_written_sql_rejects_unsafe_queries(sql: str, message: str) -> None
 def test_failed_pipeline_run_is_persisted_and_fails_the_celery_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    run = SimpleNamespace(
+    run = PipelineRun(
         id="run-1",
+        owner_id="owner-1",
+        pipeline_id="pipeline-1",
         pipeline_version_id="version-1",
+        business_case_id="bc-1",
         status=PipelineRunStatus.QUEUED,
-        started_at=None,
-        finished_at=None,
-        error_message="",
+        trigger_type=PipelineRunTrigger.MANUAL,
     )
-    version = SimpleNamespace(definition={})
-
-    class Repository:
-        def get_run(self, run_id: str):
-            return run if run_id == run.id else None
-
-        def get_version(self, version_id: str):
-            return version if version_id == run.pipeline_version_id else None
-
-        @staticmethod
-        def update_run(updated):
-            return updated
-
-    monkeypatch.setattr(
-        worker_tasks._pipeline_run_executor,
-        "repository_factory",
-        Repository,
-    )
+    repository = InMemoryPipelineRepository()
+    repository.add_run(run)
+    repository.add_version(SimpleNamespace(id=run.pipeline_version_id, definition={}))
+    executor = worker_tasks._pipeline_run_executor
+    monkeypatch.setattr(executor, "repository_factory", lambda: repository)
+    monkeypatch.setattr(executor, "_require_execution_access", lambda _: None)
 
     with pytest.raises(Exception, match="validation error"):
         worker_tasks.execute_pipeline_run.run(run.id)
 
-    assert run.status == PipelineRunStatus.FAILED
-    assert run.error_message
-    assert run.finished_at is not None
+    saved = repository.get_run(run.id)
+    assert saved.status == PipelineRunStatus.FAILED
+    assert saved.error_message
+    assert saved.finished_at is not None
 
 
 def test_user_written_sql_binds_only_declared_input_relations() -> None:

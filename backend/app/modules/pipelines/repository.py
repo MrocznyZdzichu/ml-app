@@ -1,7 +1,14 @@
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
+from copy import deepcopy
+from datetime import datetime, timezone
+from hashlib import blake2b
+from threading import Lock, RLock
 from typing import Any, Protocol
 
 from sqlalchemy import JSON, Boolean, Column, DateTime, Index, Integer, MetaData, String, Table, Text, case, func, or_, select, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import DBAPIError
 
 from app.core.database import get_engine
 from app.modules.pipelines.domain import (
@@ -113,6 +120,43 @@ pipeline_step_runs_table = Table(
     Column("started_at", DateTime(timezone=True), nullable=True),
     Column("finished_at", DateTime(timezone=True), nullable=True),
 )
+Index(
+    "ix_pipeline_step_runs_status_run_id",
+    pipeline_step_runs_table.c.status,
+    pipeline_step_runs_table.c.pipeline_run_id,
+)
+
+ACTIVE_RUN_STATUSES = (PipelineRunStatus.QUEUED, PipelineRunStatus.RUNNING)
+INTERRUPTED_RUN_ERROR = "Pipeline worker stopped during execution. Retry creates a new run."
+
+
+def _run_needs_recovery(run: PipelineRun) -> bool:
+    return run.status == PipelineRunStatus.RUNNING or (
+        run.status == PipelineRunStatus.QUEUED and run.finished_at is not None
+    )
+
+
+def _mark_interrupted(
+    run: PipelineRun | PipelineStepRun, finished_at: datetime, *, cancelled: bool = False,
+) -> None:
+    run.status = PipelineRunStatus.CANCELLED if cancelled else PipelineRunStatus.FAILED
+    run.finished_at = run.finished_at or finished_at
+    message = "Pipeline worker stopped after cancellation." if cancelled else INTERRUPTED_RUN_ERROR
+    if not cancelled:
+        run.error_message = run.error_message or message
+    run.warnings = list(dict.fromkeys([*run.warnings, message]))
+    step_id = run.pipeline_step_id if isinstance(run, PipelineStepRun) else ""
+    run.events = [
+        *run.events,
+        {
+            "timestamp": finished_at.isoformat(),
+            "level": "warning" if cancelled else "error",
+            "type": "step.interrupted" if step_id else "run.interrupted",
+            "step_id": step_id,
+            "message": message,
+            "details": {},
+        },
+    ][-1000:]
 
 
 class PipelineRepository(Protocol):
@@ -230,6 +274,24 @@ class PipelineRepository(Protocol):
     def update_run(self, run: PipelineRun) -> PipelineRun:
         ...
 
+    def change_run(
+        self, run_id: str, statuses: tuple[PipelineRunStatus, ...],
+        change: Callable[[PipelineRun], PipelineRun],
+    ) -> PipelineRun | None:
+        ...
+
+    def lock_run_execution(
+        self, run_id: str,
+    ) -> AbstractContextManager[Callable[[], None] | None]:
+        ...
+
+    def reconcile_interrupted_run(self, run_id: str) -> PipelineRun | None:
+        """Close a run or unfinished steps after acquiring its execution lock."""
+        ...
+
+    def interrupted_run_candidates(self, after_id: str, limit: int) -> list[str]:
+        ...
+
     def list_runs(
         self,
         pipeline_id: str | None,
@@ -295,6 +357,9 @@ class PipelineRepository(Protocol):
 
 class InMemoryPipelineRepository:
     def __init__(self) -> None:
+        self._run_state_lock = RLock()
+        self._running_ids: set[str] = set()
+        self._execution_lock = Lock()
         self._pipelines: dict[str, Pipeline] = {}
         self._versions: dict[str, PipelineVersion] = {}
         self._runs: dict[str, PipelineRun] = {}
@@ -496,11 +561,13 @@ class InMemoryPipelineRepository:
         return version
 
     def add_run(self, run: PipelineRun) -> PipelineRun:
-        self._runs[run.id] = run
+        with self._run_state_lock:
+            self._runs[run.id] = deepcopy(run)
         return run
 
     def get_run(self, run_id: str) -> PipelineRun | None:
-        return self._runs.get(run_id)
+        with self._run_state_lock:
+            return deepcopy(self._runs.get(run_id))
 
     def get_run_summary(self, run_id: str) -> PipelineRun | None:
         return self._runs.get(run_id)
@@ -513,8 +580,68 @@ class InMemoryPipelineRepository:
         }
 
     def update_run(self, run: PipelineRun) -> PipelineRun:
-        self._runs[run.id] = run
+        with self._run_state_lock:
+            self._runs[run.id] = deepcopy(run)
         return run
+
+    def change_run(
+        self, run_id: str, statuses: tuple[PipelineRunStatus, ...],
+        change: Callable[[PipelineRun], PipelineRun],
+    ) -> PipelineRun | None:
+        with self._run_state_lock:
+            run = self.get_run(run_id)
+            return self.update_run(change(run)) if run and run.status in statuses else None
+
+    @contextmanager
+    def lock_run_execution(self, run_id: str) -> Iterator[Callable[[], None] | None]:
+        with self._execution_lock:
+            acquired = run_id not in self._running_ids
+            if acquired:
+                self._running_ids.add(run_id)
+        if not acquired:
+            yield None
+            return
+        try:
+            yield lambda: None
+        finally:
+            with self._execution_lock:
+                self._running_ids.remove(run_id)
+
+    def reconcile_interrupted_run(self, run_id: str) -> PipelineRun | None:
+        with self._run_state_lock:
+            run = self.get_run(run_id)
+            if run is None:
+                return None
+            cancelled = run.status == PipelineRunStatus.CANCELLED
+            if not cancelled and not _run_needs_recovery(run):
+                return None
+            steps = [
+                step for step in self.list_step_runs(run.id, run.owner_id)
+                if step.status in ACTIVE_RUN_STATUSES
+            ]
+            if cancelled and not steps:
+                return None
+            finished_at = datetime.now(timezone.utc)
+            for step in steps:
+                _mark_interrupted(step, finished_at, cancelled=cancelled)
+            if cancelled:
+                return run
+            _mark_interrupted(run, finished_at)
+            return self.update_run(run)
+
+    def interrupted_run_candidates(self, after_id: str, limit: int) -> list[str]:
+        with self._run_state_lock:
+            cancelled_with_active_steps = {
+                step.pipeline_run_id for step in self._step_runs.values()
+                if step.status in ACTIVE_RUN_STATUSES
+            }
+            return sorted(
+                run.id for run in self._runs.values()
+                if run.id > after_id and (
+                    _run_needs_recovery(run)
+                    or run.status == PipelineRunStatus.CANCELLED and run.id in cancelled_with_active_steps
+                )
+            )[:limit]
 
     def list_runs(
         self,
@@ -1043,6 +1170,101 @@ class PostgresPipelineRepository:
         with self.engine.begin() as connection:
             connection.execute(statement)
         return run
+
+    def change_run(
+        self, run_id: str, statuses: tuple[PipelineRunStatus, ...],
+        change: Callable[[PipelineRun], PipelineRun],
+    ) -> PipelineRun | None:
+        self._ensure_initialized()
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                select(pipeline_runs_table).where(
+                    pipeline_runs_table.c.id == run_id,
+                    pipeline_runs_table.c.status.in_([status.value for status in statuses]),
+                ).with_for_update()
+            ).mappings().first()
+            if row is None:
+                return None
+            run = change(self._run_from_record(row))
+            connection.execute(pipeline_runs_table.update().where(
+                pipeline_runs_table.c.id == run_id
+            ).values(**self._run_to_record(run)))
+            return run
+
+    @contextmanager
+    def lock_run_execution(self, run_id: str) -> Iterator[Callable[[], None] | None]:
+        # Session locks survive short transactions and are released if the worker dies.
+        key = int.from_bytes(blake2b(run_id.encode(), digest_size=8, person=b"mlapp-run").digest(), "big", signed=True)
+        with self.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+            if not connection.scalar(select(func.pg_try_advisory_lock(key))):
+                yield None
+                return
+
+            def verify_connection() -> None:
+                connection.execute(select(1))
+
+            try:
+                yield verify_connection
+            finally:
+                if not connection.invalidated:
+                    try:
+                        connection.scalar(select(func.pg_advisory_unlock(key)))
+                    except DBAPIError:
+                        connection.invalidate()
+
+    def reconcile_interrupted_run(self, run_id: str) -> PipelineRun | None:
+        self._ensure_initialized()
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                select(pipeline_runs_table).where(pipeline_runs_table.c.id == run_id).with_for_update()
+            ).mappings().first()
+            if row is None:
+                return None
+            run = self._run_from_record(row)
+            cancelled = run.status == PipelineRunStatus.CANCELLED
+            if not cancelled and not _run_needs_recovery(run):
+                return None
+            finished_at = datetime.now(timezone.utc)
+            steps = connection.execute(select(pipeline_step_runs_table).where(
+                pipeline_step_runs_table.c.pipeline_run_id == run_id,
+                pipeline_step_runs_table.c.status.in_([status.value for status in ACTIVE_RUN_STATUSES]),
+            )).mappings().all()
+            for step_row in steps:
+                step = self._step_run_from_record(step_row)
+                _mark_interrupted(step, finished_at, cancelled=cancelled)
+                connection.execute(pipeline_step_runs_table.update().where(
+                    pipeline_step_runs_table.c.id == step.id
+                ).values(**self._step_run_to_record(step)))
+            if cancelled:
+                return run if steps else None
+            _mark_interrupted(run, finished_at)
+            connection.execute(pipeline_runs_table.update().where(
+                pipeline_runs_table.c.id == run_id
+            ).values(**self._run_to_record(run)))
+            return run
+
+    def interrupted_run_candidates(self, after_id: str, limit: int) -> list[str]:
+        self._ensure_initialized()
+        columns = pipeline_runs_table.c
+        interrupted = select(columns.id).where(
+            columns.id > after_id,
+            or_(
+                columns.status == PipelineRunStatus.RUNNING.value,
+                (columns.status == PipelineRunStatus.QUEUED.value) & columns.finished_at.is_not(None),
+            ),
+        )
+        steps = pipeline_step_runs_table.c
+        cancelled_with_active_steps = select(columns.id).join(
+            pipeline_step_runs_table, steps.pipeline_run_id == columns.id,
+        ).where(
+            columns.id > after_id,
+            columns.status == PipelineRunStatus.CANCELLED.value,
+            steps.status.in_([status.value for status in ACTIVE_RUN_STATUSES]),
+        )
+        candidates = interrupted.union(cancelled_with_active_steps).subquery()
+        statement = select(candidates.c.id).order_by(candidates.c.id).limit(limit)
+        with self.engine.connect() as connection:
+            return list(connection.scalars(statement))
 
     def list_runs(
         self,

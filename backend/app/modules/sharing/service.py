@@ -28,7 +28,7 @@ from app.modules.sharing.domain import (
     ResourceKind,
     SubjectType,
 )
-from app.modules.sharing.policy import AccessPolicy
+from app.modules.sharing.postgres_access import postgres_access_policy
 from app.modules.sharing.repository import (
     DuplicateAccessRecord,
     DuplicateAccessRequest,
@@ -49,7 +49,7 @@ from app.modules.sharing.schemas import (
 class SharingService:
     def __init__(self, repository: PostgresSharingRepository | None = None) -> None:
         self.repository = repository or PostgresSharingRepository()
-        self.policy = AccessPolicy(self.repository, self.repository.engine)
+        self.policy = postgres_access_policy(self.repository)
         self.users = PostgresUserRepository(self.repository.engine)
         self.datasets = PostgresDatasetRepository(self.repository.engine)
         self.business_cases = PostgresBusinessCaseRepository(self.repository.engine)

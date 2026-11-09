@@ -37,7 +37,7 @@ from app.modules.sharing.domain import (
     ResourceAccessRole,
     ResourceKind,
 )
-from app.modules.sharing.policy import access_policy
+from app.modules.sharing.postgres_access import access_policy
 
 
 class DatasetService:
@@ -485,7 +485,9 @@ class DatasetService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Deleted dataset cannot be profiled",
             )
-        return self.profile_jobs.start(dataset_id, principal.user_id, payload.model_dump(), asset.owner_id)
+        return self.profile_jobs.start(
+            dataset_id, principal.user_id, payload.model_dump(), asset.owner_id, asset_id=asset.id
+        )
 
     def descriptive_profile_status(
         self,
@@ -493,8 +495,10 @@ class DatasetService:
         job_id: str,
         principal: Principal,
     ) -> dict[str, Any]:
-        self.get_asset(dataset_id, principal)
-        return self.profile_jobs.status(dataset_id, principal.user_id, job_id)
+        return self.profile_jobs.status(
+            dataset_id, principal.user_id, job_id,
+            check_dataset_access=lambda asset_id: self.get_asset(asset_id, principal),
+        )
 
     def query(
         self,
@@ -568,19 +572,9 @@ class DatasetService:
             principal,
             minimum=ResourceAccessRole.EDITOR,
         )
-        connection = self.full_visualization.store.connect(asset)
-        relation = self.full_visualization.store.relation_sql(asset, lambda asset_id: self.get_asset(asset_id, principal))
-        try:
-            columns = self.full_visualization._columns(connection, relation)
-            result = self.time_series.analyze(connection, relation, payload, columns)
-            return {
-                "dataset_id": asset.id,
-                "time_column": payload.time_column,
-                "value_column": payload.value_column,
-                **result,
-            }
-        finally:
-            connection.close()
+        return self.time_series.analyze_asset(
+            asset, payload, lambda asset_id: self.get_asset(asset_id, principal)
+        )
 
     def start_time_series_analysis(self, dataset_id: str, payload: TimeSeriesAnalysisRequest, principal: Principal) -> dict[str, Any]:
         asset = self.get_asset(
@@ -588,11 +582,15 @@ class DatasetService:
             principal,
             minimum=ResourceAccessRole.EDITOR,
         )
-        return self.time_series_jobs.start(dataset_id, principal.user_id, payload.model_dump(), asset.owner_id)
+        return self.time_series_jobs.start(
+            dataset_id, principal.user_id, payload.model_dump(), asset.owner_id, asset_id=asset.id
+        )
 
     def time_series_analysis_status(self, dataset_id: str, job_id: str, principal: Principal) -> dict[str, Any]:
-        self.get_asset(dataset_id, principal)
-        return self.time_series_jobs.status(dataset_id, principal.user_id, job_id)
+        return self.time_series_jobs.status(
+            dataset_id, principal.user_id, job_id,
+            check_dataset_access=lambda asset_id: self.get_asset(asset_id, principal),
+        )
 
     def delete_asset(self, dataset_id: str, principal: Principal) -> DataAsset:
         asset = self.get_asset(

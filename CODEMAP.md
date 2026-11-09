@@ -17,7 +17,13 @@ Krótka mapa wejścia do kodu. Szczegóły kontraktów znajdują się w modułac
 - `backend/app/modules/datasets/` — lifecycle datasetów, Data Views, preview,
   SQL, wizualizacje i storage kolumnowy.
 - `backend/app/modules/analysis/full_profile.py` — pełnozbiorowy profil DuckDB.
+- `backend/app/modules/analysis/dataset_jobs.py` — kolejka, status i kontrola
+  dostępu do wyników profilowania oraz analizy szeregów czasowych.
+- `backend/app/modules/analysis/dataset_execution.py` — wykonanie analiz
+  w workerze na wersji ustalonej przy zgłoszeniu zadania.
 - `frontend/src/data/catalog/` — katalog i wersje datasetów.
+- `frontend/src/data/datasetVersions.ts` — formatowanie i grupowanie wersji
+  współdzielone przez ekrany danych.
 - `frontend/src/data/analysis/` — koordynacja przestrzeni analiz i lazy loading.
 - `frontend/src/data/browser/` — browsing, dialogi, kontrakty i operacje tabeli.
 - `frontend/src/data/profile/` — profil opisowy, szczegóły i kontrakty.
@@ -29,11 +35,15 @@ Krótka mapa wejścia do kodu. Szczegóły kontraktów znajdują się w modułac
 - `backend/app/modules/business_cases/tables.py` — definicje tabel.
 - `backend/app/modules/business_cases/repositories/` — adaptery memory/PostgreSQL.
 - `backend/app/modules/sharing/policy.py` — centralna polityka dostępu.
+- `backend/app/modules/sharing/postgres_access.py` — odczyt ścieżek grantów
+  użytkowników, grup i Business Cases.
 
 ## Pipeline'y i ML
 
 - `backend/app/modules/pipelines/service.py` — publiczna fasada przypadków użycia.
 - `backend/app/modules/pipelines/run_executor.py` — wykonanie runu.
+- `backend/app/modules/pipelines/repository.py` — atomowe zmiany stanu,
+  blokada wykonania i rekoncyliacja przerwanych runów.
 - `backend/app/modules/pipelines/step_handlers.py` — kompatybilna fasada i rejestr
   wyspecjalizowanych handlerów.
 - `backend/app/modules/pipelines/data_step_handlers.py` oraz
@@ -57,7 +67,9 @@ Krótka mapa wejścia do kodu. Szczegóły kontraktów znajdują się w modułac
 
 - `frontend/src/api/http.ts` — transport przeglądarkowy.
 - `frontend/src/api/contracts/` — kontrakty domenowe.
-- `frontend/src/api/client.ts` — kompatybilna fasada API.
+- `frontend/src/api/{datasets,businessCases,pipelines,models,serving}.ts`
+  i pozostałe moduły domenowe — operacje REST.
+- `frontend/src/api/client.ts` — składa moduły i zachowuje dotychczasowe eksporty.
 - `ml_app_client/client.py` — cienka, kompatybilna fasada klienta Python.
 - `ml_app_client/transport.py` — wspólny transport HTTP i mapowanie błędów.
 - `ml_app_client/{datasets,business_cases,pipelines,model_registry,scoring_reports}.py`

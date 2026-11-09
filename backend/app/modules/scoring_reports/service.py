@@ -11,7 +11,7 @@ from app.modules.business_cases.repository import (
 )
 from app.modules.scoring_reports.domain import ScoringReport
 from app.modules.sharing.domain import BusinessCaseAccessRole
-from app.modules.sharing.policy import access_policy
+from app.modules.sharing.postgres_access import access_policy
 
 
 class ScoringReportService:

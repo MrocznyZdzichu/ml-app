@@ -46,6 +46,7 @@ def test_hot_catalog_and_monitoring_queries_have_composite_indexes() -> None:
     run_migrations(engine)
     expected = {
         "ix_pipeline_runs_pipeline_created_at",
+        "ix_pipeline_runs_status_id",
         "ix_pipeline_versions_pipeline_version",
         "ix_serving_deployments_bc_updated",
         "ix_serving_inference_monitoring_window",

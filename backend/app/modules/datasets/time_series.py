@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -9,6 +10,7 @@ import duckdb
 from fastapi import HTTPException, status
 
 from app.modules.datasets.columnar import ColumnarDatasetStore
+from app.modules.datasets.domain import DataAsset
 from app.modules.datasets.schemas import DataAssetVisualizationRequest, TimeSeriesAnalysisRequest
 
 
@@ -20,6 +22,28 @@ class FullDatasetTimeSeriesAnalyzer:
 
     def __init__(self, store: ColumnarDatasetStore) -> None:
         self.store = store
+
+    def analyze_asset(
+        self,
+        asset: DataAsset,
+        request: TimeSeriesAnalysisRequest,
+        load_asset: Callable[[str], DataAsset],
+    ) -> dict[str, Any]:
+        connection = self.store.connect(asset)
+        try:
+            relation = self.store.relation_sql(asset, load_asset)
+            columns = {
+                str(row[0]): str(row[1])
+                for row in connection.execute(f"DESCRIBE SELECT * FROM {relation}").fetchall()
+            }
+            return {
+                "dataset_id": asset.id,
+                "time_column": request.time_column,
+                "value_column": request.value_column,
+                **self.analyze(connection, relation, request, columns),
+            }
+        finally:
+            connection.close()
 
     def analyze(
         self,

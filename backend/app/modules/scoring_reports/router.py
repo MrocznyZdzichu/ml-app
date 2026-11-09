@@ -9,7 +9,7 @@ from app.modules.scoring_reports.schemas import (
 from app.modules.scoring_reports.service import ScoringReportService
 from app.modules.business_cases.lineage import DatasetLineageResolver
 from app.modules.sharing.domain import BusinessCaseAccessRole
-from app.modules.sharing.policy import access_policy
+from app.modules.sharing.postgres_access import access_policy
 from app.shared.pagination import OffsetPage
 from app.core.container import get_container
 

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.core.security import Principal, require_user
 from app.modules.models.schemas import (
@@ -20,15 +20,15 @@ service: ModelService = get_container().models
 lineage_resolver = DatasetLineageResolver()
 
 
-@router.post("/training-jobs", response_model=TrainingJobRead, status_code=201)
+@router.post("/training-jobs", status_code=410, deprecated=True)
 def train_model(
     payload: TrainingRequest,
     principal: Principal = Depends(require_user),
-) -> TrainingJobRead:
-    return TrainingJobRead.model_validate(service.start_training(payload, principal))
+) -> None:
+    raise HTTPException(status_code=410, detail="Use a Training or AutoML pipeline to train a model.")
 
 
-@router.get("/training-jobs", response_model=list[TrainingJobRead])
+@router.get("/training-jobs", response_model=list[TrainingJobRead], deprecated=True)
 def list_training_jobs(principal: Principal = Depends(require_user)) -> list[TrainingJobRead]:
     return [TrainingJobRead.model_validate(job) for job in service.list_training_jobs(principal)]
 

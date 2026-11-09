@@ -11,7 +11,7 @@ from app.modules.serving.runtime import RuntimeUnavailableError
 from app.modules.serving.schemas import DeploymentCreate, DeploymentRevisionCreate, ScoreRecord
 from app.modules.serving.service import ServingService
 from app.modules.sharing.domain import BusinessCaseAccessRole
-from app.modules.sharing.policy import access_policy
+from app.modules.sharing.postgres_access import access_policy
 
 
 class MemoryServingRepository:

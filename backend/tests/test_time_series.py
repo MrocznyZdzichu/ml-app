@@ -4,16 +4,15 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
-
+from app.core.errors import ResourceNotFoundError
+from app.modules.analysis import dataset_jobs
+from app.modules.analysis.time_series_jobs import TimeSeriesAnalysisJobs
 from app.modules.datasets.columnar import ColumnarDatasetStore
 from app.modules.datasets.domain import DataAsset, DataAssetStatus, SourceType
 from app.modules.datasets.schemas import DataAssetVisualizationRequest, TimeSeriesAnalysisRequest
 from app.modules.datasets.sources import CsvFileDatasetSource
 from app.modules.datasets.time_series import FullDatasetTimeSeriesAnalyzer
 from app.modules.datasets.visualizations import FullDatasetVisualization
-from app.modules.analysis import time_series_jobs
-from app.modules.analysis.time_series_jobs import TimeSeriesAnalysisJobs
 
 
 class FakeRedis:
@@ -153,7 +152,7 @@ def test_time_series_visualizations_return_bounded_full_dataset_points(tmp_path:
 def test_time_series_job_records_ownership_and_submits_full_options(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_redis = FakeRedis()
     task_queue = FakeTaskQueue()
-    monkeypatch.setattr(time_series_jobs, "uuid4", lambda: "time-job-1")
+    monkeypatch.setattr(dataset_jobs, "uuid4", lambda: "time-job-1")
     jobs = TimeSeriesAnalysisJobs(fake_redis, task_queue)
 
     result = jobs.start("dataset-1", "owner-1", {"time_column": "timestamp", "value_column": "value"})
@@ -176,7 +175,5 @@ def test_time_series_job_rejects_cross_owner_polling() -> None:
     fake_redis.setex("time-series-analysis-owner:time-job-1", 3600, json.dumps({"dataset_id": "dataset-1", "owner_id": "owner-1"}))
     jobs = TimeSeriesAnalysisJobs(fake_redis)
 
-    with pytest.raises(HTTPException) as error:
-        jobs.status("dataset-1", "owner-2", "time-job-1")
-
-    assert error.value.status_code == 404
+    with pytest.raises(ResourceNotFoundError, match="Time-series analysis job not found"):
+        jobs.status("dataset-1", "owner-2", "time-job-1", check_dataset_access=pytest.fail)

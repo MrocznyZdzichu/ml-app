@@ -23,7 +23,7 @@ from app.modules.business_cases.schemas import (
     BusinessCaseOwnershipTransfer,
 )
 from app.modules.sharing.domain import BC_ROLE_RANK, BusinessCaseAccessRole, ResourceAccessRole, ResourceKind
-from app.modules.sharing.policy import access_policy
+from app.modules.sharing.postgres_access import access_policy
 from app.modules.auth.repository import PostgresUserRepository, UserRepository
 from app.modules.datasets.repository import DatasetRepository, PostgresDatasetRepository
 from app.modules.sharing.domain import AuditEvent

@@ -9,7 +9,7 @@ from app.modules.analysis.schemas import AnalysisCreate, DescriptiveStatsRespons
 from app.modules.analysis.statistics import describe_records
 from app.modules.datasets.repository import DatasetRepository, PostgresDatasetRepository
 from app.modules.sharing.domain import ResourceAccessRole, ResourceKind
-from app.modules.sharing.policy import access_policy
+from app.modules.sharing.postgres_access import access_policy
 
 
 class AnalysisService:

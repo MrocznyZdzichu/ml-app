@@ -1,8 +1,13 @@
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
+from app.core.errors import ResourceNotFoundError
+from app.core.identity import Principal
 from app.main import create_app
+from app.modules.sharing.domain import BusinessCaseAccessRole, ResourceAccessRole, ResourceKind
+from app.modules.sharing.policy import AccessPolicy
 
 
 def register(client: TestClient, prefix: str):
@@ -20,6 +25,52 @@ def create_case(client: TestClient, headers: dict[str, str]):
     })
     assert response.status_code == 201, response.text
     return response.json()
+
+
+def test_access_policy_resolves_highest_grant_and_audits_admin_without_database() -> None:
+    class AccessReaderStub:
+        def business_case_grants(self, user_id, business_case_ids):
+            assert user_id == "user-1"
+            assert business_case_ids == {"case-1"}
+            return [("case-1", BusinessCaseAccessRole.READER), ("case-1", BusinessCaseAccessRole.MANAGER)]
+
+        def resource_grants(self, user_id, kind, resource_id):
+            return [BusinessCaseAccessRole.REPORT_VIEWER, ResourceAccessRole.READER]
+
+        def business_case_owner_id(self, business_case_id):
+            return "user-1"
+
+    events = []
+    policy = AccessPolicy(AccessReaderStub(), events.append)
+    member = Principal(user_id="user-1", email="", display_name="")
+    admin = Principal(user_id="admin-1", email="", display_name="", roles=("administrator",))
+
+    assert policy.require_business_case(member, "case-1") == BusinessCaseAccessRole.MANAGER
+    with pytest.raises(ResourceNotFoundError, match="Resource not found"):
+        policy.require_resource(member, ResourceKind.DATASET, "data-1", "owner", ResourceAccessRole.EDITOR)
+    assert events == []
+
+    assert policy.require_business_case(admin, "case-1") == BusinessCaseAccessRole.OWNER
+    assert policy.require_resource(admin, ResourceKind.DATASET, "data-1", "user-1") == ResourceAccessRole.OWNER
+    assert [(event.resource_kind, event.resource_id) for event in events] == [
+        ("business_case", "case-1"), ("dataset", "data-1")
+    ]
+    assert all(event.action == "administrator.resource_accessed" for event in events)
+
+
+def test_legacy_training_and_export_routes_do_not_create_jobs() -> None:
+    client = TestClient(create_app())
+    _, headers = register(client, "alice")
+    for path, payload, expected_status in (
+        ("/models/training-jobs", {"dataset_id": "unused", "target_column": "target"}, 410),
+        ("/exports", {"resource_kind": "dataset", "resource_id": "unused", "format": "csv"}, 501),
+    ):
+        route = f"/api/v1{path}"
+        assert client.post(route, json=payload).status_code == 401
+        before = client.get(route, headers=headers).json()
+        result = client.post(route, json=payload, headers=headers)
+        assert result.status_code == expected_status
+        assert client.get(route, headers=headers).json() == before
 
 
 def test_root_bootstrap_open_registration_and_administration() -> None:

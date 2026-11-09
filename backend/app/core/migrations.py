@@ -634,6 +634,21 @@ def _index_submitted_business_case_access_request_history(connection: Connection
     ))
 
 
+def _index_pipeline_run_recovery(connection: Connection) -> None:
+    connection.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_pipeline_runs_status_id "
+        "ON mlapp.pipeline_runs (status, id)"
+    ))
+
+
+def _index_pipeline_step_recovery(connection: Connection) -> None:
+    if inspect(connection).has_table("pipeline_step_runs", schema="mlapp"):
+        connection.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_pipeline_step_runs_status_run_id "
+            "ON mlapp.pipeline_step_runs (status, pipeline_run_id)"
+        ))
+
+
 MIGRATIONS = [
     Migration(
         version="20260703_0001",
@@ -714,5 +729,15 @@ MIGRATIONS = [
         version="20260801_0016",
         description="Index submitted Business Case access request history",
         apply=_index_submitted_business_case_access_request_history,
+    ),
+    Migration(
+        version="20261109_0017",
+        description="Index pipeline execution recovery candidates",
+        apply=_index_pipeline_run_recovery,
+    ),
+    Migration(
+        version="20261109_0018",
+        description="Index unfinished pipeline steps for cancellation recovery",
+        apply=_index_pipeline_step_recovery,
     ),
 ]

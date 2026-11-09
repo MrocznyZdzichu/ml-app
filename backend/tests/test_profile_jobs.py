@@ -3,8 +3,15 @@ import json
 import pytest
 from fastapi import HTTPException
 
-from app.modules.analysis import profile_jobs
+from app.core.errors import ResourceNotFoundError
+from app.core.identity import Principal
+from app.modules.analysis import dataset_jobs
 from app.modules.analysis.profile_jobs import DescriptiveProfileJobs
+from app.modules.analysis.time_series_jobs import TimeSeriesAnalysisJobs
+from app.modules.datasets.domain import DataAsset, SourceType
+from app.modules.datasets.repository import InMemoryDatasetRepository
+from app.modules.datasets.schemas import FullDescriptiveProfileRequest, TimeSeriesAnalysisRequest
+from app.modules.datasets.service import DatasetService
 
 
 class FakeRedis:
@@ -46,7 +53,7 @@ class FakeTaskQueue:
 def test_profile_job_start_records_dataset_ownership(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_redis = FakeRedis()
     task_queue = FakeTaskQueue()
-    monkeypatch.setattr(profile_jobs, "uuid4", lambda: "job-1")
+    monkeypatch.setattr(dataset_jobs, "uuid4", lambda: "job-1")
     jobs = DescriptiveProfileJobs(fake_redis, task_queue)
 
     response = jobs.start("dataset-1", "owner-1", {"include_summary": True})
@@ -70,7 +77,40 @@ def test_profile_job_status_rejects_wrong_owner_before_reading_result() -> None:
     )
     jobs = DescriptiveProfileJobs(fake_redis)
 
-    with pytest.raises(HTTPException) as error:
-        jobs.status("dataset-1", "owner-2", "job-1")
+    with pytest.raises(ResourceNotFoundError, match="Profile job not found"):
+        jobs.status("dataset-1", "owner-2", "job-1", check_dataset_access=pytest.fail)
 
+
+@pytest.mark.parametrize("job_kind", ["descriptive_profile", "time_series_analysis"])
+def test_analysis_jobs_pin_logical_dataset_at_submission(job_kind: str) -> None:
+    repository = InMemoryDatasetRepository()
+    repository.add_version(DataAsset(
+        id="version-1", logical_id="family", owner_id="owner-1",
+        name="First version", source_type=SourceType.FILE, format="csv",
+    ))
+    service = DatasetService(repository)
+    redis = FakeRedis()
+    queue = FakeTaskQueue()
+    service.profile_jobs = DescriptiveProfileJobs(redis, queue)
+    service.time_series_jobs = TimeSeriesAnalysisJobs(redis, queue)
+    principal = Principal(user_id="owner-1", email="owner@example.com", display_name="Owner")
+    if job_kind == "descriptive_profile":
+        job = service.start_descriptive_profile("family", FullDescriptiveProfileRequest(), principal)
+        read_status = service.descriptive_profile_status
+    else:
+        job = service.start_time_series_analysis(
+            "family", TimeSeriesAnalysisRequest(time_column="timestamp", value_column="value"), principal
+        )
+        read_status = service.time_series_analysis_status
+    assert queue.submitted["args"][0] == "version-1"
+
+    repository.add_version(DataAsset(
+        id="version-2", logical_id="family", owner_id="owner-1",
+        name="Second version", source_type=SourceType.FILE, format="csv",
+    ))
+    repository.get("version-1").owner_id = "another-owner"
+
+    with pytest.raises(HTTPException) as error:
+        read_status("family", job["job_id"], principal)
     assert error.value.status_code == 404
+    assert service.get_asset("family", principal).id == "version-2"
