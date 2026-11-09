@@ -12,7 +12,7 @@ import {
   readRolesMetadata
 } from "../../analysis/dataRoles";
 import type { DataRolesMetadata } from "../../analysis/dataRoles";
-import { datasetVersionLabel } from "../catalog/DatasetCatalogPanel";
+import { datasetVersionLabel } from "../datasetVersions";
 
 export function DataRolesPanel({
   datasets,

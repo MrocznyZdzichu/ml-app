@@ -13,7 +13,7 @@ import type { FormEvent, KeyboardEvent } from "react";
 import { useMemo, useRef, useState } from "react";
 
 import type { DataAsset, DatasetPreview } from "../../api/client";
-import { datasetVersionLabel } from "../catalog/DatasetCatalogPanel";
+import { datasetVersionLabel } from "../datasetVersions";
 import type { DatasetCellValue } from "../profile/contracts";
 import {
   cellKind,

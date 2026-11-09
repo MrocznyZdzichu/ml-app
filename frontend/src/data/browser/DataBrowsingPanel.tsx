@@ -21,7 +21,7 @@ import {
   browserFiltersFromVisualizationDrill,
   type VisualizationDrillRequest
 } from "../../analysis/drillContext";
-import { datasetVersionLabel } from "../catalog/DatasetCatalogPanel";
+import { datasetVersionLabel } from "../datasetVersions";
 import type { DatasetCellValue } from "../profile/contracts";
 import {
   cellKind,

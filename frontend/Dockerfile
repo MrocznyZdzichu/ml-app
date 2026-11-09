@@ -9,6 +9,7 @@ COPY --chown=node:node package.json package-lock.json ./
 RUN npm ci
 
 COPY --chown=node:node index.html vite.config.ts tsconfig.json ./
+COPY --chown=node:node scripts ./scripts
 COPY --chown=node:node src ./src
 
 EXPOSE 5173

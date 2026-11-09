@@ -2,84 +2,18 @@ import { BarChart3, CheckCircle2, Copy, Filter, Plus, Search, Trash2, Upload, X 
 import type { FormEvent } from "react";
 import { useCallback, useEffect, useState } from "react";
 
-import { api } from "../../api/client";
-import type { BusinessCase, DataAsset, Pipeline } from "../../api/client";
+import { businessCasesApi } from "../../api/businessCases";
+import { datasetsApi } from "../../api/datasets";
+import type { BusinessCase } from "../../api/contracts/businessCases";
+import type { DataAsset } from "../../api/contracts/datasets";
+import type { Pipeline } from "../../api/contracts/pipelines";
 import { ArtifactFilters } from "../../components/ArtifactFilters";
 import { AssetList } from "../../components/AssetList";
 import { PagedCatalogSelect } from "../../components/PagedCatalogSelect";
 import { PaginationControls } from "../../components/PaginationControls";
 import { formatDateTime, shortId } from "../../shared/formatters";
-
-export function DatasetVersionHistoryDialog({
-  dataset,
-  onClose,
-  onOpen
-}: {
-  dataset: DataAsset;
-  onClose: () => void;
-  onOpen: (datasetId: string) => void;
-}) {
-  const [versions, setVersions] = useState<DataAsset[]>([]);
-  const [total, setTotal] = useState(0);
-  const [offset, setOffset] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  useEffect(() => {
-    let active = true;
-    setLoading(true);
-    api.pageDatasetVersions(dataset.logical_id, { limit: 20, offset })
-      .then((page) => {
-        if (!active) return;
-        setVersions(page.items);
-        setTotal(page.total);
-        setError("");
-      })
-      .catch((requestError) => active && setError(
-        requestError instanceof Error ? requestError.message : "Could not load dataset versions"
-      ))
-      .finally(() => active && setLoading(false));
-    return () => { active = false; };
-  }, [dataset.logical_id, offset]);
-  return (
-    <div className="modal-backdrop" role="presentation"
-      onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <div className="modal-dialog model-version-dialog" role="dialog" aria-modal="true"
-        aria-label={`Versions of ${dataset.name}`}>
-        <div className="modal-header">
-          <div><span className="builder-kicker">Dataset family</span><h2>{dataset.name}</h2>
-            <p>{total} immutable versions</p></div>
-          <button className="icon-button" type="button" onClick={onClose}
-            aria-label="Close dataset versions"><X size={17} /></button>
-        </div>
-        {error && <div className="error-banner">{error}</div>}
-        <div className="model-version-list">
-          {versions.map((version, index) => (
-            <article key={version.id}>
-              <div className="model-version-marker"><span>v{version.version_number}</span></div>
-              <div><strong>v{version.version_number}
-                {offset === 0 && index === 0 && <i className="pipeline-status published">latest</i>}</strong>
-                <span>{formatDateTime(version.created_at)} · {version.row_count ?? "?"} rows</span>
-                <small>{version.format.toUpperCase()} · {version.version_stage}</small></div>
-              <button className="secondary-button compact-button" type="button"
-                onClick={() => onOpen(version.id)}>
-                <BarChart3 size={14} /> Analyze
-              </button>
-            </article>
-          ))}
-          {!versions.length && loading && <div className="empty-state">Loading dataset versions…</div>}
-        </div>
-        <PaginationControls
-          total={total}
-          limit={20}
-          offset={offset}
-          onOffsetChange={setOffset}
-          disabled={loading}
-          label="dataset versions"
-        />
-      </div>
-    </div>
-  );
-}
+import { asRecord } from "../../shared/values";
+import { datasetVersionGroups, isDataView } from "../datasetVersions";
 
 export function DataPanel({
   businessCases,
@@ -147,7 +81,7 @@ export function DataPanel({
         summary: true
       };
       Promise.all([
-        api.pageDatasets({
+        datasetsApi.pageDatasets({
           ...common,
           offset: activeDatasetOffset,
           asset_kind: "dataset",
@@ -156,13 +90,13 @@ export function DataPanel({
           pipeline_type: purposeFilter,
           uploaded_only: uploadedOnly
         }),
-        api.pageDatasets({
+        datasetsApi.pageDatasets({
           ...common,
           offset: dataViewOffset,
           asset_kind: "view",
           include_deleted: false
         }),
-        api.pageDatasets({
+        datasetsApi.pageDatasets({
           ...common,
           offset: deletedDatasetOffset,
           families: false,
@@ -235,7 +169,7 @@ export function DataPanel({
 
     setIsUploadingFile(true);
     try {
-      const uploaded = await api.uploadDataset(formData);
+      const uploaded = await datasetsApi.uploadDataset(formData);
       setNotice(
         `Uploaded ${uploaded.name} v${uploaded.version_number}: ${uploaded.row_count ?? 0} rows · ${uploaded.format.toUpperCase()} · full dataset`
       );
@@ -254,7 +188,7 @@ export function DataPanel({
   }
 
   async function deleteDataset(dataset: DataAsset) {
-    const deleted = await api.deleteDataset(dataset.id);
+    const deleted = await datasetsApi.deleteDataset(dataset.id);
     setNotice(`Deleted ${deleted.name}`);
     await refreshCatalog();
   }
@@ -391,7 +325,7 @@ export function DataPanel({
                   setPurposeFilter("");
                   setPipelineFilter("");
                 }}
-                loadPage={api.pageBusinessCases}
+                loadPage={businessCasesApi.pageBusinessCases}
                 getId={(item) => item.id}
                 getLabel={(item) => item.name}
                 emptyLabel="All business cases"
@@ -520,7 +454,7 @@ function VersionedDatasetList({
   async function loadHistory(logicalId: string, offset: number) {
     setLoadingLogicalId(logicalId);
     try {
-      const page = await api.pageDatasetVersions(logicalId, { limit: 10, offset });
+      const page = await datasetsApi.pageDatasetVersions(logicalId, { limit: 10, offset });
       setHistoryByLogicalId((current) => ({
         ...current,
         [logicalId]: { items: page.items, total: page.total, offset: page.offset }
@@ -639,39 +573,6 @@ function VersionedDatasetList({
   );
 }
 
-export function datasetVersionGroups(datasets: DataAsset[]) {
-  const grouped = new Map<string, DataAsset[]>();
-  for (const dataset of datasets) {
-    const logicalId = dataset.logical_id || dataset.id;
-    grouped.set(logicalId, [...(grouped.get(logicalId) ?? []), dataset]);
-  }
-  return [...grouped.entries()]
-    .map(([logicalId, versions]) => ({
-      logicalId,
-      versions,
-      latest: [...versions].sort((a, b) => b.version_number - a.version_number)[0]
-    }))
-    .sort((left, right) => right.latest.created_at.localeCompare(left.latest.created_at));
-}
-
-export function latestLogicalDatasetAliases(datasets: DataAsset[]) {
-  return datasetVersionGroups(
-    datasets.filter((dataset) => dataset.status !== "deleted")
-  ).map(({ logicalId, latest }) => ({ ...latest, id: logicalId }));
-}
-
-export function datasetVersionLabel(dataset: DataAsset, datasets: DataAsset[]) {
-  const versions = datasets.filter(
-    (item) => item.logical_id === dataset.logical_id && item.status !== "deleted"
-  );
-  const latest = Math.max(...versions.map((item) => item.version_number), dataset.version_number);
-  return `${dataset.name} · v${dataset.version_number}${dataset.version_number === latest ? " (latest)" : ""}`;
-}
-
-export function isDataView(item: DataAsset) {
-  return item.source_type === "view" || item.format === "view" || Boolean(asRecord(item.metadata.data_view).source_dataset_id);
-}
-
 function dataViewMeta(item: DataAsset) {
   const metadata = asRecord(item.metadata.data_view);
   const sourceName = asString(metadata.source_dataset_name) || "unknown source";
@@ -693,12 +594,6 @@ function headerLabel(hasHeader: boolean | null) {
     return "headers unknown";
   }
   return hasHeader ? "headers detected" : "no headers detected";
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
 }
 
 function asString(value: unknown) {

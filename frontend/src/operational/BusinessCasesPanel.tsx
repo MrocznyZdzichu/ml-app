@@ -40,11 +40,8 @@ import { PaginationControls } from "../components/PaginationControls";
 import { PagedCatalogSelect } from "../components/PagedCatalogSelect";
 import { useVersionedResourceNavigation } from "../components/dialogNavigation";
 import { ArtifactDependenciesDialog } from "../operational/ArtifactDependenciesDialog";
-import {
-  DatasetVersionHistoryDialog,
-  datasetVersionGroups,
-  isDataView
-} from "../data/DataWorkspacePanels";
+import { DatasetVersionHistoryDialog } from "../data/catalog/DatasetVersionHistoryDialog";
+import { datasetVersionGroups, isDataView } from "../data/datasetVersions";
 import { ArtifactFilters } from "../components/ArtifactFilters";
 import {
   canonicalizeWorkflowDatasetIds,

@@ -1,9 +1,5 @@
 export { AnalysisPanel } from "./analysis/AnalysisPanel";
-export {
-  DataPanel,
-  DatasetVersionHistoryDialog,
-  datasetVersionGroups,
-  isDataView,
-  latestLogicalDatasetAliases
-} from "./catalog/DatasetCatalogPanel";
+export { DataPanel } from "./catalog/DatasetCatalogPanel";
+export { DatasetVersionHistoryDialog } from "./catalog/DatasetVersionHistoryDialog";
+export { datasetVersionGroups, isDataView, latestLogicalDatasetAliases } from "./datasetVersions";
 export type { DescriptiveProfileCacheEntry } from "./profile/contracts";

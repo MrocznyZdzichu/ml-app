@@ -1,0 +1,35 @@
+export type ModelArtifact = {
+  id: string;
+  owner_id: string;
+  training_job_id: string;
+  name: string;
+  version: string;
+  logical_id: string;
+  version_number: number;
+  algorithm: string;
+  stage: string;
+  artifact_uri: string;
+  metrics: Record<string, unknown>;
+  business_case_id: string;
+  pipeline_id: string;
+  pipeline_version_id: string;
+  pipeline_run_id: string;
+  pipeline_step_id: string;
+  problem_type: string;
+  target_column: string;
+  feature_columns: string[];
+  model_hash: string;
+  training_config: Record<string, unknown>;
+  model_parameters: {
+    weights?: Array<{ class: unknown; feature: string; weight: number }>;
+    intercepts?: number[];
+    total_weight_count?: number;
+    returned_weight_count?: number;
+    truncated?: boolean;
+  };
+  lineage: Record<string, unknown>;
+  fitted_transform_artifact_id: string;
+  data_engineering_definition: Record<string, unknown>;
+  feature_engineering_definition: Record<string, unknown>;
+  created_at: string;
+};

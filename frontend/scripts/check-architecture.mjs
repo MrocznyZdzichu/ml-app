@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, extname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 const frontendRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sourceRoot = join(frontendRoot, "src");
@@ -19,6 +20,7 @@ if (cycles.length) {
 }
 
 checkDataWorkspaceBoundaries();
+checkApiClientBoundaries();
 
 console.log(`Frontend architecture check passed (${files.length} modules, no import cycles).`);
 
@@ -36,17 +38,11 @@ function collectSourceFiles(directory) {
 }
 
 function dependencies(file) {
-  const source = readFileSync(file, "utf8");
-  const specifiers = new Set();
-  const importPattern = /(?:from\s+|import\s*\()\s*["']([^"']+)["']/g;
-  for (const match of source.matchAll(importPattern)) {
-    if (match[1].startsWith(".")) {
-      specifiers.add(match[1]);
-    }
-  }
-  return [...specifiers]
+  const source = ts.preProcessFile(readFileSync(file, "utf8"), true);
+  return [...new Set(source.importedFiles.map(({ fileName }) => fileName))]
+    .filter((specifier) => specifier.startsWith("."))
     .map((specifier) => resolveModule(file, specifier))
-    .filter((dependency) => dependency && fileSet.has(dependency));
+    .filter(Boolean);
 }
 
 function resolveModule(importer, specifier) {
@@ -56,7 +52,7 @@ function resolveModule(importer, specifier) {
     ...sourceExtensions.map((extension) => `${candidate}${extension}`),
     ...sourceExtensions.map((extension) => join(candidate, `index${extension}`))
   ];
-  return candidates.find((path) => existsSync(path)) ?? null;
+  return candidates.find((path) => fileSet.has(path)) ?? null;
 }
 
 function findCycles(dependenciesByFile) {
@@ -101,6 +97,26 @@ function canonicalCycle(cycle) {
 
 function displayPath(file) {
   return relative(sourceRoot, file).replaceAll("\\", "/");
+}
+
+function checkApiClientBoundaries() {
+  const violations = [];
+  for (const [file, imports] of graph) {
+    const path = displayPath(file);
+    if (!path.startsWith("api/")) continue;
+    for (const dependency of imports) {
+      const target = displayPath(dependency);
+      const withinLayer = path.startsWith("api/contracts/")
+        ? target.startsWith("api/contracts/")
+        : target.startsWith("api/") && target !== "api/client.ts";
+      if (!withinLayer) violations.push(`${path} -> ${target}`);
+    }
+  }
+  if (violations.length) {
+    console.error("Frontend API dependency boundaries violated:");
+    for (const violation of violations) console.error(`- ${violation}`);
+    process.exit(1);
+  }
 }
 
 function checkDataWorkspaceBoundaries() {

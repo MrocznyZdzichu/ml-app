@@ -27,7 +27,7 @@ import type {
 } from "./api/client";
 import { DeferredPanel } from "./components/DeferredPanel";
 import { JobsPanel } from "./operational/JobsPanel";
-import type { DescriptiveProfileCacheEntry } from "./data/DataWorkspacePanels";
+import type { DescriptiveProfileCacheEntry } from "./data/profile/contracts";
 import { AuthScreen } from "./workspace/AuthScreen";
 import { Overview } from "./workspace/Overview";
 
@@ -66,12 +66,12 @@ const PipelinesPanel = lazy(() =>
   }))
 );
 const DataPanel = lazy(() =>
-  import("./data/DataWorkspacePanels").then((module) => ({
+  import("./data/catalog/DatasetCatalogPanel").then((module) => ({
     default: module.DataPanel
   }))
 );
 const AnalysisPanel = lazy(() =>
-  import("./data/DataWorkspacePanels").then((module) => ({
+  import("./data/analysis/AnalysisPanel").then((module) => ({
     default: module.AnalysisPanel
   }))
 );

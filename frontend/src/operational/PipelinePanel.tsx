@@ -31,11 +31,8 @@ import { AssetList } from "../components/AssetList";
 import { DeferredPanel } from "../components/DeferredPanel";
 import { PaginationControls } from "../components/PaginationControls";
 import { PagedCatalogSelect } from "../components/PagedCatalogSelect";
-import {
-  AnalysisPanel,
-  latestLogicalDatasetAliases,
-  type DescriptiveProfileCacheEntry
-} from "../data/DataWorkspacePanels";
+import { latestLogicalDatasetAliases } from "../data/datasetVersions";
+import type { DescriptiveProfileCacheEntry } from "../data/profile/contracts";
 import {
   canonicalizeWorkflowDatasetIds,
   emptyWorkflowDefinition,
@@ -1504,6 +1501,10 @@ export function PipelinesPanel({
   );
 }
 
+const DryRunAnalysisPanel = lazy(() =>
+  import("../data/analysis/AnalysisPanel").then((module) => ({ default: module.AnalysisPanel }))
+);
+
 function DryRunExamination({
   run,
   initialOutputId,
@@ -1578,16 +1579,18 @@ function DryRunExamination({
           </button>
         </header>
         <div className="dry-run-examine-content">
-          <AnalysisPanel
-            datasets={temporaryDatasets}
-            descriptiveProfileCache={profileCache.current}
-            onRefresh={async () => undefined}
-            setNotice={setNotice}
-            initialDatasetId={initialDatasetId}
-            initialTab="browse"
-            showDataRoles={false}
-            allowPersistence={false}
-          />
+          <DeferredPanel>
+            <DryRunAnalysisPanel
+              datasets={temporaryDatasets}
+              descriptiveProfileCache={profileCache.current}
+              onRefresh={async () => undefined}
+              setNotice={setNotice}
+              initialDatasetId={initialDatasetId}
+              initialTab="browse"
+              showDataRoles={false}
+              allowPersistence={false}
+            />
+          </DeferredPanel>
         </div>
         <footer className="dry-run-examine-footer">
           Temporary Parquet · access follows the pipeline run · no official dataset or artifact was created. Drag the bottom-right corner to resize.

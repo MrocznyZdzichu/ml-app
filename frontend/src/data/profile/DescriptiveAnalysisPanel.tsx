@@ -15,7 +15,7 @@ import type { DataAsset, DatasetPreview } from "../../api/client";
 import { DeferredPanel } from "../../components/DeferredPanel";
 import { Metric } from "../../workspace/Overview";
 import { readRolesMetadata } from "../../analysis/dataRoles";
-import { datasetVersionLabel } from "../catalog/DatasetCatalogPanel";
+import { datasetVersionLabel } from "../datasetVersions";
 import { defaultProfilingRangeSettings } from "../profile/contracts";
 import type {
   DescriptiveComputedProfile,

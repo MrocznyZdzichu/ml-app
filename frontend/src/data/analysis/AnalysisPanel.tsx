@@ -1,8 +1,11 @@
 import { Activity, BarChart3, ListChecks, Table2 } from "lucide-react";
 import { lazy, useEffect, useMemo, useState } from "react";
 
-import { api } from "../../api/client";
-import type { BusinessCase, DataAsset, Pipeline } from "../../api/client";
+import { businessCasesApi } from "../../api/businessCases";
+import { datasetsApi } from "../../api/datasets";
+import type { BusinessCase } from "../../api/contracts/businessCases";
+import type { DataAsset } from "../../api/contracts/datasets";
+import type { Pipeline } from "../../api/contracts/pipelines";
 import {
   ArtifactFilters,
   datasetPipelineId,
@@ -12,7 +15,7 @@ import {
 import { DeferredPanel } from "../../components/DeferredPanel";
 import { PagedCatalogSelect } from "../../components/PagedCatalogSelect";
 import type { VisualizationDrillRequest } from "../../analysis/drillContext";
-import { datasetVersionGroups } from "../catalog/DatasetCatalogPanel";
+import { datasetVersionGroups } from "../datasetVersions";
 import type { DescriptiveProfileCacheEntry } from "../profile/contracts";
 import { DataRolesPanel } from "../roles/DataRolesPanel";
 
@@ -146,7 +149,7 @@ export function AnalysisPanel({
                 setSelectedAnalysisDataset(item);
                 setVisualizationDrill(null);
               }}
-              loadPage={(query) => api.pageDatasets({
+              loadPage={(query) => datasetsApi.pageDatasets({
                 ...query,
                 business_case_id: businessCaseFilter,
                 families: showOnlyLatest,
@@ -181,7 +184,7 @@ export function AnalysisPanel({
                 setBusinessCaseFilter(value);
                 setPipelineFilter("");
               }}
-              loadPage={api.pageBusinessCases}
+              loadPage={businessCasesApi.pageBusinessCases}
               getId={(item) => item.id}
               getLabel={(item) => item.name}
               emptyLabel="All Business Cases"
