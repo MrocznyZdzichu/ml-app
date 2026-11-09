@@ -878,11 +878,15 @@ class ServingService:
         )
 
     def run_replay(self, job_id: str) -> ChallengerReplayJob:
-        job = self.repository.get_replay(job_id)
-        if job is None:
-            raise ValueError("Challenger replay job not found")
-        if job.status == ReplayStatus.SUCCEEDED:
-            return job
+        with self.repository.lock_replay_execution(job_id) as acquired:
+            job = self.repository.get_replay(job_id)
+            if job is None:
+                raise ValueError("Challenger replay job not found")
+            if not acquired or job.status == ReplayStatus.SUCCEEDED:
+                return job
+            return self._execute_replay(job)
+
+    def _execute_replay(self, job: ChallengerReplayJob) -> ChallengerReplayJob:
         account = self.users.get(job.requested_by)
         if account is None or not account.is_active:
             job.status = ReplayStatus.FAILED
@@ -906,30 +910,39 @@ class ServingService:
             return self.repository.update_replay(job)
         job.status = ReplayStatus.RUNNING
         job.started_at = datetime.now(timezone.utc)
+        job.processed_requests = 0
+        job.processed_records = 0
+        job.failed_requests = 0
+        job.error_message = ""
+        job.completed_at = None
         self.repository.update_replay(job)
         try:
-            sources = self.repository.replay_sources(job)
-            for index, source in enumerate(sources, start=1):
-                try:
-                    instances = [ScoreRecord.model_validate(item) for item in source.request_payload.get("instances", [])]
-                    self.score(
-                        deployment.id, instances, principal,
-                        challenger_model_id=job.challenger_model_id,
-                        correlation_id=f"replay:{job.id}:{source.id}",
-                        idempotency_key=f"replay:{job.id}:{source.id}",
-                        _revision_id=job.deployment_revision_id,
-                    )
-                    job.processed_requests += 1
-                    job.processed_records += len(instances)
-                except Exception:
+            for index, source in enumerate(self.repository.iter_replay_sources(job), start=1):
+                if source.request_payload is None:
                     job.failed_requests += 1
                     if not job.error_message:
-                        job.error_message = f"Replay request {source.id} failed; inspect its inference log entry"
+                        job.error_message = f"Replay source {source.id} is no longer retained"
+                else:
+                    try:
+                        instances = [ScoreRecord.model_validate(item) for item in source.request_payload.get("instances", [])]
+                        self.score(
+                            deployment.id, instances, principal,
+                            challenger_model_id=job.challenger_model_id,
+                            correlation_id=f"replay:{job.id}:{source.id}",
+                            idempotency_key=f"replay:{job.id}:{source.id}",
+                            _revision_id=job.deployment_revision_id,
+                        )
+                        job.processed_requests += 1
+                        job.processed_records += len(instances)
+                    except Exception:
+                        job.failed_requests += 1
+                        if not job.error_message:
+                            job.error_message = f"Replay request {source.id} failed; inspect its inference log entry"
                 if index % 25 == 0:
                     self.repository.update_replay(job)
             job.status = (
                 ReplayStatus.FAILED
-                if sources and job.processed_requests == 0 and job.failed_requests > 0
+                if job.processed_requests == 0 and job.failed_requests > 0
                 else ReplayStatus.SUCCEEDED
             )
         except Exception as exc:

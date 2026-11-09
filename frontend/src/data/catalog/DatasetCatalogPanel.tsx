@@ -1,6 +1,6 @@
 import { BarChart3, CheckCircle2, Copy, Filter, Plus, Search, Trash2, Upload, X } from "lucide-react";
 import type { FormEvent } from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { businessCasesApi } from "../../api/businessCases";
 import { datasetsApi } from "../../api/datasets";
@@ -14,6 +14,7 @@ import { PaginationControls } from "../../components/PaginationControls";
 import { formatDateTime, shortId } from "../../shared/formatters";
 import { asRecord } from "../../shared/values";
 import { datasetVersionGroups, isDataView } from "../datasetVersions";
+import { useDatasetCatalogPage } from "./useDatasetCatalogPage";
 
 export function DataPanel({
   businessCases,
@@ -45,24 +46,18 @@ export function DataPanel({
   const [pipelineFilter, setPipelineFilter] = useState("");
   const [uploadedOnly, setUploadedOnly] = useState(false);
   const [datasetSearch, setDatasetSearch] = useState("");
-  const [activeDatasets, setActiveDatasets] = useState<DataAsset[]>([]);
-  const [activeDatasetTotal, setActiveDatasetTotal] = useState(0);
+  const [search, setSearch] = useState("");
   const [activeDatasetOffset, setActiveDatasetOffset] = useState(0);
-  const [dataViews, setDataViews] = useState<DataAsset[]>([]);
-  const [dataViewTotal, setDataViewTotal] = useState(0);
   const [dataViewOffset, setDataViewOffset] = useState(0);
-  const [deletedDatasets, setDeletedDatasets] = useState<DataAsset[]>([]);
-  const [deletedDatasetTotal, setDeletedDatasetTotal] = useState(0);
   const [deletedDatasetOffset, setDeletedDatasetOffset] = useState(0);
-  const [isDatasetPageLoading, setIsDatasetPageLoading] = useState(false);
   const [datasetRefreshKey, setDatasetRefreshKey] = useState(0);
   const filterPipelines = businessCaseFilter
     ? pipelines.filter((pipeline) => pipeline.business_case_id === businessCaseFilter)
     : pipelines;
 
   const refreshCatalog = useCallback(async () => {
-    await onRefresh();
     setDatasetRefreshKey((value) => value + 1);
+    await onRefresh();
   }, [onRefresh]);
 
   useEffect(() => {
@@ -71,68 +66,44 @@ export function DataPanel({
   }, [onRegisterRefresh, refreshCatalog]);
 
   useEffect(() => {
+    if (datasetSearch.trim() === search) return;
     const timer = window.setTimeout(() => {
-      setIsDatasetPageLoading(true);
-      const common = {
-        limit: 20,
-        search: datasetSearch.trim(),
-        business_case_id: businessCaseFilter,
-        families: true,
-        summary: true
-      };
-      Promise.all([
-        datasetsApi.pageDatasets({
-          ...common,
-          offset: activeDatasetOffset,
-          asset_kind: "dataset",
-          include_deleted: false,
-          pipeline_id: pipelineFilter,
-          pipeline_type: purposeFilter,
-          uploaded_only: uploadedOnly
-        }),
-        datasetsApi.pageDatasets({
-          ...common,
-          offset: dataViewOffset,
-          asset_kind: "view",
-          include_deleted: false
-        }),
-        datasetsApi.pageDatasets({
-          ...common,
-          offset: deletedDatasetOffset,
-          families: false,
-          status: "deleted"
-        })
-      ])
-        .then(([datasetPage, viewPage, deletedPage]) => {
-          setActiveDatasets(datasetPage.items);
-          setActiveDatasetTotal(datasetPage.total);
-          setDataViews(viewPage.items);
-          setDataViewTotal(viewPage.total);
-          setDeletedDatasets(deletedPage.items);
-          setDeletedDatasetTotal(deletedPage.total);
-        })
-        .catch((error) => setNotice(error instanceof Error ? error.message : "Could not load dataset catalog"))
-        .finally(() => setIsDatasetPageLoading(false));
+      setSearch(datasetSearch.trim());
+      setActiveDatasetOffset(0);
+      setDataViewOffset(0);
+      setDeletedDatasetOffset(0);
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [
-    activeDatasetOffset,
-    businessCaseFilter,
-    dataViewOffset,
-    datasetRefreshKey,
-    datasetSearch,
-    deletedDatasetOffset,
-    pipelineFilter,
-    purposeFilter,
-    setNotice,
-    uploadedOnly
-  ]);
+  }, [datasetSearch, search]);
 
-  useEffect(() => {
-    setActiveDatasetOffset(0);
-    setDataViewOffset(0);
-    setDeletedDatasetOffset(0);
-  }, [businessCaseFilter, datasetSearch, pipelineFilter, purposeFilter, uploadedOnly]);
+  const commonQuery = useMemo(() => ({
+    limit: 20, search, business_case_id: businessCaseFilter
+  }), [search, businessCaseFilter]);
+  const datasetQuery = useMemo(() => ({
+    ...commonQuery,
+    offset: activeDatasetOffset,
+    asset_kind: "dataset" as const,
+    families: true,
+    include_deleted: false,
+    pipeline_id: pipelineFilter,
+    pipeline_type: purposeFilter,
+    uploaded_only: uploadedOnly
+  }), [commonQuery, activeDatasetOffset, pipelineFilter, purposeFilter, uploadedOnly]);
+  const viewQuery = useMemo(() => ({
+    ...commonQuery, offset: dataViewOffset, asset_kind: "view" as const, families: true, include_deleted: false
+  }), [commonQuery, dataViewOffset]);
+  const deletedQuery = useMemo(() => ({
+    ...commonQuery, offset: deletedDatasetOffset, families: false, status: "deleted"
+  }), [commonQuery, deletedDatasetOffset]);
+  const datasetCatalog = useDatasetCatalogPage(datasetQuery, datasetRefreshKey, setNotice);
+  const viewCatalog = useDatasetCatalogPage(viewQuery, datasetRefreshKey, setNotice);
+  const deletedCatalog = useDatasetCatalogPage(deletedQuery, datasetRefreshKey, setNotice);
+  const activeDatasets = datasetCatalog.page?.items ?? [];
+  const activeDatasetTotal = datasetCatalog.page?.total ?? 0;
+  const dataViews = viewCatalog.page?.items ?? [];
+  const dataViewTotal = viewCatalog.page?.total ?? 0;
+  const deletedDatasets = deletedCatalog.page?.items ?? [];
+  const deletedDatasetTotal = deletedCatalog.page?.total ?? 0;
 
   function selectDatasetFile(nextFile: File | null) {
     if (!nextFile) {
@@ -310,7 +281,7 @@ export function DataPanel({
           <div>
             <h2>Dataset filters</h2>
             <p>
-              {isDatasetPageLoading
+              {datasetCatalog.loading
                 ? "Loading Business Case datasets…"
                 : `${activeDatasetTotal} dataset families`}
             </p>
@@ -324,6 +295,9 @@ export function DataPanel({
                   setBusinessCaseFilter(value);
                   setPurposeFilter("");
                   setPipelineFilter("");
+                  setActiveDatasetOffset(0);
+                  setDataViewOffset(0);
+                  setDeletedDatasetOffset(0);
                 }}
                 loadPage={businessCasesApi.pageBusinessCases}
                 getId={(item) => item.id}
@@ -336,12 +310,19 @@ export function DataPanel({
               pipelines={filterPipelines}
               purpose={purposeFilter}
               pipelineId={pipelineFilter}
-              onPurposeChange={setPurposeFilter}
-              onPipelineChange={setPipelineFilter}
+              onPurposeChange={(value) => {
+                setPurposeFilter(value);
+                setActiveDatasetOffset(0);
+              }}
+              onPipelineChange={(value) => {
+                setPipelineFilter(value);
+                setActiveDatasetOffset(0);
+              }}
               businessCaseId={businessCaseFilter}
               uploadedOnly={uploadedOnly}
               onUploadedOnlyChange={(value) => {
                 setUploadedOnly(value);
+                setActiveDatasetOffset(0);
                 if (value) {
                   setPurposeFilter("");
                   setPipelineFilter("");
@@ -371,7 +352,7 @@ export function DataPanel({
           limit={20}
           offset={activeDatasetOffset}
           onOffsetChange={setActiveDatasetOffset}
-          disabled={isDatasetPageLoading}
+          disabled={datasetCatalog.loading}
           label="dataset families"
         />
         <AssetList
@@ -390,7 +371,7 @@ export function DataPanel({
           limit={20}
           offset={dataViewOffset}
           onOffsetChange={setDataViewOffset}
-          disabled={isDatasetPageLoading}
+          disabled={viewCatalog.loading}
           label="data views"
         />
         {deletedDatasetTotal > 0 && (
@@ -410,7 +391,7 @@ export function DataPanel({
               limit={20}
               offset={deletedDatasetOffset}
               onOffsetChange={setDeletedDatasetOffset}
-              disabled={isDatasetPageLoading}
+              disabled={deletedCatalog.loading}
               label="deleted datasets"
             />
           </details>

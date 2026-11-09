@@ -2,10 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime
 from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
+from hashlib import blake2b
+from itertools import batched
 from typing import Any, Protocol
 
 from sqlalchemy import JSON, Boolean, Column, DateTime, Integer, MetaData, String, Table, Text, and_, case, func, or_, select, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import DBAPIError
 
 from app.core.database import get_engine
 from app.modules.serving.domain import (
@@ -20,6 +24,7 @@ from app.modules.serving.domain import (
     ModelAssignment,
     MonitoringRunStatus,
     OnlineMonitoringRun,
+    ReplaySource,
     ReplayStatus,
 )
 
@@ -216,7 +221,8 @@ class ServingRepository(Protocol):
     def page_replays(
         self, deployment_id: str, *, limit: int, offset: int
     ) -> tuple[list[ChallengerReplayJob], int]: ...
-    def replay_sources(self, job: ChallengerReplayJob) -> list[InferenceRequest]: ...
+    def iter_replay_sources(self, job: ChallengerReplayJob) -> Iterator[ReplaySource]: ...
+    def lock_replay_execution(self, job_id: str) -> AbstractContextManager[bool]: ...
     def add_monitoring_run(self, run: OnlineMonitoringRun) -> OnlineMonitoringRun: ...
     def get_monitoring_run(self, run_id: str) -> OnlineMonitoringRun | None: ...
     def update_monitoring_run(self, run: OnlineMonitoringRun) -> OnlineMonitoringRun: ...
@@ -756,21 +762,50 @@ class PostgresServingRepository:
             items = [self._replay(row._mapping) for row in connection.execute(statement)]
         return items, total
 
-    def replay_sources(self, job: ChallengerReplayJob) -> list[InferenceRequest]:
+    @contextmanager
+    def lock_replay_execution(self, job_id: str) -> Iterator[bool]:
+        key = int.from_bytes(blake2b(job_id.encode(), digest_size=8, person=b"mlapp-replay").digest(), "big", signed=True)
+        with self.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
+            acquired = bool(connection.scalar(select(func.pg_try_advisory_lock(key))))
+            try:
+                yield acquired
+            finally:
+                if acquired and not connection.invalidated:
+                    try:
+                        connection.scalar(select(func.pg_advisory_unlock(key)))
+                    except DBAPIError:
+                        connection.invalidate()
+
+    def iter_replay_sources(self, job: ChallengerReplayJob) -> Iterator[ReplaySource]:
         self._ensure_initialized()
-        statement = select(inference_requests_table).where(
-            inference_requests_table.c.deployment_id == job.deployment_id,
-            inference_requests_table.c.status == InferenceStatus.SUCCEEDED.value,
-            inference_requests_table.c.served_role.in_([DeploymentRole.CHAMPION.value, DeploymentRole.FALLBACK.value]),
-            inference_requests_table.c.created_at < job.source_before,
+        request = inference_requests_table.c
+        statement = select(request.id).where(
+            request.deployment_id == job.deployment_id,
+            request.status == InferenceStatus.SUCCEEDED.value,
+            request.served_role.in_([DeploymentRole.CHAMPION.value, DeploymentRole.FALLBACK.value]),
+            request.created_at < job.source_before,
         )
         if job.source_since:
-            statement = statement.where(inference_requests_table.c.created_at >= job.source_since)
+            statement = statement.where(request.created_at >= job.source_since)
         if job.source_until:
-            statement = statement.where(inference_requests_table.c.created_at < job.source_until)
-        statement = statement.order_by(inference_requests_table.c.created_at.asc()).limit(job.max_requests)
+            statement = statement.where(request.created_at < job.source_until)
+        statement = statement.order_by(request.created_at, request.id).limit(job.max_requests)
+        # Freeze membership at the start, then release each read connection before scoring.
         with self.engine.begin() as connection:
-            return [self._inference(row._mapping) for row in connection.execute(statement)]
+            source_ids = connection.scalars(statement).all()
+        for source_batch in batched(source_ids, 25):
+            with self.engine.begin() as connection:
+                payloads = {
+                    row.id: row.request_payload
+                    for row in connection.execute(
+                        select(request.id, request.request_payload).where(
+                            request.deployment_id == job.deployment_id,
+                            request.id.in_(source_batch),
+                        )
+                    )
+                }
+            for source_id in source_batch:
+                yield ReplaySource(source_id, payloads.pop(source_id, None))
 
     def add_monitoring_run(self, run: OnlineMonitoringRun) -> OnlineMonitoringRun:
         self._ensure_initialized()

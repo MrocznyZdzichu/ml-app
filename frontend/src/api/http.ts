@@ -4,8 +4,10 @@ const TOKEN_STORAGE_KEY = "ml_app_access_token";
 export const API_ROOT_URL = API_BASE_URL.replace(/\/api\/v1\/?$/, "");
 
 let accessToken = localStorage.getItem(TOKEN_STORAGE_KEY) ?? "";
+const pendingReads = new Map<string, Promise<unknown>>();
 
 export function setAccessToken(token: string | null) {
+  pendingReads.clear();
   accessToken = token ?? "";
   if (token) {
     localStorage.setItem(TOKEN_STORAGE_KEY, token);
@@ -31,9 +33,26 @@ export function withQuery(
   return params.size ? `${path}?${params}` : path;
 }
 
-export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+export function request<T>(path: string, options?: RequestInit): Promise<T> {
+  if (options && options.method && !["GET", "HEAD"].includes(options.method.toUpperCase())) {
+    pendingReads.clear();
+    return sendRequest<T>(path, options).finally(() => pendingReads.clear());
+  }
+  // A caller supplying headers or an AbortSignal owns an independent request.
+  if (options) return sendRequest<T>(path, options);
+
+  const existing = pendingReads.get(path);
+  if (existing) return existing as Promise<T>;
+  const pending = sendRequest<T>(path, {}).finally(() => {
+    if (pendingReads.get(path) === pending) pendingReads.delete(path);
+  });
+  pendingReads.set(path, pending);
+  return pending;
+}
+
+async function sendRequest<T>(path: string, options: RequestInit): Promise<T> {
   const headers = new Headers(options.headers);
-  if (!(options.body instanceof FormData)) {
+  if (options.body != null && !(options.body instanceof FormData)) {
     headers.set("Content-Type", "application/json");
   }
   if (accessToken) {

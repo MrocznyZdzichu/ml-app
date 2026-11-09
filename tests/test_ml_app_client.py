@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from email import policy
+from email.parser import BytesParser
 import tempfile
 import unittest
 from unittest.mock import patch
 from pathlib import Path
 from typing import Any
+
+import requests
 
 from ml_app_client import (
     ApiError,
@@ -19,6 +23,7 @@ from ml_app_client import (
     ResourceNotFoundError,
 )
 from ml_app_client.auth import AuthenticationClientMixin
+from ml_app_client._multipart import MultipartUpload
 from ml_app_client.access_requests import AccessRequestClientMixin
 from ml_app_client.analysis import AnalysisClientMixin
 from ml_app_client.business_cases import BusinessCaseClientMixin
@@ -53,10 +58,20 @@ class FakeSession:
         self.headers: dict[str, str] = {}
         self.responses = responses
         self.requests: list[tuple[str, str, dict[str, Any]]] = []
+        self.uploads = []
         self.closed = False
 
     def request(self, method: str, url: str, **kwargs: Any) -> FakeResponse:
         self.requests.append((method, url, kwargs))
+        body = kwargs.get("data")
+        if isinstance(body, MultipartUpload):
+            message = BytesParser(policy=policy.default).parsebytes(
+                f"Content-Type: {kwargs['headers']['Content-Type']}\r\n\r\n".encode()
+                + b"".join(body)
+            )
+            self.uploads.append({
+                part.get_param("name", header="content-disposition"): part for part in message.iter_parts()
+            })
         return self.responses.pop(0)
 
     def close(self) -> None:
@@ -351,7 +366,7 @@ class MLAppClientTests(unittest.TestCase):
         self.assertEqual(session.requests[1][2]["json"]["source_type"], "database")
         self.assertTrue(session.requests[2][1].endswith("/datasets/dataset-registered"))
         self.assertTrue(session.requests[3][1].endswith("/datasets/dataset-registered/metadata"))
-        self.assertEqual(session.requests[-1][2]["data"]["logical_id"], "dataset-family")
+        self.assertEqual(session.uploads[-1]["logical_id"].get_content(), "dataset-family")
 
     def test_new_dataset_requires_force_only_for_visible_duplicate_name(self) -> None:
         duplicate = dataset_payload(id="visible-dataset", logical_id="visible-family", name="Sales")
@@ -615,16 +630,37 @@ class MLAppClientTests(unittest.TestCase):
         client = MLAppClient("http://platform/api/v1/", "secret", session=session)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "sales.csv"
-            path.write_text("id,value\n1,10\n", encoding="utf-8")
+            path.write_bytes(b"id,value\n1,10\n")
             dataset = client.upload_dataset(path, logical_id="dataset-family", tags=["train"])
 
         self.assertEqual(dataset.row_count, 12)
         method, url, kwargs = session.requests[0]
         self.assertEqual((method, url), ("POST", "http://platform/api/v1/datasets/upload"))
-        self.assertEqual(kwargs["data"]["logical_id"], "dataset-family")
-        self.assertEqual(kwargs["data"]["tags"], "train")
-        self.assertEqual(kwargs["files"]["file"][0], "sales.csv")
+        self.assertEqual(session.uploads[0]["logical_id"].get_content(), "dataset-family")
+        self.assertEqual(session.uploads[0]["tags"].get_content(), "train")
+        self.assertEqual(session.uploads[0]["file"].get_filename(), "sales.csv")
+        self.assertEqual(session.uploads[0]["file"].get_payload(decode=True), b"id,value\n1,10\n")
+        self.assertEqual(kwargs["timeout"], client.upload_timeout)
         self.assertEqual(session.headers["Authorization"], "Bearer secret")
+
+    def test_multipart_requests_stream_and_rewind_without_reading_the_file_at_prepare(self) -> None:
+        with tempfile.TemporaryFile() as stream:
+            stream.truncate(1024 * 1024)
+            upload = MultipartUpload({"name": "Dane Łódź"}, "dane.csv", stream, "text/csv")
+            request = requests.Request(
+                "POST", "http://platform/datasets/upload", data=upload,
+                headers={"Content-Type": upload.content_type},
+            ).prepare()
+
+            self.assertIs(request.body, upload)
+            self.assertEqual(stream.tell(), 0)
+            self.assertEqual(int(request.headers["Content-Length"]), len(upload))
+            first = upload.read(4096)
+            self.assertEqual(len(first), 4096)
+            self.assertLess(stream.tell(), 1024 * 1024)
+            requests.utils.rewind_body(request)
+            self.assertEqual(stream.tell(), 0)
+            self.assertEqual(upload.read(4096), first)
 
     def test_name_workflow_uploads_attached_dataset_version(self) -> None:
         session = FakeSession([
@@ -642,7 +678,7 @@ class MLAppClientTests(unittest.TestCase):
                 path, business_case_name="Sales", dataset_name="sales"
             )
         self.assertEqual(result.version_number, 2)
-        self.assertEqual(session.requests[-1][2]["data"]["logical_id"], "dataset-family")
+        self.assertEqual(session.uploads[-1]["logical_id"].get_content(), "dataset-family")
 
     def test_ensure_dataset_reuses_newest_attached_family_version(self) -> None:
         session = FakeSession([

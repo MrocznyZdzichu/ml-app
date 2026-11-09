@@ -101,8 +101,8 @@ export const datasetsApi = {
     uploaded_only?: boolean;
     owned_only?: boolean;
     summary?: boolean;
-  } = {}) =>
-    request<OffsetPage<DataAsset>>(withQuery("/datasets/page", { summary: true, ...query })),
+  } = {}, signal?: AbortSignal) =>
+    request<OffsetPage<DataAsset>>(withQuery("/datasets/page", { summary: true, ...query }), signal ? { signal } : undefined),
   listDatasetVersions: (logicalId: string) =>
     request<DataAsset[]>(`/datasets/${datasetRouteId(logicalId)}/versions`),
   pageDatasetVersions: (logicalId: string, query: PageQuery = {}) =>

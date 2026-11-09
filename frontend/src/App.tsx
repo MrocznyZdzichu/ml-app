@@ -191,6 +191,8 @@ export default function App() {
     () => refreshResources("workspace"),
     [refreshResources]
   );
+  const refreshDataCatalog = useCallback(() => refreshResources("data"), [refreshResources]);
+  const consumePipelineOpenRequest = useCallback(() => setPipelineOpenRequest(null), []);
 
   const refreshServingCatalog = useCallback(async () => {
     await refreshResources("serving");
@@ -449,7 +451,7 @@ export default function App() {
               datasets={datasets}
               pipelines={pipelines}
               onAnalyze={openDatasetAnalysis}
-              onRefresh={() => refreshResources("data")}
+              onRefresh={refreshDataCatalog}
               onRegisterRefresh={registerDataRefresh}
               setNotice={setNotice}
             />
@@ -478,7 +480,7 @@ export default function App() {
               pipelines={pipelines}
               models={models}
               openRequest={pipelineOpenRequest}
-              onOpenRequestConsumed={() => setPipelineOpenRequest(null)}
+              onOpenRequestConsumed={consumePipelineOpenRequest}
               onRefresh={() => refreshResources("pipelines")}
               onExamineDataset={openDatasetAnalysis}
               setNotice={setNotice}

@@ -1,4 +1,7 @@
 from pathlib import Path
+import subprocess
+import sys
+from time import monotonic, sleep
 
 import duckdb
 import pytest
@@ -7,7 +10,7 @@ from app.shared.duckdb_runtime import (
     configured_duckdb_connection,
     write_parquet_atomic,
 )
-from app.modules.datasets.columnar import ColumnarDatasetStore
+from app.shared.file_lock import exclusive_file_lock
 
 
 def test_atomic_parquet_write_returns_copy_metadata_without_output_rescan(
@@ -57,10 +60,37 @@ def test_failed_atomic_parquet_write_preserves_previous_output(tmp_path: Path) -
         connection.close()
 
 
-def test_columnar_conversion_lock_is_released_after_last_user() -> None:
-    lock_key = "test-lock-key"
+def test_conversion_lock_serializes_processes_and_releases_after_error(tmp_path: Path) -> None:
+    lock_path = tmp_path / "dataset.mlapp.lock"
+    ready = tmp_path / "ready"
+    acquired = tmp_path / "acquired"
+    child_code = """
+from pathlib import Path
+import sys
+from app.shared.file_lock import exclusive_file_lock
 
-    with ColumnarDatasetStore._conversion_lock(lock_key):
-        assert ColumnarDatasetStore._conversion_locks[lock_key].users == 1
-
-    assert lock_key not in ColumnarDatasetStore._conversion_locks
+lock, ready, acquired = map(Path, sys.argv[1:])
+ready.touch()
+with exclusive_file_lock(lock):
+    acquired.touch()
+"""
+    child = None
+    try:
+        with pytest.raises(ValueError, match="conversion failed"):
+            with exclusive_file_lock(lock_path):
+                child = subprocess.Popen(
+                    [sys.executable, "-c", child_code, str(lock_path), str(ready), str(acquired)],
+                )
+                deadline = monotonic() + 5
+                while not ready.exists() and monotonic() < deadline:
+                    sleep(0.01)
+                assert ready.exists()
+                sleep(0.15)
+                assert not acquired.exists()
+                raise ValueError("conversion failed")
+        assert child.wait(timeout=5) == 0
+        assert acquired.exists()
+    finally:
+        if child is not None and child.poll() is None:
+            child.kill()
+            child.wait()

@@ -35,9 +35,11 @@ export function PagedCatalogSelect<T>({
   const [items, setItems] = useState<T[]>([]);
   const [selectedItems, setSelectedItems] = useState<Record<string, T>>({});
   const [query, setQuery] = useState("");
-  const [offset, setOffset] = useState(0);
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState({ reloadKey, offset: 0 });
+  const offset = page.reloadKey === reloadKey ? page.offset : 0;
   const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const loadPageRef = useRef(loadPage);
   loadPageRef.current = loadPage;
   const onPageLoadedRef = useRef(onPageLoaded);
@@ -45,25 +47,36 @@ export function PagedCatalogSelect<T>({
   const limit = 30;
 
   useEffect(() => {
+    if (query.trim() === search) return;
     const timer = window.setTimeout(() => {
-      setLoading(true);
-      loadPageRef.current({ limit, offset, search: query.trim() })
-        .then((page) => {
-          setItems(page.items);
-          setTotal(page.total);
-          onPageLoadedRef.current?.(page);
-        })
-        .catch(() => {
-          setItems([]);
-          setTotal(0);
-        })
-        .finally(() => setLoading(false));
+      setSearch(query.trim());
+      setPage({ reloadKey, offset: 0 });
     }, 250);
     return () => window.clearTimeout(timer);
-  }, [offset, query, reloadKey]);
+  }, [query, reloadKey, search]);
 
-  useEffect(() => setOffset(0), [query]);
-  useEffect(() => setOffset(0), [reloadKey]);
+  useEffect(() => {
+    let current = true;
+    setLoading(true);
+    loadPageRef.current({ limit, offset, search })
+      .then((result) => {
+        if (!current) return;
+        setItems(result.items);
+        setTotal(result.total);
+        onPageLoadedRef.current?.(result);
+      })
+      .catch(() => {
+        if (!current) return;
+        setItems([]);
+        setTotal(0);
+      })
+      .finally(() => { if (current) setLoading(false); });
+    return () => { current = false; };
+  }, [offset, reloadKey, search]);
+
+  useEffect(() => {
+    setPage((current) => current.reloadKey === reloadKey ? current : { reloadKey, offset: 0 });
+  }, [reloadKey]);
 
   const options = useMemo(() => {
     const selected = value
@@ -110,11 +123,11 @@ export function PagedCatalogSelect<T>({
       </select>
       {total > limit && (
         <span className="paged-catalog-navigation">
-          <button type="button" onClick={() => setOffset(Math.max(0, offset - limit))} disabled={loading || offset === 0}>
+          <button type="button" onClick={() => setPage({ reloadKey, offset: Math.max(0, offset - limit) })} disabled={loading || offset === 0}>
             Previous
           </button>
           <small>{offset + 1}–{Math.min(total, offset + limit)} of {total}</small>
-          <button type="button" onClick={() => setOffset(offset + limit)} disabled={loading || offset + limit >= total}>
+          <button type="button" onClick={() => setPage({ reloadKey, offset: offset + limit })} disabled={loading || offset + limit >= total}>
             Next
           </button>
         </span>

@@ -110,6 +110,12 @@ class InferenceRequest:
 
 
 @dataclass
+class ReplaySource:
+    id: str
+    request_payload: dict[str, Any] | None
+
+
+@dataclass
 class ChallengerReplayJob:
     id: str
     deployment_id: str

@@ -1,9 +1,6 @@
 import os
 import hashlib
 import json
-import threading
-from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -14,22 +11,14 @@ from fastapi import HTTPException, status
 from app.modules.datasets.domain import DataAsset, SourceType
 from app.shared.sql_security import bind_user_sql_to_inputs
 from app.shared.duckdb_runtime import configured_duckdb_connection
+from app.shared.file_lock import exclusive_file_lock
 
 
 AssetLoader = Callable[[str], DataAsset]
 
 
-@dataclass
-class _ConversionLock:
-    lock: threading.Lock
-    users: int = 0
-
-
 class ColumnarDatasetStore:
     """Provides a reusable Parquet representation for full-dataset analytics."""
-
-    _locks_guard = threading.Lock()
-    _conversion_locks: dict[str, _ConversionLock] = {}
 
     def __init__(self, repository_root: Path | None = None) -> None:
         self.repository_root = (repository_root or Path("data/repository")).resolve()
@@ -59,8 +48,7 @@ class ColumnarDatasetStore:
         if parquet_path.exists() and parquet_path.stat().st_mtime_ns >= source_path.stat().st_mtime_ns:
             return parquet_path
 
-        lock_key = str(parquet_path.resolve())
-        with self._conversion_lock(lock_key):
+        with exclusive_file_lock(parquet_path.with_suffix(".lock")):
             if parquet_path.exists() and parquet_path.stat().st_mtime_ns >= source_path.stat().st_mtime_ns:
                 return parquet_path
             return self._build_parquet(asset, source_path, parquet_path)
@@ -81,11 +69,7 @@ class ColumnarDatasetStore:
         if parquet_path.exists() and parquet_path.stat().st_mtime_ns >= source_parquet.stat().st_mtime_ns:
             return parquet_path
 
-        # Serialize every materialization of one view. Locking by the
-        # definition-specific filename would let two revisions concurrently
-        # delete each other's freshly written cache during stale-file cleanup.
-        lock_key = str((view_directory / "dataset.mlapp.view.lock").resolve())
-        with self._conversion_lock(lock_key):
+        with exclusive_file_lock(parquet_path.with_suffix(".lock")):
             if parquet_path.exists() and parquet_path.stat().st_mtime_ns >= source_parquet.stat().st_mtime_ns:
                 return parquet_path
             temporary_path = parquet_path.with_name(f".{parquet_path.name}.{uuid4().hex}.tmp")
@@ -111,33 +95,12 @@ class ColumnarDatasetStore:
                     parameters,
                 )
                 os.replace(temporary_path, parquet_path)
-                for old_path in view_directory.glob("dataset.mlapp.view.*.parquet"):
-                    if old_path != parquet_path:
-                        old_path.unlink(missing_ok=True)
             except duckdb.Error as exc:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Data View query failed: {exc}") from exc
             finally:
                 connection.close()
                 temporary_path.unlink(missing_ok=True)
             return parquet_path
-
-    @classmethod
-    @contextmanager
-    def _conversion_lock(cls, lock_key: str):
-        with cls._locks_guard:
-            entry = cls._conversion_locks.get(lock_key)
-            if entry is None:
-                entry = _ConversionLock(threading.Lock())
-                cls._conversion_locks[lock_key] = entry
-            entry.users += 1
-        try:
-            with entry.lock:
-                yield
-        finally:
-            with cls._locks_guard:
-                entry.users -= 1
-                if entry.users == 0 and cls._conversion_locks.get(lock_key) is entry:
-                    cls._conversion_locks.pop(lock_key, None)
 
     def _view_query(
         self,

@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from typing import Any, Mapping
 from urllib.parse import quote
 
+from ._multipart import MultipartUpload
 from .errors import ApiError, ConflictError, ResourceAmbiguousError, ResourceNotFoundError
 from .models import CatalogPage, Dataset
 from .pagination import iter_offset_items
@@ -190,11 +191,12 @@ class DatasetClientMixin(TransportClientMixin):
             data["logical_id"] = logical_id
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         with path.open("rb") as stream:
+            upload = MultipartUpload(data, path.name, stream, content_type)
             payload = self._request(
                 "POST",
                 "/datasets/upload",
-                data=data,
-                files={"file": (path.name, stream, content_type)},
+                data=upload,
+                headers={"Content-Type": upload.content_type},
                 timeout=self.upload_timeout,
             )
         return Dataset.from_api(payload)

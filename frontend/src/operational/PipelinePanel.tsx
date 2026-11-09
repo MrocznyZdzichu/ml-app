@@ -289,29 +289,18 @@ export function PipelinesPanel({
     setHydratedPipelineId("");
     setVersions([]);
     setVersionTotal(0);
-    setRuns([]);
     setActiveStepRuns([]);
-    setPipelineDataAttachments([]);
     if (!selectedPipelineIdValue) {
       setDraftValidationError("");
       return;
     }
     let active = true;
-    Promise.all([
-      api.pagePipelineVersions(selectedPipelineIdValue, { limit: 20, offset: 0 }),
-      api.listPipelineRuns(selectedPipelineIdValue, 8),
-      api.pageBusinessCaseDataAttachments(selectedBusinessCaseIdValue, {
-        limit: 100,
-        offset: 0
-      })
-    ])
-      .then(([versionPage, runItems, attachmentPage]) => {
+    api.pagePipelineVersions(selectedPipelineIdValue, { limit: 20, offset: 0 })
+      .then((versionPage) => {
         if (!active) return;
         const versionItems = [...versionPage.items].reverse();
         setVersions(versionItems);
         setVersionTotal(versionPage.total);
-        setRuns(runItems);
-        setPipelineDataAttachments(attachmentPage.items);
         const draftVersion = versionItems.find((item) => item.status === "draft");
         const selectedVersion = draftVersion ?? versionItems.at(-1);
         if (selectedVersion) {
@@ -340,9 +329,35 @@ export function PipelinesPanel({
           setHydratedPipelineId(selectedPipelineIdValue);
         }
       })
-      .catch((error) => setNotice(error instanceof Error ? error.message : "Could not load pipeline details"));
+      .catch((error) => {
+        if (active) setNotice(error instanceof Error ? error.message : "Could not load pipeline versions");
+      });
     return () => { active = false; };
-  }, [selectedBusinessCaseIdValue, selectedPipelineIdValue, setNotice]);
+  }, [selectedPipelineIdValue, setNotice]);
+
+  useEffect(() => {
+    setRuns([]);
+    if (!selectedPipelineIdValue) return;
+    let active = true;
+    api.listPipelineRuns(selectedPipelineIdValue, 8)
+      .then((items) => { if (active) setRuns(items); })
+      .catch((error) => {
+        if (active) setNotice(error instanceof Error ? error.message : "Could not load recent pipeline runs");
+      });
+    return () => { active = false; };
+  }, [selectedPipelineIdValue, setNotice]);
+
+  useEffect(() => {
+    setPipelineDataAttachments([]);
+    if (!selectedBusinessCaseIdValue) return;
+    let active = true;
+    api.pageBusinessCaseDataAttachments(selectedBusinessCaseIdValue, { limit: 100, offset: 0 })
+      .then((page) => { if (active) setPipelineDataAttachments(page.items); })
+      .catch((error) => {
+        if (active) setNotice(error instanceof Error ? error.message : "Could not load pipeline data attachments");
+      });
+    return () => { active = false; };
+  }, [selectedBusinessCaseIdValue, setNotice]);
 
   useEffect(() => {
     if (!isDefinitionDirty) return;

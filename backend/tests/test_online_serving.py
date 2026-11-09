@@ -1,12 +1,19 @@
-from datetime import datetime
+from contextlib import nullcontext
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
 from app.core.security import Principal
+from app.core.database import get_engine
 from app.modules.models.domain import ModelArtifact, ModelStage
 from app.modules.models.schemas import PromoteModelRequest
 from app.modules.pipelines.feature_engineering import DuckDbFeatureEngineeringEngine
-from app.modules.serving.domain import DeploymentRole, DeploymentStatus, InferenceStatus
+from app.modules.serving.domain import (
+    ChallengerReplayJob, DeploymentRole, DeploymentStatus, InferenceRequest, InferenceStatus, ReplaySource, ReplayStatus,
+)
+from app.modules.serving.repository import PostgresServingRepository, inference_requests_table
 from app.modules.serving.runtime import RuntimeUnavailableError
 from app.modules.serving.schemas import DeploymentCreate, DeploymentRevisionCreate, ScoreRecord
 from app.modules.serving.service import ServingService
@@ -158,6 +165,85 @@ class Runtime:
         if model_artifact_uri in self.failures:
             raise RuntimeUnavailableError("runtime unavailable")
         return [{"prediction": float(record["value"]), "prediction_score": 0.9} for record in records]
+
+
+def test_replay_freezes_source_ids_and_reads_payloads_in_batches() -> None:
+    engine = get_engine()
+    repository = PostgresServingRepository(engine)
+    deployment_id = str(uuid4())
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    job = ChallengerReplayJob(
+        id=f"replay-{deployment_id}", deployment_id=deployment_id, deployment_revision_id="revision",
+        challenger_model_id="challenger", requested_by="test", status=ReplayStatus.QUEUED,
+        source_since=start, source_before=start + timedelta(days=1), max_requests=27,
+    )
+
+    def row(index: int, status: InferenceStatus = InferenceStatus.SUCCEEDED) -> InferenceRequest:
+        return InferenceRequest(
+            id=f"{deployment_id}-{index:02d}", deployment_id=deployment_id, deployment_revision_id="revision",
+            requested_by="test", correlation_id="test", idempotency_key="", request_hash="",
+            status=status, record_count=1, request_payload={"index": index},
+            served_role="champion", created_at=start,
+        )
+
+    requests = inference_requests_table
+    records = [row(index) for index in range(28)]
+    late_success = row(28, InferenceStatus.FAILED)
+    records.append(late_success)
+    condition = requests.c.deployment_id == deployment_id
+    try:
+        with engine.begin() as connection:
+            connection.execute(requests.insert(), [repository._inference_record(item) for item in reversed(records)])
+        with repository.lock_replay_execution(job.id) as acquired:
+            assert acquired
+            with repository.lock_replay_execution(job.id) as concurrent:
+                assert not concurrent
+            sources = repository.iter_replay_sources(job)
+            assert next(sources) == ReplaySource(records[0].id, {"index": 0})
+            with engine.begin() as connection:
+                connection.execute(requests.delete().where(requests.c.id == records[25].id))
+                connection.execute(requests.update().where(requests.c.id == late_success.id).values(status="succeeded"))
+            assert list(sources) == [
+                ReplaySource(item.id, None if index == 25 else {"index": index})
+                for index, item in enumerate(records[1:27], start=1)
+            ]
+        with repository.lock_replay_execution(job.id) as acquired:
+            assert acquired
+    finally:
+        with engine.begin() as connection:
+            connection.execute(requests.delete().where(condition))
+
+
+def test_replay_retry_recounts_results_and_keeps_per_source_idempotency(monkeypatch) -> None:
+    job = ChallengerReplayJob(
+        id="replay", deployment_id="deployment", deployment_revision_id="revision",
+        challenger_model_id="challenger", requested_by="account", status=ReplayStatus.FAILED,
+        source_before=datetime.now(timezone.utc), processed_requests=1, processed_records=1, failed_requests=1,
+    )
+    repository = SimpleNamespace(
+        lock_replay_execution=lambda _id: nullcontext(True),
+        get_replay=lambda _id: job,
+        update_replay=lambda value: value,
+        iter_replay_sources=lambda _job: iter([
+            ReplaySource("kept", {"instances": [{"record_id": "example", "features": {"value": 1}}]}),
+            ReplaySource("expired", None),
+        ]),
+    )
+    account = SimpleNamespace(
+        id="account", email="account@example.test", display_name="Account", login_name="account",
+        roles=("user",), session_version=1, is_active=True,
+    )
+    service = ServingService(repository=repository, users=SimpleNamespace(get=lambda _id: account))
+    monkeypatch.setattr(service, "get_deployment", lambda deployment_id, *_args, **_kw: SimpleNamespace(id=deployment_id))
+    calls = []
+    monkeypatch.setattr(service, "score", lambda *_args, **options: calls.append(options))
+
+    result = service.run_replay(job.id)
+
+    assert result.status == ReplayStatus.SUCCEEDED
+    assert (result.processed_requests, result.processed_records, result.failed_requests) == (1, 1, 1)
+    assert result.error_message == "Replay source expired is no longer retained"
+    assert [call["idempotency_key"] for call in calls] == ["replay:replay:kept"]
 
 
 def model(model_id: str, stage: ModelStage = ModelStage.PRODUCTION) -> ModelArtifact:
