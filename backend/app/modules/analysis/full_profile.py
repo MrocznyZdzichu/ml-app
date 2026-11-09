@@ -14,6 +14,9 @@ from app.modules.datasets.domain import DataAsset
 COLORS = ["#3f7fc4", "#2ea39a", "#d08b2d", "#c45f74", "#7b6fc2", "#5d8f63", "#b56f3f", "#607d9b"]
 
 
+MAX_CATEGORICAL_FEATURE_VALUES = 50
+
+
 @dataclass(frozen=True)
 class ProfileOptions:
     target_column: str
@@ -319,7 +322,8 @@ class FullDatasetProfiler:
                 )
             else:
                 result = self._categorical_relation(
-                    connection, relation, feature, role, comparison_column, include_graphics
+                    connection, relation, feature, role, comparison_column, include_graphics,
+                    feature_unique=profile_by_name[feature["name"]]["unique"],
                 )
             if result:
                 output.append(result)
@@ -531,16 +535,29 @@ class FullDatasetProfiler:
         role: str,
         comparison: str,
         include_graphics: bool,
+        *,
+        feature_unique: int,
     ) -> dict[str, Any] | None:
         feature_column = self.store.identifier(feature["name"])
         target_column = self.store.identifier(comparison)
+        paired_rows = f"FROM {relation} WHERE {feature_column} IS NOT NULL AND {target_column} IS NOT NULL"
+        if feature_unique > MAX_CATEGORICAL_FEATURE_VALUES:
+            # Only the categories present in the paired scope count towards the limit.
+            (paired_unique,) = connection.execute(
+                "SELECT count(*) FROM ("
+                f"SELECT DISTINCT CAST({feature_column} AS VARCHAR) {paired_rows} "
+                f"LIMIT {MAX_CATEGORICAL_FEATURE_VALUES + 1}"
+                ") categories"
+            ).fetchone()
+            if not 2 <= paired_unique <= MAX_CATEGORICAL_FEATURE_VALUES:
+                return None
         rows = connection.execute(
             f"SELECT CAST({feature_column} AS VARCHAR), CAST({target_column} AS VARCHAR), count(*) "
-            f"FROM {relation} WHERE {feature_column} IS NOT NULL AND {target_column} IS NOT NULL GROUP BY 1, 2"
+            f"{paired_rows} GROUP BY 1, 2"
         ).fetchall()
         feature_values = self._ordered_values({str(row[0]) for row in rows}, role == "feature_ordinal")
         target_values = self._ordered_values({str(row[1]) for row in rows}, True)
-        if len(feature_values) < 2 or len(target_values) < 2 or len(feature_values) > 50:
+        if not 2 <= len(feature_values) <= MAX_CATEGORICAL_FEATURE_VALUES or len(target_values) < 2:
             return None
         cells = {(str(row[0]), str(row[1])): int(row[2]) for row in rows}
         feature_totals = {value: sum(cells.get((value, target), 0) for target in target_values) for value in feature_values}

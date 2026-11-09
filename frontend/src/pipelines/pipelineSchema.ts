@@ -49,16 +49,8 @@ export function inferPipelineStepInputColumns(
   step: PipelineStepDefinition,
   resolveRoles?: ColumnRoleResolver
 ): PipelineSchemaColumn[] {
-  return mergeColumns(step.inputs.flatMap((input) =>
-    inferPipelineNodeColumns(
-      definition,
-      datasets,
-      cache,
-      input.source.node_id,
-      new Set<string>(),
-      resolveRoles
-    )
-  ));
+  const resolve = createNodeColumnResolver(definition, datasets, cache, new Set<string>(), resolveRoles);
+  return mergeColumns(step.inputs.flatMap((input) => resolve(input.source.node_id)));
 }
 
 export function inferPipelineNodeColumns(
@@ -69,30 +61,47 @@ export function inferPipelineNodeColumns(
   visited = new Set<string>(),
   resolveRoles?: ColumnRoleResolver
 ): PipelineSchemaColumn[] {
-  if (visited.has(nodeId)) return [];
-  visited.add(nodeId);
-  const input = definition.inputs.find((item) => item.input_id === nodeId);
-  if (input) {
-    const dataset = datasets.find((item) => item.id === input.dataset_id);
-    const roles = resolveRoles?.(dataset) ?? {};
-    return datasetColumns(dataset, cache).map((column) => ({
-      ...column,
-      role: roles[column.name]
-    }));
+  const resolve = createNodeColumnResolver(definition, datasets, cache, new Set(visited), resolveRoles);
+  return resolve(nodeId);
+}
+
+function createNodeColumnResolver(
+  definition: PipelineDefinition,
+  datasets: DataAsset[],
+  cache: Record<string, DatasetColumn[]>,
+  visiting: Set<string>,
+  resolveRoles?: ColumnRoleResolver
+) {
+  const resolved = new Map<string, PipelineSchemaColumn[]>();
+  let hasCycle = false;
+
+  function resolve(nodeId: string): PipelineSchemaColumn[] {
+    if (visiting.has(nodeId)) {
+      hasCycle = true;
+      return [];
+    }
+    const cached = resolved.get(nodeId);
+    if (cached) return cached;
+
+    const input = definition.inputs.find((item) => item.input_id === nodeId);
+    const step = input ? undefined : definition.steps.find((item) => item.step_id === nodeId);
+    let columns: PipelineSchemaColumn[] = [];
+    if (input) {
+      const dataset = datasets.find((item) => item.id === input.dataset_id);
+      const roles = resolveRoles?.(dataset) ?? {};
+      columns = datasetColumns(dataset, cache).map((column) => ({ ...column, role: roles[column.name] }));
+    } else if (step) {
+      visiting.add(nodeId);
+      const inputColumns = step.inputs.map((item) => resolve(item.source.node_id));
+      visiting.delete(nodeId);
+      columns = transformColumns(step, mergeColumns(inputColumns.flat()), inputColumns);
+    }
+    // A draft with a cycle has path-dependent results, so do not cache partial schemas.
+    if (!hasCycle) resolved.set(nodeId, columns);
+    return columns;
   }
-  const step = definition.steps.find((item) => item.step_id === nodeId);
-  if (!step) return [];
-  const inputColumns = step.inputs.map((item) =>
-    inferPipelineNodeColumns(
-      definition,
-      datasets,
-      cache,
-      item.source.node_id,
-      new Set(visited),
-      resolveRoles
-    )
-  );
-  return transformColumns(step, mergeColumns(inputColumns.flat()), inputColumns);
+
+  return resolve;
 }
 
 function transformColumns(

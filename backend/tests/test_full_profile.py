@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import duckdb
+
 from app.modules.analysis.full_profile import FullDatasetProfiler
 from app.modules.datasets.columnar import ColumnarDatasetStore
 from app.modules.datasets.domain import DataAsset, DataAssetStatus, SourceType
@@ -55,6 +57,41 @@ def test_full_profile_uses_rows_beyond_the_old_frontend_limit(tmp_path: Path) ->
     assert value_profile["count"] == 60_000
     assert value_profile["mean"] == 10
     assert (dataset_dir / "dataset.mlapp.parquet").exists()
+
+
+def test_categorical_profile_limit_applies_to_categories_paired_with_target(tmp_path: Path) -> None:
+    path = tmp_path / "categories.parquet"
+    with duckdb.connect() as connection:
+        connection.sql(
+            "SELECT 'wide-' || i AS wide_feature, "
+            "CASE WHEN i < 100 THEN 'shared-' || i % 50 ELSE 'unpaired-' || i END AS paired_feature, "
+            "CASE WHEN i < 100 THEN 'target-' || i // 50 END AS target "
+            "FROM range(200) AS rows(i)"
+        ).write_parquet(str(path))
+    asset = DataAsset(
+        id="categories",
+        owner_id="owner",
+        name="categories",
+        source_type=SourceType.FILE,
+        format="parquet",
+        location_uri=f"file://{path.as_posix()}",
+        row_count=200,
+        status=DataAssetStatus.READY,
+    )
+    result = FullDatasetProfiler(ColumnarDatasetStore(tmp_path)).profile(
+        asset,
+        {
+            "comparison_column": "target",
+            "comparison_type": "categorical",
+            "include_target_relations": True,
+            "include_segments": False,
+            "include_graphic_summaries": False,
+        },
+    )
+
+    relations = result["profile"]["targetRelations"]
+    assert [relation["feature"] for relation in relations] == ["paired_feature"]
+    assert len(relations[0]["categoricalStats"]["rows"]) == 50
 
 
 def test_lightweight_schema_does_not_materialize_parquet(tmp_path: Path) -> None:

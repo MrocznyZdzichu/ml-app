@@ -30,15 +30,19 @@ def get_artifact_dependencies(
 ) -> list[dict[str, object]]:
     edges: list[dict[str, object]] = []
     seen: set[tuple[str, str, str, str]] = set()
+    edges_by_owner: dict[str, list[dict[str, object]]] = {}
     for business_case in service.list_business_cases(principal):
         role = BusinessCaseAccessRole(business_case.access_role)
         if BC_ROLE_RANK[role] < BC_ROLE_RANK[BusinessCaseAccessRole.READER]:
             continue
-        for edge in dependency_resolver.resolve(
-            owner_id=business_case.owner_id,
-            reference_id=reference_id,
-            artifact_type=artifact_type,
-        ):
+        owner_id = business_case.owner_id
+        if owner_id not in edges_by_owner:
+            edges_by_owner[owner_id] = dependency_resolver.resolve(
+                owner_id=owner_id,
+                reference_id=reference_id,
+                artifact_type=artifact_type,
+            )
+        for edge in edges_by_owner[owner_id]:
             if edge.get("business_case_id") and edge["business_case_id"] != business_case.id:
                 continue
             key = (

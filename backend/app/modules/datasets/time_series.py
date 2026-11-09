@@ -14,7 +14,7 @@ from app.modules.datasets.domain import DataAsset
 from app.modules.datasets.schemas import DataAssetVisualizationRequest, TimeSeriesAnalysisRequest
 
 
-type DisplayBins = tuple[float, float, int, int, float]
+type DisplayBins = tuple[int, float, float]
 
 
 class FullDatasetTimeSeriesAnalyzer:
@@ -60,9 +60,10 @@ class FullDatasetTimeSeriesAnalyzer:
             f"FROM {relation}"
         )
         counts = connection.execute(
-            f"WITH source AS ({base}) SELECT count(*), count(ts), count(value) FILTER (WHERE isfinite(value)), "
-            "count(*) FILTER (WHERE ts IS NOT NULL AND value IS NOT NULL AND isfinite(value)), "
-            "count(DISTINCT ts) FILTER (WHERE ts IS NOT NULL), min(ts), max(ts) FROM source"
+            f"WITH source AS ({base}), checked AS (SELECT *, ts IS NOT NULL AND isfinite(value) AS valid FROM source) "
+            "SELECT count(*), count(ts), count(*) FILTER (WHERE isfinite(value)), "
+            "count(*) FILTER (WHERE valid), count(DISTINCT ts), min(ts), max(ts), "
+            "min(epoch(ts)) FILTER (WHERE valid), max(epoch(ts)) FILTER (WHERE valid) FROM checked"
         ).fetchone()
         row_count = int(counts[0])
         valid_count = int(counts[3])
@@ -70,28 +71,21 @@ class FullDatasetTimeSeriesAnalyzer:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Time-series analysis requires at least two valid time/value rows")
         valid = f"SELECT ts, value FROM ({base}) source WHERE ts IS NOT NULL AND value IS NOT NULL AND isfinite(value)"
         interval = connection.execute(
-            f"WITH ordered AS (SELECT ts, epoch(ts) - epoch(lag(ts) OVER (ORDER BY ts)) AS delta FROM ({valid}) valid), "
-            "deltas AS (SELECT delta FROM ordered WHERE delta > 0) "
-            "SELECT count(*), median(delta), avg(delta), stddev_pop(delta), min(delta), max(delta) FROM deltas"
+            f"WITH ordered AS (SELECT epoch(ts) - epoch(lag(ts) OVER (ORDER BY ts)) AS delta FROM ({valid}) valid), "
+            "deltas AS MATERIALIZED (SELECT delta FROM ordered WHERE delta > 0), "
+            "stats AS (SELECT count(*) AS intervals, median(delta) AS median_interval, avg(delta) AS mean_interval, "
+            "stddev_pop(delta) AS std, min(delta) AS minimum, max(delta) AS maximum FROM deltas), "
+            "timing AS (SELECT count(*) FILTER (WHERE delta > median_interval * 1.5) AS gaps, "
+            "avg(CASE WHEN abs(delta - median_interval) <= greatest(1e-6, median_interval * 0.05) "
+            "THEN 1.0 ELSE 0.0 END) AS regular_ratio FROM deltas CROSS JOIN stats) "
+            "SELECT * FROM stats CROSS JOIN timing"
         ).fetchone()
         interval_count = int(interval[0])
         median_interval = float(interval[1]) if interval[1] is not None else None
         interval_mean = float(interval[2]) if interval[2] is not None else None
         interval_std = float(interval[3]) if interval[3] is not None else None
-        gap_count = 0
-        regular_ratio = None
-        if median_interval and median_interval > 0:
-            tolerance = max(1e-6, median_interval * 0.05)
-            timing = connection.execute(
-                f"WITH ordered AS (SELECT epoch(ts) - epoch(lag(ts) OVER (ORDER BY ts)) AS delta FROM ({valid}) valid) "
-                "SELECT count(*) FILTER (WHERE delta > ?), "
-                "avg(CASE WHEN delta > 0 AND abs(delta - ?) <= ? THEN 1.0 WHEN delta > 0 THEN 0.0 END) FROM ordered",
-                [median_interval * 1.5, median_interval, tolerance],
-            ).fetchone()
-            gap_count = int(timing[0])
-            regular_ratio = self._number(timing[1])
         value_stats = connection.execute(
-            f"WITH valid AS ({valid}), numbered AS (SELECT ts, value, row_number() OVER (ORDER BY ts) AS position, "
+            f"WITH valid AS ({valid}), numbered AS (SELECT ts, value, "
             "lag(value) OVER (ORDER BY ts) AS previous FROM valid) "
             "SELECT avg(value), stddev_pop(value), min(value), max(value), "
             "regr_slope(value, epoch(ts) / 86400.0), regr_r2(value, epoch(ts) / 86400.0), "
@@ -112,10 +106,11 @@ class FullDatasetTimeSeriesAnalyzer:
         cross_correlation = driver_relationships[0]["correlations"] if driver_relationships else []
         suggested_period = self._suggest_period(autocorrelation)
         seasonal_period = request.seasonal_period or suggested_period or 0
-        series = self._series(connection, valid, request.max_points, request.rolling_window)
+        display_bins = self._display_bins(counts[7], counts[8], valid_count, request.max_points)
+        series = self._series(connection, valid, display_bins, request.rolling_window)
         seasonal_profile = self._seasonal_profile(connection, valid, seasonal_period) if seasonal_period >= 2 else []
-        decomposition = self._decomposition(connection, valid, request.max_points, seasonal_period)
-        difference_series = self._difference_series(connection, valid, request.max_points, request.rolling_window)
+        decomposition = self._decomposition(connection, valid, display_bins, seasonal_period)
+        difference_series = self._difference_series(connection, valid, display_bins, request.rolling_window)
         feature_preview = self._feature_preview(connection, valid, seasonal_period, request.rolling_window)
         duplicate_timestamps = max(0, int(counts[1]) - int(counts[4]))
         missing_time = row_count - int(counts[1])
@@ -133,8 +128,8 @@ class FullDatasetTimeSeriesAnalyzer:
             "interval_std_seconds": interval_std,
             "minimum_interval_seconds": self._number(interval[4]),
             "maximum_interval_seconds": self._number(interval[5]),
-            "regular_interval_ratio": regular_ratio,
-            "gap_count": gap_count,
+            "regular_interval_ratio": self._number(interval[7]),
+            "gap_count": int(interval[6]),
             "mean": self._number(value_stats[0]),
             "std_dev": self._number(value_stats[1]),
             "minimum": self._number(value_stats[2]),
@@ -185,8 +180,8 @@ class FullDatasetTimeSeriesAnalyzer:
             f"SELECT try_cast({time} AS TIMESTAMP) AS ts, try_cast({value} AS DOUBLE) AS value FROM {relation} "
             f"WHERE try_cast({time} AS TIMESTAMP) IS NOT NULL AND isfinite(try_cast({value} AS DOUBLE))"
         )
-        valid_count = int(connection.execute(f"SELECT count(*) FROM ({valid}) valid").fetchone()[0])
         if request.kind in {"autocorrelation", "lag_relationship"}:
+            valid_count = int(connection.execute(f"SELECT count(*) FROM ({valid}) valid").fetchone()[0])
             source = self._cross_correlation(
                 connection, relation, request.x, request.y, request.driver_column, request.max_lag, columns
             ) if request.kind == "lag_relationship" else self._autocorrelation(connection, valid, request.max_lag)
@@ -196,7 +191,13 @@ class FullDatasetTimeSeriesAnalyzer:
                 "series": label, "count": item["pair_count"],
             } for item in source if item["correlation"] is not None]
             return {"points": points, "series": [label], "kpi": None, "valid_count": valid_count}
-        series = self._series(connection, valid, request.max_points, request.rolling_window)
+        low, high, valid_count = connection.execute(
+            f"SELECT min(epoch(ts)), max(epoch(ts)), count(*) FROM ({valid}) valid"
+        ).fetchone()
+        if not valid_count:
+            return {"points": [], "series": [], "kpi": None, "valid_count": 0}
+        display_bins = self._display_bins(low, high, valid_count, request.max_points)
+        series = self._series(connection, valid, display_bins, request.rolling_window)
         points: list[dict[str, Any]] = []
         for item in series:
             epoch_value = datetime.fromisoformat(item["timestamp"].replace("Z", "+00:00")).timestamp()
@@ -295,8 +296,7 @@ class FullDatasetTimeSeriesAnalyzer:
             "correlations": correlations,
         }
 
-    def _series(self, connection: duckdb.DuckDBPyConnection, valid: str, max_points: int, rolling_window: int) -> list[dict[str, Any]]:
-        low, _, _, bins, width = self._display_bins(connection, valid, max_points)
+    def _series(self, connection: duckdb.DuckDBPyConnection, valid: str, display_bins: DisplayBins, rolling_window: int) -> list[dict[str, Any]]:
         cursor = connection.execute(
             f"WITH binned AS (SELECT least(?, floor((epoch(ts) - ?) / ?))::BIGINT AS bin, "
             f"min(ts) AS timestamp, avg(value) AS value, min(value) AS minimum, max(value) AS maximum, count(*) AS point_count "
@@ -304,7 +304,7 @@ class FullDatasetTimeSeriesAnalyzer:
             f"avg(value) OVER (ORDER BY bin ROWS BETWEEN {rolling_window - 1} PRECEDING AND CURRENT ROW) AS rolling_mean, "
             f"stddev_pop(value) OVER (ORDER BY bin ROWS BETWEEN {rolling_window - 1} PRECEDING AND CURRENT ROW) AS rolling_std "
             "FROM binned) SELECT * FROM rolled ORDER BY bin",
-            [bins - 1, low, width],
+            display_bins,
         )
         names = [str(column[0]) for column in cursor.description]
         return [{
@@ -331,10 +331,9 @@ class FullDatasetTimeSeriesAnalyzer:
         self,
         connection: duckdb.DuckDBPyConnection,
         valid: str,
-        max_points: int,
+        display_bins: DisplayBins,
         seasonal_period: int,
     ) -> list[dict[str, Any]]:
-        low, _, _, bins, width = self._display_bins(connection, valid, max_points)
         period = seasonal_period if 2 <= seasonal_period <= 10_000 else 0
         rows = connection.execute(
             f"WITH numbered AS (SELECT ts, value, row_number() OVER (ORDER BY ts) - 1 AS position FROM ({valid}) valid), "
@@ -351,7 +350,7 @@ class FullDatasetTimeSeriesAnalyzer:
             "avg(value - trend - seasonal.seasonal) AS residual, count(*) AS point_count "
             "FROM phased JOIN seasonal USING (phase) GROUP BY bin) "
             "SELECT timestamp, observed, trend, seasonal, residual, point_count FROM binned ORDER BY bin",
-            [period, period, period, bins - 1, low, width],
+            [period, period, period, *display_bins],
         ).fetchall()
         return [{
             "timestamp": self._json(row[0]),
@@ -366,10 +365,9 @@ class FullDatasetTimeSeriesAnalyzer:
         self,
         connection: duckdb.DuckDBPyConnection,
         valid: str,
-        max_points: int,
+        display_bins: DisplayBins,
         rolling_window: int,
     ) -> list[dict[str, Any]]:
-        low, _, _, bins, width = self._display_bins(connection, valid, max_points)
         rows = connection.execute(
             f"WITH differenced AS (SELECT ts, value - lag(value) OVER (ORDER BY ts) AS difference FROM ({valid}) valid), "
             "binned AS (SELECT least(?, floor((epoch(ts) - ?) / ?))::BIGINT AS bin, min(ts) AS timestamp, "
@@ -377,7 +375,7 @@ class FullDatasetTimeSeriesAnalyzer:
             "FROM differenced WHERE difference IS NOT NULL GROUP BY bin), "
             f"rolled AS (SELECT *, avg(abs(difference)) OVER (ORDER BY bin ROWS BETWEEN {rolling_window - 1} PRECEDING AND CURRENT ROW) AS rolling_abs_difference "
             "FROM binned) SELECT timestamp, difference, std_dev, rolling_abs_difference, point_count FROM rolled ORDER BY bin",
-            [bins - 1, low, width],
+            display_bins,
         ).fetchall()
         return [{
             "timestamp": self._json(row[0]),
@@ -387,12 +385,11 @@ class FullDatasetTimeSeriesAnalyzer:
             "count": int(row[4]),
         } for row in rows]
 
-    def _display_bins(self, connection: duckdb.DuckDBPyConnection, valid: str, max_points: int) -> DisplayBins:
-        bounds = connection.execute(f"SELECT min(epoch(ts)), max(epoch(ts)), count(*) FROM ({valid}) valid").fetchone()
-        low, high, count = float(bounds[0]), float(bounds[1]), int(bounds[2])
+    @staticmethod
+    def _display_bins(low: float, high: float, count: int, max_points: int) -> DisplayBins:
         bins = max(1, min(max_points // 2, count))
         width = (high - low) / bins or 1.0
-        return low, high, count, bins, width
+        return bins - 1, low, width
 
     def _feature_preview(
         self,

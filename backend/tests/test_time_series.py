@@ -3,6 +3,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import duckdb
 import pytest
 from app.core.errors import ResourceNotFoundError
 from app.modules.analysis import dataset_jobs
@@ -147,6 +148,35 @@ def test_time_series_visualizations_return_bounded_full_dataset_points(tmp_path:
     assert acf["points"][0]["xLabel"] == "Lag 1"
     assert len(lag_relationship["points"]) == 37
     assert lag_relationship["points"][0]["xLabel"] == "Lag 0"
+
+
+def test_display_bins_exclude_invalid_values_even_at_the_time_range_edges(tmp_path: Path) -> None:
+    analyzer = FullDatasetTimeSeriesAnalyzer(ColumnarDatasetStore(tmp_path))
+    relation = """(VALUES
+        (TIMESTAMP '2025-01-01', NULL::DOUBLE),
+        (TIMESTAMP '2025-01-02', 10.0),
+        (TIMESTAMP '2025-01-02', 20.0),
+        (TIMESTAMP '2025-01-03', 'Infinity'::DOUBLE)
+    ) AS source(ts, value)"""
+    columns = {"ts": "TIMESTAMP", "value": "DOUBLE"}
+    with duckdb.connect() as connection:
+        result = analyzer.analyze(
+            connection, relation, TimeSeriesAnalysisRequest(time_column="ts", value_column="value", max_lag=2), columns
+        )
+        empty_chart = analyzer.visualization(
+            connection,
+            f"(SELECT * FROM {relation} WHERE value IS NULL)",
+            DataAssetVisualizationRequest(kind="time_series", x="ts", y="value"),
+            columns,
+        )
+
+    assert result["valid_count"] == 2
+    assert result["summary"]["span_seconds"] == 2 * 86400
+    assert result["summary"]["interval_count"] == result["summary"]["gap_count"] == 0
+    assert result["summary"]["regular_interval_ratio"] is None
+    assert [point["count"] for point in result["series"]] == [2]
+    assert [point["count"] for point in result["decomposition"]] == [2]
+    assert empty_chart == {"points": [], "series": [], "kpi": None, "valid_count": 0}
 
 
 def test_time_series_job_records_ownership_and_submits_full_options(monkeypatch: pytest.MonkeyPatch) -> None:

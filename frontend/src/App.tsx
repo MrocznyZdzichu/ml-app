@@ -26,7 +26,6 @@ import type {
   UserProfile
 } from "./api/client";
 import { DeferredPanel } from "./components/DeferredPanel";
-import { JobsPanel } from "./operational/JobsPanel";
 import type { DescriptiveProfileCacheEntry } from "./data/profile/contracts";
 import { AuthScreen } from "./workspace/AuthScreen";
 import { Overview } from "./workspace/Overview";
@@ -64,6 +63,9 @@ const PipelinesPanel = lazy(() =>
   import("./operational/PipelinePanel").then((module) => ({
     default: module.PipelinesPanel
   }))
+);
+const JobsPanel = lazy(() =>
+  import("./operational/JobsPanel").then((module) => ({ default: module.JobsPanel }))
 );
 const DataPanel = lazy(() =>
   import("./data/catalog/DatasetCatalogPanel").then((module) => ({
@@ -484,13 +486,15 @@ export default function App() {
           </DeferredPanel>
         )}
         {activeTab === "jobs" && (
-          <JobsPanel
-            businessCases={businessCases}
-            pipelines={pipelines}
-            onRefreshCatalog={refreshJobsCatalog}
-            onRegisterRefresh={registerJobsRefresh}
-            setNotice={setNotice}
-          />
+          <DeferredPanel>
+            <JobsPanel
+              businessCases={businessCases}
+              pipelines={pipelines}
+              onRefreshCatalog={refreshJobsCatalog}
+              onRegisterRefresh={registerJobsRefresh}
+              setNotice={setNotice}
+            />
+          </DeferredPanel>
         )}
         {activeTab === "models" && (
           <DeferredPanel>

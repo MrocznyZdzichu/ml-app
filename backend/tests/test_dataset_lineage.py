@@ -1,4 +1,10 @@
-from app.modules.business_cases.domain import Artifact, ArtifactOrigin, ArtifactType
+from types import SimpleNamespace
+
+import pytest
+
+from app.core.identity import Principal
+from app.modules.business_cases import router
+from app.modules.business_cases.domain import Artifact, ArtifactOrigin, ArtifactType, BusinessCase
 from app.modules.business_cases.lineage import ArtifactDependencyResolver, DatasetLineageResolver
 from app.modules.business_cases.repository import InMemoryBusinessCaseRepository
 from app.modules.datasets.domain import DataAsset, DataAssetStatus, SourceType
@@ -152,3 +158,33 @@ def test_artifact_dependencies_keep_legacy_flat_inputs_with_port_lineage() -> No
         (item["direction"], item["role"], item["reference_id"])
         for item in dependencies
     } == {("downstream", "input", report.reference_id)}
+
+
+def test_dependency_endpoint_resolves_shared_owner_once_and_keeps_case_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases = [
+        BusinessCase(id="readable-1", owner_id="owner", name="One", access_role="reader"),
+        BusinessCase(id="summary", owner_id="owner", name="Summary", access_role="report_viewer"),
+        BusinessCase(id="readable-2", owner_id="owner", name="Two", access_role="reader"),
+    ]
+    calls = []
+
+    def resolve(**query):
+        calls.append(query)
+        return [
+            {
+                "direction": "downstream", "role": "input", "artifact_type": "report",
+                "reference_id": case_id, "business_case_id": case_id,
+            }
+            for case_id in ("readable-1", "summary", "readable-2", "hidden")
+        ]
+
+    monkeypatch.setattr(router, "service", SimpleNamespace(list_business_cases=lambda _principal: cases))
+    monkeypatch.setattr(router, "dependency_resolver", SimpleNamespace(resolve=resolve))
+    result = router.get_artifact_dependencies(
+        "root-dataset", "dataset", Principal("reader", "reader@example.test", "Reader")
+    )
+
+    assert calls == [{"owner_id": "owner", "reference_id": "root-dataset", "artifact_type": "dataset"}]
+    assert [edge["reference_id"] for edge in result] == ["readable-1", "readable-2"]

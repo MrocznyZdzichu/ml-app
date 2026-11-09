@@ -1,6 +1,7 @@
 import csv
 import duckdb
 from datetime import datetime
+from functools import lru_cache
 from io import StringIO
 from pathlib import Path
 
@@ -136,32 +137,48 @@ class CsvFileDatasetSource:
                 f"column_{index + 1}" for index in range(len(sample_rows[0]))
             ]
             headers = self._unique_column_names(headers)
-            observed_types: list[set[str]] = [set() for _ in headers]
+            observed_types = ["empty"] * len(headers)
+            classify_cell = self._cell_type
+            cached_classifier = lru_cache(maxsize=4096)(classify_cell)
+
+            def classify_with_cache(value: str) -> str:
+                return cached_classifier(value) if len(value) <= 64 else classify_cell(value)
+
+            detect_type = classify_with_cache
             with path.open("r", encoding="utf-8-sig", newline="") as source:
                 row_count = 0
-                non_empty_row_index = 0
+                skip_header = has_header
                 for row in csv.reader(source, dialect):
                     if not any(cell.strip() for cell in row):
                         continue
-                    if has_header and non_empty_row_index == 0:
-                        non_empty_row_index += 1
+                    if skip_header:
+                        skip_header = False
                         continue
-                    non_empty_row_index += 1
                     if not has_header and len(row) > len(headers):
                         start = len(headers)
                         headers.extend(f"column_{index + 1}" for index in range(start, len(row)))
-                        observed_types.extend(set() for _ in range(start, len(row)))
+                        observed_types.extend(["empty"] * (len(row) - start))
                     row_count += 1
-                    for index, _header in enumerate(headers):
-                        observed_types[index].add(self._cell_type(row[index] if index < len(row) else ""))
+                    for index, (value, observed) in enumerate(zip(row, observed_types)):
+                        if observed == "mixed":
+                            continue
+                        detected = detect_type(value)
+                        if detected != observed and detected != "empty":
+                            observed_types[index] = detected if observed == "empty" else "mixed"
+                    if row_count == 2048:
+                        hits, misses, _, _ = cached_classifier.cache_info()
+                        if hits <= misses:
+                            # Stop paying eviction costs on mostly distinct values.
+                            detect_type = classify_cell
+                            cached_classifier.cache_clear()
         except UnicodeDecodeError as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="CSV file must be UTF-8 encoded",
             ) from exc
         columns = [
-            {"name": header, "type": self._resolve_types(observed_types[index])}
-            for index, header in enumerate(headers)
+            {"name": header, "type": observed}
+            for header, observed in zip(headers, observed_types, strict=True)
         ]
         return has_header, row_count, columns
 
@@ -205,21 +222,19 @@ class CsvFileDatasetSource:
         stripped = value.strip()
         if not stripped:
             return "empty"
+        try:
+            float(stripped)
+        except ValueError:
+            pass
+        else:
+            return "number"
         if stripped.lower() in {"true", "false"}:
             return "boolean"
-        if self._is_number(stripped):
-            return "number"
         try:
             datetime.fromisoformat(stripped.replace("Z", "+00:00"))
         except ValueError:
             return "text"
         return "date"
-
-    def _resolve_types(self, value_types: set[str]) -> str:
-        concrete = value_types - {"empty"}
-        if not concrete:
-            return "empty"
-        return next(iter(concrete)) if len(concrete) == 1 else "mixed"
 
     def _column_name(self, value: str, index: int) -> str:
         return value.strip() or f"column_{index + 1}"

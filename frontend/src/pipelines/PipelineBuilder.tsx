@@ -1210,16 +1210,23 @@ function normalizeColumnType(value: string): DatasetColumn["type"] {
 }
 
 function datasetIdsForStepInputs(definition: PipelineDefinition, step: PipelineStepDefinition): string[] {
-  return Array.from(new Set(step.inputs.flatMap((input) => datasetIdsForNode(definition, input.source.node_id))));
-}
+  const visited = new Set<string>();
+  const datasetIds = new Set<string>();
 
-function datasetIdsForNode(definition: PipelineDefinition, nodeId: string, visited = new Set<string>()): string[] {
-  if (visited.has(nodeId)) return [];
-  visited.add(nodeId);
-  const input = definition.inputs.find((item) => item.input_id === nodeId);
-  if (input) return [input.dataset_id];
-  const step = definition.steps.find((item) => item.step_id === nodeId);
-  return step ? step.inputs.flatMap((item) => datasetIdsForNode(definition, item.source.node_id, new Set(visited))) : [];
+  function visit(nodeId: string) {
+    if (visited.has(nodeId)) return;
+    visited.add(nodeId);
+    const source = definition.inputs.find((item) => item.input_id === nodeId);
+    if (source) {
+      datasetIds.add(source.dataset_id);
+      return;
+    }
+    const upstream = definition.steps.find((item) => item.step_id === nodeId);
+    upstream?.inputs.forEach((input) => visit(input.source.node_id));
+  }
+
+  step.inputs.forEach((input) => visit(input.source.node_id));
+  return [...datasetIds];
 }
 
 function physicalDatasetId(datasets: DataAsset[], datasetId: string) {
